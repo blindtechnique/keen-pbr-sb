@@ -10,6 +10,7 @@
 #endif
 
 #include <functional>
+#include <map>
 #include <string>
 
 namespace keen_pbr3 {
@@ -18,8 +19,14 @@ namespace keen_pbr3 {
 // from HttpClient with the subscription destination policy applied to every
 // address actually connected to; tests substitute a local fixture, because the
 // policy correctly refuses the loopback addresses a test server lives on.
+struct SubscriptionFetchResult {
+    std::string body;
+    std::map<std::string, std::string> headers;
+    SubscriptionFetchResult() = default;
+    SubscriptionFetchResult(std::string content) : body(std::move(content)) {}
+};
 using SubscriptionFetcher =
-    std::function<std::string(const std::string& url)>;
+    std::function<SubscriptionFetchResult(const std::string& url)>;
 
 // The production fetcher: 20 s timeout, the 1 MiB subscription bound enforced
 // by the transport (a too-large body fails whole, it is not truncated), and

@@ -8,5 +8,7 @@
 import type { SubscriptionApplyResult } from './subscriptionApplyResult';
 
 export interface SubscriptionApplyResponse {
+  /** Metadata save failed after VPN import; must not retry creating the VPNs. */
+  subscription_error?: string;
   results: SubscriptionApplyResult[];
 }

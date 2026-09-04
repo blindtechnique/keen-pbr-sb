@@ -1,4 +1,50 @@
 export const enTranslation = {
+  subscriptions: {
+    title: "Subscriptions",
+    description:
+      "Provider expiration and traffic limits. Refreshing metadata does not change VPNs or routes.",
+    add: "Add subscription",
+    rename: "Rename subscription",
+    remove: "Remove subscription record",
+    refresh: "Refresh metadata",
+    url: "Subscription URL",
+    name: "Name",
+    optionalName: "Subscription name (optional)",
+    addHint:
+      "Saves the source and links matching VPNs already imported. No new VPNs are created.",
+    empty:
+      "No saved subscriptions yet. New URL imports appear here automatically. Add the URL once for a previously imported subscription.",
+    traffic: "Traffic",
+    remaining: "{{remaining}} remaining of {{total}}",
+    limit: "Limit: {{total}}; usage not provided",
+    used: "Used: {{used}}",
+    unknownTraffic: "Provider did not supply a traffic limit",
+    expiry: "Expiration",
+    unknownExpiry: "Provider did not supply an expiration date",
+    expired: "Expired",
+    days: "Days remaining: {{count}}",
+    nodes: "Subscription nodes: {{count}}",
+    linked: "Linked VPNs: {{count}}",
+    updated: "Last updated: {{date}}",
+    neverUpdated: "Metadata has not been received",
+    refreshFailed:
+      "Could not refresh metadata. Showing the last received values.",
+    loadFailed: "Could not load subscriptions.",
+    saveFailed:
+      "Could not save the subscription. Check the URL, name and provider availability.",
+    actionFailed: "Could not complete the action. Please try again.",
+    importMetadataFailed:
+      "VPNs were added, but their subscription source was not saved. Add its URL in Subscriptions; do not import the VPNs again.",
+    removeHint:
+      "Remove the record “{{name}}”? Its VPNs and routes will stay unchanged.",
+    refreshed: "Subscription metadata refreshed",
+    saved: "Changes saved",
+    loading: "Loading subscriptions…",
+    saving: "Saving…",
+    save: "Save",
+    cancel: "Cancel",
+    retry: "Retry",
+  },
   nfqws: {
     showArgs: "Show the launch line",
     hideArgs: "Hide",

@@ -1636,6 +1636,21 @@ namespace api {
         HealthResponse service;
     };
 
+    struct SavedSubscription {
+        int64_t checked_at = 0;
+        std::optional<int64_t> download_bytes;
+        std::optional<std::string> error;
+        std::optional<int64_t> expires_at;
+        std::string id;
+        std::string name;
+        std::optional<int64_t> node_count;
+        std::string source_host;
+        std::optional<int64_t> total_bytes;
+        std::vector<std::string> transport_tags;
+        std::optional<int64_t> updated_at;
+        std::optional<int64_t> upload_bytes;
+    };
+
     enum class Blocker : int { ARCHITECTURE_UNSUPPORTED, ENTWARE_ABSENT, FOREIGN_BINARY_PRESENT, TARGET_NOT_WRITABLE, TRANSPORTS_RUNNING, TRANSPORT_STATE_UNKNOWN };
 
     enum class SingBoxInstallCapabilityOperation : int { INSTALL, REINSTALL_SAME_VERSION, REPLACE };
@@ -1723,6 +1738,7 @@ namespace api {
     struct SubscriptionApplyRequest {
         std::string preview_id;
         std::vector<SubscriptionApplySelectionElement> selections;
+        std::optional<std::string> subscription_name;
     };
 
     enum class Outcome : int { ALREADY_IMPORTED, CREATED, FAILED };
@@ -1737,6 +1753,11 @@ namespace api {
 
     struct SubscriptionApplyResponse {
         std::vector<SubscriptionApplyResultElement> results;
+        std::optional<std::string> subscription_error;
+    };
+
+    struct SubscriptionIdRequest {
+        std::string id;
     };
 
     enum class Disposition : int { ALREADY_CONFIGURED, DUPLICATE_IN_DOCUMENT, IMPORTABLE, MALFORMED, SCHEME_NOT_SUPPORTED, TAG_CONFLICT };
@@ -1763,6 +1784,16 @@ namespace api {
         DocumentKind document_kind;
         int64_t expires_in_seconds = 0;
         std::string preview_id;
+    };
+
+    struct SubscriptionRenameRequest {
+        std::string id;
+        std::string name;
+    };
+
+    struct SubscriptionSourceRequest {
+        std::optional<std::string> name;
+        std::string url;
     };
 
     enum class PackageRollbackState : int { AVAILABLE, HELPER_MISSING, NEVER_CAPTURED, PACKAGE_UNVERIFIED, RECOVERY_PENDING, RECOVERY_UNKNOWN, SNAPSHOT_UNVERIFIED };
@@ -2211,6 +2242,7 @@ namespace api {
         std::optional<RuntimeOutboundsResponse> runtime_outbounds_response;
         std::optional<RuntimeOutboundStateElement> runtime_outbound_state;
         std::optional<ResolverLiveStatus> runtime_outbound_status;
+        std::optional<SavedSubscription> saved_subscription;
         std::optional<SingBoxInstallCapability> sing_box_install_capability;
         std::optional<SingBoxInstallRequest> sing_box_install_request;
         std::optional<SingBoxInstallResult> sing_box_install_result;
@@ -2226,9 +2258,12 @@ namespace api {
         std::optional<SubscriptionApplyResponse> subscription_apply_response;
         std::optional<SubscriptionApplyResultElement> subscription_apply_result;
         std::optional<SubscriptionApplySelectionElement> subscription_apply_selection;
+        std::optional<SubscriptionIdRequest> subscription_id_request;
         std::optional<SubscriptionPreviewCandidate> subscription_preview_candidate;
         std::optional<SubscriptionPreviewRequest> subscription_preview_request;
         std::optional<SubscriptionPreviewResponse> subscription_preview_response;
+        std::optional<SubscriptionRenameRequest> subscription_rename_request;
+        std::optional<SubscriptionSourceRequest> subscription_source_request;
         std::optional<SystemUpdateLocalStatus> system_update_local_status;
         std::optional<SystemUpdateStatus> system_update_status;
         std::optional<TransportActionRequest> transport_action_request;
@@ -2720,6 +2755,9 @@ void to_json(json & j, const RuntimeOutboundsResponse & x);
 void from_json(const json & j, RuntimeInventoryResponse & x);
 void to_json(json & j, const RuntimeInventoryResponse & x);
 
+void from_json(const json & j, SavedSubscription & x);
+void to_json(json & j, const SavedSubscription & x);
+
 void from_json(const json & j, SingBoxInstallCapability & x);
 void to_json(json & j, const SingBoxInstallCapability & x);
 
@@ -2759,6 +2797,9 @@ void to_json(json & j, const SubscriptionApplyResultElement & x);
 void from_json(const json & j, SubscriptionApplyResponse & x);
 void to_json(json & j, const SubscriptionApplyResponse & x);
 
+void from_json(const json & j, SubscriptionIdRequest & x);
+void to_json(json & j, const SubscriptionIdRequest & x);
+
 void from_json(const json & j, SubscriptionPreviewCandidate & x);
 void to_json(json & j, const SubscriptionPreviewCandidate & x);
 
@@ -2767,6 +2808,12 @@ void to_json(json & j, const SubscriptionPreviewRequest & x);
 
 void from_json(const json & j, SubscriptionPreviewResponse & x);
 void to_json(json & j, const SubscriptionPreviewResponse & x);
+
+void from_json(const json & j, SubscriptionRenameRequest & x);
+void to_json(json & j, const SubscriptionRenameRequest & x);
+
+void from_json(const json & j, SubscriptionSourceRequest & x);
+void to_json(json & j, const SubscriptionSourceRequest & x);
 
 void from_json(const json & j, SystemUpdateLocalStatus & x);
 void to_json(json & j, const SystemUpdateLocalStatus & x);
@@ -6089,6 +6136,37 @@ namespace api {
         j["service"] = x.service;
     }
 
+    inline void from_json(const json & j, SavedSubscription& x) {
+        x.checked_at = j.at("checked_at").get<int64_t>();
+        x.download_bytes = get_stack_optional<int64_t>(j, "download_bytes");
+        x.error = get_stack_optional<std::string>(j, "error");
+        x.expires_at = get_stack_optional<int64_t>(j, "expires_at");
+        x.id = j.at("id").get<std::string>();
+        x.name = j.at("name").get<std::string>();
+        x.node_count = get_stack_optional<int64_t>(j, "node_count");
+        x.source_host = j.at("source_host").get<std::string>();
+        x.total_bytes = get_stack_optional<int64_t>(j, "total_bytes");
+        x.transport_tags = j.at("transport_tags").get<std::vector<std::string>>();
+        x.updated_at = get_stack_optional<int64_t>(j, "updated_at");
+        x.upload_bytes = get_stack_optional<int64_t>(j, "upload_bytes");
+    }
+
+    inline void to_json(json & j, const SavedSubscription & x) {
+        j = json::object();
+        j["checked_at"] = x.checked_at;
+        j["download_bytes"] = x.download_bytes;
+        j["error"] = x.error;
+        j["expires_at"] = x.expires_at;
+        j["id"] = x.id;
+        j["name"] = x.name;
+        j["node_count"] = x.node_count;
+        j["source_host"] = x.source_host;
+        j["total_bytes"] = x.total_bytes;
+        j["transport_tags"] = x.transport_tags;
+        j["updated_at"] = x.updated_at;
+        j["upload_bytes"] = x.upload_bytes;
+    }
+
     inline void from_json(const json & j, SingBoxInstallCapability& x) {
         x.asset_architecture = get_stack_optional<std::string>(j, "asset_architecture");
         x.available = j.at("available").get<bool>();
@@ -6226,12 +6304,14 @@ namespace api {
     inline void from_json(const json & j, SubscriptionApplyRequest& x) {
         x.preview_id = j.at("preview_id").get<std::string>();
         x.selections = j.at("selections").get<std::vector<SubscriptionApplySelectionElement>>();
+        x.subscription_name = get_stack_optional<std::string>(j, "subscription_name");
     }
 
     inline void to_json(json & j, const SubscriptionApplyRequest & x) {
         j = json::object();
         j["preview_id"] = x.preview_id;
         j["selections"] = x.selections;
+        j["subscription_name"] = x.subscription_name;
     }
 
     inline void from_json(const json & j, SubscriptionApplyResultElement& x) {
@@ -6253,11 +6333,22 @@ namespace api {
 
     inline void from_json(const json & j, SubscriptionApplyResponse& x) {
         x.results = j.at("results").get<std::vector<SubscriptionApplyResultElement>>();
+        x.subscription_error = get_stack_optional<std::string>(j, "subscription_error");
     }
 
     inline void to_json(json & j, const SubscriptionApplyResponse & x) {
         j = json::object();
         j["results"] = x.results;
+        j["subscription_error"] = x.subscription_error;
+    }
+
+    inline void from_json(const json & j, SubscriptionIdRequest& x) {
+        x.id = j.at("id").get<std::string>();
+    }
+
+    inline void to_json(json & j, const SubscriptionIdRequest & x) {
+        j = json::object();
+        j["id"] = x.id;
     }
 
     inline void from_json(const json & j, SubscriptionPreviewCandidate& x) {
@@ -6305,6 +6396,28 @@ namespace api {
         j["document_kind"] = x.document_kind;
         j["expires_in_seconds"] = x.expires_in_seconds;
         j["preview_id"] = x.preview_id;
+    }
+
+    inline void from_json(const json & j, SubscriptionRenameRequest& x) {
+        x.id = j.at("id").get<std::string>();
+        x.name = j.at("name").get<std::string>();
+    }
+
+    inline void to_json(json & j, const SubscriptionRenameRequest & x) {
+        j = json::object();
+        j["id"] = x.id;
+        j["name"] = x.name;
+    }
+
+    inline void from_json(const json & j, SubscriptionSourceRequest& x) {
+        x.name = get_stack_optional<std::string>(j, "name");
+        x.url = j.at("url").get<std::string>();
+    }
+
+    inline void to_json(json & j, const SubscriptionSourceRequest & x) {
+        j = json::object();
+        j["name"] = x.name;
+        j["url"] = x.url;
     }
 
     inline void from_json(const json & j, SystemUpdateLocalStatus& x) {
@@ -6939,6 +7052,7 @@ namespace api {
         x.runtime_outbounds_response = get_stack_optional<RuntimeOutboundsResponse>(j, "RuntimeOutboundsResponse");
         x.runtime_outbound_state = get_stack_optional<RuntimeOutboundStateElement>(j, "RuntimeOutboundState");
         x.runtime_outbound_status = get_stack_optional<ResolverLiveStatus>(j, "RuntimeOutboundStatus");
+        x.saved_subscription = get_stack_optional<SavedSubscription>(j, "SavedSubscription");
         x.sing_box_install_capability = get_stack_optional<SingBoxInstallCapability>(j, "SingBoxInstallCapability");
         x.sing_box_install_request = get_stack_optional<SingBoxInstallRequest>(j, "SingBoxInstallRequest");
         x.sing_box_install_result = get_stack_optional<SingBoxInstallResult>(j, "SingBoxInstallResult");
@@ -6954,9 +7068,12 @@ namespace api {
         x.subscription_apply_response = get_stack_optional<SubscriptionApplyResponse>(j, "SubscriptionApplyResponse");
         x.subscription_apply_result = get_stack_optional<SubscriptionApplyResultElement>(j, "SubscriptionApplyResult");
         x.subscription_apply_selection = get_stack_optional<SubscriptionApplySelectionElement>(j, "SubscriptionApplySelection");
+        x.subscription_id_request = get_stack_optional<SubscriptionIdRequest>(j, "SubscriptionIdRequest");
         x.subscription_preview_candidate = get_stack_optional<SubscriptionPreviewCandidate>(j, "SubscriptionPreviewCandidate");
         x.subscription_preview_request = get_stack_optional<SubscriptionPreviewRequest>(j, "SubscriptionPreviewRequest");
         x.subscription_preview_response = get_stack_optional<SubscriptionPreviewResponse>(j, "SubscriptionPreviewResponse");
+        x.subscription_rename_request = get_stack_optional<SubscriptionRenameRequest>(j, "SubscriptionRenameRequest");
+        x.subscription_source_request = get_stack_optional<SubscriptionSourceRequest>(j, "SubscriptionSourceRequest");
         x.system_update_local_status = get_stack_optional<SystemUpdateLocalStatus>(j, "SystemUpdateLocalStatus");
         x.system_update_status = get_stack_optional<SystemUpdateStatus>(j, "SystemUpdateStatus");
         x.transport_action_request = get_stack_optional<TransportActionRequest>(j, "TransportActionRequest");
@@ -7193,6 +7310,7 @@ namespace api {
         j["RuntimeOutboundsResponse"] = x.runtime_outbounds_response;
         j["RuntimeOutboundState"] = x.runtime_outbound_state;
         j["RuntimeOutboundStatus"] = x.runtime_outbound_status;
+        j["SavedSubscription"] = x.saved_subscription;
         j["SingBoxInstallCapability"] = x.sing_box_install_capability;
         j["SingBoxInstallRequest"] = x.sing_box_install_request;
         j["SingBoxInstallResult"] = x.sing_box_install_result;
@@ -7208,9 +7326,12 @@ namespace api {
         j["SubscriptionApplyResponse"] = x.subscription_apply_response;
         j["SubscriptionApplyResult"] = x.subscription_apply_result;
         j["SubscriptionApplySelection"] = x.subscription_apply_selection;
+        j["SubscriptionIdRequest"] = x.subscription_id_request;
         j["SubscriptionPreviewCandidate"] = x.subscription_preview_candidate;
         j["SubscriptionPreviewRequest"] = x.subscription_preview_request;
         j["SubscriptionPreviewResponse"] = x.subscription_preview_response;
+        j["SubscriptionRenameRequest"] = x.subscription_rename_request;
+        j["SubscriptionSourceRequest"] = x.subscription_source_request;
         j["SystemUpdateLocalStatus"] = x.system_update_local_status;
         j["SystemUpdateStatus"] = x.system_update_status;
         j["TransportActionRequest"] = x.transport_action_request;

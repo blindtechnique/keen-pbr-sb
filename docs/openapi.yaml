@@ -2824,6 +2824,94 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/subscriptions:
+    get:
+      summary: List saved subscription sources and provider limits
+      operationId: getSubscriptions
+      responses:
+        "200":
+          description: Sources without credential-bearing URLs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SavedSubscription"
+    post:
+      summary: Save a source and read its metadata without importing nodes
+      operationId: postSubscriptionSource
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubscriptionSourceRequest"
+      responses:
+        "200":
+          description: Saved source; matching existing transports linked without mutation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SavedSubscription"
+
+  /api/subscriptions/refresh:
+    post:
+      summary: Refresh provider metadata without changing nodes or routing
+      operationId: postSubscriptionRefresh
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubscriptionIdRequest"
+      responses:
+        "200":
+          description: Current metadata; failed fetch keeps the previous counters and reports error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SavedSubscription"
+
+  /api/subscriptions/rename:
+    post:
+      summary: Rename a saved subscription
+      operationId: postSubscriptionRename
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubscriptionRenameRequest"
+      responses:
+        "200":
+          description: Renamed source
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SavedSubscription"
+
+  /api/subscriptions/remove:
+    post:
+      summary: Forget subscription metadata without deleting its VPN transports
+      operationId: postSubscriptionRemove
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubscriptionIdRequest"
+      responses:
+        "200":
+          description: Metadata removed; VPNs unchanged
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok:
+                    type: boolean
+
   /api/subscriptions/preview:
     post:
       summary: Plan the import of a sing-box subscription
@@ -4957,6 +5045,77 @@ components:
             For duplicate_in_document - the line of the occurrence that was
             offered instead.
 
+    SavedSubscription:
+      type: object
+      required: [id, name, source_host, transport_tags, checked_at]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        source_host:
+          type: string
+          description: Host only; never includes source path, query or credentials.
+        transport_tags:
+          type: array
+          items:
+            type: string
+        node_count:
+          type: integer
+          minimum: 0
+        upload_bytes:
+          type: integer
+          minimum: 0
+        download_bytes:
+          type: integer
+          minimum: 0
+        total_bytes:
+          type: integer
+          minimum: 1
+          description: Absent when provider did not supply a positive limit; absence is not unlimited.
+        expires_at:
+          type: integer
+          minimum: 1
+          description: Provider expiration time, Unix seconds; absent when unspecified.
+        updated_at:
+          type: integer
+          description: Last successful metadata fetch, Unix seconds.
+        checked_at:
+          type: integer
+          description: Most recent attempt, Unix seconds.
+        error:
+          type: string
+          description: Stable error code; never includes provider response or credential-bearing URL.
+
+    SubscriptionSourceRequest:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+          maxLength: 4096
+        name:
+          type: string
+          maxLength: 96
+
+    SubscriptionIdRequest:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+
+    SubscriptionRenameRequest:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+          minLength: 1
+          maxLength: 96
+
     SubscriptionPreviewResponse:
       type: object
       required: [preview_id, document_kind, expires_in_seconds, candidates]
@@ -5008,6 +5167,10 @@ components:
       type: object
       required: [preview_id, selections]
       properties:
+        subscription_name:
+          type: string
+          maxLength: 96
+          description: Optional saved source label for URL imports; does not rename VPN nodes.
         preview_id:
           type: string
           pattern: "^[0-9a-f]{64}$"
@@ -5057,6 +5220,9 @@ components:
       type: object
       required: [results]
       properties:
+        subscription_error:
+          type: string
+          description: Metadata save failed after VPN import; must not retry creating the VPNs.
         results:
           type: array
           items:

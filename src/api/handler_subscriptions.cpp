@@ -11,6 +11,7 @@
 #include "../config/subscription_fetch_policy.hpp"
 #include "../config/subscription_import_plan.hpp"
 #include "../config/subscription_transport_naming.hpp"
+#include "../config/subscription_store.hpp"
 #include "../http/http_client.hpp"
 #include "../util/display_name.hpp"
 
@@ -21,6 +22,7 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <filesystem>
 #include <httplib.h>
 #include <map>
 #include <mutex>
@@ -54,6 +56,8 @@ struct TransportIdentity {
 struct PreviewSession {
     std::chrono::steady_clock::time_point expires;
     SubscriptionImportPlan plan;
+    std::string source_url;
+    nlohmann::json source_metadata;
     // The exact identities created for lines by an apply. A preview is a
     // one-shot import: re-applying a line must neither duplicate its transport
     // nor relabel that transport with a new override from the retry request.
@@ -271,6 +275,47 @@ public:
     }
 };
 
+std::int64_t subscription_now() {
+    return std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+void validate_source_url(const std::string& url) {
+    if (url.size() > 4096U || classify_subscription_url(url) != SubscriptionUrlVerdict::allowed)
+        throw ApiError("invalid subscription URL", 400);
+}
+
+nlohmann::json subscription_metadata(const SubscriptionFetchResult& fetched,
+                                     const SubscriptionImportPlan& plan) {
+    const auto header = fetched.headers.find("subscription-userinfo");
+    auto metadata = parse_subscription_userinfo(
+        header == fetched.headers.end() ? "" : header->second);
+    const auto now = subscription_now();
+    metadata["checked_at"] = now;
+    metadata["updated_at"] = now;
+    if (plan.kind == SubscriptionDocumentKind::link_list ||
+        plan.kind == SubscriptionDocumentKind::base64_link_list) {
+        std::size_t count = 0U;
+        for (const auto& item : plan.candidates)
+            if (item.disposition != SubscriptionCandidateDisposition::duplicate_in_document &&
+                item.disposition != SubscriptionCandidateDisposition::malformed) ++count;
+        metadata["node_count"] = count;
+    } else if (plan.kind != SubscriptionDocumentKind::json_document) {
+        throw ApiError("invalid subscription document", 400);
+    }
+    return metadata;
+}
+
+template <typename Function>
+std::string subscription_store_call(Function&& function) {
+    try { return function().dump(); }
+    catch (const ApiError&) { throw; }
+    catch (const nlohmann::json::exception&) { throw ApiError("invalid subscription data", 400); }
+    catch (const std::out_of_range&) { throw ApiError("subscription not found", 404); }
+    catch (const std::invalid_argument&) { throw ApiError("invalid subscription data", 400); }
+    catch (...) { throw ApiError("cannot save subscription metadata", 500); }
+}
+
 void register_subscriptions_handler_impl(
     ApiServer& server,
     ApiContext& ctx,
@@ -279,6 +324,64 @@ void register_subscriptions_handler_impl(
         ApiContext&,
         std::string,
         PrepareConfigCommit)> commit_config) {
+    const auto store = std::make_shared<SubscriptionStore>(
+        (std::filesystem::path(ctx.config_path).parent_path() / "subscriptions.json").string());
+    server.get("/api/subscriptions", [store]() {
+        return subscription_store_call([&] { return store->list(); });
+    });
+    server.post("/api/subscriptions", [&ctx, store, fetcher](const std::string& body) {
+        return subscription_store_call([&] {
+            const auto request = nlohmann::json::parse(body);
+            const auto url = request.at("url").get<std::string>();
+            const auto name = request.value("name", "");
+            validate_source_url(url);
+            if (!name.empty() && !display_name::is_valid(name, false))
+                throw ApiError("invalid subscription name", 400);
+            const auto fetched = fetcher(url);
+            const auto plan = plan_subscription_import(fetched.body, {}, {});
+            const auto metadata = subscription_metadata(fetched, plan);
+            std::vector<std::string> tags;
+            // Linking an old import is advisory and read-only. An unavailable
+            // manager does not prevent saving provider limits and the source.
+            try {
+                const auto existing = read_existing_transports(load_transport_manager_endpoint(ctx.config_path));
+                for (const auto& link : plan.links) {
+                    const auto it = existing.identities_by_fingerprint.find(subscription_link_fingerprint(link));
+                    if (it != existing.identities_by_fingerprint.end() && it->second.tag)
+                        tags.push_back(*it->second.tag);
+                }
+            } catch (...) {}
+            return store->save(url, name, metadata, tags);
+        });
+    });
+    server.post("/api/subscriptions/refresh", [store, fetcher](const std::string& body) {
+        return subscription_store_call([&] {
+            const auto id = nlohmann::json::parse(body).at("id").get<std::string>();
+            const auto record = store->find(id);
+            nlohmann::json metadata;
+            try {
+                const auto url = record.at("url").get<std::string>();
+                validate_source_url(url);
+                const auto fetched = fetcher(url);
+                metadata = subscription_metadata(fetched, plan_subscription_import(fetched.body, {}, {}));
+            } catch (...) {
+                metadata = {{"checked_at", subscription_now()}, {"error", "fetch_failed"}};
+            }
+            return store->refresh(id, metadata);
+        });
+    });
+    server.post("/api/subscriptions/rename", [store](const std::string& body) {
+        return subscription_store_call([&] {
+            const auto request = nlohmann::json::parse(body);
+            return store->rename(request.at("id").get<std::string>(), request.at("name").get<std::string>());
+        });
+    });
+    server.post("/api/subscriptions/remove", [store](const std::string& body) {
+        return subscription_store_call([&] {
+            store->erase(nlohmann::json::parse(body).at("id").get<std::string>());
+            return nlohmann::json{{"ok", true}};
+        });
+    });
     server.post(
         "/api/subscriptions/preview",
         [&ctx, fetcher = std::move(fetcher)](
@@ -344,10 +447,10 @@ void register_subscriptions_handler_impl(
             // 400 - the operator learns what was wrong with their file. A
             // second bound here would be the same contract written twice, and
             // the copy that drifts is always the one nobody is looking at.
-            const std::string body =
-                has_url ? fetcher(*request.url) : *request.document;
+            const auto fetched = has_url ? fetcher(*request.url)
+                                        : SubscriptionFetchResult(*request.document);
             auto plan = plan_subscription_import(
-                body, existing.tags, existing.link_fingerprints);
+                fetched.body, existing.tags, existing.link_fingerprints);
 
             api::SubscriptionPreviewResponse response;
             response.document_kind = response_kind(plan.kind);
@@ -393,6 +496,14 @@ void register_subscriptions_handler_impl(
                 }
                 PreviewSession session;
                 session.expires = now + kPreviewTtl;
+                if (has_url) {
+                    session.source_url = *request.url;
+                    // Invalid documents still get their existing explanatory
+                    // preview; they cannot reach a successful apply.
+                    if (plan.kind == SubscriptionDocumentKind::link_list ||
+                        plan.kind == SubscriptionDocumentKind::base64_link_list)
+                        session.source_metadata = subscription_metadata(fetched, plan);
+                }
                 session.plan = std::move(plan);
                 registry.sessions.emplace(response.preview_id,
                                           std::move(session));
@@ -403,7 +514,7 @@ void register_subscriptions_handler_impl(
 
     server.post(
         "/api/subscriptions/apply",
-        [&ctx,
+        [&ctx, store,
          commit_config](const std::string& request_body) -> std::string {
             api::SubscriptionApplyRequest request;
             try {
@@ -419,6 +530,9 @@ void register_subscriptions_handler_impl(
                                "selection",
                                400);
             }
+            if (request.subscription_name && !request.subscription_name->empty() &&
+                !display_name::is_valid(*request.subscription_name, false))
+                throw ApiError("invalid subscription name", 400);
             if (request.selections.size() >
                 kMaximumSubscriptionApplyEntries) {
                 throw ApiError(
@@ -523,6 +637,34 @@ void register_subscriptions_handler_impl(
             }
 
             api::SubscriptionApplyResponse response;
+            const auto finish_response = [&]() -> std::string {
+                std::string url;
+                nlohmann::json metadata;
+                {
+                    auto& registry = preview_registry();
+                    std::lock_guard<std::mutex> lock(registry.mutex);
+                    const auto found = registry.sessions.find(request.preview_id);
+                    if (found != registry.sessions.end()) {
+                        url = found->second.source_url;
+                        metadata = found->second.source_metadata;
+                    }
+                }
+                std::vector<std::string> tags;
+                for (const auto& result : response.results)
+                    if (result.outcome != api::Outcome::FAILED && result.tag) tags.push_back(*result.tag);
+                auto output = nlohmann::json(response);
+                output.erase("subscription_error");
+                if (!url.empty() && !tags.empty()) {
+                    try {
+                        store->save(url, request.subscription_name.value_or(""), metadata, tags);
+                    } catch (...) {
+                        // VPN creation already succeeded. Do not turn a failed
+                        // metadata write into a failed/retryable VPN import.
+                        output["subscription_error"] = "metadata_save_failed";
+                    }
+                }
+                return output.dump();
+            };
             const auto remember_import =
                 [&request](const std::size_t line,
                            TransportIdentity identity) {
@@ -565,7 +707,7 @@ void register_subscriptions_handler_impl(
                 response.results.push_back(std::move(result));
             }
             if (pending.empty()) {
-                return nlohmann::json(response).dump();
+                return finish_response();
             }
 
             struct PlannedCreate {
@@ -728,7 +870,7 @@ void register_subscriptions_handler_impl(
                             ctx, std::move(creates));
                     });
             } catch (const SubscriptionApplyNoMutation&) {
-                return nlohmann::json(response).dump();
+                return finish_response();
             }
 
             for (const auto& created : planned) {
@@ -743,14 +885,14 @@ void register_subscriptions_handler_impl(
                     TransportIdentity{
                         created.tag, created.interface_name});
             }
-            return nlohmann::json(response).dump();
+            return finish_response();
         });
 }
 
 } // namespace
 
 SubscriptionFetcher make_subscription_fetcher() {
-    return [](const std::string& url) -> std::string {
+    return [](const std::string& url) -> SubscriptionFetchResult {
         HttpClient client;
         client.set_timeout(std::chrono::seconds(20));
         // The transport enforces the bound, so an oversized body fails whole
@@ -762,10 +904,16 @@ SubscriptionFetcher make_subscription_fetcher() {
                    SubscriptionDestinationVerdict::allowed;
         };
         try {
-            return client.download(url, options);
+            auto response = client.download_response(url, options);
+            SubscriptionFetchResult result(std::move(response.body));
+            result.headers = std::move(response.headers);
+            return result;
         } catch (const HttpError& error) {
             throw ApiError(
-                std::string("subscription fetch failed: ") + error.what(),
+                std::string("subscription fetch failed") +
+                    (error.status_code() > 0 ? ": HTTP " + std::to_string(error.status_code()) :
+                     std::string(error.what()).find("destination policy") != std::string::npos ?
+                     ": destination policy" : ""),
                 502);
         }
     };

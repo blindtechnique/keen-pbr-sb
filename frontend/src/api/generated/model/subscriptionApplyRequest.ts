@@ -8,6 +8,11 @@
 import type { SubscriptionApplySelection } from './subscriptionApplySelection';
 
 export interface SubscriptionApplyRequest {
+  /**
+     * Optional saved source label for URL imports; does not rename VPN nodes.
+     * @maxLength 96
+     */
+  subscription_name?: string;
   /** @pattern ^[0-9a-f]{64}$ */
   preview_id: string;
   /** @minItems 1 */

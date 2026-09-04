@@ -374,6 +374,7 @@ struct SubscriptionsHarness {
     std::size_t apply_calls{0};
     Config visible_config;
     std::string fetch_body;
+    std::map<std::string, std::string> fetch_headers;
 
     explicit SubscriptionsHarness(const int api_port,
                                   const bool with_manager = true)
@@ -418,7 +419,9 @@ struct SubscriptionsHarness {
             context,
             [this](const std::string&) {
                 ++fetch_calls;
-                return fetch_body;
+                SubscriptionFetchResult result(fetch_body);
+                result.headers = fetch_headers;
+                return result;
             },
             [](const std::string& path, const std::string& body) {
                 write_config_atomically(path, body);
@@ -1182,6 +1185,56 @@ TEST_CASE("manager response text is never reflected through the API") {
           std::string::npos);
     CHECK(harness.manager->created.empty());
     CHECK(harness.apply_calls == 0U);
+}
+
+TEST_CASE("saved subscription metadata does not create or apply VPNs") {
+    SubscriptionsHarness harness(19881);
+    harness.fetch_body = kConfiguredLink;
+    harness.fetch_headers = {{"subscription-userinfo", "upload=10; download=20; total=1000; expire=2000000000"}};
+    httplib::Client client("127.0.0.1", 19881);
+    const auto saved = client.Post("/api/subscriptions", R"({"url":"https://provider.example/sub/private","name":"Plan"})", "application/json");
+    REQUIRE(saved != nullptr);
+    REQUIRE(saved->status == 200);
+    const auto record = nlohmann::json::parse(saved->body);
+    CHECK(record.at("total_bytes") == 1000);
+    CHECK_FALSE(record.contains("url"));
+    CHECK(record.at("transport_tags").size() == 1);
+    CHECK(harness.apply_calls == 0);
+    CHECK(harness.manager->created.empty());
+    const auto list = client.Get("/api/subscriptions");
+    REQUIRE(list != nullptr);
+    CHECK(list->body.find("/private") == std::string::npos);
+    harness.fetch_headers.clear();
+    const auto refresh = client.Post("/api/subscriptions/refresh", nlohmann::json{{"id", record.at("id")}}.dump(), "application/json");
+    REQUIRE(refresh != nullptr);
+    CHECK(refresh->status == 200);
+    CHECK_FALSE(nlohmann::json::parse(refresh->body).contains("total_bytes"));
+    const auto remove = client.Post("/api/subscriptions/remove", nlohmann::json{{"id", record.at("id")}}.dump(), "application/json");
+    REQUIRE(remove != nullptr);
+    CHECK(remove->status == 200);
+    CHECK(harness.apply_calls == 0);
+    CHECK(harness.manager->created.empty());
+}
+
+TEST_CASE("URL import remembers its subscription source on successful apply") {
+    SubscriptionsHarness harness(19882);
+    harness.fetch_body = "vless://user@new.example:443#New";
+    httplib::Client client("127.0.0.1", 19882);
+    const auto preview_id = preview_and_get_id(client);
+    const auto applied = client.Post("/api/subscriptions/apply", nlohmann::json{
+        {"preview_id", preview_id}, {"subscription_name", "My subscription"},
+        {"selections", nlohmann::json::array({{{"line", 1}, {"tag", "new_sub_vpn"}}})}
+    }.dump(), "application/json");
+    REQUIRE(applied != nullptr);
+    REQUIRE(applied->status == 200);
+    CHECK_FALSE(nlohmann::json::parse(applied->body).contains("subscription_error"));
+    const auto listed = client.Get("/api/subscriptions");
+    REQUIRE(listed != nullptr);
+    const auto records = nlohmann::json::parse(listed->body);
+    REQUIRE(records.size() == 1);
+    CHECK(records[0].at("name") == "My subscription");
+    CHECK(records[0].at("transport_tags")[0] == "new_sub_vpn");
+    CHECK(harness.apply_calls == 1);
 }
 
 TEST_CASE("the production fetcher carries the destination policy") {

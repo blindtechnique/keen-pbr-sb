@@ -233,7 +233,9 @@ export function NfqwsPage() {
   const [upgradeOpen, setUpgradeOpen] = useState(false)
   const [installOpen, setInstallOpen] = useState(false)
   const [restoreOpen, setRestoreOpen] = useState(false)
-  const [downloadUpgradeBackup, setDownloadUpgradeBackup] = useState(true)
+  // The component update already captures its restore point. Downloading a
+  // separate secret-bearing archive is optional and may ask for a password.
+  const [downloadUpgradeBackup, setDownloadUpgradeBackup] = useState(false)
   const [drafts, setDrafts] = useState<Record<string, DraftFile>>({})
   const [operation, setOperation] = useState<OperationState>({
     open: false,
@@ -681,7 +683,7 @@ export function NfqwsPage() {
                             outcome:
                               status.upgrade_capability.boot_recovery_last
                                 .outcome,
-                          },
+                          }
                         )}
                       </>
                     ) : null}
@@ -957,9 +959,7 @@ export function NfqwsPage() {
           exactly when nothing is installed, and its progress/result dialog
           must render then too. */}
       <NfqwsOperationDialog
-        onClose={() =>
-          setOperation((current) => ({ ...current, open: false }))
-        }
+        onClose={() => setOperation((current) => ({ ...current, open: false }))}
         operation={operation}
       />
       <NfqwsConfirmDialog

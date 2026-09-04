@@ -68,13 +68,18 @@ void HttpClient::set_user_agent(const std::string& user_agent) { user_agent_ = u
 void HttpClient::set_max_response_size(size_t bytes) { max_response_size_ = bytes; }
 
 std::string HttpClient::download(const std::string& url, const HttpRequestOptions& options) {
+    return download_response(url, options).body;
+}
+
+HttpTransportResponse HttpClient::download_response(
+    const std::string& url, const HttpRequestOptions& options) {
     throw_if_cancelled(options.cancellation);
     try {
         auto response = transport_->perform(request_for(
             url, timeout_, user_agent_, max_response_size_, options));
         throw_if_cancelled(options.cancellation);
         throw_for_status(response.status_code);
-        return response.body;
+        return response;
     } catch (const HttpTransportCancelled& error) {
         throw HttpRequestCancelled(error.what());
     } catch (const HttpTransportBindError& error) {

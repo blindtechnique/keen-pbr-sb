@@ -83,6 +83,18 @@ private:
 constexpr const char* kReadmeUrl =
     "https://raw.githubusercontent.com/maksimkurb/keen-pbr/refs/heads/main/README.md";
 
+TEST_CASE("HttpClient preserves final subscription response headers") {
+    auto transport = std::make_shared<FakeTransport>();
+    transport->response.status_code = 200;
+    transport->response.body = "subscription";
+    transport->response.headers = {{"subscription-userinfo", "download=25; total=100"}};
+    keen_pbr3::HttpClient client(transport);
+    const auto response = client.download_response("https://example.com/sub");
+    CHECK(response.body == "subscription");
+    CHECK(response.headers.at("subscription-userinfo") == "download=25; total=100");
+    CHECK(client.download("https://example.com/sub") == "subscription");
+}
+
 bool is_network_unavailable(const keen_pbr3::HttpError& error) {
     const std::string message = error.what();
     return message.find("Couldn't resolve host name") != std::string::npos ||

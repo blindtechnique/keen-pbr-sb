@@ -500,6 +500,7 @@ set(SOURCES
   src/config/subscription_fetch_policy.cpp
   src/config/subscription_import_plan.cpp
   src/config/subscription_transport_naming.cpp
+  src/config/subscription_store.cpp
   src/config/dependency_analysis.cpp
   src/config/list_delete_planner.cpp
   src/config/routing_state.cpp

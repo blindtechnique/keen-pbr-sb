@@ -70,6 +70,7 @@ import { PageHeader } from "@/components/shared/page-header"
 import { SectionHeading } from "@/components/shared/section-heading"
 import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
+import { SubscriptionsPanel } from "@/components/transports/subscriptions-panel"
 import { NativeInterfaceDetails } from "@/components/transports/native-interface-details"
 import { NativeInterfaceDeleteDialog } from "@/components/transports/native-interface-delete-dialog"
 import { summarizeNativeDeleteDependencies } from "@/components/transports/native-interface-delete-guard"
@@ -404,17 +405,24 @@ export function TransportsPage({
 
     // «Все» нужна и тогда, когда вкладка одна, но есть нативные интерфейсы
     // без своей вкладки (OpenVPN, L2TP…): иначе их не было бы видно нигде.
-    return providerTabs.length > 1 ||
+    const tabs =
+      providerTabs.length > 1 ||
       (providerTabs.length > 0 && otherNativeCount > 0)
-      ? [
-          {
-            value: "all",
-            label: t("transports.tabs.all"),
-            count: managedItems.length + displayedNativeInterfaces.length,
-          },
-          ...providerTabs,
-        ]
-      : providerTabs
+        ? [
+            {
+              value: "all",
+              label: t("transports.tabs.all"),
+              count: managedItems.length + displayedNativeInterfaces.length,
+            },
+            ...providerTabs,
+          ]
+        : providerTabs
+    if (tabs.length === 0)
+      tabs.push({ value: "all", label: t("transports.tabs.all"), count: 0 })
+    return [
+      ...tabs,
+      { value: "subscriptions", label: t("subscriptions.title") },
+    ]
   }, [
     displayedNativeInterfaces.length,
     managedItems.length,
@@ -2031,6 +2039,7 @@ export function TransportsPage({
       ) : null}
 
       {!query.isLoading &&
+      activeTransportTab !== "subscriptions" &&
       !ndmsInventoryQuery.isLoading &&
       !error &&
       managedItems.length === 0 &&
@@ -2057,16 +2066,19 @@ export function TransportsPage({
         />
       ) : null}
 
-      {query.isLoading || ndmsInventoryQuery.isLoading ? (
+      {activeTransportTab !== "subscriptions" &&
+      (query.isLoading || ndmsInventoryQuery.isLoading) ? (
         <TableSkeleton />
       ) : null}
 
-      <NativeRouteOffer
-        candidates={nativeImportInProgress ? [] : routeOfferCandidates}
-        disabled={routeOfferMutation.isPending || !keenConfig}
-        onCreate={createRouteFromOffer}
-        onDismiss={dismissRouteOffer}
-      />
+      {activeTransportTab !== "subscriptions" ? (
+        <NativeRouteOffer
+          candidates={nativeImportInProgress ? [] : routeOfferCandidates}
+          disabled={routeOfferMutation.isPending || !keenConfig}
+          onCreate={createRouteFromOffer}
+          onDismiss={dismissRouteOffer}
+        />
+      ) : null}
 
       {transportTabs.length > 1 ? (
         <SectionTabs
@@ -2080,7 +2092,10 @@ export function TransportsPage({
           отодвигала первую карточку вниз ни за чем. Отрицательный отступ
           сверху убирает лишний ритм над ней; снизу его быть не должно —
           кнопка наезжала на первую карточку. */}
-      {hiddenNativeCount > 0 ? (
+      {activeTransportTab === "subscriptions" ? (
+        <SubscriptionsPanel transports={managedItems} />
+      ) : null}
+      {activeTransportTab !== "subscriptions" && hiddenNativeCount > 0 ? (
         <div className="-mt-1 flex justify-start">
           <Button
             onClick={() => setShowHiddenNative((current) => !current)}

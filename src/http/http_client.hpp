@@ -93,6 +93,9 @@ public:
     std::string download(const std::string& url,
                          const HttpRequestOptions& options = {});
 
+    HttpTransportResponse download_response(
+        const std::string& url, const HttpRequestOptions& options = {});
+
     ConditionalDownloadResult download_conditional(
         const std::string& url,
         const std::string& if_none_match = "",

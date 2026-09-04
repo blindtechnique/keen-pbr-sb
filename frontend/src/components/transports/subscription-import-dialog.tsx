@@ -8,6 +8,7 @@ import { useEffect, useRef, useState } from "react"
 
 import type { ApiError } from "@/api/client"
 import { useTranslation } from "react-i18next"
+import { toast } from "sonner"
 
 import type {
   SubscriptionApplyResponse,
@@ -66,6 +67,7 @@ export function SubscriptionImportDialog({
 }) {
   const { t } = useTranslation()
   const [url, setUrl] = useState("")
+  const [subscriptionName, setSubscriptionName] = useState("")
   const [preview, setPreview] = useState<SubscriptionPreviewResponse | null>(
     null
   )
@@ -79,6 +81,7 @@ export function SubscriptionImportDialog({
 
   const reset = () => {
     setUrl("")
+    setSubscriptionName("")
     setPreview(null)
     setResults(null)
     setSelected(new Set())
@@ -170,11 +173,19 @@ export function SubscriptionImportDialog({
     const selections = buildSelections(preview.candidates, selected, overrides)
     if (selections.length === 0) return
     applyMutation.mutate(
-      { data: { preview_id: preview.preview_id, selections } },
+      {
+        data: {
+          preview_id: preview.preview_id,
+          selections,
+          subscription_name: subscriptionName.trim() || undefined,
+        },
+      },
       {
         onSuccess: (response) => {
           if (response.status === 200) {
             setResults(response.data)
+            if (response.data.subscription_error)
+              toast.warning(t("subscriptions.importMetadataFailed"))
             // A partial result must stay visible: otherwise the operator
             // cannot tell which entries need attention. A complete success
             // has no remaining form state, so close both nested and source
@@ -258,6 +269,19 @@ export function SubscriptionImportDialog({
           <div className="space-y-3">
             {hasCandidates ? (
               <>
+                {url ? (
+                  <label className="block space-y-1 text-sm">
+                    <span>{t("subscriptions.optionalName")}</span>
+                    <Input
+                      maxLength={80}
+                      value={subscriptionName}
+                      onChange={(event) =>
+                        setSubscriptionName(event.target.value)
+                      }
+                      disabled={applyMutation.isPending}
+                    />
+                  </label>
+                ) : null}
                 <p className="text-xs text-muted-foreground">
                   {t("transports.subscriptionImport.selectionLimit", {
                     count: selectionCount,

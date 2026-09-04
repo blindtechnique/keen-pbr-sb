@@ -218,6 +218,9 @@ export const usePostSubscriptionApplyMutation = (
     mutation: {
       ...options?.mutation,
       onSuccess: async (data, variables, onMutateResult, context) => {
+        await queryClient.invalidateQueries({
+          queryKey: ["/api/subscriptions"],
+        })
         // Same set as a manual transport create: apply reaches the same
         // manager pipeline, so the same views go stale.
         await queryClient.invalidateQueries({

@@ -138,6 +138,7 @@ add_executable(keen-pbr-tests
   test_subscription_fetch_policy.cpp
   test_subscription_import_plan.cpp
   test_subscription_transport_naming.cpp
+  test_subscription_store.cpp
   test_sing_box_install_policy.cpp
   test_sing_box_install_observation.cpp
   test_sing_box_release_plan.cpp
@@ -276,6 +277,7 @@ add_executable(keen-pbr-tests
   ../src/config/subscription_fetch_policy.cpp
   ../src/config/subscription_import_plan.cpp
   ../src/config/subscription_transport_naming.cpp
+  ../src/config/subscription_store.cpp
   ../src/util/last_command_failure.cpp
   ../src/backup/persistent_snapshot.cpp
   ../src/backup/restore_journal.cpp
