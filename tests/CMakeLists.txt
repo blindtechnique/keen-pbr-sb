@@ -1800,6 +1800,13 @@ add_test(
 )
 
 add_test(
+  NAME keen-pbr-service-start-environment
+  COMMAND /bin/sh
+    ${CMAKE_SOURCE_DIR}/tests/package_it/run-service-start-environment.sh
+    ${CMAKE_SOURCE_DIR}
+)
+
+add_test(
   NAME keen-pbr-keenetic-iptables-wait
   COMMAND /bin/sh
     ${CMAKE_SOURCE_DIR}/tests/package_it/run-keenetic-iptables-wait.sh

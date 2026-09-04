@@ -4569,6 +4569,10 @@ if [ "$FASTNAT_DISPATCH_ACTION" = start ] &&
    ! guard_meta_udp443_start_ownership; then
     exit_failed_start 1
 fi
+# The guard has finished interpreting the current installer/recovery context.
+# Do not let a later API-driven dependency restart inherit stale postinst state.
+unset KEEN_PBR_PERSISTENT_TRANSACTION KEEN_PBR_PACKAGE_POSTINST \
+    KEEN_PBR_RESCUE_TRANSACTION KEEN_PBR_PACKAGE_UNKNOWN_RECOVERY
 . /opt/etc/init.d/rc.func
 status=$?
 if [ "$FASTNAT_DISPATCH_ACTION" = start ]; then

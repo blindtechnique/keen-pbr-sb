@@ -578,7 +578,7 @@ Daemon::acquire_runtime_mutation_or_throw(
     bool require_runtime_stopped) {
     auto lease = runtime_mutation_admission_.try_acquire_after_for(
         label,
-        runtime_firewall_background_owner_label,
+        {runtime_firewall_background_owner_label, "urltest-selection-change"},
         config_preapply_background_wait_budget);
     if (!lease.has_value()) {
         const auto active = runtime_mutation_admission_.active();

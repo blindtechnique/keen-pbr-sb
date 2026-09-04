@@ -1,12 +1,15 @@
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <initializer_list>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace keen_pbr3 {
@@ -179,9 +182,9 @@ public:
     }
 
     // Foreground API mutations normally fail immediately when another writer
-    // owns the runtime. The periodic firewall worker is different: it is
-    // replaceable background maintenance which is normally about to publish
-    // its terminal. Wait for that exact predecessor once, then claim the
+    // owns the runtime. Background firewall work and URLTEST selection are
+    // different: they normally only need to finish their current terminal.
+    // Wait for that exact predecessor once, then claim the
     // admission under the same mutex which observed its release. If another
     // owner wins, shutdown starts, or the predecessor does not finish within
     // the caller's small budget, no claim is made.
@@ -189,6 +192,15 @@ public:
     std::optional<Lease> try_acquire_after_for(
         std::string label,
         const std::string& waitable_active_label,
+        const std::chrono::duration<Rep, Period>& timeout) {
+        return try_acquire_after_for(
+            std::move(label), {std::string_view{waitable_active_label}}, timeout);
+    }
+
+    template<class Rep, class Period>
+    std::optional<Lease> try_acquire_after_for(
+        std::string label,
+        std::initializer_list<std::string_view> waitable_active_labels,
         const std::chrono::duration<Rep, Period>& timeout) {
         const auto state = state_;
         std::unique_lock<std::mutex> lock(state->mutex);
@@ -198,7 +210,8 @@ public:
         if (state->active_token == 0) {
             return acquire_locked(state, std::move(label));
         }
-        if (state->active_label != waitable_active_label) {
+        if (std::find(waitable_active_labels.begin(), waitable_active_labels.end(),
+                      state->active_label) == waitable_active_labels.end()) {
             return std::nullopt;
         }
 

@@ -7021,6 +7021,7 @@ void Daemon::begin_preowned_runtime_firewall_config_generation(
     }
 
     std::shared_ptr<DaemonConfigGenerationTransaction> transaction;
+    std::optional<std::string> expected_staged_serialized;
     try {
         if (config_store_.pin_active_snapshot() != base_active_snapshot) {
             reject(
@@ -7035,7 +7036,7 @@ void Daemon::begin_preowned_runtime_firewall_config_generation(
                 RuntimeConfigGenerationPublicationMode::
                     staged_bootstrap_from_stopped) {
             const auto staged = config_store_.staged_snapshot();
-            if (!staged || staged->second != staged_serialized) {
+            if (staged && staged->second != staged_serialized) {
                 reject(
                     std::move(final_continuation), std::move(lease),
                     "staged configuration changed before candidate "
@@ -7043,6 +7044,10 @@ void Daemon::begin_preowned_runtime_firewall_config_generation(
                     true);
                 return;
             }
+            // Linked VPN creates and backup restore commit directly: the
+            // validated candidate is not a separately staged panel draft.
+            // Preserve the observed optional draft in the existing commit.
+            if (staged) expected_staged_serialized = staged->second;
         }
         const auto base_runtime_generation =
             runtime_generation_.load(std::memory_order_acquire);
@@ -7191,7 +7196,7 @@ void Daemon::begin_preowned_runtime_firewall_config_generation(
                 ConfigStore::prepare_active_commit(
                     base_active_snapshot,
                     candidate_active_snapshot,
-                    std::move(staged_serialized));
+                    std::move(expected_staged_serialized));
             break;
         case RuntimeConfigGenerationPublicationMode::active_runtime_reload:
             transaction->active_runtime_reload_commit =

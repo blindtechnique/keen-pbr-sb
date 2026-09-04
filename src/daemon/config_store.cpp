@@ -87,7 +87,7 @@ void ConfigStore::replace_active(Config active_config, OutboundMarkMap outbound_
 PreparedActiveConfigCommit ConfigStore::prepare_active_commit(
     ActiveConfigSnapshotHandle base,
     ActiveConfigSnapshotHandle candidate,
-    std::string staged_serialized) {
+    std::optional<std::string> staged_serialized) {
     return PreparedActiveConfigCommit{
         std::move(base),
         std::move(candidate),
@@ -99,7 +99,7 @@ PreparedActiveConfigCommit ConfigStore::prepare_active_commit(
     ActiveConfigSnapshotHandle base,
     Config candidate_config,
     OutboundMarkMap candidate_outbound_marks,
-    std::string staged_serialized) {
+    std::optional<std::string> staged_serialized) {
     return prepare_active_commit(
         std::move(base),
         prepare_active_snapshot(

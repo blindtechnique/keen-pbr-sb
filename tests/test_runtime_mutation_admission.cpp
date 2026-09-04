@@ -287,6 +287,24 @@ TEST_CASE("foreground mutation does not wait behind another foreground owner") {
     CHECK(admission.owns(*blocker));
 }
 
+TEST_CASE("VPN import waits for an in-flight URLTEST selection") {
+    RuntimeMutationAdmission admission;
+    auto selection = admission.try_acquire("urltest-selection-change");
+    REQUIRE(selection.has_value());
+    std::optional<RuntimeMutationAdmission::Lease> foreground;
+    std::thread waiter([&] {
+        foreground = admission.try_acquire_after_for(
+            "save-config", {"runtime-firewall-worker", "urltest-selection-change"},
+            std::chrono::seconds{1});
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    selection->release();
+    waiter.join();
+    REQUIRE(foreground.has_value());
+    CHECK(admission.owns(*foreground));
+    CHECK(admission.active()->label == "save-config");
+}
+
 TEST_CASE("foreground background wait stops at timeout and shutdown") {
     SUBCASE("timeout") {
         RuntimeMutationAdmission admission;

@@ -1214,12 +1214,15 @@ html:not(.dark)
  * фокус без наведения иначе оказывался бы на невидимом элементе.
  */
 @media (hover: hover) and (pointer: fine) {
-  [data-slot="table-row"] .keen-row-actions {
+  [data-slot="table-row"] .keen-row-actions,
+  [data-row-actions] .keen-row-actions {
     visibility: hidden;
   }
 
   [data-slot="table-row"]:hover .keen-row-actions,
-  [data-slot="table-row"]:focus-within .keen-row-actions {
+  [data-slot="table-row"]:focus-within .keen-row-actions,
+  [data-row-actions]:hover .keen-row-actions,
+  [data-row-actions]:focus-within .keen-row-actions {
     visibility: visible;
   }
 }

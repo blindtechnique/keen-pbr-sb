@@ -82,10 +82,10 @@ esac
 case "${1:-}" in
     start)
         run_recovery_guard start || exit 1
-        # This flag authorizes only the guard bypass owned by an already
-        # durable transaction. Never leak it into transport-manager or its
-        # managed sing-box children.
-        unset KEEN_PBR_PERSISTENT_TRANSACTION
+        # These flags describe this startup, not the lifetime of the daemon.
+        # A leaked postinst flag would later block an ordinary WAL rollback.
+        unset KEEN_PBR_PERSISTENT_TRANSACTION KEEN_PBR_PACKAGE_POSTINST \
+            KEEN_PBR_RESCUE_TRANSACTION KEEN_PBR_PACKAGE_UNKNOWN_RECOVERY
         ;;
 esac
 

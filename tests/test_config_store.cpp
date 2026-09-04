@@ -190,6 +190,41 @@ TEST_CASE(
     CHECK_FALSE(store.staged_snapshot().has_value());
 }
 
+TEST_CASE("direct VPN commit publishes without creating a panel draft") {
+    ConfigStore store(config_named("before-import"));
+    const auto base = store.pin_active_snapshot();
+    const auto candidate = ConfigStore::prepare_active_snapshot(
+        interface_config_named("imported-vpn", "vless1"), {});
+    const auto prepared = ConfigStore::prepare_active_commit(
+        base, candidate, std::nullopt);
+    bool published = false;
+    REQUIRE_FALSE(store.config_is_draft());
+    CHECK(store.commit_prepared_active(prepared, [&]() noexcept {
+        published = true;
+    }) == PreparedActiveConfigCommitResult::committed);
+    CHECK(published);
+    CHECK(store.pin_active_snapshot() == candidate);
+    CHECK_FALSE(store.config_is_draft());
+}
+
+TEST_CASE("direct VPN commit does not consume a newly staged user edit") {
+    ConfigStore store(config_named("before-import"));
+    const auto base = store.pin_active_snapshot();
+    const auto prepared = ConfigStore::prepare_active_commit(
+        base, config_named("imported-vpn"), {}, std::nullopt);
+    const auto draft = config_named("user-edit");
+    const auto serialized = staged_json(draft);
+    store.stage_config(draft, serialized);
+    bool published = false;
+    CHECK(store.commit_prepared_active(prepared, [&]() noexcept {
+        published = true;
+    }) == PreparedActiveConfigCommitResult::staged_mismatch);
+    CHECK_FALSE(published);
+    CHECK(store.pin_active_snapshot() == base);
+    REQUIRE(store.staged_snapshot().has_value());
+    CHECK(store.staged_snapshot()->second == serialized);
+}
+
 TEST_CASE(
     "stopped bootstrap orders worker proof before exact ConfigStore publication") {
     const auto active = config_named("bootstrap-active");

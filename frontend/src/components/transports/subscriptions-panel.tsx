@@ -12,7 +12,8 @@ import {
   useGetSubscriptions,
 } from "@/api/generated/keen-api"
 import type { SavedSubscription, TransportStatus } from "@/api/generated/model"
-import { KeenPencilIcon, KeenTrashIcon } from "@/components/shared/keen-icons"
+import { EditDeleteActions } from "@/components/shared/edit-delete-actions"
+import { DeleteImpactDialog } from "@/components/shared/delete-impact-dialog"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -144,6 +145,7 @@ export function SubscriptionsPanel({
           mutation.variables.id === record.id
         return (
           <article
+            data-row-actions
             className="space-y-4 rounded-lg border p-4 sm:p-5"
             key={record.id}
           >
@@ -170,31 +172,17 @@ export function SubscriptionsPanel({
                     className={refreshing ? "size-4 animate-spin" : "size-4"}
                   />
                 </Button>
-                <Button
-                  size="icon"
-                  variant="outline"
-                  className="keen-row-action size-8 rounded-[4px]"
-                  disabled={mutation.isPending}
-                  aria-label={t("subscriptions.rename")}
-                  title={t("subscriptions.rename")}
-                  onClick={() => edit(record)}
-                >
-                  <KeenPencilIcon className="size-4" />
-                </Button>
-                <Button
-                  size="icon"
-                  variant="outline"
-                  className="keen-row-action keen-row-action--danger size-8 rounded-[4px]"
-                  disabled={mutation.isPending}
-                  aria-label={t("subscriptions.remove")}
-                  title={t("subscriptions.remove")}
-                  onClick={() => {
+                <EditDeleteActions
+                  editDisabled={mutation.isPending}
+                  deleteDisabled={mutation.isPending}
+                  editTitle={t("subscriptions.rename")}
+                  deleteTitle={t("subscriptions.remove")}
+                  onEdit={() => edit(record)}
+                  onDelete={() => {
                     mutation.reset()
                     setRemoving(record)
                   }}
-                >
-                  <KeenTrashIcon className="size-4" />
-                </Button>
+                />
               </div>
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
@@ -344,8 +332,16 @@ export function SubscriptionsPanel({
           </form>
         </DialogContent>
       </Dialog>
-      <Dialog
+      <DeleteImpactDialog
         open={removing !== null}
+        title={t("subscriptions.remove")}
+        description={t("subscriptions.removeHint", { name: removing?.name })}
+        confirmLabel={t("subscriptions.remove")}
+        impactItems={[]}
+        isPending={mutation.isPending}
+        onConfirm={() => {
+          if (removing) mutation.mutate({ kind: "remove", id: removing.id })
+        }}
         onOpenChange={(open) => {
           if (!open && !mutation.isPending) {
             setRemoving(null)
@@ -353,38 +349,12 @@ export function SubscriptionsPanel({
           }
         }}
       >
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>{t("subscriptions.remove")}</DialogTitle>
-          </DialogHeader>
-          <p className="text-sm">
-            {t("subscriptions.removeHint", { name: removing?.name })}
+        {mutation.isError ? (
+          <p role="alert" className="text-sm text-destructive">
+            {t("subscriptions.actionFailed")}
           </p>
-          {mutation.isError ? (
-            <p role="alert" className="text-sm text-destructive">
-              {t("subscriptions.actionFailed")}
-            </p>
-          ) : null}
-          <DialogFooter>
-            <Button
-              variant="outline"
-              disabled={mutation.isPending}
-              onClick={() => setRemoving(null)}
-            >
-              {t("subscriptions.cancel")}
-            </Button>
-            <Button
-              disabled={mutation.isPending}
-              onClick={() => {
-                if (removing)
-                  mutation.mutate({ kind: "remove", id: removing.id })
-              }}
-            >
-              {t("subscriptions.remove")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        ) : null}
+      </DeleteImpactDialog>
     </section>
   )
 }

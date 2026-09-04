@@ -24,9 +24,14 @@ describe("subscription metadata presentation", () => {
     )
     expect(source).toContain("<SubscriptionImportDialog")
     expect(source).not.toContain("postSubscriptionSource")
-    expect(source).toContain("<KeenPencilIcon")
-    expect(source).toContain("<KeenTrashIcon")
-    expect(source).toContain("keen-row-action keen-row-action--danger size-8")
+    expect(source).toContain("<EditDeleteActions")
+    expect(source).toContain("<DeleteImpactDialog")
+    expect(source).toContain("data-row-actions")
+    const vpn = readFileSync(
+      new URL("../src/pages/transports-page.tsx", import.meta.url),
+      "utf8"
+    )
+    expect(vpn).toContain("<EditDeleteActions")
   })
   test("missing counters or limits are unknown, not zero or unlimited", () => {
     expect(subscriptionUsage(base).remaining).toBeUndefined()

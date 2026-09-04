@@ -39,7 +39,8 @@ struct StagedConfigSnapshot {
 struct PreparedActiveConfigCommit {
     ActiveConfigSnapshotHandle base;
     ActiveConfigSnapshotHandle candidate;
-    std::string staged_serialized;
+    // A direct commit (for example VPN + route creation) has no panel draft.
+    std::optional<std::string> staged_serialized;
 };
 
 enum class PreparedActiveConfigCommitResult {
@@ -99,12 +100,12 @@ public:
     static PreparedActiveConfigCommit prepare_active_commit(
         ActiveConfigSnapshotHandle base,
         ActiveConfigSnapshotHandle candidate,
-        std::string staged_serialized);
+        std::optional<std::string> staged_serialized);
     static PreparedActiveConfigCommit prepare_active_commit(
         ActiveConfigSnapshotHandle base,
         Config candidate_config,
         OutboundMarkMap candidate_outbound_marks,
-        std::string staged_serialized);
+        std::optional<std::string> staged_serialized);
     static PreparedActiveRuntimeReloadCommit
     prepare_active_runtime_reload_commit(
         ActiveConfigSnapshotHandle base,
@@ -115,7 +116,7 @@ public:
         Config candidate_config,
         OutboundMarkMap candidate_outbound_marks);
 
-    // The caller prepares both shared handles and the exact staged bytes
+    // The caller prepares both shared handles and the optional draft bytes
     // before entering this seam. A throwing publisher is rejected during
     // overload resolution: once the CAS succeeds there is no fallible step
     // between publication and the ConfigStore generation switch.
@@ -135,9 +136,9 @@ public:
         if (active_snapshot_ != prepared.base) {
             return PreparedActiveConfigCommitResult::base_mismatch;
         }
-        if (!staged_config_.has_value() ||
-            !staged_config_json_.has_value() ||
-            *staged_config_json_ != prepared.staged_serialized) {
+        if (staged_config_json_ != prepared.staged_serialized ||
+            staged_config_.has_value() !=
+                prepared.staged_serialized.has_value()) {
             return PreparedActiveConfigCommitResult::staged_mismatch;
         }
 

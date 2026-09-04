@@ -55,7 +55,8 @@ import {
   useGetTransports,
 } from "@/api/queries"
 import { selectConfig } from "@/api/selectors"
-import { KeenPencilIcon, KeenTrashIcon } from "@/components/shared/keen-icons"
+import { KeenPencilIcon } from "@/components/shared/keen-icons"
+import { EditDeleteActions } from "@/components/shared/edit-delete-actions"
 import { DataTable } from "@/components/shared/data-table"
 import { DeleteImpactDialog } from "@/components/shared/delete-impact-dialog"
 import {
@@ -2499,48 +2500,14 @@ function RowActions({
 }) {
   return (
     <span className="flex items-center justify-end gap-1">
-      {/* Появление и вид — общие с таблицами правил и списков: класс
-          `keen-row-actions` прячет группу до наведения там, где курсор есть,
-          `keen-row-action` даёт прошивочную кнопку 32×32 с рамкой. Раньше тут
-          было своё скрытие через прозрачность и кнопки без рамки — из-за
-          этого одни и те же действия на разных страницах выглядели по-разному. */}
-      <span className="keen-row-actions flex items-center gap-1">
-        <Button
-          aria-label={editTitle}
-          className="keen-row-action size-8 rounded-[4px]"
-          disabled={editDisabled}
-          onClick={(event) => {
-            event.preventDefault()
-            event.stopPropagation()
-            onEdit()
-          }}
-          size="icon"
-          title={editTitle}
-          type="button"
-          variant="outline"
-        >
-          <KeenPencilIcon className="size-4" />
-        </Button>
-        <Button
-          aria-label={deleteTitle}
-          className={cn(
-            "keen-row-action size-8 rounded-[4px]",
-            !deleteDisabled && "keen-row-action--danger"
-          )}
-          disabled={deleteDisabled}
-          onClick={(event) => {
-            event.preventDefault()
-            event.stopPropagation()
-            onDelete()
-          }}
-          size="icon"
-          title={deleteTitle}
-          type="button"
-          variant="outline"
-        >
-          <KeenTrashIcon className="size-4" />
-        </Button>
-      </span>
+      <EditDeleteActions
+        onEdit={onEdit}
+        onDelete={onDelete}
+        editDisabled={editDisabled}
+        deleteDisabled={deleteDisabled}
+        editTitle={editTitle}
+        deleteTitle={deleteTitle}
+      />
       <Button
         aria-expanded={expanded}
         aria-label={toggleTitle}
