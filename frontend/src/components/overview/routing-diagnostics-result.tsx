@@ -1,18 +1,8 @@
-import {
-  ChevronRight,
-  CircleCheck,
-  CircleHelp,
-  CircleOff,
-  CircleX,
-} from "lucide-react"
+import { CircleCheck, CircleHelp, CircleOff, CircleX } from "lucide-react"
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 
-import type {
-  ConfigObject,
-  RoutingTestEntry,
-  RoutingTestResponse,
-} from "@/api/generated/model"
+import type { ConfigObject, RoutingTestResponse } from "@/api/generated/model"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Checkbox } from "@/components/ui/checkbox"
 import { getListReferenceLabel } from "@/lib/list-display"
@@ -29,12 +19,9 @@ import {
 
 import { IpSetStateIcon } from "./ipset-state-icon"
 import {
-  formatRoutingFwmark,
   getRuleConditions,
-  getRoutingPathStates,
   getVisibleRuleDiagnostics,
 } from "./routing-diagnostics-utils"
-import type { RoutingPathStepState } from "./routing-diagnostics-utils"
 import { RoutingLegend } from "./routing-legend"
 
 const emptyRuleDiagnostics: RoutingTestResponse["rule_diagnostics"] = []
@@ -62,15 +49,6 @@ export function RoutingDiagnosticsResult({
   const hasInsufficientContext = diagnostics.results.some(
     (result) => result.evaluation === "insufficient_context"
   )
-  const getOutboundName = (outbound: string) => {
-    if (outbound === "(default)") {
-      return t("overview.routingDiagnostics.pathDefault")
-    }
-    if (outbound === "(unknown)") {
-      return t("overview.routingDiagnostics.pathUnknown")
-    }
-    return outboundDisplayNames.get(outbound) ?? outbound
-  }
 
   return (
     <div className="space-y-4">
@@ -96,62 +74,6 @@ export function RoutingDiagnosticsResult({
 
       {diagnostics.results.length > 0 ? (
         <div className="space-y-4">
-          <div className="space-y-3 rounded-md border bg-muted/20 p-3">
-            <div className="space-y-0.5">
-              <div className="font-medium">
-                {t("overview.routingDiagnostics.pathTitle")}
-              </div>
-              <div className="text-xs text-muted-foreground">
-                {t("overview.routingDiagnostics.pathDescription")}
-              </div>
-            </div>
-
-            <div className="space-y-3">
-              {diagnostics.results.map((result) => {
-                const states = getRoutingPathStates(result)
-                const mark = formatRoutingFwmark(result.kernel_route?.fwmark)
-                const actualOutbound = getOutboundName(result.actual_outbound)
-                const firewallValue = mark
-                  ? t("overview.routingDiagnostics.pathFirewallMarked", {
-                      outbound: actualOutbound,
-                      mark,
-                    })
-                  : actualOutbound
-                const kernelValue = getKernelRouteLabel(result, t)
-
-                return (
-                  <div
-                    className="space-y-2 rounded-md border bg-background p-3"
-                    key={`routing-path-${result.ip}`}
-                  >
-                    <div className="font-mono text-xs text-muted-foreground">
-                      {result.ip}
-                    </div>
-                    <div className="grid items-stretch gap-2 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)_auto_minmax(0,1fr)]">
-                      <RoutingPathStep
-                        label={t("overview.routingDiagnostics.pathRule")}
-                        state={states.rule}
-                        value={getOutboundName(result.expected_outbound)}
-                      />
-                      <ChevronRight className="mx-auto h-4 w-4 rotate-90 self-center text-muted-foreground md:rotate-0" />
-                      <RoutingPathStep
-                        label={t("overview.routingDiagnostics.pathFirewall")}
-                        state={states.firewall}
-                        value={firewallValue}
-                      />
-                      <ChevronRight className="mx-auto h-4 w-4 rotate-90 self-center text-muted-foreground md:rotate-0" />
-                      <RoutingPathStep
-                        label={t("overview.routingDiagnostics.pathKernel")}
-                        state={states.kernel}
-                        value={kernelValue}
-                      />
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-
           <div className="space-y-2">
             <div className="font-medium">
               {t("overview.routingDiagnostics.resultTitle")}
@@ -375,78 +297,6 @@ export function RoutingDiagnosticsResult({
       <RoutingLegend />
     </div>
   )
-}
-
-function RoutingPathStep({
-  label,
-  state,
-  value,
-}: {
-  label: string
-  state: RoutingPathStepState
-  value: string
-}) {
-  const Icon =
-    state === "verified"
-      ? CircleCheck
-      : state === "failed"
-        ? CircleX
-        : state === "unknown"
-          ? CircleHelp
-          : CircleOff
-  const tone =
-    state === "verified"
-      ? "border-green-300/60 bg-green-50/60 text-green-800"
-      : state === "failed" || state === "blocked"
-        ? "border-red-300/60 bg-red-50/60 text-red-700"
-        : state === "unknown"
-          ? "border-amber-300/60 bg-amber-50/60 text-amber-800"
-          : "border-border bg-muted/30 text-muted-foreground"
-
-  return (
-    <div className={`min-w-0 rounded-md border px-3 py-2 ${tone}`}>
-      <div className="text-xs font-medium opacity-80">{label}</div>
-      <div className="mt-1 flex items-start gap-1.5">
-        <Icon className="mt-0.5 h-4 w-4 shrink-0" />
-        <span className="min-w-0 text-sm font-medium break-words">{value}</span>
-      </div>
-    </div>
-  )
-}
-
-function getKernelRouteLabel(
-  result: RoutingTestEntry,
-  t: ReturnType<typeof useTranslation>["t"]
-) {
-  const kernelRoute = result.kernel_route
-
-  switch (kernelRoute?.route_status) {
-    case "resolved":
-      if (kernelRoute.interface && kernelRoute.table != null) {
-        return t("overview.routingDiagnostics.pathKernelResolvedTable", {
-          interface: kernelRoute.interface,
-          table: kernelRoute.table,
-        })
-      }
-      if (kernelRoute.interface) {
-        return t("overview.routingDiagnostics.pathKernelResolved", {
-          interface: kernelRoute.interface,
-        })
-      }
-      if (kernelRoute.table != null) {
-        return t("overview.routingDiagnostics.pathKernelTableOnly", {
-          table: kernelRoute.table,
-        })
-      }
-      return t("overview.routingDiagnostics.pathUnknown")
-    case "unroutable":
-      return t("overview.routingDiagnostics.pathKernelUnroutable")
-    case "not_applicable":
-      return t("overview.routingDiagnostics.pathKernelNotApplicable")
-    case "unavailable":
-    default:
-      return t("overview.routingDiagnostics.pathKernelUnavailable")
-  }
 }
 
 function RuleConditions({
