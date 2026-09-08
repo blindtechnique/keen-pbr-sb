@@ -161,6 +161,7 @@ add_executable(keen-pbr-tests
   test_sing_box_transport_pause.cpp
   test_sing_box_install_steps.cpp
   test_dependency_analysis.cpp
+  test_outbound_delete.cpp
   test_list_delete_planner.cpp
   test_routing_state.cpp
   test_route_failure_policy.cpp
@@ -327,6 +328,7 @@ add_executable(keen-pbr-tests
   ../src/update/sing_box_install_steps.cpp
   ../src/update/package_footprint.cpp
   ../src/config/dependency_analysis.cpp
+  ../src/config/outbound_delete.cpp
   ../src/config/list_delete_planner.cpp
   ../src/crash/crash_diagnostics.cpp
   ../src/config/routing_state.cpp
