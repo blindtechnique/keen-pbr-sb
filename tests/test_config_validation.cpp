@@ -1,10 +1,15 @@
 #include <doctest/doctest.h>
 
 #include "../src/config/config.hpp"
+#include "../src/api/config_validation_json.hpp"
+#include "../src/config/config_migration.hpp"
+#include "../src/config/json_validation.hpp"
 #include "../src/config/routing_state.hpp"
 #include "../src/util/system_info.hpp"
+#include "../src/util/display_name.hpp"
 
 #include <nlohmann/json.hpp>
+#include <limits>
 #include <set>
 #include <string>
 
@@ -41,6 +46,260 @@ Config parse_test_config(const std::string& json_str) {
 
 } // namespace
 
+TEST_CASE("specialized config causes survive validation serialization and generated DTOs") {
+    struct Example {
+        nlohmann::json patch;
+        std::string path;
+        std::string code;
+        std::map<std::string, std::string> params;
+    };
+    const std::vector<Example> examples{
+        {{{"route", {{"rules", nlohmann::json::array({
+            {{"outbound", "wan"}, {"src_port", "9000-8000"}}
+        })}}}}, "route.rules[0].src_port", "config.port.range_order", {}},
+        {{{"dns", {{"servers", nlohmann::json::array({
+            {{"tag", "primary"}, {"address", "invalid'\naddress"}}
+        })}}}}, "dns.servers.primary.address", "config.dns.address", {}},
+        {{{"lists", {{"example", {{"domains", {"example.org"}},
+            {"display_name", std::string(81U, 'x')}}}}}},
+            "lists.example.display_name", "config.name.too_long", {{"max", "80"}}},
+    };
+    for (const auto& example : examples) {
+        CAPTURE(example.path);
+        nlohmann::json document{
+            {"outbounds", nlohmann::json::array({
+                {{"tag", "wan"}, {"type", "interface"}, {"interface", "eth0"}}
+            })},
+            {"dns", {
+                {"servers", nlohmann::json::array({
+                    {{"tag", "primary"}, {"address", "1.1.1.1"}}
+                })},
+                {"fallback", {"primary"}},
+                {"system_resolver", {{"address", "1.1.1.1"}}}
+            }}
+        };
+        document.merge_patch(example.patch);
+        bool found = false;
+        try {
+            const auto config = parse_config(document.dump());
+            validate_config(config);
+        } catch (const ConfigValidationError& failure) {
+            const auto serialized = serialize_config_validation_issues(failure.issues());
+            for (const auto& item : serialized) {
+                if (item.at("path") != example.path) continue;
+                found = true;
+                CHECK(item.at("code") == example.code);
+                const auto dto = item.get<api::ValidationErrorElement>();
+                CHECK(dto.path == example.path);
+                CHECK(dto.code == example.code);
+                CHECK_FALSE(dto.message.empty());
+                const auto roundtrip = nlohmann::json(dto).get<api::ValidationErrorElement>();
+                CHECK(roundtrip.path == dto.path);
+                CHECK(roundtrip.message == dto.message);
+                CHECK(roundtrip.code == dto.code);
+                CHECK(roundtrip.params == dto.params);
+                if (example.params.empty()) {
+                    CHECK_FALSE(item.contains("params"));
+                    CHECK_FALSE(dto.params.has_value());
+                } else {
+                    REQUIRE(dto.params.has_value());
+                    CHECK(*dto.params == example.params);
+                }
+            }
+        }
+        CHECK(found);
+    }
+}
+
+TEST_CASE("config migration: versionless and explicit v1 raw documents preserve their fields") {
+    // Synthetic boundary fixture, not a claimed historical released config.
+    nlohmann::json legacy = {
+        {"daemon", {{"strict_enforcement", false}}},
+        {"future_extension", {{"order", {3, 1, 2}}, {"nullable", nullptr}}},
+        {"lists", {{"custom", {{"domains", {"example.org"}},
+                                  {"extension", {true, "kept"}}}}}},
+    };
+    SUBCASE("missing version means v1") {}
+    SUBCASE("explicit v1 follows the same migration") { legacy["schema_version"] = 1; }
+    const auto original = legacy;
+    const auto migrated = migrate_config_json(legacy);
+    CHECK(legacy == original);
+    CHECK(migrated.at("schema_version") == kCurrentConfigSchemaVersion);
+    auto expected = original;
+    expected["schema_version"] = kCurrentConfigSchemaVersion;
+    CHECK(migrated == expected);
+    CHECK(migrate_config_json(migrated) == migrated);
+}
+
+TEST_CASE("config migration: current version is idempotent and default DTO writes current version") {
+    const nlohmann::json current = {
+        {"schema_version", kCurrentConfigSchemaVersion},
+        {"unrecognized", {{"preserve", true}}},
+    };
+    CHECK(migrate_config_json(current) == current);
+    Config default_constructed;
+    CHECK(default_constructed.schema_version == kCurrentConfigSchemaVersion);
+    CHECK(nlohmann::json(default_constructed).at("schema_version") == kCurrentConfigSchemaVersion);
+    CHECK(parse_config("{}").schema_version == kCurrentConfigSchemaVersion);
+    CHECK(parse_config(R"({"schema_version":1})").schema_version == kCurrentConfigSchemaVersion);
+}
+
+TEST_CASE("config migration: invalid version values are not coerced or treated as legacy") {
+    for (const nlohmann::json& value : {
+             nlohmann::json(nullptr), nlohmann::json(false), nlohmann::json("2"),
+             nlohmann::json(2.0), nlohmann::json(0), nlohmann::json(-1),
+             nlohmann::json::array(), nlohmann::json::object()}) {
+        const nlohmann::json document = {{"schema_version", value}};
+        try {
+            (void)parse_config(document.dump());
+            FAIL("invalid schema_version accepted");
+        } catch (const ConfigValidationError& error) {
+            REQUIRE(error.issues().size() == 1);
+            CHECK(error.issues().front().path == "schema_version");
+            CHECK(error.issues().front().message == "schema_version must be a positive integer");
+            CHECK(error.issues().front().code == "config.schema_version.invalid");
+            CHECK(error.issues().front().params.empty());
+        }
+    }
+    for (const char* document : {"null", "[]", "false", "1"}) {
+        CHECK_THROWS_AS(parse_config(document), ConfigValidationError);
+    }
+}
+
+TEST_CASE("config migration: future version has a distinct error before field validation") {
+    for (const auto version : {kCurrentConfigSchemaVersion + 1,
+                               std::numeric_limits<std::uint64_t>::max()}) {
+        const nlohmann::json future = {
+            {"schema_version", version},
+            {"fwmark", {{"mask", false}}},
+        };
+        try {
+            (void)parse_config(future.dump());
+            FAIL("future configuration accepted");
+        } catch (const ConfigSchemaVersionError& error) {
+            CHECK(error.source_version() == version);
+            CHECK(error.supported_version() == kCurrentConfigSchemaVersion);
+            REQUIRE(error.issues().size() == 1);
+            CHECK(error.issues().front().path == "schema_version");
+            CHECK(error.issues().front().message.find(std::to_string(version)) != std::string::npos);
+            CHECK(error.issues().front().message.find("Update keen-pbr-sb") != std::string::npos);
+            CHECK(error.issues().front().code == "config.schema_version.unsupported");
+            CHECK(error.issues().front().params == std::map<std::string, std::string>{
+                {"version", std::to_string(version)},
+                {"supported", std::to_string(kCurrentConfigSchemaVersion)},
+            });
+        }
+    }
+}
+
+TEST_CASE("config migration: known routing and DNS fields survive load and reload") {
+    const auto legacy = parse_test_config(R"({
+        "daemon":{"strict_enforcement":false,"ipv6_enabled":true},
+        "outbounds":[{"tag":"vpn","type":"interface","interface":"wg0",
+                      "display_name":"Example VPN","strict_enforcement":false}],
+        "lists":{"example":{"domains":["example.org"],"ip_cidrs":["192.0.2.0/24"]}},
+        "route":{"rules":[{"list":["example"],"outbound":"vpn"}]}
+    })");
+    const nlohmann::json serialized = legacy;
+    CHECK(serialized.at("schema_version") == kCurrentConfigSchemaVersion);
+    const auto reloaded = parse_and_validate_config(serialized.dump());
+    CHECK(nlohmann::json(reloaded) == serialized);
+    CHECK(reloaded.daemon->strict_enforcement == false);
+    CHECK(reloaded.outbounds->front().display_name == "Example VPN");
+    CHECK(reloaded.route->rules->front().outbound == "vpn");
+}
+
+TEST_CASE("config migration: unknown extensions survive raw and typed projection") {
+    const nlohmann::json raw = {{"unknown_extension", {{"note", "synthetic"}}}};
+    CHECK(migrate_config_json(raw).contains("unknown_extension"));
+    CHECK(nlohmann::json(parse_config(raw.dump())).at("unknown_extension") == raw.at("unknown_extension"));
+}
+
+TEST_CASE("config migration: typed validation accepts only the current migrated version") {
+    auto config = parse_test_config("{}");
+    for (const auto version : {0, 1}) {
+        config.schema_version = version;
+        CHECK_THROWS_AS(validate_config(config), ConfigValidationError);
+    }
+    config.schema_version = static_cast<std::int64_t>(kCurrentConfigSchemaVersion + 1);
+    CHECK_THROWS_AS(validate_config(config), ConfigSchemaVersionError);
+    config.schema_version = static_cast<std::int64_t>(kCurrentConfigSchemaVersion);
+    CHECK_NOTHROW(validate_config(config));
+}
+
+TEST_CASE("inline IP import normalizes changed lists and deduplicates canonical first occurrences") {
+    const auto previous = parse_test_config(R"({"lists":{"kept":{"ip_cidrs":["old-invalid"]}}})");
+    auto candidate = previous;
+    ListConfig added;
+    added.ip_cidrs = std::vector<std::string>{
+        "# first comment", " ", "192.168.7.199/24", "192.168.7.9/24",
+        "192.0.2.1/32", "192.0.2.1", "2001:0DB8::1/128", "2001:db8::1",
+        "::FFFF:C000:0280/128", "::ffff:192.0.2.128", " \t# last comment",
+        "0.0.0.0/0", "::/0",
+    };
+    candidate.lists->emplace("added", std::move(added));
+    normalize_changed_list_ip_cidrs(candidate, previous);
+    CHECK(candidate.lists->at("added").ip_cidrs == std::vector<std::string>{
+        "192.168.7.0/24", "192.0.2.1", "2001:db8::1", "::ffff:192.0.2.128",
+        "0.0.0.0/0", "::/0",
+    });
+    CHECK(candidate.lists->at("kept").ip_cidrs == previous.lists->at("kept").ip_cidrs);
+    CHECK_NOTHROW(validate_config(candidate));
+}
+
+TEST_CASE("inline IP import errors retain original indexes and do not partially normalize candidate") {
+    const auto previous = parse_test_config("{}");
+    auto candidate = previous;
+    candidate.lists = std::map<std::string, ListConfig>{};
+    (*candidate.lists)["first"].ip_cidrs = std::vector<std::string>{"192.168.7.9/24"};
+    (*candidate.lists)["later"].ip_cidrs = std::vector<std::string>{
+        "# skipped", "192.0.2.1/32", "192.0.2.1", " ",
+        "001.2.3.4", "not-an-ip.example", "192.0.2.1/33",
+    };
+    const nlohmann::json before = candidate;
+    try {
+        normalize_changed_list_ip_cidrs(candidate, previous);
+        FAIL("invalid changed IP entries accepted");
+    } catch (const ConfigValidationError& error) {
+        REQUIRE(error.issues().size() == 3);
+        CHECK(error.issues()[0].path == "lists.later.ip_cidrs[4]");
+        CHECK(error.issues()[0].message == "IPv4 addresses must not contain leading zeros");
+        CHECK(error.issues()[0].code == "config.ip_cidr.leading_zeros");
+        CHECK(error.issues()[1].path == "lists.later.ip_cidrs[5]");
+        CHECK(error.issues()[1].message == "IP/CIDR address is invalid");
+        CHECK(error.issues()[1].code == "config.ip_cidr.invalid_address");
+        CHECK(error.issues()[2].path == "lists.later.ip_cidrs[6]");
+        CHECK(error.issues()[2].message == "IP/CIDR prefix length is invalid");
+        CHECK(error.issues()[2].code == "config.ip_cidr.invalid_prefix");
+        for (const auto& issue : error.issues()) CHECK(issue.params.empty());
+    }
+    CHECK(nlohmann::json(candidate) == before);
+}
+
+TEST_CASE("inline IP import leaves unchanged legacy values alone but validates a copied new list") {
+    const auto previous = parse_test_config(R"({"lists":{"legacy":{"ip_cidrs":["old-invalid","001.2.3.4"]}}})");
+    auto candidate = previous;
+    candidate.daemon = DaemonConfig{};
+    candidate.daemon->strict_enforcement = false;
+    CHECK_NOTHROW(normalize_changed_list_ip_cidrs(candidate, previous));
+    CHECK(candidate.lists->at("legacy").ip_cidrs == previous.lists->at("legacy").ip_cidrs);
+    candidate.lists->emplace("new_copy", candidate.lists->at("legacy"));
+    CHECK_THROWS_AS(normalize_changed_list_ip_cidrs(candidate, previous), ConfigValidationError);
+}
+
+TEST_CASE("inline IP import permits removing a vector and skips blank comment entries") {
+    const auto previous = parse_test_config(R"({"lists":{"example":{"ip_cidrs":["old-invalid"],"domains":["example.org"]}}})");
+    auto candidate = previous;
+    candidate.lists->at("example").ip_cidrs = std::vector<std::string>{"", "  # comment", "\t\r"};
+    CHECK_NOTHROW(normalize_changed_list_ip_cidrs(candidate, previous));
+    REQUIRE(candidate.lists->at("example").ip_cidrs.has_value());
+    CHECK(candidate.lists->at("example").ip_cidrs->empty());
+    CHECK_NOTHROW(validate_config(candidate));
+    candidate.lists->at("example").ip_cidrs.reset();
+    CHECK_NOTHROW(normalize_changed_list_ip_cidrs(candidate, previous));
+    CHECK_FALSE(candidate.lists->at("example").ip_cidrs.has_value());
+}
+
 // Helper: build a minimal valid config JSON with a single list entry.
 static std::string list_config_json(const std::string& list_name,
                                     const std::string& list_body = R"({"ip_cidrs":["10.0.0.1"]})") {
@@ -57,6 +316,81 @@ static std::vector<ConfigValidationIssue> parse_issues(const std::string& json) 
     } catch (const ConfigValidationError& e) {
         return e.issues();
     }
+}
+
+TEST_CASE("Firefox DoH canary accepts nullable booleans and preserves explicit settings") {
+    struct Case {
+        const char* document;
+        std::optional<bool> explicit_value;
+    };
+    const std::vector<Case> cases{
+        {R"({})", std::nullopt},
+        {R"({"dns":null})", std::nullopt},
+        {R"({"dns":{}})", std::nullopt},
+        {R"({"dns":{"firefox_doh_canary":null}})", std::nullopt},
+        {R"({"dns":{"firefox_doh_canary":true}})", true},
+        {R"({"dns":{"firefox_doh_canary":false}})", false},
+    };
+    for (const auto& fixture : cases) {
+        CAPTURE(fixture.document);
+        const auto config = parse_test_config(fixture.document);
+        REQUIRE(config.dns.has_value());
+        CHECK(config.dns->firefox_doh_canary == fixture.explicit_value);
+        CHECK(config.dns->firefox_doh_canary.value_or(true) ==
+              fixture.explicit_value.value_or(true));
+
+        const nlohmann::json dto = config;
+        const auto dto_roundtrip = parse_test_config(dto.dump());
+        REQUIRE(dto_roundtrip.dns.has_value());
+        CHECK(dto_roundtrip.dns->firefox_doh_canary == fixture.explicit_value);
+
+        const auto persisted_text = serialize_config_document(config);
+        const auto persisted = nlohmann::json::parse(persisted_text);
+        REQUIRE(persisted.contains("dns"));
+        if (fixture.explicit_value.has_value()) {
+            REQUIRE(persisted["dns"].contains("firefox_doh_canary"));
+            CHECK(persisted["dns"]["firefox_doh_canary"] ==
+                  *fixture.explicit_value);
+        } else {
+            CHECK_FALSE(persisted["dns"].contains("firefox_doh_canary"));
+        }
+        const auto restored = parse_test_config(persisted_text);
+        REQUIRE(restored.dns.has_value());
+        CHECK(restored.dns->firefox_doh_canary == fixture.explicit_value);
+    }
+}
+
+TEST_CASE("Firefox DoH canary rejects other JSON types with the existing boolean issue") {
+    const std::vector<nlohmann::json> values{
+        "false", "", 0, 1, 1.5,
+        nlohmann::json::object(), nlohmann::json::array()};
+    for (const auto& value : values) {
+        CAPTURE(value.dump());
+        const nlohmann::json document{
+            {"dns", {{"firefox_doh_canary", value}}}};
+        const auto issues = parse_issues(document.dump());
+        REQUIRE(issues.size() == 1U);
+        CHECK(issues[0].path == "dns.firefox_doh_canary");
+        CHECK(issues[0].message == "dns.firefox_doh_canary must be a boolean");
+        CHECK(issues[0].code == "config.value.boolean");
+        CHECK(issues[0].params.empty());
+        const auto wire = serialize_config_validation_issues(issues);
+        REQUIRE(wire.size() == 1U);
+        const auto dto = wire[0].get<api::ValidationErrorElement>();
+        CHECK(dto.path == "dns.firefox_doh_canary");
+        CHECK(dto.code == "config.value.boolean");
+        CHECK(dto.message == issues[0].message);
+    }
+
+    const auto ordered = parse_issues(R"({
+        "daemon":{"ipv6_enabled":"invalid"},
+        "dns":{"firefox_doh_canary":"invalid"}
+    })");
+    REQUIRE(ordered.size() == 2U);
+    CHECK(ordered[0].path == "daemon.ipv6_enabled");
+    CHECK(ordered[0].message == "daemon.ipv6_enabled must be a boolean");
+    CHECK(ordered[1].path == "dns.firefox_doh_canary");
+    CHECK(ordered[1].message == "dns.firefox_doh_canary must be a boolean");
 }
 
 static std::vector<ConfigValidationIssue> validate_issues(const std::string& json) {
@@ -95,6 +429,122 @@ static const ConfigValidationIssue* find_issue(
         }
     }
     return nullptr;
+}
+
+TEST_CASE("structured config validation: scalar types preserve their original messages") {
+    const auto issues = parse_issues(R"({"daemon":{
+        "max_file_size_bytes":"not-a-number",
+        "firewall_backend":123,
+        "ipv6_enabled":"not-a-boolean"
+    }})");
+    REQUIRE(issues.size() == 3);
+    const auto* integer = find_issue(issues, "daemon.max_file_size_bytes");
+    REQUIRE(integer != nullptr);
+    CHECK(integer->message == "daemon.max_file_size_bytes must be an integer");
+    CHECK(integer->code == "config.value.integer");
+    const auto* string = find_issue(issues, "daemon.firewall_backend");
+    REQUIRE(string != nullptr);
+    CHECK(string->message == "daemon.firewall_backend must be a string");
+    CHECK(string->code == "config.value.string");
+    const auto* boolean = find_issue(issues, "daemon.ipv6_enabled");
+    REQUIRE(boolean != nullptr);
+    CHECK(boolean->message == "daemon.ipv6_enabled must be a boolean");
+    CHECK(boolean->code == "config.value.boolean");
+    for (const auto& issue : issues) CHECK(issue.params.empty());
+}
+
+TEST_CASE("structured config validation: numeric metadata describes constraints not input values") {
+    const auto issues = validate_issues(R"({
+        "daemon":{"firewall_verify_max_bytes":-1,"max_file_size_bytes":0,"ipset_maxelem":0},
+        "lists":{"custom":{"ip_cidrs":["192.0.2.0/24"],
+            "shrink_policy":{"min_previous_entries":-1,"min_retained_fraction":1.5}}},
+        "outbounds":[{"tag":"vpn","type":"interface","interface":"wg0"},
+            {"tag":"group","type":"urltest","url":"https://example.org/",
+             "interval_ms":0,"outbound_groups":[{"outbounds":["vpn"]}]}]
+    })");
+    REQUIRE(issues.size() == 6);
+    const auto* nonnegative = find_issue(issues, "daemon.firewall_verify_max_bytes");
+    REQUIRE(nonnegative != nullptr);
+    CHECK(nonnegative->code == "config.value.non_negative");
+    CHECK(nonnegative->message == "daemon.firewall_verify_max_bytes must be >= 0");
+    const auto* positive = find_issue(issues, "daemon.max_file_size_bytes");
+    REQUIRE(positive != nullptr);
+    CHECK(positive->code == "config.value.positive");
+    CHECK(positive->message == "daemon.max_file_size_bytes must be greater than 0");
+    const auto* fraction = find_issue(issues, "lists.custom.shrink_policy.min_retained_fraction");
+    REQUIRE(fraction != nullptr);
+    CHECK(fraction->code == "config.value.fraction");
+    CHECK(fraction->message == "lists.custom.shrink_policy.min_retained_fraction must be a finite number between 0 and 1");
+    const auto* previous = find_issue(issues, "lists.custom.shrink_policy.min_previous_entries");
+    REQUIRE(previous != nullptr);
+    CHECK(previous->code == "config.value.non_negative");
+    for (const auto* issue : {nonnegative, positive, fraction, previous}) CHECK(issue->params.empty());
+    for (const auto* path : {"daemon.ipset_maxelem", "outbounds.group.interval_ms"}) {
+        const auto* range = find_issue(issues, path);
+        REQUIRE(range != nullptr);
+        CHECK(range->code == "config.value.range");
+        CHECK(range->message == std::string(path) + " must be between 1 and 4294967295");
+        CHECK(range->params == std::map<std::string, std::string>{{"min", "1"}, {"max", "4294967295"}});
+    }
+    for (const auto& dscp : {nlohmann::json("bad"), nlohmann::json(64)}) {
+        const auto raw = nlohmann::json{{"route", {{"rules", {{{"dscp", dscp}, {"outbound", "vpn"}}}}}}};
+        const auto invalid = parse_issues(raw.dump());
+        REQUIRE(invalid.size() == 1);
+        CHECK(invalid.front().path == "route.rules[0].dscp");
+        CHECK(invalid.front().code == (dscp.is_string() ? "config.value.integer_range" : "config.value.range"));
+        CHECK(invalid.front().params == std::map<std::string, std::string>{{"min", "1"}, {"max", "63"}});
+    }
+}
+
+TEST_CASE("structured config validation: tags and missing required fields do not expose values in params") {
+    const auto required = validate_issues(list_config_json(""));
+    REQUIRE(required.size() == 1);
+    CHECK(required.front().code == "config.value.required");
+    CHECK(required.front().message == "List name must not be empty");
+    CHECK(required.front().params.empty());
+    const auto invalid = validate_issues(list_config_json("BadName"));
+    REQUIRE(invalid.size() == 1);
+    CHECK(invalid.front().code == "config.tag.invalid");
+    CHECK(invalid.front().params.empty());
+    const auto too_long = validate_issues(list_config_json(std::string(25, 'a')));
+    REQUIRE(too_long.size() == 2);
+    CHECK(too_long.front().code == "config.tag.too_long");
+    CHECK(too_long.front().params == std::map<std::string, std::string>{{"max", "24"}});
+    CHECK(too_long.back().code == "config.tag.invalid");
+    const auto empty_reference = validate_issues(R"({
+        "route":{"rules":[{"src_addr":"192.0.2.1","outbound":""}]}
+    })");
+    REQUIRE(empty_reference.size() == 1);
+    CHECK(empty_reference.front().code == "config.value.required");
+    CHECK(empty_reference.front().message == "route.rules[0].outbound must not be empty");
+    const auto cron = validate_issues(R"({"lists_autoupdate":{"enabled":true}})");
+    REQUIRE(cron.size() == 1);
+    CHECK(cron.front().code == "config.value.required");
+    CHECK(cron.front().message == "lists_autoupdate.cron is required when enabled");
+}
+
+TEST_CASE("structured config validation: legacy issue text is not classified into codes") {
+    const ConfigValidationIssue legacy{"custom.path", "custom.path must be an integer"};
+    CHECK(legacy.code.empty());
+    CHECK(legacy.params.empty());
+    const ConfigValidationError old_error({legacy});
+    CHECK(std::string(old_error.what()) == legacy.message);
+    const ConfigValidationError coded_error({{legacy.path, legacy.message, "config.value.integer", {}}});
+    CHECK(std::string(coded_error.what()) == legacy.message);
+    const auto malformed = parse_issues("{");
+    REQUIRE(malformed.size() == 1);
+    CHECK(malformed.front().code == "config.json.syntax");
+    CHECK(malformed.front().params.empty());
+    auto stale = parse_test_config("{}");
+    stale.schema_version = 1;
+    try {
+        validate_config(stale);
+        FAIL("unmigrated typed configuration accepted");
+    } catch (const ConfigValidationError& error) {
+        REQUIRE(error.issues().size() == 1);
+        CHECK(error.issues().front().code == "config.schema_version.migration_required");
+        CHECK(error.issues().front().params == std::map<std::string, std::string>{{"supported", "2"}});
+    }
 }
 
 // =============================================================================
@@ -1438,7 +1888,7 @@ TEST_CASE("dns detour: no detour field is accepted") {
 }
 
 TEST_CASE("dns fallback: parser diagnostics include precise path for type error") {
-    const auto issues = parse_issues(R"({"dns":{"fallback":"quad9"}})");
+    const auto issues = parse_issues(R"({"schema_version":2,"dns":{"fallback":"quad9"}})");
     REQUIRE(issues.size() == 1);
     CHECK(issues[0].path == "$");
     CHECK(issues[0].message.find("/dns/fallback") != std::string::npos);
@@ -1461,6 +1911,139 @@ TEST_CASE("parse_config accepts JSON comments") {
     })";
 
     CHECK_NOTHROW(parse_test_config(json));
+}
+
+TEST_CASE("dns servers: direct domain bindings survive config round trip") {
+    const auto cfg = parse_test_config(R"({
+        "dns": {
+            "servers": [{"tag":"dns","address":"192.0.2.53",
+                         "domains":["*.YouTube.com.","youtube.com","_sip._tcp.example.com"]}],
+            "fallback": ["dns"]
+        }
+    })");
+    REQUIRE(cfg.dns->servers->front().domains.has_value());
+    CHECK(cfg.dns->servers->front().domains->size() == 3);
+    const nlohmann::json encoded = cfg;
+    CHECK(encoded.at("dns").at("servers").at(0).at("domains").at(0) ==
+          "*.YouTube.com.");
+    CHECK_NOTHROW(parse_test_config(encoded.dump()));
+}
+
+TEST_CASE("list shrink policy absent null and empty preserve default thresholds") {
+    const auto absent = parse_test_config(list_config_json("remote"));
+    CHECK_FALSE(absent.lists->at("remote").shrink_policy.has_value());
+    const auto null_policy = parse_test_config(list_config_json("remote",
+        R"({"url":"https://example.test/list.txt","shrink_policy":null})"));
+    CHECK_FALSE(null_policy.lists->at("remote").shrink_policy.has_value());
+    for (const auto& policy : {std::string("{}"),
+                              std::string(R"({"min_previous_entries":null,"min_retained_fraction":null})")}) {
+        const auto config = parse_test_config(list_config_json("remote",
+            "{\"url\":\"https://example.test/list.txt\",\"shrink_policy\":" + policy + "}"));
+        const auto& parsed = config.lists->at("remote").shrink_policy;
+        REQUIRE(parsed.has_value());
+        CHECK_FALSE(parsed->min_previous_entries.has_value());
+        CHECK_FALSE(parsed->min_retained_fraction.has_value());
+        CHECK(parsed->min_previous_entries.value_or(50) == 50);
+        CHECK(parsed->min_retained_fraction.value_or(0.5) == 0.5);
+        const auto reparsed = parse_test_config(nlohmann::json(config).dump());
+        CHECK_FALSE(reparsed.lists->at("remote").shrink_policy->min_previous_entries.has_value());
+        CHECK_FALSE(reparsed.lists->at("remote").shrink_policy->min_retained_fraction.has_value());
+    }
+}
+
+TEST_CASE("list shrink policy accepts finite inclusive bounds") {
+    for (const auto minimum : {int64_t{0}, int64_t{50}, std::numeric_limits<int64_t>::max()}) {
+        for (const auto fraction : {0.0, 0.5, 1.0}) {
+            const nlohmann::json list = {
+                {"url", "https://example.test/list.txt"},
+                {"shrink_policy", {{"min_previous_entries", minimum},
+                                    {"min_retained_fraction", fraction}}}};
+            const auto config = parse_test_config(list_config_json("remote", list.dump()));
+            const auto& policy = *config.lists->at("remote").shrink_policy;
+            CHECK(policy.min_previous_entries == minimum);
+            CHECK(policy.min_retained_fraction == fraction);
+        }
+    }
+}
+
+TEST_CASE("list shrink policy rejects malformed fields without losing source paths") {
+    for (const auto& policy : {nlohmann::json(true), nlohmann::json(2),
+                              nlohmann::json("automatic"), nlohmann::json::array()}) {
+        const nlohmann::json list = {{"url", "https://example.test/list.txt"}, {"shrink_policy", policy}};
+        CHECK(find_issue(parse_issues(list_config_json("remote", list.dump())),
+                         "lists.remote.shrink_policy") != nullptr);
+    }
+    for (const auto& minimum : {nlohmann::json(true), nlohmann::json(1.5),
+                               nlohmann::json("50"),
+                               nlohmann::json(std::numeric_limits<uint64_t>::max())}) {
+        const nlohmann::json list = {{"url", "https://example.test/list.txt"},
+            {"shrink_policy", {{"min_previous_entries", minimum}}}};
+        CHECK(find_issue(parse_issues(list_config_json("remote", list.dump())),
+                         "lists.remote.shrink_policy.min_previous_entries") != nullptr);
+    }
+    for (const auto& fraction : {nlohmann::json(true), nlohmann::json("0.5"), nlohmann::json::array()}) {
+        const nlohmann::json list = {{"url", "https://example.test/list.txt"},
+            {"shrink_policy", {{"min_retained_fraction", fraction}}}};
+        CHECK(find_issue(parse_issues(list_config_json("remote", list.dump())),
+                         "lists.remote.shrink_policy.min_retained_fraction") != nullptr);
+    }
+}
+
+TEST_CASE("list shrink policy validates hidden source fields and numeric ranges") {
+    for (const auto& source : {nlohmann::json{{"url", "https://example.test/list.txt"}},
+                               nlohmann::json{{"ip_cidrs", {"10.0.0.1"}}}}) {
+        auto list = source;
+        list["shrink_policy"] = {{"min_previous_entries", -1}};
+        CHECK(find_issue(validate_issues(list_config_json("remote", list.dump())),
+                         "lists.remote.shrink_policy.min_previous_entries") != nullptr);
+        for (const auto fraction : {-0.001, 1.001}) {
+            list["shrink_policy"] = {{"min_retained_fraction", fraction}};
+            CHECK(find_issue(validate_issues(list_config_json("remote", list.dump())),
+                             "lists.remote.shrink_policy.min_retained_fraction") != nullptr);
+        }
+    }
+}
+
+TEST_CASE("list shrink policy rejects nonfinite typed fractions") {
+    for (const auto fraction : {std::numeric_limits<double>::quiet_NaN(),
+                               std::numeric_limits<double>::infinity(),
+                               -std::numeric_limits<double>::infinity()}) {
+        auto config = parse_test_config(list_config_json("remote"));
+        config.lists->at("remote").shrink_policy = api::ShrinkPolicy{};
+        config.lists->at("remote").shrink_policy->min_retained_fraction = fraction;
+        std::vector<ConfigValidationIssue> issues;
+        try {
+            validate_config(config);
+        } catch (const ConfigValidationError& error) {
+            issues = error.issues();
+        }
+        CHECK(find_issue(issues, "lists.remote.shrink_policy.min_retained_fraction") != nullptr);
+    }
+}
+
+TEST_CASE("dns servers: malformed direct domains report the exact field") {
+    for (const std::string& domain : std::vector<std::string>{
+             "", "https://example.com", "example.com/path", "192.0.2.53",
+             "::1", ".example.com", "example.com..", "a..com", "-bad.com",
+             "bad-.com", "x*.com", "example.com\nserver=8.8.8.8",
+             std::string(64, 'a') + ".com"}) {
+        CAPTURE(domain);
+        auto config = nlohmann::json::parse(R"({"dns": {
+            "servers": [{"tag":"dns","address":"192.0.2.53"}],
+            "fallback": ["dns"]
+        }})");
+        config["dns"]["servers"][0]["domains"] = {domain};
+        const auto issues = validate_issues(config.dump());
+        CHECK(find_issue(issues, "dns.servers.dns.domains.0") != nullptr);
+    }
+}
+
+TEST_CASE("dns servers: legacy and empty domain bindings remain valid") {
+    for (const std::string& suffix : {std::string{}, std::string{",\"domains\":[]"}}) {
+        CHECK_NOTHROW(parse_test_config(
+            "{\"dns\":{\"servers\":[{\"tag\":\"dns\",\"address\":\"192.0.2.53\"" +
+            suffix + "}],\"fallback\":[\"dns\"]}}"));
+    }
 }
 
 TEST_CASE("dns servers: duplicate tag is rejected") {
@@ -1947,6 +2530,186 @@ TEST_CASE("strict enforcement: outbound override parses") {
     REQUIRE(cfg.outbounds.has_value());
     REQUIRE(cfg.outbounds->size() == 1);
     CHECK(cfg.outbounds->front().strict_enforcement.value_or(false));
+}
+
+// =============================================================================
+// Route rule failure policy validation
+// =============================================================================
+
+static nlohmann::json failure_policy_config() {
+    return nlohmann::json::parse(R"({
+        "outbounds":[
+            {"tag":"primary","type":"interface","interface":"wg0"},
+            {"tag":"backup","type":"interface","interface":"wg1"},
+            {"tag":"table_backup","type":"table","table":201},
+            {"tag":"group_backup","type":"urltest","url":"https://example.test/check",
+             "outbound_groups":[{"outbounds":["backup"]}]},
+            {"tag":"drop","type":"blackhole"},
+            {"tag":"direct","type":"ignore"}
+        ],
+        "route":{"rules":[{"outbound":"primary","src_addr":"192.0.2.10"}]}
+    })");
+}
+
+TEST_CASE("route failure policy: absent and null preserve legacy inheritance on round trip") {
+    for (bool explicit_null : {false, true}) {
+        auto input = failure_policy_config();
+        if (explicit_null) {
+            input["route"]["rules"][0]["failure_policy"] = nullptr;
+            input["route"]["rules"][0]["fallback_outbound"] = nullptr;
+        }
+        input["daemon"]["strict_enforcement"] = true;
+        input["outbounds"][0]["strict_enforcement"] = false;
+        const auto parsed = parse_test_config(input.dump());
+        REQUIRE(parsed.route.has_value());
+        REQUIRE(parsed.route->rules.has_value());
+        const auto& rule = parsed.route->rules->front();
+        CHECK_FALSE(rule.failure_policy.has_value());
+        CHECK(rule.failure_policy.value_or(api::FailurePolicy::INHERIT) == api::FailurePolicy::INHERIT);
+        CHECK_FALSE(rule.fallback_outbound.has_value());
+        const nlohmann::json encoded = parsed;
+        CHECK(encoded["route"]["rules"][0]["failure_policy"].is_null());
+        CHECK(encoded["route"]["rules"][0]["fallback_outbound"].is_null());
+        CHECK(encoded["daemon"]["strict_enforcement"] == true);
+        CHECK(encoded["outbounds"][0]["strict_enforcement"] == false);
+        const auto round_trip = parse_test_config(encoded.dump());
+        CHECK_FALSE(round_trip.route->rules->front().failure_policy.has_value());
+    }
+}
+
+TEST_CASE("route failure policy: explicit modes round-trip without changing the configured primary") {
+    for (const std::string policy : {"inherit", "block", "fallback"}) {
+        auto input = failure_policy_config();
+        auto& rule = input["route"]["rules"][0];
+        rule["failure_policy"] = policy;
+        rule["enabled"] = false;
+        if (policy == "fallback") rule["fallback_outbound"] = "backup";
+        const auto parsed = parse_test_config(input.dump());
+        const nlohmann::json encoded = parsed;
+        CHECK(encoded["route"]["rules"][0]["failure_policy"] == policy);
+        CHECK(encoded["route"]["rules"][0]["outbound"] == "primary");
+        CHECK(encoded["route"]["rules"][0]["enabled"] == false);
+        if (policy == "fallback") {
+            CHECK(encoded["route"]["rules"][0]["fallback_outbound"] == "backup");
+        }
+        CHECK_NOTHROW(parse_test_config(encoded.dump()));
+    }
+}
+
+TEST_CASE("route failure policy: interface and urltest targets require no live health at save") {
+    for (const std::string primary : {"primary", "group_backup"}) {
+        for (const std::string backup : {"backup", "group_backup"}) {
+            if (primary == backup) continue;
+            auto input = failure_policy_config();
+            auto& rule = input["route"]["rules"][0];
+            rule["outbound"] = primary;
+            rule["failure_policy"] = "fallback";
+            rule["fallback_outbound"] = backup;
+            CHECK_NOTHROW(parse_test_config(input.dump()));
+        }
+    }
+}
+
+TEST_CASE("route failure policy: malformed mode and fallback types have exact parse paths") {
+    for (const auto& invalid : std::vector<nlohmann::json>{true, 3, "unknown", "", nlohmann::json::object()}) {
+        auto input = failure_policy_config();
+        input["route"]["rules"][0]["failure_policy"] = invalid;
+        const auto issues = parse_issues(input.dump());
+        REQUIRE(issues.size() == 1U);
+        CHECK(issues.front().path == "route.rules[0].failure_policy");
+    }
+    for (const auto& invalid : std::vector<nlohmann::json>{true, 3, nlohmann::json::array()}) {
+        auto input = failure_policy_config();
+        input["route"]["rules"][0]["fallback_outbound"] = invalid;
+        const auto issues = parse_issues(input.dump());
+        REQUIRE(issues.size() == 1U);
+        CHECK(issues.front().path == "route.rules[0].fallback_outbound");
+    }
+}
+
+TEST_CASE("route failure policy: fallback requires a configured target") {
+    for (const auto& fallback : std::vector<nlohmann::json>{nullptr, "", "missing", " backup "}) {
+        auto input = failure_policy_config();
+        input["route"]["rules"][0]["failure_policy"] = "fallback";
+        input["route"]["rules"][0]["fallback_outbound"] = fallback;
+        const auto issues = validate_issues(input.dump());
+        REQUIRE(issues.size() == 1U);
+        CHECK(issues.front().path == "route.rules[0].fallback_outbound");
+    }
+    auto missing = failure_policy_config();
+    missing["route"]["rules"][0]["failure_policy"] = "fallback";
+    CHECK(find_issue(validate_issues(missing.dump()), "route.rules[0].fallback_outbound") != nullptr);
+}
+
+TEST_CASE("route failure policy: explicit modes require the exact configured primary") {
+    for (const std::string primary : {"missing", " primary ", " table_backup "}) {
+        auto input = failure_policy_config();
+        input["route"]["rules"][0]["failure_policy"] = "block";
+        input["route"]["rules"][0]["outbound"] = primary;
+        const auto issues = validate_issues(input.dump());
+        REQUIRE(issues.size() == 1U);
+        CHECK(issues.front().path == "route.rules[0].outbound");
+    }
+}
+
+TEST_CASE("route failure policy: table ignore and blackhole keep inherited behavior only") {
+    for (const std::string primary : {"table_backup", "drop", "direct"}) {
+        for (const std::string policy : {"block", "fallback"}) {
+            auto input = failure_policy_config();
+            auto& rule = input["route"]["rules"][0];
+            rule["outbound"] = primary;
+            rule["failure_policy"] = policy;
+            if (policy == "fallback") rule["fallback_outbound"] = "backup";
+            const auto issues = validate_issues(input.dump());
+            REQUIRE(issues.size() == 1U);
+            CHECK(issues.front().path == "route.rules[0].failure_policy");
+        }
+        auto inherited = failure_policy_config();
+        inherited["route"]["rules"][0]["outbound"] = primary;
+        CHECK_NOTHROW(parse_test_config(inherited.dump()));
+        inherited["route"]["rules"][0]["failure_policy"] = "inherit";
+        CHECK_NOTHROW(parse_test_config(inherited.dump()));
+    }
+}
+
+TEST_CASE("route failure policy: fallback must differ from primary and be routable") {
+    for (const std::string fallback : {"primary", "table_backup", "drop", "direct"}) {
+        auto input = failure_policy_config();
+        input["route"]["rules"][0]["failure_policy"] = "fallback";
+        input["route"]["rules"][0]["fallback_outbound"] = fallback;
+        const auto issues = validate_issues(input.dump());
+        REQUIRE(issues.size() == 1U);
+        CHECK(issues.front().path == "route.rules[0].fallback_outbound");
+    }
+}
+
+TEST_CASE("route failure policy: unused nonempty fallback cannot be silently retained") {
+    for (const auto& policy : std::vector<nlohmann::json>{nullptr, "inherit", "block"}) {
+        auto input = failure_policy_config();
+        input["route"]["rules"][0]["failure_policy"] = policy;
+        input["route"]["rules"][0]["fallback_outbound"] = "backup";
+        const auto issues = validate_issues(input.dump());
+        REQUIRE(issues.size() == 1U);
+        CHECK(issues.front().path == "route.rules[0].fallback_outbound");
+        input["route"]["rules"][0]["fallback_outbound"] = "";
+        CHECK_NOTHROW(parse_test_config(input.dump()));
+    }
+}
+
+TEST_CASE("route failure policy: rule fallback participates in existing conntrack ownership rules") {
+    for (const std::string mode : {"delete", "delete_on_failure", "preserve"}) {
+        auto input = failure_policy_config();
+        input["outbounds"][3]["conntrack_on_switch"] = mode;
+        input["route"]["rules"][0]["failure_policy"] = "fallback";
+        input["route"]["rules"][0]["fallback_outbound"] = "backup";
+        const auto issues = validate_issues(input.dump());
+        if (mode == "delete") {
+            REQUIRE(issues.size() == 1U);
+            CHECK(issues.front().path == "outbounds.group_backup.conntrack_on_switch");
+        } else {
+            CHECK(issues.empty());
+        }
+    }
 }
 
 // =============================================================================
@@ -2566,9 +3329,9 @@ TEST_CASE("fwmark start: zero masked value is rejected") {
         ConfigError);
 }
 
-TEST_CASE("fwmark start and mask: non-string values are rejected during config parsing") {
-    CHECK_THROWS_AS(parse_test_config(R"({"fwmark":{"start":65536}})"), ConfigValidationError);
-    CHECK_THROWS_AS(parse_test_config(R"({"fwmark":{"mask":16711680}})"), ConfigValidationError);
+TEST_CASE("fwmark start and mask: current format requires strings during config parsing") {
+    CHECK_THROWS_AS(parse_test_config(R"({"schema_version":2,"fwmark":{"start":65536}})"), ConfigValidationError);
+    CHECK_THROWS_AS(parse_test_config(R"({"schema_version":2,"fwmark":{"mask":16711680}})"), ConfigValidationError);
 }
 
 TEST_CASE("config parsing returns all collected validation errors") {
@@ -2983,7 +3746,7 @@ TEST_CASE(
         "daemon.reconnect_owned_flows_on_routing_change_lists[1]");
 }
 
-TEST_CASE("retired WhatsApp TCP reset source key is ignored and dropped") {
+TEST_CASE("retired WhatsApp TCP reset source key stays opaque without enabling a runtime setting") {
     const auto cfg = parse_test_config(R"({
         "daemon":{
             "experimental_whatsapp_tcp_reset_sources":[
@@ -2995,8 +3758,14 @@ TEST_CASE("retired WhatsApp TCP reset source key is ignored and dropped") {
 
     const nlohmann::json serialized = cfg;
     REQUIRE(serialized.contains("daemon"));
-    CHECK_FALSE(serialized["daemon"].contains(
-        "experimental_whatsapp_tcp_reset_sources"));
+    // Lossless saves retain this retired setting only as unknown JSON. It has
+    // no typed field or runtime consumer and must not map to the replacement.
+    CHECK(cfg.daemon->_config_unknown_fields.at(
+        "experimental_whatsapp_tcp_reset_sources") ==
+        nlohmann::json::array({"192.168.1.117", "10.8.0.2"}));
+    CHECK(serialized["daemon"]["experimental_whatsapp_tcp_reset_sources"] ==
+        cfg.daemon->_config_unknown_fields.at("experimental_whatsapp_tcp_reset_sources"));
+    CHECK_FALSE(cfg.daemon->reconnect_owned_flows_on_routing_change_lists.has_value());
 }
 
 TEST_CASE("daemon.ipv6_enabled: defaults to true behavior when absent") {
@@ -3033,6 +3802,8 @@ TEST_CASE("route rule: unknown outbound tag is rejected") {
     REQUIRE(issues.size() == 1);
     CHECK(issues[0].path == "route.rules[0].outbound");
     CHECK(issues[0].message.find("unknown outbound") != std::string::npos);
+    CHECK(issues[0].code == "config.reference.outbound_missing");
+    CHECK(issues[0].params.empty());
 }
 
 TEST_CASE("route rule: unknown list name is rejected") {
@@ -3044,6 +3815,8 @@ TEST_CASE("route rule: unknown list name is rejected") {
     REQUIRE(issues.size() == 1);
     CHECK(issues[0].path == "route.rules[0].list[0]");
     CHECK(issues[0].message.find("unknown list") != std::string::npos);
+    CHECK(issues[0].code == "config.reference.list_missing");
+    CHECK(issues[0].params.empty());
 }
 
 TEST_CASE("dns rule: unknown server tag is rejected") {
@@ -3058,6 +3831,8 @@ TEST_CASE("dns rule: unknown server tag is rejected") {
     REQUIRE(issues.size() == 1);
     CHECK(issues[0].path == "dns.rules[0].server");
     CHECK(issues[0].message.find("unknown DNS server") != std::string::npos);
+    CHECK(issues[0].code == "config.reference.dns_server_missing");
+    CHECK(issues[0].params.empty());
 }
 
 TEST_CASE("dns rule: unknown list name is rejected") {
@@ -3072,6 +3847,8 @@ TEST_CASE("dns rule: unknown list name is rejected") {
     REQUIRE(issues.size() == 1);
     CHECK(issues[0].path == "dns.rules[0].list[0]");
     CHECK(issues[0].message.find("unknown list") != std::string::npos);
+    CHECK(issues[0].code == "config.reference.list_missing");
+    CHECK(issues[0].params.empty());
 }
 
 TEST_CASE("interface outbound: empty interface name is rejected") {
@@ -3092,4 +3869,882 @@ TEST_CASE("parse_config rejects numeric overflow as a validation error") {
 
     CHECK_THROWS_AS(keen_pbr3::parse_config(document),
                     keen_pbr3::ConfigValidationError);
+}
+
+TEST_CASE("JSON metadata preserves parse diagnostics including numeric overflow") {
+    struct Case { const char* document; const char* code; int id; };
+    const Case cases[] = {
+        {"{", "config.json.syntax", 101},
+        {R"({"outbounds":[],"lists":{},"x":7777777777777777e777777777777777777777})",
+            "config.json.number_overflow", 406},
+    };
+    for (const auto& item : cases) {
+        CAPTURE(item.document);
+        std::string original_message;
+        try {
+            const auto unexpected = nlohmann::json::parse(item.document, nullptr, true, true);
+            static_cast<void>(unexpected);
+            FAIL("malformed JSON unexpectedly parsed");
+        } catch (const nlohmann::json::exception& error) {
+            CHECK(error.id == item.id);
+            original_message = std::string("Invalid JSON: ") + error.what();
+        }
+        REQUIRE_FALSE(original_message.empty());
+        try {
+            static_cast<void>(parse_config(item.document));
+            FAIL("malformed configuration unexpectedly parsed");
+        } catch (const ConfigValidationError& error) {
+            REQUIRE(error.issues().size() == 1);
+            const auto& issue = error.issues().front();
+            CHECK(issue.path == "$");
+            CHECK(issue.message == original_message);
+            CHECK(std::string(error.what()) == original_message);
+            CHECK(issue.code == item.code);
+            CHECK(issue.params.empty());
+        }
+    }
+}
+
+TEST_CASE("JSON metadata preserves generated decode diagnostics and required field behavior") {
+    struct Case { const char* document; const char* code; int id; };
+    const Case cases[] = {
+        {R"({"outbounds":[{"tag":17,"type":"ignore"}]})", "config.json.type", 302},
+        {R"({"outbounds":[{"type":"ignore"}]})", "config.json.missing_field", 403},
+        {R"({"outbounds":[{"tag":"wan","type":"unsupported"}]})", "config.json.decode", 0},
+    };
+    for (const auto& item : cases) {
+        CAPTURE(item.document);
+        std::string original_message;
+        try {
+            const auto migrated = migrate_config_json(nlohmann::json::parse(item.document));
+            static_cast<void>(migrated.get<Config>());
+            FAIL("invalid DTO unexpectedly decoded");
+        } catch (const nlohmann::json::exception& error) {
+            CHECK(error.id == item.id);
+            original_message = error.what();
+        } catch (const std::exception& error) {
+            CHECK(item.id == 0);
+            original_message = error.what();
+        }
+        REQUIRE_FALSE(original_message.empty());
+        try {
+            static_cast<void>(parse_config(item.document));
+            FAIL("invalid configuration unexpectedly decoded");
+        } catch (const ConfigValidationError& error) {
+            REQUIRE(error.issues().size() == 1);
+            const auto& issue = error.issues().front();
+            CHECK(issue.path == "$");
+            CHECK(issue.message == original_message);
+            CHECK(std::string(error.what()) == original_message);
+            CHECK(issue.code == item.code);
+            CHECK(issue.params.empty());
+        }
+    }
+}
+
+TEST_CASE("JSON root-object metadata preserves every existing rejected root shape") {
+    for (const char* document : {"null", "[]", "false", "1", "\"text\""}) {
+        CAPTURE(document);
+        const auto issues = parse_issues(document);
+        REQUIRE(issues.size() == 1);
+        CHECK(issues.front().path == "$");
+        CHECK(issues.front().message == "Configuration must be a JSON object");
+        CHECK(issues.front().code == "config.json.object");
+        CHECK(issues.front().params.empty());
+        CHECK(std::string(ConfigValidationError(issues).what()) == "Configuration must be a JSON object");
+        try {
+            static_cast<void>(migrate_config_json(nlohmann::json::parse(document)));
+            FAIL("non-object migration unexpectedly accepted");
+        } catch (const ConfigValidationError& error) {
+            REQUIRE(error.issues().size() == 1);
+            CHECK(error.issues().front().code == "config.json.object");
+            CHECK(std::string(error.what()) == "Configuration must be a JSON object");
+        }
+    }
+}
+
+TEST_CASE("JSON metadata helper preserves caller redaction and never classifies exception text") {
+    for (const char* misleading : {
+            "[json.exception.parse_error.101] parse error",
+            "[json.exception.out_of_range.406] number overflow",
+            "Cannot deserialize to enumeration \"OutboundType\""}) {
+        const std::runtime_error error(misleading);
+        const auto issue = make_json_validation_issue("request", "Original fixed diagnostic", error);
+        CHECK(issue.path == "request");
+        CHECK(issue.message == "Original fixed diagnostic");
+        CHECK(issue.code == "config.json.decode");
+        CHECK(issue.params.empty());
+    }
+    try {
+        static_cast<void>(nlohmann::json::array().at(0));
+        FAIL("out-of-bounds array access unexpectedly accepted");
+    } catch (const nlohmann::json::out_of_range& error) {
+        CHECK(error.id == 401);
+        const auto issue = make_json_validation_issue("request", "Keep this fixed message", error);
+        CHECK(issue.code == "config.json.decode");
+        CHECK(issue.message == "Keep this fixed message");
+        CHECK(issue.params.empty());
+    }
+}
+
+TEST_CASE("JSON metadata keeps comments defaults legacy migration and unknown fields accepted") {
+    const auto empty = parse_config("{}");
+    CHECK(empty.schema_version == kCurrentConfigSchemaVersion);
+    CHECK(nlohmann::json(parse_config("{/* comment */}")) == nlohmann::json(empty));
+    const std::string with_comments = R"(
+        // Older configuration, comments intentionally remain supported.
+        {
+            "fwmark":{"start":65536,"mask":16711680},
+            "dns":{"fallback":"default_dns"},
+            "outbounds":[{"tag":"wan","type":"ignore"}],
+            "x-preserved":{"value":17,"nested":[true,null]}
+        } // trailing comment
+    )";
+    const auto raw = nlohmann::json::parse(with_comments, nullptr, true, true);
+    const auto parsed = parse_config(with_comments);
+    const nlohmann::json result = parsed;
+    CHECK(result == nlohmann::json(parse_config(raw.dump())));
+    CHECK(result.at("schema_version") == kCurrentConfigSchemaVersion);
+    CHECK(result.at("fwmark").at("start") == "0x00010000");
+    CHECK(result.at("fwmark").at("mask") == "0x00FF0000");
+    CHECK(result.at("dns").at("fallback") == nlohmann::json::array({"default_dns"}));
+    CHECK(result.at("x-preserved") == raw.at("x-preserved"));
+    REQUIRE(parsed.outbounds.has_value());
+    REQUIRE(parsed.outbounds->size() == 1);
+    CHECK(parsed.outbounds->front().type == OutboundType::IGNORE);
+}
+
+TEST_CASE("JSON decode metadata does not precede existing ordered field validation") {
+    const auto issues = parse_issues(R"({
+        "daemon":{"max_file_size_bytes":"not-a-number","ipv6_enabled":"not-a-boolean"},
+        "outbounds":[{"type":"ignore"}]
+    })");
+    REQUIRE(issues.size() == 2);
+    CHECK(issues[0].path == "daemon.max_file_size_bytes");
+    CHECK(issues[0].message == "daemon.max_file_size_bytes must be an integer");
+    CHECK(issues[0].code == "config.value.integer");
+    CHECK(issues[1].path == "daemon.ipv6_enabled");
+    CHECK(issues[1].message == "daemon.ipv6_enabled must be a boolean");
+    CHECK(issues[1].code == "config.value.boolean");
+}
+
+TEST_CASE("JSON validation producer codes survive the real serializer and generated DTO") {
+    struct Case { const char* document; const char* code; };
+    const Case cases[] = {
+        {"{", "config.json.syntax"},
+        {R"({"x":1e9999})", "config.json.number_overflow"},
+        {R"({"outbounds":[{"tag":17,"type":"ignore"}]})", "config.json.type"},
+        {R"({"outbounds":[{"type":"ignore"}]})", "config.json.missing_field"},
+        {"[]", "config.json.object"},
+        {R"({"outbounds":[{"tag":"wan","type":"unsupported"}]})", "config.json.decode"},
+    };
+    for (const auto& item : cases) {
+        const auto issues = parse_issues(item.document);
+        REQUIRE(issues.size() == 1);
+        const auto wire = serialize_config_validation_issues(issues);
+        REQUIRE(wire.size() == 1);
+        CHECK_FALSE(wire.at(0).contains("params"));
+        const auto dto = wire.at(0).get<api::ValidationErrorElement>();
+        CHECK(dto.path == "$");
+        CHECK(dto.message == issues.front().message);
+        CHECK(dto.code == item.code);
+        CHECK_FALSE(dto.params.has_value());
+        // Generated DTOs render an absent optional as null; the HTTP helper
+        // intentionally omits it. Compare decoded fields, not JSON bytes.
+        const auto roundtrip = nlohmann::json(dto).get<api::ValidationErrorElement>();
+        CHECK(roundtrip.path == dto.path);
+        CHECK(roundtrip.message == dto.message);
+        CHECK(roundtrip.code == dto.code);
+        CHECK_FALSE(roundtrip.params.has_value());
+    }
+}
+
+TEST_CASE("specialized validation metadata preserves port errors and accepted boundaries") {
+    struct Case { const char* value; const char* code; const char* message; };
+    const Case cases[] = {
+        {"!", "config.port.list", "Use comma-separated ports or ranges."},
+        {",1", "config.port.list", "Use comma-separated ports or ranges."},
+        {"1,", "config.port.list", "Use comma-separated ports or ranges."},
+        {"1,,2", "config.port.list", "Use comma-separated ports or ranges."},
+        {"1-2-3", "config.port.range", "Port ranges must use valid ports such as 8000-9000."},
+        {"0-1", "config.port.range", "Port ranges must use valid ports such as 8000-9000."},
+        {"1-65536", "config.port.range", "Port ranges must use valid ports such as 8000-9000."},
+        {"2-1", "config.port.range_order", "Port range start must be less than or equal to end."},
+        {"0", "config.port.number", "Ports must be integers between 1 and 65535."},
+        {"65536", "config.port.number", "Ports must be integers between 1 and 65535."},
+        {"word", "config.port.number", "Ports must be integers between 1 and 65535."},
+    };
+    for (const char* field : {"src_port", "dest_port"}) {
+        auto document = nlohmann::json::parse(R"({"route":{"rules":[{"src_addr":"192.0.2.1","outbound":"vpn"}]}})");
+        for (const auto& item : cases) {
+            CAPTURE(field);
+            CAPTURE(item.value);
+            document["route"]["rules"][0][field] = item.value;
+            const auto issues = parse_issues(document.dump());
+            REQUIRE(issues.size() == 1);
+            CHECK(issues[0].path == std::string("route.rules[0].") + field);
+            CHECK(issues[0].message == item.message);
+            CHECK(issues[0].code == item.code);
+            CHECK(issues[0].params.empty());
+        }
+        for (const char* value : {"", " ", "1", "65535", "1-65535", "!1-65535", " 0001, 65535 "}) {
+            document["route"]["rules"][0][field] = value;
+            CHECK_NOTHROW(parse_config(document.dump()));
+        }
+        document["route"]["rules"][0][field] = nullptr;
+        CHECK_NOTHROW(parse_config(document.dump()));
+    }
+}
+
+TEST_CASE("specialized validation metadata preserves address errors and accepted boundaries") {
+    const std::string invalid_message = "Addresses must be valid IPv4 or IPv6 hosts or CIDR ranges, for example 10.0.0.1, 10.0.0.0/8, or 2001:db8::/32.";
+    for (const char* field : {"src_addr", "dest_addr"}) {
+        auto document = nlohmann::json::parse(R"({"route":{"rules":[{"dscp":1,"outbound":"vpn"}]}})");
+        for (const char* value : {"!", ",192.0.2.1", "192.0.2.1,", "not-an-ip", "2001:db8::/129"}) {
+            CAPTURE(field);
+            CAPTURE(value);
+            document["route"]["rules"][0][field] = value;
+            const auto issues = parse_issues(document.dump());
+            REQUIRE(issues.size() == 1);
+            const bool list_error = std::string(value) == "!" || value[0] == ',' || std::string(value).back() == ',';
+            CHECK(issues[0].path == std::string("route.rules[0].") + field);
+            CHECK(issues[0].message == (list_error ? "Use comma-separated IP addresses or CIDRs." : invalid_message));
+            CHECK(issues[0].code == (list_error ? "config.address.list" : "config.address.invalid"));
+            CHECK(issues[0].params.empty());
+        }
+        for (const char* value : {"", " ", "0.0.0.0/0", "::/0", "192.0.2.1,2001:db8::1", "!192.168.0.0/16"}) {
+            document["route"]["rules"][0][field] = value;
+            CHECK_NOTHROW(parse_config(document.dump()));
+        }
+        document["route"]["rules"][0][field] = nullptr;
+        CHECK_NOTHROW(parse_config(document.dump()));
+    }
+}
+
+TEST_CASE("specialized validation metadata leaves route issue ordering and texts unchanged") {
+    const auto issues = parse_issues(R"({"route":{"rules":[
+        {"outbound":"vpn"},
+        {"outbound":"vpn","src_port":"!","dest_port":"2-1","src_addr":"bad","dest_addr":",192.0.2.1"}
+    ]}})");
+    REQUIRE(issues.size() == 5);
+    CHECK(issues[0].path == "route.rules[0]");
+    CHECK(issues[0].message == "Route rule must include at least one condition: list, dscp, src_port, dest_port, src_addr, or dest_addr.");
+    CHECK(issues[0].code == "config.route.condition_required");
+    CHECK(issues[1].path == "route.rules[1].src_port");
+    CHECK(issues[1].code == "config.port.list");
+    CHECK(issues[2].path == "route.rules[1].dest_port");
+    CHECK(issues[2].code == "config.port.range_order");
+    CHECK(issues[3].path == "route.rules[1].src_addr");
+    CHECK(issues[3].code == "config.address.invalid");
+    CHECK(issues[4].path == "route.rules[1].dest_addr");
+    CHECK(issues[4].code == "config.address.list");
+    for (const auto& issue : issues) CHECK(issue.params.empty());
+    for (const char* condition : {"\"list\":[\"custom\"]", "\"dscp\":1", "\"src_port\":\"1\"", "\"dest_port\":\"65535\"", "\"src_addr\":\"::1\"", "\"dest_addr\":\"192.0.2.1\""}) {
+        CHECK_NOTHROW(parse_config(std::string("{\"route\":{\"rules\":[{\"outbound\":\"vpn\",") + condition + "}]}}"));
+    }
+}
+
+TEST_CASE("specialized validation metadata uses display-name enum causes and existing Unicode limit") {
+    struct Case { std::string value; const char* code; const char* suffix; };
+    const Case cases[] = {
+        {std::string("\xc0\xaf", 2), "config.name.encoding", " must be valid UTF-8"},
+        {"name\nline", "config.name.controls", " must not contain ASCII control characters"},
+        {std::string("name\xc2\x80", 6), "config.name.controls", " must not contain C1 or bidirectional control characters"},
+        {std::string("name\xe2\x80\xae", 7), "config.name.controls", " must not contain C1 or bidirectional control characters"},
+        {"  ", "config.value.required", " must contain a non-whitespace character"},
+        {std::string(display_name::MAX_CODE_POINTS + 1U, 'a'), "config.name.too_long", " must not exceed 80 Unicode code points"},
+    };
+    for (const auto& item : cases) {
+        auto config = parse_test_config(R"({"lists":{"custom":{"domains":["example.org"]}}})");
+        config.lists->at("custom").display_name = item.value;
+        try {
+            validate_config(config);
+            FAIL("invalid display name accepted");
+        } catch (const ConfigValidationError& error) {
+            REQUIRE(error.issues().size() == 1);
+            const auto& issue = error.issues()[0];
+            CHECK(issue.path == "lists.custom.display_name");
+            CHECK(issue.message == std::string("List display name") + item.suffix);
+            CHECK(issue.code == item.code);
+            if (issue.code == "config.name.too_long")
+                CHECK(issue.params == std::map<std::string, std::string>{{"max", std::to_string(display_name::MAX_CODE_POINTS)}});
+            else CHECK(issue.params.empty());
+        }
+    }
+    auto config = parse_test_config(R"({"lists":{"custom":{"domains":["example.org"]}}})");
+    std::string boundary;
+    for (std::size_t index = 0; index < display_name::MAX_CODE_POINTS; ++index) boundary += "\xc3\xa9";
+    config.lists->at("custom").display_name = boundary;
+    CHECK_NOTHROW(validate_config(config));
+    config.lists->at("custom").display_name = " surrounding whitespace remains allowed ";
+    CHECK_NOTHROW(validate_config(config));
+    config.lists->at("custom").display_name.reset();
+    CHECK_NOTHROW(validate_config(config));
+}
+
+TEST_CASE("specialized validation metadata forwards DNS parser causes without classifying text") {
+    struct Case { const char* address; const char* code; const char* reason; };
+    const Case cases[] = {
+        {"8.8.8.8:abc", "config.dns.port_number", "non-numeric port"},
+        {"8.8.8.8:4294967296", "config.dns.port_number", "non-numeric port"},
+        {"8.8.8.8:65536", "config.dns.port_range", "port out of range 1-65535"},
+        {"[::1", "config.dns.closing_bracket", "missing closing ']'"},
+        {"[::1]x", "config.dns.port_separator", "expected ':' after ']'"},
+        {"not-an-ip", "config.dns.address", "not a valid IPv4 or IPv6 address"},
+    };
+    auto document = nlohmann::json::parse(R"({"dns":{"servers":[{"tag":"default_dns","address":"127.0.0.1"}]}})");
+    for (const auto& item : cases) {
+        document["dns"]["servers"][0]["address"] = item.address;
+        const auto issues = validate_issues(document.dump());
+        REQUIRE(issues.size() == 1);
+        CHECK(issues[0].path == "dns.servers.default_dns.address");
+        CHECK(issues[0].message == std::string("Invalid DNS server address: '") + item.address + "' (" + item.reason + ")");
+        CHECK(issues[0].code == item.code);
+        CHECK(issues[0].params.empty());
+    }
+    document["dns"]["servers"][0]["address"] = "";
+    const auto required = validate_issues(document.dump());
+    REQUIRE(required.size() == 1);
+    CHECK(required[0].path == "dns.servers.default_dns.address");
+    CHECK(required[0].message == "dns.servers[\"default_dns\"].address is required for type='static'");
+    CHECK(required[0].code == "config.value.required");
+    CHECK(required[0].params.empty());
+    for (const char* address : {"8.8.8.8:1", "8.8.8.8:65535", "[2001:0DB8::1]:53", "::1"}) {
+        document["dns"]["servers"][0]["address"] = address;
+        CHECK_NOTHROW(parse_test_config(document.dump()));
+    }
+}
+
+TEST_CASE("specialized validation metadata distinguishes DNS domains and plain IPv4 templates") {
+    const auto issues = validate_issues(R"({
+        "ui_preferences":{"plain_dns_templates":[{"name":"Plain","primary_ipv4":"bad","secondary_ipv4":"bad"}]},
+        "dns":{"servers":[{"tag":"default_dns","address":"127.0.0.1","domains":["https://example.org"]}]}
+    })");
+    REQUIRE(issues.size() == 4);
+    CHECK(issues[0].path == "ui_preferences.plain_dns_templates[0].primary_ipv4");
+    CHECK(issues[0].message == "Plain DNS template primary_ipv4 must be a valid IPv4 address");
+    CHECK(issues[0].code == "config.address.ipv4");
+    CHECK(issues[1].path == "ui_preferences.plain_dns_templates[0].secondary_ipv4");
+    CHECK(issues[1].message == "Plain DNS template secondary_ipv4 must be a valid IPv4 address");
+    CHECK(issues[1].code == "config.address.ipv4");
+    CHECK(issues[2].path == "ui_preferences.plain_dns_templates[0].secondary_ipv4");
+    CHECK(issues[2].message == "Plain DNS template secondary_ipv4 must differ from primary_ipv4");
+    CHECK(issues[2].code == "config.dns.different");
+    CHECK(issues[3].path == "dns.servers.default_dns.domains.0");
+    CHECK(issues[3].message == "Enter a DNS domain without a URL scheme, path or IP address");
+    CHECK(issues[3].code == "config.dns.domain");
+    for (const auto& issue : issues) CHECK(issue.params.empty());
+    CHECK_NOTHROW(parse_test_config(R"({
+        "ui_preferences":{"plain_dns_templates":[{"name":"Plain","primary_ipv4":"192.0.2.1","secondary_ipv4":"192.0.2.2"}]},
+        "dns":{"servers":[{"tag":"default_dns","address":"127.0.0.1","domains":["*.Example.ORG."]}]}
+    })"));
+}
+
+TEST_CASE("specialized validation metadata retains URL scheme and fallback reason distinctions") {
+    auto document = failure_policy_config();
+    document["outbounds"][3]["url"] = "ftp://example.org/check";
+    const auto url_issues = validate_issues(document.dump());
+    REQUIRE(url_issues.size() == 1);
+    CHECK(url_issues[0].path == "outbounds.group_backup.url");
+    CHECK(url_issues[0].message == "Urltest URL must use the http or https scheme");
+    CHECK(url_issues[0].code == "config.url.scheme");
+    CHECK(url_issues[0].params.empty());
+    struct Case { const char* fallback; const char* mode; const char* code; const char* message; };
+    const Case cases[] = {
+        {"primary", "fallback", "config.route.fallback_different", "Fallback outbound must differ from the primary outbound"},
+        {"drop", "fallback", "config.route.fallback_routable", "Fallback outbound must be an interface or urltest outbound"},
+        {"backup", "inherit", "config.route.fallback_mode", "fallback_outbound is only used when failure_policy is fallback"},
+        {"", "fallback", "config.value.required", "route.rules[0].fallback_outbound is required when failure_policy is fallback"},
+    };
+    for (const auto& item : cases) {
+        document = failure_policy_config();
+        document["route"]["rules"][0]["failure_policy"] = item.mode;
+        document["route"]["rules"][0]["fallback_outbound"] = item.fallback;
+        const auto errors = validate_issues(document.dump());
+        REQUIRE(errors.size() == 1);
+        CHECK(errors[0].path == "route.rules[0].fallback_outbound");
+        CHECK(errors[0].message == item.message);
+        CHECK(errors[0].code == item.code);
+        CHECK(errors[0].params.empty());
+    }
+    document = failure_policy_config();
+    document["outbounds"][3]["url"] = "HTTPS://example.org/check";
+    document["route"]["rules"][0]["failure_policy"] = "fallback";
+    document["route"]["rules"][0]["fallback_outbound"] = "backup";
+    CHECK_NOTHROW(parse_test_config(document.dump()));
+}
+
+namespace {
+
+void check_finished_metadata_wire(const std::vector<ConfigValidationIssue>& issues) {
+    const auto wire = serialize_config_validation_issues(issues);
+    REQUIRE(wire.size() == issues.size());
+    for (std::size_t index = 0; index < issues.size(); ++index) {
+        const auto& issue = issues[index];
+        CAPTURE(issue.path);
+        CAPTURE(issue.message);
+        REQUIRE_FALSE(issue.code.empty());
+        const auto dto = wire.at(index).get<api::ValidationErrorElement>();
+        CHECK(dto.path == issue.path);
+        CHECK(dto.message == issue.message);
+        CHECK(dto.code == issue.code);
+        if (issue.params.empty()) {
+            CHECK_FALSE(dto.params.has_value());
+            CHECK_FALSE(wire.at(index).contains("params"));
+        } else {
+            REQUIRE(dto.params.has_value());
+            CHECK(*dto.params == issue.params);
+        }
+        const auto decoded = nlohmann::json(dto).get<api::ValidationErrorElement>();
+        CHECK(decoded.path == dto.path);
+        CHECK(decoded.message == dto.message);
+        CHECK(decoded.code == dto.code);
+        CHECK(decoded.params == dto.params);
+    }
+}
+
+void check_finished_metadata_issue(
+    const std::vector<ConfigValidationIssue>& issues,
+    const std::string& path, const std::string& code,
+    const std::string& message = {}) {
+    CAPTURE(path);
+    CAPTURE(code);
+    const auto found = std::find_if(issues.begin(), issues.end(), [&](const auto& issue) {
+        return issue.path == path && issue.code == code &&
+               (message.empty() || issue.message == message);
+    });
+    REQUIRE(found != issues.end());
+    check_finished_metadata_wire(issues);
+}
+
+std::vector<ConfigValidationIssue> finished_typed_issues(const Config& config) {
+    try {
+        validate_config(config);
+        return {};
+    } catch (const ConfigValidationError& error) {
+        return error.issues();
+    }
+}
+
+nlohmann::json finished_metadata_base() {
+    return nlohmann::json::parse(R"({
+        "lists":{"matched":{"domains":["example.test"]}},
+        "outbounds":[
+            {"tag":"wan","type":"interface","interface":"eth0"},
+            {"tag":"other","type":"interface","interface":"eth1"},
+            {"tag":"drop","type":"blackhole"},
+            {"tag":"skip","type":"ignore"},
+            {"tag":"group","type":"urltest","url":"https://example.test/",
+             "outbound_groups":[{"outbounds":["wan"]}]}
+        ],
+        "dns":{"servers":[{"tag":"default_dns","address":"127.0.0.1"}],
+               "fallback":["default_dns"],"system_resolver":{"address":"127.0.0.1"}}
+    })");
+}
+
+} // namespace
+
+TEST_CASE("finished metadata covers list provenance source cron and download constraints") {
+    struct Case { const char* document; const char* path; const char* code; const char* message; };
+    const Case cases[] = {
+        {R"({"lists":{"empty":{}}})", "lists.empty", "config.list.source_required",
+         "List 'empty' must have at least one of: url, domains, ip_cidrs, file"},
+        {R"({"lists":{"bad":{"domains":["example.test"],"catalog_identity":"BAD"}}})",
+         "lists.bad.catalog_identity", "config.catalog_identity.invalid",
+         "lists.bad.catalog_identity must be a lowercase SHA-256 digest"},
+        {R"({"list_refresh":{"fallback_detours":["missing"]}})",
+         "list_refresh.fallback_detours", "config.download.primary_required",
+         "list_refresh.fallback_detours requires an explicit primary detour"},
+        {R"({"outbounds":[{"tag":"drop","type":"blackhole"}],"list_refresh":{"detour":"drop"}})",
+         "list_refresh.detour", "config.outbound.routing_table_required",
+         "list_refresh.detour: outbound 'drop' has no routable download table"},
+        {R"({"lists":{"local":{"domains":["example.test"],"refresh_detour_mode":"inherit"}}})",
+         "lists.local.refresh_detour_mode", "config.download.url_required",
+         "lists.local.refresh_detour_mode is only valid for URL-backed lists"},
+        {R"({"outbounds":[{"tag":"wan","type":"table","table":150}],"lists":{"remote":{
+            "url":"http://example.test/list","refresh_detour_mode":"inherit","detour":"wan"}}})",
+         "lists.remote.refresh_detour_mode", "config.download.inherit_conflict",
+         "lists.remote cannot inherit the global download route while local detours are configured"},
+        {R"({"lists":{"remote":{"url":"http://example.test/list","refresh_detour_mode":"override"}}})",
+         "lists.remote.detour", "config.value.required",
+         "lists.remote.detour is required when refresh_detour_mode is override"},
+        {R"({"outbounds":[{"tag":"wan","type":"table","table":150}],
+             "list_refresh":{"detour":"wan","fallback_detours":["wan","missing",""]}})",
+         "list_refresh.fallback_detours[0]", "config.value.duplicate",
+         "list_refresh.fallback_detours[0] repeats outbound tag 'wan'"},
+        {R"({"daemon":{"reconnect_owned_flows_on_routing_change_lists":["missing"]}})",
+         "daemon.reconnect_owned_flows_on_routing_change_lists[0]", "config.reference.list_missing",
+         "daemon.reconnect_owned_flows_on_routing_change_lists[0] references unknown list 'missing'"},
+    };
+    for (const auto& item : cases) {
+        const auto issues = validate_issues(item.document);
+        check_finished_metadata_issue(issues, item.path, item.code, item.message);
+    }
+    const auto cron = validate_issues(R"({"lists_autoupdate":{"cron":"invalid"}})");
+    REQUIRE(cron.size() == 1);
+    check_finished_metadata_issue(cron, "lists_autoupdate.cron", "config.cron.invalid");
+    CHECK(cron.front().message.find("lists_autoupdate.cron: ") == 0);
+
+    auto document = finished_metadata_base();
+    const std::string digest(64, 'a');
+    document["lists"]["matched"]["catalog_identity"] = digest;
+    document["lists"]["second"] = {{"domains", {"second.test"}}, {"catalog_identity", digest}};
+    const auto duplicate = validate_issues(document.dump());
+    REQUIRE(duplicate.size() == 1);
+    check_finished_metadata_issue(duplicate, "lists.second.catalog_identity", "config.value.duplicate",
+        "lists.second.catalog_identity duplicates catalogue provenance first declared at lists.matched.catalog_identity");
+    document["lists"]["second"]["catalog_identity"] = std::string(64, 'b');
+    document["lists"]["remote"] = {{"url", "http://192.0.2.1/list"}, {"detour", "group"}};
+    CHECK_NOTHROW(parse_test_config(document.dump()));
+
+    document["list_refresh"] = {{"detour", "wan"}, {"fallback_detours", {"other", "group", "wan", "other"}}};
+    const auto limited = validate_issues(document.dump());
+    check_finished_metadata_issue(limited, "list_refresh.fallback_detours", "config.value.too_many");
+    const auto* limit = find_issue(limited, "list_refresh.fallback_detours");
+    REQUIRE(limit != nullptr);
+    CHECK(limit->params == std::map<std::string, std::string>{{"max", "3"}});
+}
+
+TEST_CASE("finished metadata covers interface urltest and rule target constraints") {
+    struct Case { const char* document; const char* path; const char* code; const char* message; };
+    const Case cases[] = {
+        {R"({"outbounds":[{"tag":"wan","type":"interface"}]})", "outbounds.wan.interface", "config.value.required",
+         "Interface outbound 'wan' requires a non-empty interface name"},
+        {R"({"outbounds":[{"tag":"wan","type":"interface","interface":"bad/name"}]})",
+         "outbounds.wan.interface", "config.interface.invalid", ""},
+        {R"({"outbounds":[{"tag":"wan","type":"interface","interface":"eth0","gateway":"bad","gateway6":"bad"}]})",
+         "outbounds.wan.gateway6", "config.address.ipv6", "Interface outbound 'wan' gateway6 must be a valid IPv6 address"},
+        {R"({"outbounds":[{"tag":"wan","type":"interface","interface":"eth0","conntrack_on_switch":"delete"}]})",
+         "outbounds.wan.conntrack_on_switch", "config.conntrack.urltest_only", "conntrack_on_switch is only valid for urltest outbounds"},
+        {R"({"outbounds":[{"tag":"group","type":"urltest"}]})", "outbounds.group.url", "config.value.required",
+         "Urltest outbound 'group' requires a URL"},
+        {R"({"outbounds":[{"tag":"group","type":"urltest","url":"http://example.test"}]})",
+         "outbounds.group.outbound_groups", "config.value.non_empty_array", "Urltest outbound 'group' 'outbound_groups' array must not be empty"},
+        {R"({"outbounds":[{"tag":"group","type":"urltest","url":"http://example.test","outbound_groups":[{"outbounds":[]}]}]})",
+         "outbounds.group.outbound_groups[0].outbounds", "config.value.non_empty_array", "Urltest outbound 'group' outbound_group has empty 'outbounds' array"},
+        {R"({"outbounds":[{"tag":"group","type":"urltest","url":"http://example.test","outbound_groups":[{"outbounds":["group"]}]}]})",
+         "outbounds.group.outbound_groups[0].outbounds[0]", "config.urltest.cycle", "Urltest outbound 'group' creates a cyclic reference to urltest outbound 'group'"},
+        {R"({"outbounds":[{"tag":"skip","type":"ignore"},{"tag":"group","type":"urltest","url":"http://example.test","outbound_groups":[{"outbounds":["skip"]}]}]})",
+         "outbounds.group.outbound_groups[0].outbounds[0]", "config.urltest.child_type",
+         "Urltest outbound 'group' references outbound 'skip' which is not an interface, table, blackhole, or urltest outbound"},
+    };
+    for (const auto& item : cases) {
+        check_finished_metadata_issue(validate_issues(item.document), item.path, item.code, item.message);
+    }
+    auto document = finished_metadata_base();
+    document["route"]["rules"] = {{{"list", {"matched"}}, {"outbound", " wan "}, {"failure_policy", "block"}}};
+    check_finished_metadata_issue(validate_issues(document.dump()), "route.rules[0].outbound", "config.route.primary_exact",
+        "A rule failure policy requires an exact configured primary outbound tag");
+    document["route"]["rules"][0]["outbound"] = "drop";
+    check_finished_metadata_issue(validate_issues(document.dump()), "route.rules[0].failure_policy", "config.route.primary_routable",
+        "A rule failure policy requires an interface or urltest primary outbound");
+    document["route"]["rules"][0]["outbound"] = "group";
+    CHECK_NOTHROW(parse_test_config(document.dump()));
+    document["route"]["rules"][0]["failure_policy"] = "fallback";
+    document["route"]["rules"][0]["fallback_outbound"] = "absent";
+    check_finished_metadata_issue(validate_issues(document.dump()), "route.rules[0].fallback_outbound", "config.reference.outbound_missing",
+        "route.rules[0] references unknown fallback outbound tag 'absent'");
+}
+
+TEST_CASE("finished metadata covers raw internal VPN shapes without changing field order") {
+    struct Case { const char* document; const char* path; const char* code; const char* message; };
+    const Case cases[] = {
+        {R"({"route":{"internal_vpn_servers":false}})", "route.internal_vpn_servers", "config.value.object_array",
+         "route.internal_vpn_servers must be an array of objects"},
+        {R"({"route":{"internal_vpn_servers":[false]}})", "route.internal_vpn_servers[0]", "config.value.object",
+         "route.internal_vpn_servers[0] must be an object"},
+        {R"({"route":{"internal_vpn_servers":[{}]}})", "route.internal_vpn_servers[0].interface", "config.value.string",
+         "route.internal_vpn_servers[0].interface must be a string"},
+        {R"({"route":{"internal_vpn_servers":[{"interface":"wg0","ndms_id":7,"process_clients":true}]}})",
+         "route.internal_vpn_servers[0].ndms_id", "config.value.string", "route.internal_vpn_servers[0].ndms_id must be a string"},
+        {R"({"route":{"internal_vpn_services":false}})", "route.internal_vpn_services", "config.value.object_array",
+         "route.internal_vpn_services must be an array of objects"},
+        {R"({"route":{"internal_vpn_services":[false]}})", "route.internal_vpn_services[0]", "config.value.object",
+         "route.internal_vpn_services[0] must be an object"},
+        {R"({"route":{"internal_vpn_services":[{}]}})", "route.internal_vpn_services[0].service_id", "config.value.string",
+         "route.internal_vpn_services[0].service_id must be a string"},
+        {R"({"route":{"internal_vpn_services":[{"service_id":"bad/name","process_clients":false}]}})",
+         "route.internal_vpn_services[0].service_id", "config.vpn.service_id",
+         "route.internal_vpn_services[0].service_id must be 1-128 ASCII letters, digits, dot, underscore, colon or hyphen"},
+    };
+    for (const auto& item : cases) {
+        check_finished_metadata_issue(parse_issues(item.document), item.path, item.code, item.message);
+    }
+    const auto ordered = parse_issues(R"({"route":{"internal_vpn_servers":[{}],"internal_vpn_services":[{}]}})");
+    REQUIRE(ordered.size() == 4);
+    CHECK(ordered[0].path == "route.internal_vpn_servers[0].interface");
+    CHECK(ordered[0].code == "config.value.string");
+    CHECK(ordered[1].path == "route.internal_vpn_servers[0].process_clients");
+    CHECK(ordered[1].code == "config.value.boolean");
+    CHECK(ordered[2].path == "route.internal_vpn_services[0].service_id");
+    CHECK(ordered[2].code == "config.value.string");
+    CHECK(ordered[3].path == "route.internal_vpn_services[0].process_clients");
+    CHECK(ordered[3].code == "config.value.boolean");
+    check_finished_metadata_wire(ordered);
+}
+
+TEST_CASE("finished metadata keeps raw and typed internal VPN validation equivalent") {
+    auto document = finished_metadata_base();
+    document["route"]["internal_vpn_servers"] = {
+        {{"interface", "wg0"}, {"ndms_id", "Native0"}, {"process_clients", true}}
+    };
+    document["route"]["internal_vpn_services"] = {
+        {{"service_id", "vpn:server-0"}, {"process_clients", true}}
+    };
+    const auto valid = parse_test_config(document.dump());
+    struct Case { std::string value; const char* code; const char* suffix; };
+    const Case cases[] = {
+        {" Native0 ", "config.identifier.whitespace", " must be a non-blank identifier without surrounding whitespace"},
+        {std::string(129, 'n'), "config.name.too_long", " must not exceed 128 Unicode code points"},
+        {std::string("Native\x01", 7), "config.name.controls", " must not contain control characters"},
+        {std::string("\xC3\x28", 2), "config.name.encoding", " must be valid UTF-8"},
+    };
+    for (const auto& item : cases) {
+        auto candidate = valid;
+        candidate.route->internal_vpn_servers->front().ndms_id = item.value;
+        const auto typed = finished_typed_issues(candidate);
+        REQUIRE(typed.size() == 1);
+        check_finished_metadata_issue(typed, "route.internal_vpn_servers[0].ndms_id", item.code,
+            std::string("route.internal_vpn_servers[0].ndms_id") + item.suffix);
+        if (std::string(item.code) == "config.name.too_long") {
+            CHECK(typed.front().params == std::map<std::string, std::string>{{"max", "128"}});
+        }
+        if (std::string(item.code) != "config.name.encoding") {
+            const auto raw = parse_issues(nlohmann::json(candidate).dump());
+            REQUIRE(raw.size() == typed.size());
+            CHECK(raw.front().path == typed.front().path);
+            CHECK(raw.front().message == typed.front().message);
+            CHECK(raw.front().code == typed.front().code);
+            CHECK(raw.front().params == typed.front().params);
+        }
+    }
+    auto duplicate = valid;
+    duplicate.route->internal_vpn_servers->push_back(duplicate.route->internal_vpn_servers->front());
+    duplicate.route->internal_vpn_services->push_back(duplicate.route->internal_vpn_services->front());
+    const auto typed_duplicates = finished_typed_issues(duplicate);
+    const auto raw_duplicates = parse_issues(nlohmann::json(duplicate).dump());
+    REQUIRE(typed_duplicates.size() == 3);
+    REQUIRE(raw_duplicates.size() == typed_duplicates.size());
+    for (std::size_t index = 0; index < typed_duplicates.size(); ++index) {
+        CHECK(typed_duplicates[index].code == "config.value.duplicate");
+        CHECK(raw_duplicates[index].path == typed_duplicates[index].path);
+        CHECK(raw_duplicates[index].message == typed_duplicates[index].message);
+        CHECK(raw_duplicates[index].code == typed_duplicates[index].code);
+    }
+    check_finished_metadata_wire(typed_duplicates);
+
+    auto boundaries = valid;
+    boundaries.route->internal_vpn_servers->clear();
+    boundaries.route->internal_vpn_services->clear();
+    for (std::size_t index = 0; index < 128; ++index) {
+        auto server = valid.route->internal_vpn_servers->front();
+        server.interface = "v" + std::to_string(index);
+        server.ndms_id = "Native" + std::to_string(index);
+        boundaries.route->internal_vpn_servers->push_back(server);
+    }
+    for (std::size_t index = 0; index < 32; ++index) {
+        auto service = valid.route->internal_vpn_services->front();
+        service.service_id = "vpn:" + std::to_string(index);
+        boundaries.route->internal_vpn_services->push_back(service);
+    }
+    CHECK_NOTHROW(validate_config(boundaries));
+    CHECK_NOTHROW(parse_test_config(nlohmann::json(boundaries).dump()));
+    auto extra_server = valid.route->internal_vpn_servers->front();
+    extra_server.interface = "v128";
+    extra_server.ndms_id = "Native128";
+    boundaries.route->internal_vpn_servers->push_back(extra_server);
+    auto extra_service = valid.route->internal_vpn_services->front();
+    extra_service.service_id = "vpn:32";
+    boundaries.route->internal_vpn_services->push_back(extra_service);
+    const auto limited = finished_typed_issues(boundaries);
+    REQUIRE(limited.size() == 2);
+    CHECK(limited[0].code == "config.value.too_many");
+    CHECK(limited[0].params == std::map<std::string, std::string>{{"max", "128"}});
+    CHECK(limited[1].code == "config.value.too_many");
+    CHECK(limited[1].params == std::map<std::string, std::string>{{"max", "32"}});
+    check_finished_metadata_wire(limited);
+    boundaries = valid;
+    boundaries.route->internal_vpn_services->front().service_id = "bad/name";
+    check_finished_metadata_issue(finished_typed_issues(boundaries), "route.internal_vpn_services[0].service_id", "config.vpn.service_id");
+}
+
+TEST_CASE("finished metadata preserves fwmark table multiport and migration diagnostics") {
+    struct Case { const char* document; const char* path; const char* code; const char* message; };
+    const Case cases[] = {
+        {R"({"fwmark":{"start":"invalid"}})", "fwmark.start", "config.fwmark.start_invalid",
+         "fwmark.start must be a hexadecimal string with 0x prefix"},
+        {R"({"fwmark":{"mask":"0x00000000"}})", "fwmark.mask", "config.fwmark.mask_invalid", "fwmark.mask must not be zero"},
+        {R"({"fwmark":{"start":"0x00010000","mask":"0x0000F000"}})", "outbounds", "config.fwmark.allocation",
+         "fwmark.start must select a non-zero value within fwmark.mask"},
+        {R"({"iproute":{"table_start":255}})", "iproute.table_start", "config.iproute.reserved",
+         "iproute.table_start 255 is reserved. Use a different value (e.g. 150)."},
+    };
+    for (const auto& item : cases) {
+        const auto issues = validate_issues(item.document);
+        REQUIRE(issues.size() == 1);
+        check_finished_metadata_issue(issues, item.path, item.code, item.message);
+    }
+    auto document = finished_metadata_base();
+    document["daemon"]["firewall_backend"] = "iptables";
+    document["route"]["rules"] = {{{"src_port", "444,555"}, {"dest_port", "443"}, {"outbound", "wan"}}};
+    const auto multiport = validate_issues(document.dump());
+    REQUIRE(multiport.size() == 1);
+    CHECK(multiport.front().code == "config.route.multiport_combo");
+    CHECK(multiport.front().message == "When you use port lists (e.g. 444,555) you can't combine src_port and dest_port condition. This is a xt_multiport module limitation. Consider using nftables firewall backend or create multiple rules.");
+    check_finished_metadata_wire(multiport);
+    document["daemon"]["firewall_backend"] = "nftables";
+    CHECK_NOTHROW(parse_test_config(document.dump()));
+    auto old = parse_test_config(finished_metadata_base().dump());
+    old.schema_version = 1;
+    const auto migration = finished_typed_issues(old);
+    REQUIRE(migration.size() == 1);
+    check_finished_metadata_issue(migration, "schema_version", "config.schema_version.migration_required",
+        "Configuration must be migrated to schema version 2 before validation");
+    CHECK(migration.front().params == std::map<std::string, std::string>{{"supported", "2"}});
+}
+
+TEST_CASE("finished metadata covers DNS references duplicates resolver and probe errors") {
+    auto document = finished_metadata_base();
+    document["dns"]["servers"].push_back({{"tag", "default_dns"}, {"address", "192.0.2.53"}});
+    const auto tag = validate_issues(document.dump());
+    REQUIRE(tag.size() == 1);
+    check_finished_metadata_issue(tag, "dns.servers.default_dns.tag", "config.value.duplicate",
+        "Duplicate DNS server tag \"default_dns\"");
+    document["dns"]["servers"][1] = {{"tag", "second_dns"}, {"address", "127.0.0.1:53"}};
+    const auto definition = validate_issues(document.dump());
+    REQUIRE(definition.size() == 1);
+    check_finished_metadata_issue(definition, "dns.servers.second_dns", "config.value.duplicate",
+        "DNS server \"second_dns\" duplicates an existing DNS server definition (same type/address)");
+
+    document = finished_metadata_base();
+    document["dns"]["servers"][0]["detour"] = "drop";
+    check_finished_metadata_issue(validate_issues(document.dump()), "dns.servers.default_dns.detour", "config.outbound.routing_table_required",
+        "dns.servers[\"default_dns\"].detour: outbound \"drop\" has no routing table");
+    document["dns"]["servers"][0]["detour"] = "absent";
+    check_finished_metadata_issue(validate_issues(document.dump()), "dns.servers.default_dns.detour", "config.reference.outbound_missing",
+        "dns.servers[\"default_dns\"].detour: unknown outbound tag \"absent\"");
+    document["dns"]["servers"][0]["detour"] = "group";
+    CHECK_NOTHROW(parse_test_config(document.dump()));
+    document["dns"]["fallback"] = {"", "default_dns", "default_dns", "absent"};
+    const auto fallback = validate_issues(document.dump());
+    REQUIRE(fallback.size() == 3);
+    CHECK(fallback[0].path == "dns.fallback.0");
+    CHECK(fallback[0].code == "config.value.required");
+    CHECK(fallback[0].message == "dns.fallback[0] must not be empty");
+    CHECK(fallback[1].path == "dns.fallback.2");
+    CHECK(fallback[1].code == "config.value.duplicate");
+    CHECK(fallback[1].message == "dns.fallback[2] duplicates DNS server tag \"default_dns\"");
+    CHECK(fallback[2].path == "dns.fallback.3");
+    CHECK(fallback[2].code == "config.reference.dns_server_missing");
+    CHECK(fallback[2].message == "dns.fallback[3] references unknown DNS server tag \"absent\"");
+    check_finished_metadata_wire(fallback);
+
+    document = finished_metadata_base();
+    document["dns"]["rules"] = {{{"list", nlohmann::json::array()}, {"server", "default_dns"}}};
+    check_finished_metadata_issue(validate_issues(document.dump()), "dns.rules[0].list", "config.value.non_empty_array",
+        "dns.rules[0].list must include at least one list name");
+    document = finished_metadata_base();
+    document["dns"]["dns_test_server"] = {{"listen", "[::1]:53"}};
+    check_finished_metadata_issue(validate_issues(document.dump()), "dns.dns_test_server", "config.dns.probe_invalid",
+        "dns.dns_test_server: DNS test server listen address must be IPv4: [::1]:53");
+    document["dns"]["dns_test_server"] = {{"listen", "127.0.0.88:53"}, {"answer_ipv4", "192.0.2.53"}};
+    CHECK_NOTHROW(parse_test_config(document.dump()));
+
+    auto missing = parse_test_config(finished_metadata_base().dump());
+    missing.dns->system_resolver->address.clear();
+    check_finished_metadata_issue(finished_typed_issues(missing), "dns.system_resolver.address", "config.value.required",
+        "dns.system_resolver.address must not be empty");
+    missing.dns->system_resolver.reset();
+    check_finished_metadata_issue(finished_typed_issues(missing), "dns.system_resolver", "config.value.required",
+        "dns.system_resolver must be present");
+    missing.dns.reset();
+    check_finished_metadata_issue(finished_typed_issues(missing), "dns.system_resolver", "config.value.required",
+        "dns.system_resolver must be present");
+}
+
+TEST_CASE("finished metadata preserves DNS capability and typed enum branches") {
+    SystemInfoTestGuard guard;
+    SystemInfo info;
+    info.os_type = "keenetic";
+    info.os_version = "2.16.D.12.0-12";
+    info.build_variant = "keenetic";
+    set_system_info_for_tests(info);
+    auto config = parse_test_config(finished_metadata_base().dump());
+    config.dns->servers->front().type = api::DnsServerType::KEENETIC;
+    config.dns->servers->front().address.reset();
+    const auto unsupported = finished_typed_issues(config);
+    check_finished_metadata_issue(unsupported, "dns.servers.default_dns.type", "config.dns.keenetic_version",
+        "dns.servers[\"default_dns\"].type='keenetic' requires KeeneticOS 3.x or newer; detected 2.16.D.12.0-12");
+#ifndef USE_KEENETIC_API
+    check_finished_metadata_issue(unsupported, "dns.servers.default_dns.type", "config.dns.keenetic_build",
+        "dns.servers[\"default_dns\"].type='keenetic' requires build with USE_KEENETIC_API=ON");
+#endif
+    info.os_version = "4.0.0";
+    set_system_info_for_tests(info);
+#ifdef USE_KEENETIC_API
+    CHECK_NOTHROW(validate_config(config));
+#endif
+    config.dns->servers->front().address = "192.0.2.53";
+    check_finished_metadata_issue(finished_typed_issues(config), "dns.servers.default_dns.address", "config.dns.keenetic_address",
+        "dns.servers[\"default_dns\"].address must not be set for type='keenetic' (resolved via RCI)");
+    config.dns->servers->front().address.reset();
+    auto second = config.dns->servers->front();
+    second.tag = "second_dns";
+    config.dns->servers->push_back(second);
+    check_finished_metadata_issue(finished_typed_issues(config), "dns.servers", "config.dns.keenetic_limit",
+        "at most one dns.servers entry may use type='keenetic'");
+    config.dns->servers->resize(1);
+    config.dns->servers->front().type = static_cast<api::DnsServerType>(999);
+    check_finished_metadata_issue(finished_typed_issues(config), "dns.servers.default_dns.type", "config.dns.type",
+        "dns.servers[\"default_dns\"].type must be one of: static, keenetic");
+}
+
+TEST_CASE("finished metadata keeps conntrack ownership diagnostics ordered and accepted modes unchanged") {
+    auto document = finished_metadata_base();
+    auto nested = document["outbounds"][4];
+    nested["tag"] = "nested";
+    document["outbounds"].push_back(nested);
+    document["outbounds"][4]["outbound_groups"][0]["outbounds"] = {"nested"};
+    document["outbounds"][4]["conntrack_on_switch"] = "delete_on_failure";
+    const auto nested_errors = validate_issues(document.dump());
+    REQUIRE(nested_errors.size() == 1);
+    check_finished_metadata_issue(nested_errors, "outbounds.group.conntrack_on_switch", "config.conntrack.nested",
+        "conntrack_on_switch='delete_on_failure' does not support nested urltest child 'nested'; use 'preserve' for nested selectors");
+    document["outbounds"][4]["conntrack_on_switch"] = "preserve";
+    CHECK_NOTHROW(parse_test_config(document.dump()));
+
+    document = finished_metadata_base();
+    auto shared = document["outbounds"][4];
+    shared["tag"] = "shared";
+    document["outbounds"].push_back(shared);
+    document["outbounds"][4]["conntrack_on_switch"] = "delete";
+    const auto shared_errors = validate_issues(document.dump());
+    REQUIRE(shared_errors.size() == 1);
+    check_finished_metadata_issue(shared_errors, "outbounds.group.conntrack_on_switch", "config.conntrack.shared_child",
+        "conntrack_on_switch='delete' requires exclusive child marks, but outbound 'wan' is shared by multiple urltest selectors");
+    document["outbounds"][4]["conntrack_on_switch"] = "delete_on_failure";
+    CHECK_NOTHROW(parse_test_config(document.dump()));
+
+    document = finished_metadata_base();
+    document["outbounds"][4]["conntrack_on_switch"] = "delete";
+    document["route"]["rules"] = {{{"list", {"matched"}}, {"outbound", "wan"}}};
+    document["dns"]["servers"][0]["detour"] = "wan";
+    document["lists"]["remote"] = {{"url", "https://example.test/list"}, {"detour", "wan"}};
+    const auto direct = validate_issues(document.dump());
+    REQUIRE(direct.size() == 3);
+    CHECK(direct[0].code == "config.conntrack.route_child");
+    CHECK(direct[0].message == "conntrack_on_switch='delete' cannot use child 'wan' because a routing rule also references it directly");
+    CHECK(direct[1].code == "config.conntrack.dns_child");
+    CHECK(direct[1].message == "conntrack_on_switch='delete' cannot use child 'wan' because a DNS server also references it directly");
+    CHECK(direct[2].code == "config.conntrack.list_child");
+    CHECK(direct[2].message == "conntrack_on_switch='delete' cannot use child 'wan' because a URL list download also references it directly");
+    for (const auto& issue : direct) {
+        CHECK(issue.path == "outbounds.group.conntrack_on_switch");
+        CHECK(issue.params.empty());
+    }
+    check_finished_metadata_wire(direct);
+    document["outbounds"][4]["conntrack_on_switch"] = "delete_on_failure";
+    CHECK_NOTHROW(parse_test_config(document.dump()));
+    document["outbounds"][4]["conntrack_on_switch"] = "preserve";
+    CHECK_NOTHROW(parse_test_config(document.dump()));
 }

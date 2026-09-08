@@ -1,0 +1,18 @@
+{
+  "daemon": {"strict_enforcement": false},
+  "outbounds": [
+    {"type": "interface", "tag": "vpn", "interface": "tun0", "strict_enforcement": true},
+    {"type": "table", "tag": "wan", "table": 254}
+  ],
+  "lists": {"example": {"domains": ["example.org"], "ip_cidrs": ["192.0.2.0/24"]}},
+  "dns": {
+    "system_resolver": {"type": "dnsmasq-ipset", "hook": "/opt/etc/keen-pbr/dnsmasq.sh", "address": "127.0.0.1"},
+    "dns_test_server": {"listen": "127.0.0.88:12153", "answer_ipv4": "192.0.2.1"},
+    "servers": [{"tag": "quad9", "address": "9.9.9.9"}],
+    "rules": [{"list": ["example"], "server": "quad9"}],
+    "fallback": "quad9"
+  },
+  "fwmark": {"start": 65536, "mask": 16711680},
+  "iproute": {"table_start": 150},
+  "route": {"rules": [{"list": ["example"], "outbound": "vpn"}]}
+}

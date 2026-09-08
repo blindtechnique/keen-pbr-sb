@@ -100,6 +100,8 @@ public:
         const std::vector<std::string>& interfaces) override;
     void create_source_egress_snat_rules(
         const std::vector<FirewallSourceEgressSnatSelector>& selectors) override;
+    void create_native_vpn_forward_rules(
+        const std::vector<FirewallNativeForwardSelector>& selectors) override;
     OwnedSnatState inspect_owned_snat_state() const override;
     OwnedForwardUdpRejectState
     inspect_forward_udp_reject_state() const override;
@@ -140,6 +142,8 @@ private:
         "KeenPbrMeta443";
     static constexpr const char* EXACT_TCP_RESET_CHAIN_NAME =
         "KeenPbrTcpRst";
+    static constexpr const char* NATIVE_FORWARD_CHAIN_NAME =
+        "KeenPbrNativeFwd";
     static constexpr const char* DNS_NAT_VALIDATION_CHAIN_NAME =
         "KeenPbrDnsValidate";
     static constexpr const char* SNAT_VALIDATION_CHAIN_NAME =
@@ -157,17 +161,14 @@ private:
         FirewallApplyMode mode,
         const FirewallGlobalPrefilter& prefilter);
     void apply_nat_rules(bool effective_ipv6, FirewallApplyMode mode);
-    // One restore script that tears down every set we own, instead of a flush
-    // and a destroy exec each. Forty managed sets cost eighty fork/execs on the
-    // old path.
-    //
-    // Reads the output of `ipset save`, which cleanup already has in hand, so
-    // this adds no read of its own.
-    static std::string build_managed_set_teardown_script(
-        const std::string& ipset_save_output,
-        bool preserve_dynamic_sets);
-
-    void cleanup_saved_sets(bool preserve_dynamic_sets);
+    // Names are selected before serialization. An empty script for non-empty
+    // input means an unusual name needs the argv path rather than restore text.
+    static std::string build_set_teardown_script(
+        const std::vector<std::string>& names);
+    static void teardown_ipsets(const std::vector<std::string>& names,
+                                bool strict_cleanup = false);
+    void cleanup_saved_sets(bool preserve_dynamic_sets,
+                            bool sweep_live_state = true);
     static void cleanup_legacy_generation_chains(const char* command);
 
     // Describes a set to be created via 'ipset restore'.
@@ -335,6 +336,15 @@ private:
         const std::vector<PendingForwardUdpReject>& rules);
     static std::string build_exact_tcp_reset_rule_line(
         const FirewallExactTcpResetRule& rule);
+    static std::string build_native_forward_script(
+        bool ipv6,
+        bool chain_exists,
+        std::size_t hook_count,
+        const std::vector<FirewallNativeForwardSelector>& selectors,
+        uint32_t fwmark_mask);
+    void reconcile_native_forward_rules(
+        bool ipv6,
+        const std::vector<FirewallNativeForwardSelector>& selectors);
     static std::vector<std::string> build_exact_tcp_reset_rule_spec(
         const FirewallExactTcpResetRule& rule);
     static bool exact_tcp_reset_rules_match(
@@ -625,6 +635,10 @@ private:
     // Native-VPN source pools whose direct egress needs masquerading.
     std::vector<FirewallSourceEgressSnatSelector>
         source_egress_snat_selectors_;
+    std::vector<FirewallNativeForwardSelector> pending_native_forward_selectors_;
+    bool native_forward_requested_ = false;
+    bool native_forward_v4_created_ = false;
+    bool native_forward_v6_created_ = false;
     // Last successfully applied SNAT contract. Runtime health inspection must
     // validate the desired state, including the intentional absence of SNAT.
     bool last_applied_snat_v4_expected_ = false;

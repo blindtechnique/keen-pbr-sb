@@ -386,9 +386,13 @@ TEST_CASE("compute_test_routing resolves domain through configured system resolv
 
     CHECK(result.is_domain);
     CHECK(result.resolved_ips == std::vector<std::string>{"10.0.0.53", "2001:db8::53"});
+    CHECK(result.dns_source == "configured_resolver");
+    CHECK(result.dns_server == server.address());
     REQUIRE(result.entries.size() == 2);
     CHECK(result.entries[0].ip == "10.0.0.53");
     CHECK(result.entries[1].ip == "2001:db8::53");
+    CHECK(result.entries[0].expected_rule_index == 0U);
+    CHECK(result.entries[1].expected_rule_index == 1U);
     CHECK_FALSE(result.dns_error.has_value());
     REQUIRE(result.rule_diagnostics.size() == 2);
     const auto& ip_diagnostic = result.rule_diagnostics[0];
@@ -497,6 +501,8 @@ TEST_CASE("compute_test_routing falls back to resolv.conf when system resolver i
     const auto result = compute_test_routing(config, cache, "example.invalid");
 
     CHECK(result.is_domain);
+    CHECK(result.dns_source == "system_resolver");
+    CHECK_FALSE(result.dns_server.has_value());
     CHECK(result.resolved_ips.empty());
     REQUIRE(result.entries.size() == 1);
     CHECK(result.entries.front().ip == "(no IPs resolved)");
@@ -630,6 +636,8 @@ TEST_CASE(
     CacheManager cache(temp_dir / "cache");
     cache.ensure_dir();
     Config config = build_test_config();
+    config.fwmark = FwmarkConfig{};
+    config.fwmark->mask = "0x0FFF0000";
     ListConfig list;
     list.file = list_path.string();
     config.lists =
@@ -710,6 +718,11 @@ TEST_CASE(
     CHECK(result.entries.front().expected_outbound == "vpn");
     CHECK(result.entries.front().actual_outbound == "vpn");
     CHECK(result.entries.front().ok);
+    CHECK(result.dns_source == "literal");
+    CHECK_FALSE(result.dns_server.has_value());
+    CHECK(result.fwmark_mask == 0x0FFF0000U);
+    CHECK(result.entries.front().expected_rule_index == 0U);
+    CHECK(result.entries.front().actual_rule_index == 0U);
     const auto& fib = result.entries.front().fib;
     CHECK(fib.verdict == expected_fib_verdict);
     CHECK(std::string(routing_fib_verdict_code(fib.verdict)) ==
@@ -746,6 +759,165 @@ TEST_CASE(
     CHECK(invocation_contents.find("test kpbr4S_remote_B 203.0.113.10") !=
           std::string::npos);
     CHECK_FALSE(std::filesystem::exists(wrong_backend_log));
+    std::filesystem::remove_all(temp_dir);
+}
+
+TEST_CASE("routing metadata joins exact rule indices even when outbound tags coincide") {
+    bool default_path = false;
+    SUBCASE("config and live sets select different rules with the same outbound") {}
+    SUBCASE("default path has no invented rule index or packet mark") { default_path = true; }
+
+    const auto temp_dir = make_temp_dir();
+    const auto bin_dir = temp_dir / "bin";
+    std::filesystem::create_directories(bin_dir);
+    write_executable(bin_dir / "iptables", "#!/bin/sh\nexit 0\n");
+    write_executable(bin_dir / "ipset", default_path ? "#!/bin/sh\nexit 1\n" :
+        "#!/bin/sh\n"
+        "if [ \"$1\" = test ] && [ \"$2\" = kpbr4S_live_B ] && "
+        "[ \"$3\" = 203.0.113.10 ]; then exit 0; fi\n"
+        "exit 1\n");
+    ScopedPathOverride path_override(bin_dir.string() + ":/usr/bin:/bin");
+    CacheManager cache(temp_dir / "cache");
+    cache.ensure_dir();
+    Config config = build_test_config();
+    ListConfig planned_list;
+    planned_list.ip_cidrs = std::vector<std::string>{
+        default_path ? "192.0.2.20" : "203.0.113.10"};
+    ListConfig live_list;
+    live_list.ip_cidrs = std::vector<std::string>{"192.0.2.30"};
+    config.lists = std::map<std::string, ListConfig>{
+        {"planned", planned_list}, {"live", live_list}};
+    Outbound outbound;
+    outbound.tag = "vpn";
+    outbound.type = OutboundType::TABLE;
+    outbound.table = 100;
+    config.outbounds = std::vector<Outbound>{outbound};
+    RouteRule planned;
+    planned.outbound = "vpn";
+    planned.list = std::vector<std::string>{"planned"};
+    RouteRule disabled = planned;
+    disabled.enabled = false;
+    RouteRule live = planned;
+    live.list = std::vector<std::string>{"live"};
+    config.route = RouteConfig{};
+    config.route->rules = std::vector<RouteRule>{disabled, planned, live};
+    RuleState planned_state;
+    planned_state.rule_index = 1;
+    planned_state.outbound_tag = "vpn";
+    planned_state.action_type = RuleActionType::Mark;
+    planned_state.fwmark = 0x00030000U;
+    planned_state.set_names = {"kpbr4S_planned_B"};
+    RuleState live_state = planned_state;
+    live_state.rule_index = 2;
+    live_state.set_names = {"kpbr4S_live_B"};
+    const std::vector<RuleState> states{planned_state, live_state};
+    std::optional<FibQuery> lookup;
+    const auto result = compute_test_routing(
+        config, cache, "203.0.113.10", &states, std::nullopt,
+        FirewallBackend::iptables, [&](const FibQuery& query) {
+            lookup = query;
+            return FibAnswer{FibVerdict::resolved, "wg-test", 152U, ""};
+        });
+    REQUIRE(result.entries.size() == 1);
+    const auto& entry = result.entries.front();
+    CHECK(entry.ok); // Existing tag agreement is not a rule-identity claim.
+    REQUIRE(lookup.has_value());
+    if (default_path) {
+        CHECK(entry.expected_outbound == "(default)");
+        CHECK(entry.actual_outbound == "(default)");
+        CHECK_FALSE(entry.expected_rule_index.has_value());
+        CHECK_FALSE(entry.actual_rule_index.has_value());
+        CHECK_FALSE(lookup->fwmark.has_value());
+    } else {
+        CHECK(entry.expected_outbound == "vpn");
+        CHECK(entry.actual_outbound == "vpn");
+        CHECK(entry.expected_rule_index == 1U);
+        CHECK(entry.actual_rule_index == 2U);
+        CHECK(lookup->fwmark == live_state.fwmark);
+    }
+    std::filesystem::remove_all(temp_dir);
+}
+
+TEST_CASE("routing metadata does not claim an invalid configured DNS server was queried") {
+    const auto temp_dir = make_temp_dir();
+    CacheManager cache(temp_dir / "cache");
+    cache.ensure_dir();
+    Config config = build_test_config();
+    config.dns->system_resolver = api::SystemResolver{};
+    config.dns->system_resolver->address = "not-a-dns-address";
+    const auto result = compute_test_routing(
+        config, cache, "example.org", nullptr, std::nullopt, FirewallBackend::iptables);
+    CHECK(result.dns_source == "configured_resolver");
+    CHECK_FALSE(result.dns_server.has_value());
+    CHECK(result.resolved_ips.empty());
+    CHECK(result.dns_error.has_value());
+    REQUIRE(result.entries.size() == 1);
+    CHECK_FALSE(result.entries.front().expected_rule_index.has_value());
+    CHECK_FALSE(result.entries.front().actual_rule_index.has_value());
+    std::filesystem::remove_all(temp_dir);
+}
+
+TEST_CASE("test-routing uses the published destination family mark and leaf") {
+    const auto temp_dir = make_temp_dir();
+    const auto bin_dir = temp_dir / "bin";
+    std::filesystem::create_directories(bin_dir);
+    write_executable(bin_dir / "iptables", "#!/bin/sh\nexit 0\n");
+    ScopedPathOverride path_override(bin_dir.string() + ":/usr/bin:/bin");
+    Config config = build_test_config();
+    Outbound ipv4;
+    ipv4.tag = "ipv4-vpn";
+    ipv4.type = OutboundType::TABLE;
+    ipv4.table = 100;
+    Outbound ipv6 = ipv4;
+    ipv6.tag = "ipv6-vpn";
+    ipv6.table = 101;
+    config.outbounds = std::vector<Outbound>{ipv4, ipv6};
+    RouteRule rule;
+    rule.outbound = ipv4.tag;
+    RouteConfig route;
+    route.rules = std::vector<RouteRule>{rule};
+    config.route = route;
+    const auto marks = allocate_outbound_marks(
+        config.fwmark.value_or(FwmarkConfig{}), *config.outbounds);
+    RuleState realized;
+    realized.rule_index = 0;
+    realized.action_type = RuleActionType::Mark;
+    realized.outbound_tag = ipv4.tag;
+    realized.effective_outbound_tag = ipv4.tag;
+    realized.fwmark = marks.at(ipv4.tag);
+    realized.fwmark_ipv6 = marks.at(ipv6.tag);
+    std::string destination = "2001:db8::1";
+    std::string expected_leaf = ipv6.tag;
+    std::uint32_t expected_mark = *realized.fwmark_ipv6;
+    SUBCASE("IPv6 uses its published fallback leaf") {}
+    SUBCASE("IPv4 keeps the selected leaf") {
+        destination = "203.0.113.1";
+        expected_leaf = ipv4.tag;
+        expected_mark = realized.fwmark;
+    }
+    SUBCASE("unknown published IPv6 mark is not reported as the IPv4 leaf") {
+        realized.fwmark_ipv6 = 0x00ef0000U;
+        expected_mark = *realized.fwmark_ipv6;
+        expected_leaf = "(unknown)";
+    }
+    const std::vector<RuleState> realized_rules{realized};
+    CacheManager cache(temp_dir / "cache");
+    cache.ensure_dir();
+    unsigned queries = 0;
+    const auto result = compute_test_routing(
+        config, cache, destination, &realized_rules, std::nullopt,
+        FirewallBackend::iptables, [&](const FibQuery& query) {
+            ++queries;
+            CHECK(query.destination == destination);
+            CHECK(query.fwmark == expected_mark);
+            FibAnswer answer;
+            answer.verdict = FibVerdict::resolved;
+            return answer;
+        });
+    REQUIRE(result.entries.size() == 1);
+    CHECK(queries == 1);
+    CHECK(result.entries.front().actual_outbound == expected_leaf);
+    CHECK(result.entries.front().fib.fwmark == expected_mark);
     std::filesystem::remove_all(temp_dir);
 }
 
@@ -1104,6 +1276,8 @@ TEST_CASE("test-routing reports packet selectors as insufficient context") {
     const auto& entry = result.entries.front();
     CHECK(entry.expected_outbound == "(unknown)");
     CHECK(entry.actual_outbound == "(unknown)");
+    CHECK_FALSE(entry.expected_rule_index.has_value());
+    CHECK_FALSE(entry.actual_rule_index.has_value());
     CHECK_FALSE(entry.ok);
     CHECK(entry.evaluation ==
           RoutingMatchEvaluation::InsufficientContext);

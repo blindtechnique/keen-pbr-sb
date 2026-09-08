@@ -9,6 +9,8 @@
 // from after the fact.
 
 #include <cstddef>
+#include <atomic>
+#include <ctime>
 #include <fstream>
 #include <mutex>
 #include <string>
@@ -30,14 +32,20 @@ public:
     const std::string& error() const { return error_; }
 
     void write(const std::string& line);
+    // The new cap is enforced by the next write, without reopening the sink.
+    void set_max_bytes(std::size_t max_bytes);
+    void set_size_limit_enabled(bool enabled);
+    void maintain_age(std::time_t cutoff);
 
 private:
-    void rotate_if_needed();
+    bool rotate();
 
     std::string path_;
-    std::size_t max_bytes_;
+    std::atomic<std::size_t> max_bytes_;
+    std::atomic<bool> size_limit_enabled_{true};
     std::ofstream stream_;
     std::size_t written_bytes_{0};
+    std::size_t previous_limit_{0};
     bool ok_{false};
     std::string error_;
     std::mutex mutex_;
@@ -53,5 +61,18 @@ bool install_file_log_sink(const std::string& path, std::string* error_out = nul
 // problem that only shows up at boot.
 void set_file_logging_enabled(bool enabled);
 bool file_logging_enabled();
+
+inline constexpr std::size_t kMinLogFileBytes = 64U * 1024U;
+inline constexpr std::size_t kMaxLogFileBytes = 16U * 1024U * 1024U;
+bool valid_log_file_max_bytes(std::size_t value);
+void set_file_logging_max_bytes(std::size_t max_bytes);
+std::size_t file_logging_max_bytes();
+inline constexpr unsigned kDefaultLogMaxAgeDays = 7U;
+inline constexpr unsigned kMaximumLogAgeDays = 365U;
+void set_file_log_retention(bool size_enabled, bool age_enabled, unsigned max_age_days);
+bool file_log_size_limit_enabled();
+bool file_log_age_limit_enabled();
+unsigned file_log_max_age_days();
+void maintain_file_logs() noexcept;
 
 } // namespace keen_pbr3

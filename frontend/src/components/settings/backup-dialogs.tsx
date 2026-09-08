@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react"
+import { useQueryClient } from "@tanstack/react-query"
 import { DownloadIcon, RotateCcwIcon, UploadIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
+import { OperationErrorMessage } from "@/components/shared/operation-error-message"
+import { refreshAfterBackupRestore } from "@/api/backup-refresh"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import {
@@ -18,6 +21,7 @@ import {
   createBackup,
   downloadBackup,
   getRollbackAvailability,
+  InvalidBackupBundleError,
   readBackupFile,
   restoreBackup,
   rollbackBackup,
@@ -147,9 +151,10 @@ export function BackupPanel({ onComplete }: BackupPanelProps) {
       onComplete?.()
     } catch (error) {
       toast.error(
-        error instanceof Error
-          ? error.message
-          : t("pages.settings.backup.createFailed")
+        <OperationErrorMessage
+          error={error}
+          fallbackSummary={t("pages.settings.backup.createFailed")}
+        />
       )
     } finally {
       setPending(false)
@@ -178,6 +183,11 @@ export function BackupPanel({ onComplete }: BackupPanelProps) {
             />
             <span className="text-sm font-medium">
               {t(choiceLabelKey(choice.key))}
+              {choice.key === "vpn" ? (
+                <span className="mt-1 block text-xs font-normal text-muted-foreground">
+                  {t("pages.settings.backup.vpnHint")}
+                </span>
+              ) : null}
             </span>
           </label>
         ))}
@@ -205,19 +215,49 @@ type PendingRestoreAction =
   | { kind: "restore"; bundle: BackupBundle; filename: string }
   | { kind: "rollback" }
 
+export function RestoreSubscriptionsSummary({
+  bundle,
+}: {
+  bundle: BackupBundle
+}) {
+  const { t } = useTranslation()
+  const records = bundle.data.subscriptions
+  if (records === undefined && !Object.hasOwn(bundle.data, "transports")) {
+    return null
+  }
+
+  // Only a count leaves the archive boundary. Names, URLs and binding payloads
+  // may contain provider credentials and must never enter the preview.
+  return (
+    <p className="mt-1 text-sm text-muted-foreground">
+      {records === undefined
+        ? t("pages.settings.backup.restoreSubscriptionsLegacy")
+        : records.length === 0
+          ? t("pages.settings.backup.restoreSubscriptionsEmpty")
+          : t("pages.settings.backup.restoreSubscriptions", {
+              count: records.length,
+            })}
+    </p>
+  )
+}
+
 export function RestorePanel({ onBusyChange }: RestorePanelProps) {
   const { t } = useTranslation()
+  const queryClient = useQueryClient()
   const inputRef = useRef<HTMLInputElement>(null)
   const [pending, setPending] = useState(false)
   const [rollbackAvailable, setRollbackAvailable] = useState(false)
+  const [rollbackError, setRollbackError] = useState<unknown>(null)
   const [pendingAction, setPendingAction] =
     useState<PendingRestoreAction | null>(null)
 
   const refreshRollback = useCallback(async () => {
     try {
       setRollbackAvailable(await getRollbackAvailability())
-    } catch {
+      setRollbackError(null)
+    } catch (error) {
       setRollbackAvailable(false)
+      setRollbackError(error)
     }
   }, [])
 
@@ -239,9 +279,15 @@ export function RestorePanel({ onBusyChange }: RestorePanelProps) {
       })
     } catch (error) {
       toast.error(
-        error instanceof Error
-          ? error.message
-          : t("pages.settings.backup.readFailed")
+        error instanceof InvalidBackupBundleError ||
+          error instanceof SyntaxError ? (
+          t("pages.settings.backup.readFailed")
+        ) : (
+          <OperationErrorMessage
+            error={error}
+            fallbackSummary={t("pages.settings.backup.readFailed")}
+          />
+        )
       )
     } finally {
       if (inputRef.current) inputRef.current.value = ""
@@ -254,18 +300,32 @@ export function RestorePanel({ onBusyChange }: RestorePanelProps) {
     try {
       if (pendingAction.kind === "restore") {
         await restoreBackup(pendingAction.bundle)
-        toast.success(t("pages.settings.backup.restored"))
       } else {
         await rollbackBackup()
-        toast.success(t("pages.settings.backup.rolledBack"))
       }
+      const completedKind = pendingAction.kind
       setPendingAction(null)
+      try {
+        await refreshAfterBackupRestore(queryClient)
+        toast.success(
+          t(
+            completedKind === "restore"
+              ? "pages.settings.backup.restored"
+              : "pages.settings.backup.rolledBack"
+          )
+        )
+      } catch {
+        // The restoration itself succeeded. Never invite replaying it merely
+        // because the independent display refresh failed.
+        toast.warning(t("pages.settings.backup.restoredRefreshFailed"))
+      }
       await refreshRollback()
     } catch (error) {
       toast.error(
-        error instanceof Error
-          ? error.message
-          : t("pages.settings.backup.actionFailed")
+        <OperationErrorMessage
+          error={error}
+          fallbackSummary={t("pages.settings.backup.actionFailed")}
+        />
       )
     } finally {
       setPending(false)
@@ -277,6 +337,17 @@ export function RestorePanel({ onBusyChange }: RestorePanelProps) {
       <p className="text-sm text-muted-foreground">
         {t("pages.settings.backup.validationNote")}
       </p>
+      {rollbackError ? (
+        <div
+          className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm"
+          role="alert"
+        >
+          <OperationErrorMessage
+            error={rollbackError}
+            fallbackSummary={t("pages.settings.backup.rollbackCheckFailed")}
+          />
+        </div>
+      ) : null}
       {pendingAction ? (
         <div className="space-y-3 rounded-md border border-destructive/40 bg-destructive/5 p-4">
           <div>
@@ -292,6 +363,9 @@ export function RestorePanel({ onBusyChange }: RestorePanelProps) {
                 ? t("pages.settings.backup.restoreHint")
                 : t("pages.settings.backup.rollbackHint")}
             </p>
+            {pendingAction.kind === "restore" ? (
+              <RestoreSubscriptionsSummary bundle={pendingAction.bundle} />
+            ) : null}
           </div>
           <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
             <Button

@@ -473,7 +473,7 @@ grep -Fq 'reapply_netfilter_runtime SIGUSR2' "$init_script"
 # while still refusing to replace a binary which is actually executing.
 prerm_root="$work/prerm"
 mkdir -p "$prerm_root/init.d" "$prerm_root/bin"
-sed "s#/opt/etc/init.d#$prerm_root/init.d#g" "$prerm_script" > \
+sed "s#/opt/etc/init.d#$prerm_root/init.d#g; s#/opt/usr/lib/keen-pbr#$prerm_root/lib#g" "$prerm_script" > \
     "$prerm_root/prerm"
 cat > "$prerm_root/init.d/S80keen-pbr" <<'EOF'
 #!/bin/sh

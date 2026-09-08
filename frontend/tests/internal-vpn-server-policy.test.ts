@@ -13,6 +13,60 @@ import {
 } from "../src/lib/internal-vpn-server-policy"
 
 describe("internal VPN server policy", () => {
+  test("keeps extensions on the exact stable server during policy edits and removal", () => {
+    const original = {
+      ndms_id: "Wireguard5",
+      interface: "nwg5",
+      process_clients: true,
+      future_server: { identity: "first" },
+    }
+    const sibling = {
+      ndms_id: "Wireguard9",
+      interface: "nwg9",
+      process_clients: true,
+      future_server: { identity: "second" },
+    }
+    const baseline = [original, sibling]
+    const updated = updateInternalVpnServerOverride({
+      ndmsId: "Wireguard5",
+      interfaceName: "nwg9",
+      processClients: false,
+      overrides: baseline,
+      baselineOverrides: baseline,
+    })!
+    expect(updated.find((row) => row.ndms_id === "Wireguard5")).toEqual({
+      ...original,
+      process_clients: false,
+    })
+    expect(updated.find((row) => row.ndms_id === "Wireguard9")).toEqual(sibling)
+    const reconciled = reconcileInternalVpnServerOverrides({
+      overrides: updated,
+      baselineOverrides: baseline,
+    })!
+    expect(reconciled).toEqual(updated)
+    expect(
+      removeInternalVpnServerOverride({
+        ndmsId: "Wireguard5",
+        interfaceName: "nwg9",
+        overrides: reconciled,
+        baselineOverrides: baseline,
+      })
+    ).toEqual([sibling])
+    expect(original.process_clients).toBe(true)
+  })
+
+  test("normalizes known server selectors without discarding unknown values", () => {
+    const row = {
+      ndms_id: " ",
+      interface: " nwg1 ",
+      process_clients: false,
+      future: [null, 3],
+    }
+    expect(normalizeInternalVpnServerOverrides([row])).toEqual([
+      { interface: "nwg1", process_clients: false, future: [null, 3] },
+    ])
+  })
+
   test("uses only NDMS servers with a resolved kernel interface", () => {
     const options = buildInternalVpnServerOptions({
       nativeInterfaces: [
@@ -814,8 +868,7 @@ function nativeInterface({
       kind,
       role,
       internal_vpn_server_candidate: candidate,
-      internal_vpn_server_role_confirmation_required:
-        requiresRoleConfirmation,
+      internal_vpn_server_role_confirmation_required: requiresRoleConfirmation,
       owner: "keenetic",
       connected: true,
       link: true,

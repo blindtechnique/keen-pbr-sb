@@ -2,6 +2,8 @@
 
 #include "../cache/cache_manager.hpp"
 #include "../config/config.hpp"
+#include "../config/route_failure_policy.hpp"
+#include "../config/routing_state.hpp"
 #include "../dns/keenetic_dns.hpp"
 #include "../keenetic/internal_vpn_runtime_target.hpp"
 #include "../lists/list_set_usage.hpp"
@@ -98,7 +100,9 @@ StagedRuntimeFirewall stage_runtime_firewall(
     std::shared_ptr<const ListCacheGenerationSnapshot>
         list_cache_snapshot = nullptr,
     bool force_clear_dynamic_sets = false,
-    const PreviousRuntimeFirewall& previous = {});
+    const PreviousRuntimeFirewall& previous = {},
+    const RouteFailureHealthSnapshot* failure_health = nullptr,
+    const OutboundFamilyReachabilitySnapshot* family_reachability = nullptr);
 
 // Worker-safe staging entry point. The list generation and its size limit are
 // immutable values captured on the control loop; no CacheManager reference is
@@ -121,7 +125,9 @@ StagedRuntimeFirewall stage_runtime_firewall_from_snapshot(
     const std::optional<KeeneticDnsSnapshot>& keenetic_dns_snapshot =
         std::nullopt,
     bool force_clear_dynamic_sets = false,
-    const PreviousRuntimeFirewall& previous = {});
+    const PreviousRuntimeFirewall& previous = {},
+    const RouteFailureHealthSnapshot* failure_health = nullptr,
+    const OutboundFamilyReachabilitySnapshot* family_reachability = nullptr);
 
 // Hand the staged transaction to the kernel. This is a blocking publication
 // step; staging can also block while the backend prepares the transaction.
@@ -167,6 +173,17 @@ std::vector<RuleState> apply_runtime_firewall(
     std::shared_ptr<const ListCacheGenerationSnapshot>
         list_cache_snapshot = nullptr,
     bool force_clear_dynamic_sets = false);
+
+// Permit OpenConnect clients to reach every interface referenced by enabled
+// routing rules, including all nested group members and fallback marks.
+// Only enabled OpenConnect processing participates. With the checkbox off,
+// clients bypass keen-pbr policy routing and use their ordinary WAN path.
+std::vector<FirewallNativeForwardSelector>
+select_openconnect_forward_selectors(
+    const Config& config,
+    const OutboundMarkMap& outbound_marks,
+    const std::vector<InternalVpnRuntimeTarget>& internal_vpn_targets,
+    bool ipv6_enabled);
 
 // Build the source-scoped direct-egress SNAT contract for Keenetic's SSTP,
 // OpenConnect, L2TP and IKEv1 servers. Their clients need this on the ordinary

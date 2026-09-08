@@ -25,4 +25,7 @@ export interface DnsServer {
   address?: string;
   /** Outbound tag to use when querying this DNS server. */
   detour?: string;
+  /** Optional direct domain suffix bindings, without list references. Each domain includes its subdomains. Matching is case-insensitive; a leading "*." and a trailing dot are accepted. Names must be DNS-compatible ASCII (use punycode for international names). Direct bindings override list-based DNS rules and inherited Keenetic DNS policy for the same suffix and its subdomains. Among direct bindings, the most specific suffix wins. Binding the same suffix to several servers supplies multiple upstreams. Global fallback and traffic routing rules are not changed.
+   */
+  domains?: string[];
 }

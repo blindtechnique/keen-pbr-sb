@@ -43,8 +43,9 @@ address=/my.keenetic.net/my.netcraze.net/2001:2:7847:1251:feee:ed78:4712:5180
 
 # --- Upstream Servers ---
 
-# Configure upstream DNS servers in keen-pbr itself and in:
+# Configure upstream DNS servers in keen-pbr. Direct fallback DNS is kept in:
 #   /opt/etc/keen-pbr/dnsmasq-fallback.conf
+# It follows successful resolver activations unless marked as a manual override.
 # The fallback file is used when keen-pbr is stopped or disabled.
 
 # BEGIN keen-pbr managed block

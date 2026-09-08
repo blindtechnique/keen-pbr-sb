@@ -2115,38 +2115,117 @@ CatalogSetupPlan plan_catalog_setup(
         auto route = candidate.route.value_or(RouteConfig{});
         auto rules = route.rules.value_or(std::vector<RouteRule>{});
         auto ids = occupied_route_ids(active_config);
-        const auto base_insertion_index =
-            catalog_route_insertion_index(
-                candidate, rules, selected_action);
+        std::set<std::string> pending(
+            missing_route_list_ids.begin(), missing_route_list_ids.end());
+        const auto name_for = [&](const std::vector<std::string>& list_ids) {
+            std::vector<ParsedPreset> names;
+            for (const auto& id : list_ids) names.push_back(preset_for_list_id(id));
+            return generated_display_name(intent.route_display_name, names);
+        };
+        const auto normalize_failure_policy = [&](RouteRule& rule) {
+            const auto* target = find_outbound(candidate, rule.outbound);
+            if (target != nullptr && target->type != OutboundType::INTERFACE &&
+                target->type != OutboundType::URLTEST) {
+                rule.failure_policy.reset();
+                rule.fallback_outbound.reset();
+            } else if (rule.failure_policy == api::FailurePolicy::FALLBACK &&
+                       rule.fallback_outbound == rule.outbound) {
+                // The selected primary is no longer an independent fallback.
+                // Do not silently choose another VPN or allow a direct leak.
+                rule.failure_policy = api::FailurePolicy::BLOCK;
+                rule.fallback_outbound.reset();
+            }
+        };
 
-        std::vector<ParsedPreset> route_presets;
-        route_presets.reserve(missing_route_list_ids.size());
-        for (const auto& list_id : missing_route_list_ids) {
-            route_presets.push_back(preset_for_list_id(list_id));
-        }
-        const auto route_display_name = generated_display_name(
-            intent.route_display_name, route_presets);
-
-        RouteRule rule;
-        rule.id = unique_technical_id(
-            rule_seed(missing_route_list_ids), "rule", ids);
-        rule.display_name = route_display_name;
-        rule.enabled = true;
-        rule.list = missing_route_list_ids;
-        rule.outbound = *route_outbound;
-
-        rules.insert(
-            rules.begin() +
-                static_cast<std::ptrdiff_t>(base_insertion_index),
-            rule);
-        plan.summary.route_rules.push_back(
-            CatalogRouteRulePlanSummary{
-                *rule.id,
-                route_display_name,
+        std::vector<RouteRule> updated;
+        updated.reserve(rules.size());
+        for (auto rule : rules) {
+            std::vector<std::string> affected;
+            std::vector<std::string> remaining;
+            for (const auto& id : route_rule_lists(rule)) {
+                if (pending.count(id) != 0U &&
+                    route_rule_matches_whole_list(rule, id)) {
+                    affected.push_back(id);
+                } else {
+                    remaining.push_back(id);
+                }
+            }
+            if (affected.empty()) {
+                updated.push_back(std::move(rule));
+                continue;
+            }
+            for (const auto& id : affected) pending.erase(id);
+            auto replacement = rule;
+            replacement.list = affected;
+            replacement.outbound = *route_outbound;
+            normalize_failure_policy(replacement);
+            if (!remaining.empty()) {
+                replacement.id = unique_technical_id(rule_seed(affected), "rule", ids);
+                replacement.display_name = name_for(affected);
+            } else if (!replacement.id.has_value()) {
+                replacement.id = unique_technical_id(rule_seed(affected), "rule", ids);
+            }
+            plan.summary.route_rules.push_back({
+                *replacement.id,
+                replacement.display_name.value_or(name_for(affected)),
                 *route_outbound,
-                base_insertion_index,
+                updated.size(),
                 intent.mode == CatalogSetupMode::block,
             });
+            // Retarget at the first broad match, not after the old policy.
+            // A mixed rule keeps its unrelated lists and identity immediately
+            // after the split. Selector-specific exceptions never move.
+            updated.push_back(std::move(replacement));
+            if (!remaining.empty()) {
+                rule.list = std::move(remaining);
+                updated.push_back(std::move(rule));
+            }
+        }
+        rules = std::move(updated);
+        std::vector<std::string> new_route_list_ids;
+        for (const auto& id : missing_route_list_ids) {
+            if (pending.count(id) != 0U) new_route_list_ids.push_back(id);
+        }
+        if (!new_route_list_ids.empty()) {
+            const auto base_insertion_index =
+                catalog_route_insertion_index(
+                    candidate, rules, selected_action);
+
+            std::vector<ParsedPreset> route_presets;
+            route_presets.reserve(new_route_list_ids.size());
+            for (const auto& list_id : new_route_list_ids) {
+                route_presets.push_back(preset_for_list_id(list_id));
+            }
+            const auto route_display_name = generated_display_name(
+                intent.route_display_name, route_presets);
+
+            RouteRule rule;
+            rule.id = unique_technical_id(
+                rule_seed(new_route_list_ids), "rule", ids);
+            rule.display_name = route_display_name;
+            rule.enabled = true;
+            rule.list = new_route_list_ids;
+            rule.outbound = *route_outbound;
+
+            rules.insert(
+                rules.begin() +
+                    static_cast<std::ptrdiff_t>(base_insertion_index),
+                rule);
+            plan.summary.route_rules.push_back(
+                CatalogRouteRulePlanSummary{
+                    *rule.id,
+                    route_display_name,
+                    *route_outbound,
+                    base_insertion_index,
+                    intent.mode == CatalogSetupMode::block,
+                });
+        }
+        for (auto& summary : plan.summary.route_rules) {
+            const auto found = std::find_if(rules.begin(), rules.end(), [&](const RouteRule& rule) {
+                return rule.id == summary.technical_id;
+            });
+            summary.insertion_index = static_cast<std::size_t>(found - rules.begin());
+        }
         route.rules = std::move(rules);
         candidate.route = std::move(route);
         plan.summary.route_rule =
@@ -2157,31 +2236,83 @@ CatalogSetupPlan plan_catalog_setup(
         auto dns = candidate.dns.value_or(DnsConfig{});
         auto rules = dns.rules.value_or(std::vector<DnsRule>{});
         auto ids = occupied_dns_rule_ids(active_config);
-        std::vector<ParsedPreset> dns_presets;
-        dns_presets.reserve(missing_dns_list_ids.size());
-        for (const auto& list_id : missing_dns_list_ids) {
-            dns_presets.push_back(preset_for_list_id(list_id));
-        }
-        const auto dns_display_name = generated_display_name(
-            intent.dns_display_name, dns_presets);
-
-        DnsRule rule;
-        rule.id = unique_technical_id(
-            rule_seed(missing_dns_list_ids), "dns_rule", ids);
-        rule.display_name = dns_display_name;
-        rule.enabled = true;
-        rule.list = missing_dns_list_ids;
-        rule.server = *dns_server;
-        rule.allow_domain_rebinding = false;
-        const auto insertion_index = rules.size();
-        rules.push_back(rule);
-        plan.summary.dns_rules.push_back(
-            CatalogDnsRulePlanSummary{
-                *rule.id,
-                dns_display_name,
+        std::set<std::string> pending(
+            missing_dns_list_ids.begin(), missing_dns_list_ids.end());
+        const auto name_for = [&](const std::vector<std::string>& list_ids) {
+            std::vector<ParsedPreset> names;
+            for (const auto& id : list_ids) names.push_back(preset_for_list_id(id));
+            return generated_display_name(intent.dns_display_name, names);
+        };
+        std::vector<DnsRule> updated;
+        updated.reserve(rules.size());
+        for (auto rule : rules) {
+            std::vector<std::string> affected;
+            std::vector<std::string> remaining;
+            for (const auto& id : rule.list) {
+                if (dns_rule_enabled(rule) && pending.count(id) != 0U) {
+                    affected.push_back(id);
+                } else {
+                    remaining.push_back(id);
+                }
+            }
+            if (affected.empty()) {
+                updated.push_back(std::move(rule));
+                continue;
+            }
+            for (const auto& id : affected) pending.erase(id);
+            auto replacement = rule;
+            replacement.list = affected;
+            replacement.server = *dns_server;
+            if (!remaining.empty()) {
+                replacement.id = unique_technical_id(rule_seed(affected), "dns_rule", ids);
+                replacement.display_name = name_for(affected);
+            } else if (!replacement.id.has_value()) {
+                replacement.id = unique_technical_id(rule_seed(affected), "dns_rule", ids);
+            }
+            plan.summary.dns_rules.push_back({
+                *replacement.id,
+                replacement.display_name.value_or(name_for(affected)),
                 *dns_server,
-                insertion_index,
+                updated.size(),
             });
+            updated.push_back(std::move(replacement));
+            if (!remaining.empty()) {
+                rule.list = std::move(remaining);
+                updated.push_back(std::move(rule));
+            }
+        }
+        rules = std::move(updated);
+        std::vector<std::string> new_dns_list_ids;
+        for (const auto& id : missing_dns_list_ids) {
+            if (pending.count(id) != 0U) new_dns_list_ids.push_back(id);
+        }
+        if (!new_dns_list_ids.empty()) {
+            std::vector<ParsedPreset> dns_presets;
+            dns_presets.reserve(new_dns_list_ids.size());
+            for (const auto& list_id : new_dns_list_ids) {
+                dns_presets.push_back(preset_for_list_id(list_id));
+            }
+            const auto dns_display_name = generated_display_name(
+                intent.dns_display_name, dns_presets);
+
+            DnsRule rule;
+            rule.id = unique_technical_id(
+                rule_seed(new_dns_list_ids), "dns_rule", ids);
+            rule.display_name = dns_display_name;
+            rule.enabled = true;
+            rule.list = new_dns_list_ids;
+            rule.server = *dns_server;
+            rule.allow_domain_rebinding = false;
+            const auto insertion_index = rules.size();
+            rules.push_back(rule);
+            plan.summary.dns_rules.push_back(
+                CatalogDnsRulePlanSummary{
+                    *rule.id,
+                    dns_display_name,
+                    *dns_server,
+                    insertion_index,
+                });
+        }
         dns.rules = std::move(rules);
         candidate.dns = std::move(dns);
         plan.summary.dns_rule =

@@ -522,7 +522,7 @@ void Daemon::dispatch_owned_conntrack_cleanup_retry(
                 "invalid owned conntrack cleanup target");
         }
         auto admitted = runtime_mutation_admission_.try_acquire(
-            "owned-conntrack-cleanup-point");
+            "owned-conntrack-cleanup-point", RuntimeMutationAdmission::Kind::Background);
         if (!admitted.has_value()) {
             throw TransientFirewallError(
                 "runtime mutation owner is busy");
@@ -599,23 +599,25 @@ void Daemon::setup_static_routing() {
     log_ipv6_support_decision_once(ipv6_decision);
     const auto main_table_routes = netlink_.dump_routes_in_table(254);
     OutboundReachabilitySnapshot reachability;
+    OutboundFamilyReachabilitySnapshot family_reachability;
     for (const auto& outbound :
          active_config_snapshot_->config.outbounds.value_or(std::vector<Outbound>{})) {
         if (outbound.type != OutboundType::INTERFACE ||
             reachability.count(outbound.tag) != 0U) {
             continue;
         }
-        reachability.emplace(
-            outbound.tag,
-            is_interface_outbound_reachable(
-                outbound, main_table_routes));
+        const auto families = interface_outbound_family_reachability(
+            outbound, main_table_routes);
+        reachability.emplace(outbound.tag, families.any(ipv6_decision.enabled));
+        family_reachability.emplace(outbound.tag, families);
     }
     const auto plan = plan_routing_state(
         active_config_snapshot_->config,
         active_config_snapshot_->outbound_marks,
         reachability,
         &firewall_state_.get_urltest_selections(),
-        ipv6_decision.enabled);
+        ipv6_decision.enabled,
+        &family_reachability);
     const auto inventory =
         routing_operation_owner_.populate_initial_generation(
             plan.routes, plan.rules);
@@ -628,22 +630,25 @@ void Daemon::reconcile_static_routing(RouteReconcileMode mode) {
     log_ipv6_support_decision_once(ipv6_decision);
     const auto main_table_routes = netlink_.dump_routes_in_table(254);
     OutboundReachabilitySnapshot reachability;
+    OutboundFamilyReachabilitySnapshot family_reachability;
     for (const auto& outbound :
          active_config_snapshot_->config.outbounds.value_or(std::vector<Outbound>{})) {
         if (outbound.type != OutboundType::INTERFACE ||
             reachability.count(outbound.tag) != 0U) {
             continue;
         }
-        reachability.emplace(
-            outbound.tag,
-            is_interface_outbound_reachable(outbound, main_table_routes));
+        const auto families = interface_outbound_family_reachability(
+            outbound, main_table_routes);
+        reachability.emplace(outbound.tag, families.any(ipv6_decision.enabled));
+        family_reachability.emplace(outbound.tag, families);
     }
     const auto plan = plan_routing_state(
         active_config_snapshot_->config,
         active_config_snapshot_->outbound_marks,
         reachability,
         &firewall_state_.get_urltest_selections(),
-        ipv6_decision.enabled);
+        ipv6_decision.enabled,
+        &family_reachability);
 
     reconcile_static_routing(plan, mode);
 }
@@ -890,7 +895,7 @@ void Daemon::dispatch_meta_udp443_activation_cleanup(
             throw std::runtime_error("invalid Meta cleanup target");
         }
         auto admitted = runtime_mutation_admission_.try_acquire(
-            "meta-udp443-cleanup-point");
+            "meta-udp443-cleanup-point", RuntimeMutationAdmission::Kind::Background);
         if (!admitted.has_value()) {
             throw TransientFirewallError(
                 "runtime mutation owner is busy");
@@ -1152,8 +1157,8 @@ void Daemon::apply_firewall(
     }
 
     // RulesOnly reuses the live sets, which is only true to do while the
-    // lists those sets were loaded from are byte-for-byte the ones this
-    // refresh would have streamed. Compare digests, not assumptions: a
+    // lists those sets were loaded from have the same source identity and
+    // bytes this refresh would stream. Compare fingerprints: a
     // refresh that races a list download must stream, and this is where it
     // finds out. Downgrading here is silent by design - it is the ordinary
     // path, not an error.
@@ -1170,6 +1175,25 @@ void Daemon::apply_firewall(
         effective_mode = FirewallApplyMode::PreserveSets;
     }
 
+    auto failure_health = capture_route_failure_health(
+        active_config_snapshot_->config, active_config_snapshot_->outbound_marks,
+        firewall_state_.get_urltest_selections());
+    const auto main_routes = netlink_.dump_routes_in_table(254);
+    const bool ipv6_enabled = !active_config_snapshot_->config.daemon ||
+        active_config_snapshot_->config.daemon->ipv6_enabled.value_or(true);
+    OutboundFamilyReachabilitySnapshot family_reachability;
+    OutboundReachabilitySnapshot reachability;
+    for (const auto& outbound : active_config_snapshot_->config.outbounds.value_or(
+             std::vector<Outbound>{})) {
+        if (outbound.type == OutboundType::INTERFACE) {
+            const auto families = interface_outbound_family_reachability(outbound, main_routes);
+            family_reachability.emplace(outbound.tag, families);
+            reachability.emplace(outbound.tag, families.any(ipv6_enabled));
+        }
+    }
+    if (route_failure_policies_enabled(active_config_snapshot_->config)) {
+        merge_route_failure_link_health(failure_health, reachability);
+    }
     const auto stage_with = [&](FirewallApplyMode stage_mode) {
         PreviousRuntimeFirewall previous;
         if (stage_mode == FirewallApplyMode::RulesOnly) {
@@ -1191,7 +1215,8 @@ void Daemon::apply_firewall(
             active_keenetic_dns_.snapshot,
             list_cache_snapshot,
             force_clear_dynamic_sets,
-            previous);
+            previous,
+            &failure_health, &family_reachability);
     };
     // One fallback, at most: a RulesOnly preflight that fails has touched
     // nothing, so restaging with PreserveSets is the same transaction the
@@ -1733,7 +1758,7 @@ bool Daemon::handle_urltest_selection_change(
         }
 
         auto runtime_mutation = runtime_mutation_admission_.try_acquire(
-            "urltest-selection-change");
+            "urltest-selection-change", RuntimeMutationAdmission::Kind::Background);
         if (!runtime_mutation.has_value()) {
             const auto active = runtime_mutation_admission_.active();
             log.verbose(
@@ -1824,7 +1849,11 @@ bool Daemon::handle_urltest_selection_change(
                 change.urltest_tag);
             return false;
         }
-        return true;
+        // The terminal is posted back to this control loop, never invoked
+        // inline by start_immediate_preowned. Keep this probe generation until
+        // that terminal has published the candidate or resolved its rollback.
+        return urltest_manager_->defer_selection_completion(
+            change.urltest_tag, change.probe_generation);
     } catch (const std::exception& error) {
         try {
             Logger::instance().error(
@@ -1836,6 +1865,78 @@ bool Daemon::handle_urltest_selection_change(
         return false;
     } catch (...) {
         return false;
+    }
+}
+
+RouteFailureHealthSnapshot Daemon::capture_route_failure_health(
+    const Config& config,
+    const OutboundMarkMap& marks,
+    const std::map<std::string, std::string>& selections) const {
+    RouteFailureHealthSnapshot health;
+    if (!route_failure_policies_enabled(config)) return health;
+    for (const auto& target : collect_interface_probe_targets(config, marks)) {
+        const auto result = interface_probe_.result_for(target);
+        if (result) {
+            health[target.tag] = route_failure_probe_health(
+                result->attributed, result->success);
+        }
+    }
+    if (!urltest_manager_) return health;
+    const auto configured_outbounds = config.outbounds.value_or(std::vector<Outbound>{});
+    for (const auto& outbound : configured_outbounds) {
+        if (outbound.type != OutboundType::URLTEST) continue;
+        const auto state = urltest_manager_->get_state(outbound.tag);
+        if (!state || route_failure_group_children(state->config) !=
+                          route_failure_group_children(outbound)) continue;
+        const auto selected = selections.find(outbound.tag);
+        if (selected != selections.end() && !selected->second.empty()) {
+            const auto child = std::find_if(configured_outbounds.begin(), configured_outbounds.end(),
+                [&selected](const Outbound& candidate) { return candidate.tag == selected->second; });
+            const auto bound = state->direct_child_interfaces.find(selected->second);
+            if (child == configured_outbounds.end() || child->type != OutboundType::INTERFACE ||
+                !child->interface || child->interface->empty() ||
+                bound == state->direct_child_interfaces.end() || bound->second != *child->interface) {
+                continue;
+            }
+            const auto result = state->last_results.find(selected->second);
+            if (result != state->last_results.end()) {
+                // This is the existing selector's bound direct-child result,
+                // not an independently timed InterfaceProbe observation.
+                health[outbound.tag] = route_failure_probe_health(
+                    /*attributed=*/true, result->second.success);
+            }
+            continue;
+        }
+        // All children use the selector's same HTTP endpoint. Even if all
+        // requests fail, this does not prove all transports unavailable. The
+        // pure resolver may still use independent real link/route absence.
+    }
+    return health;
+}
+
+void Daemon::refresh_route_failure_policy_after_probe(
+    const RouteFailureHealthSnapshot& previous_health) {
+    const auto& config = active_config_snapshot_->config;
+    if (!routing_runtime_active() || !route_failure_policies_enabled(config)) return;
+    const auto& selections = firewall_state_.get_urltest_selections();
+    const auto current_health = capture_route_failure_health(
+        config, active_config_snapshot_->outbound_marks, selections);
+    if (previous_health == current_health) return;
+    const auto outbounds = config.outbounds.value_or(std::vector<Outbound>{});
+    for (const auto& rule : *config.route->rules) {
+        if (!route_rule_enabled(rule)) continue;
+        const auto previous = select_route_failure_target(
+            rule, outbounds, &selections, &previous_health);
+        const auto current = select_route_failure_target(
+            rule, outbounds, &selections, &current_health);
+        if (previous.drop != current.drop ||
+            previous.outbound_tag != current.outbound_tag) {
+            // Reuse the existing coalesced runtime refresh only for an actual
+            // policy outcome change, not each healthy probe or latency update.
+            (void)refresh_iproute_and_firewall_runtime(
+                0U, {}, /*schedule_catalog_refresh=*/false);
+            return;
+        }
     }
 }
 
@@ -1858,6 +1959,9 @@ bool Daemon::commit_urltest_probe_results(
                                          probe_generation);
                 return;
             }
+            const auto previous_failure_health = capture_route_failure_health(
+                active_config_snapshot_->config, active_config_snapshot_->outbound_marks,
+                firewall_state_.get_urltest_selections());
             const bool selection_changed =
                 urltest_manager_->commit_probe_results(urltest_tag,
                                                        probe_generation,
@@ -1867,6 +1971,7 @@ bool Daemon::commit_urltest_probe_results(
             // manager has committed or restored its cursor and cleared that
             // ownership, for one coherent runtime snapshot.
             (void)selection_changed;
+            refresh_route_failure_policy_after_probe(previous_failure_health);
             publish_runtime_state();
         },
         "urltest-commit:" + urltest_tag);
@@ -2017,9 +2122,14 @@ bool Daemon::start_targeted_interface_probe(const std::string& tag) noexcept {
                                         std::vector<Outbound>{}),
                                     {target.tag});
                             }
+                            const auto previous_failure_health = capture_route_failure_health(
+                                active_config_snapshot_->config,
+                                active_config_snapshot_->outbound_marks,
+                                firewall_state_.get_urltest_selections());
                             const bool transitioned =
                                 interface_probe_.commit_observation(
                                     observation);
+                            refresh_route_failure_policy_after_probe(previous_failure_health);
                             if (urltest_manager_ && transitioned) {
                                 for (const auto& urltest_tag :
                                      affected_urltests) {
@@ -2231,9 +2341,14 @@ void Daemon::start_interface_probe_round_impl(
                                                 std::vector<Outbound>{}),
                                             {target.tag});
                                 }
+                                const auto previous_failure_health = capture_route_failure_health(
+                                    active_config_snapshot_->config,
+                                    active_config_snapshot_->outbound_marks,
+                                    firewall_state_.get_urltest_selections());
                                 const bool transitioned =
                                     interface_probe_.commit_observation(
                                         observation);
+                                refresh_route_failure_policy_after_probe(previous_failure_health);
                                 if (urltest_manager_ && transitioned) {
                                     for (const auto& urltest_tag :
                                          affected_urltests) {
@@ -2784,6 +2899,9 @@ void Daemon::commit_remote_list_refresh_task_result(
                  &task_id,
                  &cancellation,
                  &source,
+                 generation,
+                 reload,
+                 trace_id,
                  reschedule,
                  schedule_forced_reconcile](
                     RemoteListsRefreshResult committed,
@@ -2864,6 +2982,42 @@ void Daemon::commit_remote_list_refresh_task_result(
                     schedule_forced_reconcile(state->source);
                 };
 
+                auto taken = list_refresh_tasks_.take_mutation_lease(state->task_id);
+                if (taken.status == ListRefreshMutationLeaseTakeStatus::NoLease) {
+                    auto admitted = runtime_mutation_admission_.try_acquire(
+                        "lists-refresh-publication",
+                        RuntimeMutationAdmission::Kind::Background);
+                    if (!admitted) {
+                        // Retry this completed result, not the network download.
+                        // A foreground save keeps priority over publication.
+                        try {
+                            scheduler_->schedule_oneshot(
+                                std::chrono::seconds{1},
+                                [this, state, generation, reload, trace_id]() mutable {
+                                    commit_remote_list_refresh_task_result(
+                                        state->task_id, state->cancellation,
+                                        generation, reload,
+                                        std::move(state->refresh_result),
+                                        std::move(state->refresh_error),
+                                        std::move(state->source), trace_id);
+                                },
+                                "lists-refresh-publication");
+                        } catch (const std::exception& retry_error) {
+                            fail_before_owner(retry_error.what(), {});
+                        }
+                        return;
+                    }
+                    taken.status = ListRefreshMutationLeaseTakeStatus::Acquired;
+                    taken.lease = std::make_unique<RuntimeMutationAdmission::Lease>(
+                        std::move(*admitted));
+                }
+                if (!taken || !runtime_mutation_admission_.owns(*taken.lease)) {
+                    fail_before_owner(
+                        "committed list reconcile did not receive its exact mutation lease",
+                        std::move(taken.lease));
+                    return;
+                }
+
                 const bool applying =
                     list_refresh_tasks_.mark_applying(state->task_id);
                 if (!applying &&
@@ -2912,16 +3066,6 @@ void Daemon::commit_remote_list_refresh_task_result(
                     return;
                 }
 
-                auto taken = list_refresh_tasks_.take_mutation_lease(
-                    state->task_id);
-                if (!taken || !taken.lease ||
-                    !runtime_mutation_admission_.owns(*taken.lease)) {
-                    fail_before_owner(
-                        "committed list reconcile did not receive its exact "
-                        "mutation lease",
-                        std::move(taken.lease));
-                    return;
-                }
                 state->expected_lease_token = taken.lease->token();
 
                 try {
@@ -3303,21 +3447,13 @@ RemoteListRefreshTaskStartResult Daemon::start_remote_list_refresh_task(
         return {false, {}, "daemon is shutting down"};
     }
 
-    std::optional<RuntimeMutationLeaseHandoff>
-        mutation_lease_handoff;
-    if (reload) {
-        auto admitted = runtime_mutation_admission_.try_acquire(
-            "lists-refresh-" + source);
-        if (!admitted.has_value()) {
-            const bool retain_force = merge_list_refresh_force_reconcile(
-                force_reconcile,
-                list_refresh_tasks_.active().has_value());
-            return {false, {}, "busy", retain_force};
-        }
-        mutation_lease_handoff.emplace(
-            std::make_unique<
-                RuntimeMutationAdmission::Lease>(
-                    std::move(*admitted)));
+    // Serialize task registration with foreground cancellation. Release this
+    // short claim on return; the task must not own it during network I/O.
+    auto registration = runtime_mutation_admission_.try_acquire(
+        "lists-refresh-registration", RuntimeMutationAdmission::Kind::Background);
+    if (!registration) {
+        return {false, {}, "busy", merge_list_refresh_force_reconcile(
+            force_reconcile, list_refresh_tasks_.active().has_value())};
     }
 
     const auto active_generation = active_config_snapshot_;
@@ -3330,7 +3466,7 @@ RemoteListRefreshTaskStartResult Daemon::start_remote_list_refresh_task(
 
     auto started = list_refresh_tasks_.begin(
         target_selection.list_names.size(),
-        std::move(mutation_lease_handoff),
+        std::nullopt,
         /*upgrade_active=*/reload,
         /*force_new=*/force_reconcile);
     if (started.coalesced) {
@@ -3406,8 +3542,13 @@ RemoteListRefreshTaskStartResult Daemon::start_remote_list_refresh_task(
                         progress.completed,
                         std::move(current));
                 };
-                control.cache_commit =
-                    make_guarded_cache_commit_callback();
+                control.cache_commit = [this, cancellation](const std::function<void()>& commit) {
+                    KPBR_SHARED_UNIQUE_LOCK(cache_commit, resolver_cache_snapshot_mutex_);
+                    if (cancellation.cancellation_requested()) {
+                        throw HttpRequestCancelled("list refresh preempted before cache publication");
+                    }
+                    commit();
+                };
                 refresh_result = list_service_.refresh_remote_lists(
                     active_generation->config,
                     active_generation->outbound_marks,
@@ -3583,7 +3724,7 @@ PreparedRuntimeInputs Daemon::prepare_runtime_inputs(const Config& config,
                 if (list == prepared.config.lists->end() ||
                     !list->second.url.has_value() ||
                     !list_service_.cache_manager().has_current_cache(
-                        name, *list->second.url)) {
+                        name, *list->second.url, list->second.source_format.value_or("text"))) {
                     unavailable_lists.push_back(name);
                 }
             }
@@ -4102,7 +4243,7 @@ void Daemon::start_resolver_reload_retry_attempt(
     }
 
     auto admitted = runtime_mutation_admission_.try_acquire(
-        "resolver-reload-recovery");
+        "resolver-reload-recovery", RuntimeMutationAdmission::Kind::Background);
     if (!admitted.has_value()) {
         const auto active = runtime_mutation_admission_.active();
         Logger::instance().verbose(
@@ -4681,7 +4822,7 @@ bool Daemon::begin_idle_stall_exact_tcp_reset_point(
 
     try {
         auto admitted = runtime_mutation_admission_.try_acquire(
-            "exact-whatsapp-tcp-reset-point");
+            "exact-whatsapp-tcp-reset-point", RuntimeMutationAdmission::Kind::Background);
         if (!admitted.has_value()) {
             abandon_reservation();
             return false;
@@ -4847,7 +4988,7 @@ bool Daemon::begin_idle_stall_exact_cleanup_point(
             std::move(target));
         if (!transaction->valid()) return false;
         auto admitted = runtime_mutation_admission_.try_acquire(
-            "idle-stall-exact-cleanup-point");
+            "idle-stall-exact-cleanup-point", RuntimeMutationAdmission::Kind::Background);
         if (!admitted.has_value()) return false;
         auto lease = std::make_unique<RuntimeMutationAdmission::Lease>(
             std::move(*admitted));
@@ -5038,7 +5179,7 @@ void Daemon::run_exact_tcp_reset_cleanup(
     std::optional<RuntimeMutationAdmission::Lease> admitted;
     try {
         admitted = runtime_mutation_admission_.try_acquire(
-            "exact-tcp-reset-cleanup");
+            "exact-tcp-reset-cleanup", RuntimeMutationAdmission::Kind::Background);
     } catch (...) {
     }
     if (!admitted.has_value()) {
@@ -6138,7 +6279,7 @@ void Daemon::dispatch_udp_call_affinity_mutations(
             return;
         }
         auto admitted = runtime_mutation_admission_.try_acquire(
-            "udp-call-affinity-point-mutation");
+            "udp-call-affinity-point-mutation", RuntimeMutationAdmission::Kind::Background);
         if (!admitted.has_value()) {
             release_decisions();
             return;

@@ -7,8 +7,8 @@ config_writer.cpp from its source list and nothing noticed for days, taking
 the whole WAL store suite dark with it, because those tests build into no
 other target.
 
-The only permitted exception is keen-pbr-firewall-it, which needs Docker and
-network namespaces and has its own `make firewall-it`.
+Isolated package DNS regressions must also be reachable through the same
+runner: add_test registrations alone do not make `make test` execute them.
 """
 
 import re
@@ -18,6 +18,23 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CMAKE = REPO_ROOT / "tests" / "CMakeLists.txt"
 MAKEFILE = REPO_ROOT / "Makefile"
+PACKAGE_DNS_FIXTURES = {
+    "run-dnsmasq-helper-timing.sh",
+    "run-dnsmasq-direct-fallback.sh",
+    "run-installer-dns-rollback.sh",
+    "run-uninstall-cleanup.sh",
+}
+
+
+def make_recipe(target):
+    text = MAKEFILE.read_text(encoding="utf-8")
+    match = re.search(
+        r"^" + re.escape(target) + r":[^\n]*\n((?:\t[^\n]*\n)*)",
+        text, re.M,
+    )
+    if match is None:
+        raise AssertionError(f"{target} recipe not found in Makefile")
+    return match.group(1)
 
 # Built explicitly by the `test` recipe rather than through the list.
 DIRECTLY_BUILT = {"keen-pbr-tests", "crash-diagnostics-smoke"}
@@ -34,6 +51,15 @@ OPT_IN_ONLY = {
     "keen-pbr-fuzz-list",
     "keen-pbr-fuzz-iptables",
     "keen-pbr-fuzz-conntrack",
+    # Manual EXCLUDE_FROM_ALL review aggregate. Its sources also belong to
+    # the normal gated suites; compiling it again adds no CI coverage.
+    "keen-pbr-routing-list-review-tests",
+    # Manual list/connection query aggregate; every source is also compiled
+    # and run by the normal keen-pbr-tests gate.
+    "keen-pbr-list-query-tests",
+    # Manual component recovery aggregate. All sources are already compiled
+    # and executed by keen-pbr-tests; do not duplicate this work in CI.
+    "keen-pbr-component-recovery-tests",
 }
 # Compiled into a target through a variable rather than a literal path, or
 # deliberately not compiled at all. Every other tests/test_*.cpp must appear in
@@ -72,6 +98,24 @@ def gated_targets():
 
 
 class TestTargetCoverage(unittest.TestCase):
+    def test_package_dns_regressions_run_in_the_default_gate(self):
+        self.assertEqual(make_recipe("test").count("$(MAKE) test-package-dns"), 1)
+        recipe = make_recipe("test-package-dns")
+        fixtures = re.findall(
+            r"^\t\$\(BUSYBOX\) sh tests/package_it/([\w-]+\.sh)(?:\s|$)",
+            recipe, re.M,
+        )
+        self.assertCountEqual(fixtures, PACKAGE_DNS_FIXTURES)
+        for fixture in fixtures:
+            self.assertTrue((REPO_ROOT / "tests" / "package_it" / fixture).is_file())
+        self.assertNotRegex(recipe, r"\|\|\s*true|^\t-", "fixture failures must fail the gate")
+
+    def test_release_backend_uses_the_default_test_gate(self):
+        workflow = (REPO_ROOT / ".github/workflows/release-keenetic.yml").read_text(encoding="utf-8")
+        backend = re.search(r"^  backend:\n(.*?)(?=^  [\w-]+:)", workflow, re.M | re.S)
+        self.assertIsNotNone(backend)
+        self.assertRegex(backend.group(1), r"run: >-\n\s+make test\b")
+
     def test_every_declared_target_is_gated(self):
         declared = declared_targets()
         self.assertIn(

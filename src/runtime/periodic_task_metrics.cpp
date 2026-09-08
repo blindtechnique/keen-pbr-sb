@@ -203,6 +203,23 @@ void update_terminal_metrics(
     } else {
         metrics.last_error.clear();
     }
+
+    // Unlike the lifetime run totals, the current streak must still reflect
+    // real terminal outcomes after those totals reach their ceiling.
+    switch (outcome) {
+    case PeriodicTaskOutcome::Failure:
+        if (metrics.consecutive_failures < counter_ceiling) {
+            ++metrics.consecutive_failures;
+        }
+        break;
+    case PeriodicTaskOutcome::Success:
+    case PeriodicTaskOutcome::Noop:
+        metrics.consecutive_failures = 0;
+        break;
+    case PeriodicTaskOutcome::Skipped:
+    case PeriodicTaskOutcome::Abandoned:
+        break;
+    }
 }
 
 } // namespace

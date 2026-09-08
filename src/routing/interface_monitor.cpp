@@ -4,10 +4,12 @@
 #include "../util/format_compat.hpp"
 
 #include <cerrno>
+#include <algorithm>
 #include <ifaddrs.h>
 #include <cstring>
 #include <net/if.h>
 #include <linux/rtnetlink.h>
+#include <linux/neighbour.h>
 #include <sys/socket.h>
 #include <unordered_map>
 
@@ -58,6 +60,45 @@ struct InterfaceMonitor::Impl {
             return;
         }
 
+        if (hdr->nlmsg_type == RTM_NEWNEIGH ||
+            hdr->nlmsg_type == RTM_DELNEIGH) {
+            if (hdr->nlmsg_len < NLMSG_LENGTH(sizeof(ndmsg))) return;
+            auto* neighbor = static_cast<ndmsg*>(nlmsg_data(hdr));
+            // AF_BRIDGE is an FDB notification, not an IP neighbor hint.
+            if (neighbor->ndm_family != AF_INET &&
+                neighbor->ndm_family != AF_INET6) return;
+            struct nlattr* attrs[NDA_MAX + 1] = {};
+            if (nlmsg_parse(hdr, sizeof(*neighbor), attrs, NDA_MAX,
+                            nullptr) < 0 || attrs[NDA_DST] == nullptr) return;
+            const auto address_bytes = nla_len(attrs[NDA_DST]);
+            const auto expected_bytes =
+                neighbor->ndm_family == AF_INET ? 4 : 16;
+            if (address_bytes != expected_bytes) return;
+            NeighborObservation observation;
+            observation.address_family = neighbor->ndm_family;
+            if (neighbor->ndm_ifindex <= 0) return;
+            observation.interface_index =
+                static_cast<std::uint32_t>(neighbor->ndm_ifindex);
+            observation.address.assign(
+                static_cast<const char*>(nla_data(attrs[NDA_DST])),
+                static_cast<std::size_t>(address_bytes));
+            if (attrs[NDA_LLADDR] != nullptr) {
+                const auto link_bytes = nla_len(attrs[NDA_LLADDR]);
+                if (link_bytes < 0 || link_bytes > 32) return;
+                observation.link_address.assign(
+                    static_cast<const char*>(nla_data(attrs[NDA_LLADDR])),
+                    static_cast<std::size_t>(link_bytes));
+            }
+            observation.state = neighbor->ndm_state;
+            observation.present = hdr->nlmsg_type == RTM_NEWNEIGH;
+            if (neighbors.observe(observation)) {
+                Event event;
+                event.neighbor_changed = true;
+                callback(event);
+            }
+            return;
+        }
+
         if (hdr->nlmsg_type == RTM_NEWROUTE ||
             hdr->nlmsg_type == RTM_DELROUTE) {
             auto* route = static_cast<rtmsg*>(nlmsg_data(hdr));
@@ -76,7 +117,7 @@ struct InterfaceMonitor::Impl {
             }
             const auto event =
                 InterfaceMonitor::describe_route_transition(
-                    table, route->rtm_family);
+                    table, route->rtm_family, route->rtm_dst_len == 0);
             if (event.has_value()) callback(*event);
             return;
         }
@@ -191,6 +232,17 @@ struct InterfaceMonitor::Impl {
                 format("Failed to subscribe interface monitor to link group: {}", nl_geterror(err)));
         }
 
+#ifdef WITH_API
+        // Hotspot acceleration is optional. Older kernels must retain their
+        // established link/address/route monitor when this group is absent.
+        err = nl_socket_add_memberships(socket, RTNLGRP_NEIGH, 0);
+        if (err < 0) {
+            Logger::instance().verbose(
+                "Neighbor notifications are unavailable; hotspot metadata keeps its TTL fallback: {}",
+                nl_geterror(err));
+        }
+#endif
+
         // libnl defaults to 32 KB each way. The firmware brings interfaces up
         // and down in bursts - most visibly during our own update - and the
         // kernel then overruns the socket buffer and answers ENOBUFS, which
@@ -212,6 +264,7 @@ struct InterfaceMonitor::Impl {
                             this);
 
         interface_state.clear();
+        neighbors.clear();
         struct ifaddrs* interfaces = nullptr;
         if (getifaddrs(&interfaces) == 0) {
             for (auto* current = interfaces; current != nullptr;
@@ -235,7 +288,75 @@ struct InterfaceMonitor::Impl {
     InterfaceStateCallback callback;
     struct nl_sock* socket{nullptr};
     std::unordered_map<unsigned int, ObservedInterface> interface_state;
+    NeighborHintTracker neighbors;
 };
+
+bool InterfaceMonitor::NeighborHintTracker::observe(
+    const NeighborObservation& observation) {
+    const bool ipv4 = observation.address_family == AF_INET;
+    const bool ipv6 = observation.address_family == AF_INET6;
+    if ((!ipv4 && !ipv6) || observation.interface_index == 0U ||
+        observation.address.size() != (ipv4 ? 4U : 16U) ||
+        observation.link_address.size() > 32U) return false;
+    const auto first = static_cast<unsigned char>(observation.address[0]);
+    const bool all_zero = std::all_of(
+        observation.address.begin(), observation.address.end(),
+        [](char byte) { return byte == 0; });
+    const bool ipv4_broadcast = ipv4 && std::all_of(
+        observation.address.begin(), observation.address.end(),
+        [](char byte) { return static_cast<unsigned char>(byte) == 255U; });
+    if (all_zero || ipv4_broadcast ||
+        (ipv4 && (first & 0xf0U) == 0xe0U) ||
+        (ipv6 && first == 0xffU)) return false;
+
+    const Key key{observation.address_family, observation.interface_index,
+                  observation.address};
+    auto previous = entries_.find(key);
+    if (!observation.present) {
+        if (previous != entries_.end()) {
+            entries_.erase(previous);
+            const auto position = std::find(
+                insertion_order_.begin(), insertion_order_.end(), key);
+            if (position != insertion_order_.end()) {
+                insertion_order_.erase(position);
+            }
+        }
+        // A deleted neighbor can predate the monitor's startup/reconnect.
+        return true;
+    }
+    const bool failed = (observation.state & NUD_FAILED) != 0U;
+    const bool resolved = !observation.link_address.empty() &&
+        (observation.state & (NUD_REACHABLE | NUD_STALE | NUD_DELAY |
+                              NUD_PROBE | NUD_NOARP | NUD_PERMANENT)) != 0U;
+    if (!failed && !resolved) return false;
+    if (previous == entries_.end()) {
+        if (entries_.size() >= max_entries) {
+            entries_.erase(insertion_order_.front());
+            insertion_order_.pop_front();
+        }
+        insertion_order_.push_back(key);
+        try {
+            entries_.emplace(key, State{observation.link_address, failed});
+        } catch (...) {
+            insertion_order_.pop_back();
+            throw;
+        }
+        return true;
+    }
+    const bool changed = previous->second.failed != failed ||
+        (!observation.link_address.empty() &&
+         previous->second.link_address != observation.link_address);
+    if (!observation.link_address.empty()) {
+        previous->second.link_address = observation.link_address;
+    }
+    previous->second.failed = failed;
+    return changed;
+}
+
+void InterfaceMonitor::NeighborHintTracker::clear() noexcept {
+    entries_.clear();
+    insertion_order_.clear();
+}
 
 InterfaceMonitor::InterfaceMonitor(InterfaceStateCallback callback)
     : impl_(std::make_unique<Impl>(std::move(callback))) {
@@ -289,13 +410,15 @@ InterfaceMonitor::Event InterfaceMonitor::describe_indexed_link_transition(
 std::optional<InterfaceMonitor::Event>
 InterfaceMonitor::describe_route_transition(
     std::uint32_t table,
-    int address_family) {
+    int address_family,
+    bool default_route) {
     if (table != RT_TABLE_MAIN ||
         (address_family != AF_INET && address_family != AF_INET6)) {
         return std::nullopt;
     }
     Event event;
     event.route_changed = true;
+    event.default_route_changed = default_route;
     return event;
 }
 
@@ -328,6 +451,7 @@ void InterfaceMonitor::handle_events() {
         // revokes cached NDMS authority and schedules a fresh topology read;
         // outbound probes do not rebuild the native-interface inventory.
         if (err == -NLE_NOMEM || errno == ENOBUFS) {
+            impl_->neighbors.clear();
             Logger::instance().info(
                 "Interface monitor fell behind and lost some link events; "
                 "requesting a fresh topology observation");

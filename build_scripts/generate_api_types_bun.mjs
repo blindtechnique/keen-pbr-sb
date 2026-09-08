@@ -8,6 +8,8 @@ import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import yaml from "../frontend/node_modules/js-yaml/index.js"
+import { applyApiScalarDefaults } from "./apply_api_scalar_defaults.cjs"
+import { preserveConfigFields } from "./preserve_config_fields.cjs"
 
 const scriptDir = dirname(fileURLToPath(import.meta.url))
 const root = resolve(scriptDir, "..")
@@ -52,8 +54,8 @@ const schema = {
 }
 
 const temporaryDirectory = mkdtempSync(join(tmpdir(), "keen-pbr-types-"))
-const schemaPath = join(temporaryDirectory, "schema.json")
-const typesPath = join(temporaryDirectory, "api_types.hpp")
+const schemaPath = join(temporaryDirectory, "api-types.json")
+const typesPath = join(temporaryDirectory, "api-types.hpp")
 
 try {
   writeFileSync(schemaPath, JSON.stringify(schema, null, 2))
@@ -61,7 +63,7 @@ try {
     process.execPath,
     [
       "x",
-      "quicktype",
+      "quicktype@26.0.0",
       "--lang",
       "cpp",
       "--src",
@@ -104,6 +106,8 @@ try {
     /^(\s+)(int64_t|double) ([a-z_][a-z0-9_]*);$/gm,
     "$1$2 $3 = 0;"
   )
+  content = applyApiScalarDefaults(content, schemas)
+  content = preserveConfigFields(content)
   // NB: этот путь генерации в Makefile не подключён; он обязан оставаться в
   // согласии с build_scripts/generate_api_types.sh.
 

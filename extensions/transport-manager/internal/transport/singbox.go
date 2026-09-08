@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"net"
 	"net/http"
 	"os"
@@ -29,6 +28,8 @@ var (
 	validInterface = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
 	validCountry   = regexp.MustCompile(`^[A-Za-z]{2}$`)
 )
+
+const routingHealthFailurePrefix = "keen-pbr routing health: "
 
 func storeRoutingHealthSnapshot(cacheKey string, values map[string]routingHealthResult) {
 	routingHealthCacheMu.Lock()
@@ -359,13 +360,28 @@ func validateGeoSpec(spec TransportSpec) error {
 func (s *SingBox) Tag() string { return s.spec.Tag }
 
 func (s *SingBox) Up(ctx context.Context) error {
-	s.opMu.Lock()
+	if err := lockMutexContext(ctx, &s.opMu); err != nil {
+		return err
+	}
 	defer s.opMu.Unlock()
 
 	s.mu.Lock()
 	if s.cmd != nil && s.cmd.Process != nil {
+		if s.state == StateUp {
+			s.mu.Unlock()
+			return nil
+		}
+		// A stopped/failed child remains owned until its wait goroutine has
+		// removed the old forwarding rules. Do not report this retained cmd as
+		// a live runtime or let its cleanup delete a replacement's rules.
+		done := s.done
 		s.mu.Unlock()
-		return nil
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		s.mu.Lock()
 	}
 	s.state, s.updated, s.lastErr = StateStarting, time.Now().UTC(), ""
 	s.mu.Unlock()
@@ -396,10 +412,19 @@ func (s *SingBox) Up(ctx context.Context) error {
 		return s.fail(err)
 	}
 	cmd.Stdout, cmd.Stderr = logFile, logFile
+	if err := ctx.Err(); err != nil {
+		_ = logFile.Close()
+		return s.fail(err)
+	}
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()
 		return s.fail(err)
 	}
+	// Forwarding setup can be waiting on xtables outside the readiness select.
+	// Cancellation still owns this exact starting process until Up succeeds;
+	// never leave it alive beyond the manager's bounded shutdown grace period.
+	stopOnCancel := context.AfterFunc(ctx, func() { _ = cmd.Process.Kill() })
+	defer stopOnCancel()
 	s.mu.Lock()
 	s.cmd, s.done = cmd, make(chan error, 1)
 	done := s.done
@@ -410,6 +435,10 @@ func (s *SingBox) Up(ctx context.Context) error {
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer deadline.Stop()
 	defer ticker.Stop()
+	interfaceByName := s.interfaceByName
+	if interfaceByName == nil {
+		interfaceByName = net.InterfaceByName
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -424,12 +453,23 @@ func (s *SingBox) Up(ctx context.Context) error {
 			}
 			return s.fail(err)
 		case <-ticker.C:
-			if _, err := net.InterfaceByName(s.spec.Interface); err == nil {
+			if _, err := interfaceByName(s.spec.Interface); err == nil {
 				if err := s.ensureForwardingRules(); err != nil {
 					s.stop(cmd, done)
 					return s.fail(err)
 				}
+				// A successful Up outlives its API timeout context. Detach before
+				// returning so the handler's normal deferred cancel cannot kill it.
+				stopOnCancel()
+				if err := ctx.Err(); err != nil {
+					s.stop(cmd, done)
+					return s.fail(err)
+				}
 				s.mu.Lock()
+				if s.cmd != cmd || s.state != StateStarting {
+					s.mu.Unlock()
+					return s.fail(errors.New("sing-box exited during forwarding setup"))
+				}
 				s.state, s.updated = StateUp, time.Now().UTC()
 				s.mu.Unlock()
 				return nil
@@ -462,6 +502,11 @@ func (s *SingBox) stop(cmd *exec.Cmd, done <-chan error) {
 func (s *SingBox) wait(cmd *exec.Cmd, logFile *os.File) {
 	err := cmd.Wait()
 	_ = logFile.Close()
+	s.mu.Lock()
+	if s.cmd == cmd {
+		s.state, s.updated = StateDown, time.Now().UTC()
+	}
+	s.mu.Unlock()
 	s.removeForwardingRules()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -645,7 +690,13 @@ func matchesOwnedSingBoxCommand(cmdline []byte, ownedConfigs map[string]bool) bo
 }
 
 func (s *SingBox) Down(ctx context.Context) error {
-	s.opMu.Lock()
+	// A spent shared shutdown budget must not skip stopping the next idle
+	// transport. Only waiting behind an in-flight operation consumes the budget.
+	if !s.opMu.TryLock() {
+		if err := lockMutexContext(ctx, &s.opMu); err != nil {
+			return err
+		}
+	}
 	defer s.opMu.Unlock()
 
 	s.mu.Lock()
@@ -656,6 +707,9 @@ func (s *SingBox) Down(ctx context.Context) error {
 		return nil
 	}
 	done := s.done
+	// A cancelled Down can return before wait runs. Keep ownership of cmd,
+	// but do not let a subsequent Up mistake this stopping child for a live one.
+	s.state, s.updated = StateDown, time.Now().UTC()
 	s.mu.Unlock()
 	if err := cmd.Process.Signal(os.Interrupt); err != nil {
 		_ = cmd.Process.Kill()
@@ -666,6 +720,13 @@ func (s *SingBox) Down(ctx context.Context) error {
 		return ctx.Err()
 	case <-time.After(5 * time.Second):
 		_ = cmd.Process.Kill()
+		// Kill is not completion: wait may still be removing old rules. A
+		// successful Down permits Restart/Remove to reuse the same interface.
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	case <-done:
 	}
 	s.mu.Lock()
@@ -730,7 +791,7 @@ func (s *SingBox) applyRoutingHealth(ctx context.Context, status *Status) {
 		return
 	}
 	status.State = StateDegraded
-	status.Error = "keen-pbr routing health: " + verdict
+	status.Error = routingHealthFailurePrefix + verdict
 	if detail != "" {
 		status.Error += ": " + detail
 	}
@@ -838,12 +899,7 @@ func (s *SingBox) buildConfig() (map[string]any, error) {
 
 func tunAddressForSpec(spec TransportSpec) (string, error) {
 	if spec.TunAddress == "" {
-		hash := fnv.New32a()
-		_, _ = hash.Write([]byte(spec.Tag))
-		slot := hash.Sum32() % (1 << 14) // 16,384 non-overlapping /30s in 172.19.0.0/16.
-		third := slot >> 6
-		fourth := (slot & 63) * 4
-		return fmt.Sprintf("172.19.%d.%d/30", third, fourth+1), nil
+		return generatedTunAddress(generatedTunSlot(spec.Tag)), nil
 	}
 	ip, network, err := net.ParseCIDR(spec.TunAddress)
 	if err != nil || ip.To4() == nil {

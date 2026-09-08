@@ -1,115 +1,14 @@
 #include "runtime_route_health_plan.hpp"
 
-#include <arpa/inet.h>
-#include <charconv>
 #include <condition_variable>
-#include <cstring>
 #include <mutex>
-#include <system_error>
 #include <utility>
 
 namespace keen_pbr3 {
 
 namespace {
 
-bool parse_ip(const std::string& value, int family, void* output) noexcept {
-    return inet_pton(family, value.c_str(), output) == 1;
-}
-
-bool ipv4_prefix_contains(const in_addr& network,
-                          const in_addr& candidate,
-                          int prefix_length) noexcept {
-    if (prefix_length <= 0) return true;
-    if (prefix_length > 32) return false;
-    const std::uint32_t network_bits = ntohl(network.s_addr);
-    const std::uint32_t candidate_bits = ntohl(candidate.s_addr);
-    const std::uint32_t mask = prefix_length == 32
-        ? 0xFFFFFFFFU
-        : (~0U << (32 - prefix_length));
-    return (network_bits & mask) == (candidate_bits & mask);
-}
-
-bool ipv6_prefix_contains(const in6_addr& network,
-                          const in6_addr& candidate,
-                          int prefix_length) noexcept {
-    if (prefix_length <= 0) return true;
-    if (prefix_length > 128) return false;
-    const int full_bytes = prefix_length / 8;
-    const int extra_bits = prefix_length % 8;
-    if (full_bytes > 0 &&
-        std::memcmp(
-            network.s6_addr,
-            candidate.s6_addr,
-            static_cast<std::size_t>(full_bytes)) != 0) {
-        return false;
-    }
-    if (extra_bits == 0) return true;
-    const std::uint8_t mask = static_cast<std::uint8_t>(
-        0xFFU << (8 - extra_bits));
-    return (network.s6_addr[full_bytes] & mask) ==
-           (candidate.s6_addr[full_bytes] & mask);
-}
-
-bool route_contains_ip(const DumpedRoute& route,
-                       const std::string& ip) {
-    // Preserve the compatibility helper's semantics: a default route on the
-    // exact interface reaches either gateway family.
-    if (route.destination == "default") return true;
-
-    const auto slash = route.destination.find('/');
-    if (slash == std::string::npos) {
-        return route.destination == ip;
-    }
-
-    const std::string network = route.destination.substr(0U, slash);
-    const std::string prefix = route.destination.substr(slash + 1U);
-    int prefix_length = -1;
-    const auto converted = std::from_chars(
-        prefix.data(), prefix.data() + prefix.size(), prefix_length);
-    if (converted.ec != std::errc{} ||
-        converted.ptr != prefix.data() + prefix.size()) {
-        return false;
-    }
-
-    const int family = ip.find(':') == std::string::npos
-        ? AF_INET
-        : AF_INET6;
-    const int network_family =
-        network.find(':') == std::string::npos ? AF_INET : AF_INET6;
-    if (family != network_family) return false;
-
-    if (family == AF_INET) {
-        in_addr network_address{};
-        in_addr candidate_address{};
-        return parse_ip(network, AF_INET, &network_address) &&
-               parse_ip(ip, AF_INET, &candidate_address) &&
-               ipv4_prefix_contains(
-                   network_address, candidate_address, prefix_length);
-    }
-
-    in6_addr network_address{};
-    in6_addr candidate_address{};
-    return parse_ip(network, AF_INET6, &network_address) &&
-           parse_ip(ip, AF_INET6, &candidate_address) &&
-           ipv6_prefix_contains(
-               network_address, candidate_address, prefix_length);
-}
-
-bool interface_has_gateway_route(
-    const std::vector<DumpedRoute>& routes,
-    const std::string& interface,
-    const std::string& gateway) {
-    for (const auto& route : routes) {
-        if (route.table != 254U || route.blackhole || route.unreachable) {
-            continue;
-        }
-        if (!route.interface || *route.interface != interface) continue;
-        if (route_contains_ip(route, gateway)) return true;
-    }
-    return false;
-}
-
-OutboundReachabilitySnapshot build_reachability_snapshot(
+OutboundFamilyReachabilitySnapshot build_family_reachability_snapshot(
     const Config& config,
     const std::vector<DumpedRoute>& routes,
     const std::vector<DumpedInterface>& interfaces) {
@@ -125,25 +24,18 @@ OutboundReachabilitySnapshot build_reachability_snapshot(
         }
     }
 
-    OutboundReachabilitySnapshot reachability;
+    OutboundFamilyReachabilitySnapshot reachability;
     for (const auto& outbound :
          config.outbounds.value_or(std::vector<Outbound>{})) {
         if (outbound.type != OutboundType::INTERFACE) continue;
 
         const std::string interface = outbound.interface.value_or("");
         const auto observed = interface_admin_state.find(interface);
-        bool reachable = !interface.empty() &&
+        const bool admin_up = !interface.empty() &&
             observed != interface_admin_state.end() &&
             observed->second;
-        if (reachable && outbound.gateway.has_value()) {
-            reachable = interface_has_gateway_route(
-                routes, interface, *outbound.gateway);
-        }
-        if (reachable && outbound.gateway6.has_value()) {
-            reachable = interface_has_gateway_route(
-                routes, interface, *outbound.gateway6);
-        }
-        reachability.insert_or_assign(outbound.tag, reachable);
+        reachability.insert_or_assign(outbound.tag,
+            interface_outbound_family_reachability(outbound, routes, admin_up));
     }
     return reachability;
 }
@@ -194,8 +86,12 @@ RuntimeRouteHealthExecutionResult execute_runtime_route_health_plan(
         auto interfaces = services.dump_interfaces();
 
         stage = RuntimeRouteHealthFailureStage::build_reachability;
-        auto reachability = build_reachability_snapshot(
+        auto family_reachability = build_family_reachability_snapshot(
             request.config, routes, interfaces);
+        OutboundReachabilitySnapshot reachability;
+        for (const auto& entry : family_reachability) {
+            reachability.emplace(entry.first, entry.second.any(ipv6_decision.enabled));
+        }
 
         stage = RuntimeRouteHealthFailureStage::plan_routing;
         auto routing = plan_routing_state(
@@ -203,7 +99,8 @@ RuntimeRouteHealthExecutionResult execute_runtime_route_health_plan(
             request.outbound_marks,
             reachability,
             &request.urltest_selections,
-            ipv6_decision.enabled);
+            ipv6_decision.enabled,
+            &family_reachability);
 
         RuntimeRouteHealthPlan plan;
         plan.operation_serial = request.operation_serial;
@@ -213,6 +110,7 @@ RuntimeRouteHealthExecutionResult execute_runtime_route_health_plan(
         plan.routes_snapshot = std::move(routes);
         plan.interfaces_snapshot = std::move(interfaces);
         plan.reachability = std::move(reachability);
+        plan.family_reachability = std::move(family_reachability);
         plan.routing = std::move(routing);
         result.plan = std::make_shared<const RuntimeRouteHealthPlan>(
             std::move(plan));

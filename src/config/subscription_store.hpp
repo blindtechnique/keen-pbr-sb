@@ -2,16 +2,19 @@
 
 #include <nlohmann/json.hpp>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
 namespace keen_pbr3 {
 
-// Only provider counters are stored, never subscription bodies or share links.
+// Provider counters and private inventory digests, never bodies or share links.
 nlohmann::json parse_subscription_userinfo(const std::string& header);
 std::string parse_subscription_title(const std::string& header);
 std::string subscription_source_host(const std::string& url);
 nlohmann::json public_subscription(nlohmann::json record);
+inline constexpr std::int64_t subscription_default_refresh_interval = 21600;
+bool valid_subscription_refresh_interval(std::int64_t interval) noexcept;
 
 // A small metadata file beside config.json. No daemon config apply, runtime
 // owner, worker or recovery journal participates in metadata-only operations.
@@ -22,10 +25,24 @@ public:
     nlohmann::json find(const std::string& id);
     nlohmann::json save(const std::string& url, const std::string& name,
                         const nlohmann::json& metadata,
-                        const std::vector<std::string>& tags);
-    nlohmann::json refresh(const std::string& id, const nlohmann::json& metadata);
+                        const std::vector<std::string>& tags,
+                        const nlohmann::json& bindings = nlohmann::json::array());
+    nlohmann::json refresh(const std::string& id, const nlohmann::json& metadata,
+                          const std::vector<std::string>& confirmed_absent_tags = {});
+    // Call after confirmed VPN deletion while the existing maintenance lease
+    // is held. Preserve the source and provider inventory; never delete a VPN.
+    // Returns false without rewriting the metadata file when already detached.
+    bool detach_transport(const std::string& tag);
     nlohmann::json rename(const std::string& id, const std::string& name);
+    nlohmann::json set_refresh_interval(const std::string& id, std::int64_t interval);
+    std::optional<nlohmann::json> due(std::int64_t now);
     void erase(const std::string& id);
+    // Backup/restore already holds the existing maintenance lease. Hold this
+    // metadata mutex while reading/applying raw-file snapshot mutations; do
+    // not call another Store method under it. Lock order: maintenance -> store.
+    std::unique_lock<std::mutex> lock_for_backup() {
+        return std::unique_lock<std::mutex>(mutex_);
+    }
 private:
     nlohmann::json read() const;
     void write(const nlohmann::json& records) const;

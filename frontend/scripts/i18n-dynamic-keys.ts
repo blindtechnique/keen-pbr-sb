@@ -19,6 +19,20 @@ export type DynamicTranslationUsage = Readonly<{
  */
 export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
   {
+    file: "src/components/shared/server-field-error.tsx",
+    argument: "presentation.key",
+    keys: ["serverValidation.*"],
+    reason:
+      "Finite server-validation message patterns return local keys; original server text and field paths remain diagnostic details, never translation keys.",
+  },
+  {
+    file: "src/components/shared/operation-error-message.tsx",
+    argument: "`operationErrors.${presentation.kind}`",
+    keys: ["operationErrors.*"],
+    reason:
+      "OperationErrorKind is the finite presentation union in api-errors.ts; raw server text is never used as a translation key.",
+  },
+  {
     file: "src/components/overview/target-facts.tsx",
     argument: "`overview.targetFacts.availability.reasons.${probe.reason}`",
     keys: ["overview.targetFacts.availability.reasons.*"],
@@ -65,7 +79,7 @@ export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
     argument: "`transports.subscriptionImport.urlRefused.${*}`",
     keys: ["transports.subscriptionImport.urlRefused.*"],
     reason:
-      "The refusal reason is narrowed to the four literals of the backend's SubscriptionUrlVerdict before the call; anything else falls back to the raw error message.",
+      "The refusal reason is narrowed to the four literals of the backend's SubscriptionUrlVerdict before the call; unknown reasons use a localized summary with original details.",
   },
   {
     file: "src/components/layout/header-health-indicator.tsx",

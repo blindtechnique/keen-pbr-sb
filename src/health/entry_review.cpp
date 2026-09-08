@@ -16,8 +16,8 @@ std::uint32_t effective_retire_after(const ReviewRecord& record,
                                      const ReviewPolicy& policy) noexcept {
     const auto floor_value = policy.retire_after == 0U ? 1U : policy.retire_after;
     const auto ceiling = std::max(floor_value, policy.max_retire_after);
-    const auto raised = floor_value + record.retirements;
-    return raised > ceiling ? ceiling : raised;
+    const auto room = ceiling - floor_value;
+    return record.retirements >= room ? ceiling : floor_value + record.retirements;
 }
 
 ReviewAction review_step(ReviewRecord& record,

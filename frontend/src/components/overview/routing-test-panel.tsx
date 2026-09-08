@@ -3,6 +3,7 @@ import { useState } from "react"
 import { useTranslation } from "react-i18next"
 import { useMutation } from "@tanstack/react-query"
 import { toast } from "sonner"
+import { Link } from "wouter"
 
 import type { ApiError } from "@/api/client"
 import type { NfqwsActionResult } from "@/api/generated/model"
@@ -12,9 +13,10 @@ import {
 } from "@/api/mutations"
 import { nfqwsAction } from "@/api/nfqws"
 import { useGetRoutingRegistryConsent } from "@/api/queries"
-import type { ConfigObject } from "@/api/generated/model"
+import type { ConfigObject, RoutingTestResponse } from "@/api/generated/model"
 import { SectionCard } from "@/components/shared/section-card"
 import { Alert, AlertDescription } from "@/components/ui/alert"
+import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
@@ -29,7 +31,12 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { getApiErrorMessage } from "@/lib/api-errors"
 
 import { RoutingDiagnosticsResult } from "./routing-diagnostics-result"
+import {
+  routingHttpProbeMutationOptions,
+  routingHttpProbeState,
+} from "./routing-http-probe-state"
 import { sanitizeRoutingTarget } from "./sanitize-routing-target"
+import { siteCheckPresentation } from "./site-check-guidance"
 import { TargetFacts } from "./target-facts"
 import {
   probeBrowserReachability,
@@ -54,6 +61,11 @@ export function RoutingTestPanel({
   const [activeTarget, setActiveTarget] = useState<string | null>(null)
 
   const routingTestMutation = usePostRoutingTestMutation()
+  const httpProbeMutation = usePostRoutingTestMutation(
+    routingHttpProbeMutationOptions
+  )
+  const [httpProbeBase, setHttpProbeBase] =
+    useState<RoutingTestResponse | null>(null)
   const registryConsentQuery = useGetRoutingRegistryConsent()
   const registryEnabled = Boolean(
     registryConsentQuery.data?.status === 200 &&
@@ -107,11 +119,26 @@ export function RoutingTestPanel({
     : browserProbeMutation.data?.target === activeTarget
       ? browserProbeMutation.data.result
       : { status: "idle" }
+  const httpControls = routingHttpProbeState(
+    routingDiagnostics,
+    httpProbeBase,
+    httpProbeMutation
+  )
   const routerProbe: SiteProbeState = routerProbeMutation.isPending
     ? { status: "checking" }
     : routerProbeMutation.data?.target === activeTarget
       ? routerProbeMutation.data.result
       : { status: "idle" }
+  const { retry, guidance } = siteCheckPresentation({
+    inputTarget: sanitizeRoutingTarget(testTarget),
+    activeTarget,
+    routingStatus:
+      routingTestMutation.isSuccess && !routingDiagnostics
+        ? "error"
+        : routingTestMutation.status,
+    browserProbe,
+    routerProbe,
+  })
 
   return (
     <SectionCard title={t("overview.routingTest.title")}>
@@ -133,6 +160,8 @@ export function RoutingTestPanel({
             setTestTarget(sanitized)
           }
           setActiveTarget(sanitized)
+          httpProbeMutation.reset()
+          setHttpProbeBase(null)
           routingTestMutation.mutate({ data: { target: sanitized } })
           const probe = {
             target: sanitized,
@@ -174,7 +203,9 @@ export function RoutingTestPanel({
               {routingTestMutation.isPending ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : null}
-              {t("overview.routingTest.submit")}
+              {retry
+                ? t("overview.routingTest.retry")
+                : t("overview.routingTest.submit")}
             </InputGroupButton>
           </InputGroupAddon>
         </InputGroup>
@@ -226,6 +257,32 @@ export function RoutingTestPanel({
         />
       ) : null}
 
+      {guidance ? (
+        <div className="space-y-2 text-sm" role="status">
+          <p className="text-muted-foreground">
+            {guidance === "service"
+              ? t("overview.routingTest.guidance.service")
+              : guidance === "dns"
+                ? t("overview.routingTest.guidance.dns")
+                : t("overview.routingTest.guidance.deviceOnly")}
+          </p>
+          <Button
+            render={
+              <Link
+                href={
+                  guidance === "service" ? "/?section=service" : "/?section=dns"
+                }
+              />
+            }
+            variant="outline"
+          >
+            {guidance === "service"
+              ? t("overview.routingTest.guidance.openService")
+              : t("overview.routingTest.guidance.openDns")}
+          </Button>
+        </div>
+      ) : null}
+
       {routingTestMutation.isPending ? (
         <div className="space-y-2">
           <Skeleton className="h-4 w-2/3" />
@@ -262,6 +319,18 @@ export function RoutingTestPanel({
           diagnostics={routingDiagnostics}
           lists={lists}
           outbounds={outbounds}
+          {...httpControls}
+          onHttpProbe={(ip) => {
+            if (
+              httpProbeMutation.isPending ||
+              !routingDiagnostics.results.some((entry) => entry.ip === ip)
+            )
+              return
+            setHttpProbeBase(routingDiagnostics)
+            httpProbeMutation.mutate({
+              data: { target: routingDiagnostics.target, http_probe_ip: ip },
+            })
+          }}
         />
       ) : null}
     </SectionCard>

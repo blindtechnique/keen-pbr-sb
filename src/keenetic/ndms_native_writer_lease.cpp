@@ -442,6 +442,14 @@ NdmsNativeWriterLease::state_directory() const noexcept {
     return state_directory_;
 }
 
+void NdmsNativeWriterLease::with_outer_leases(
+    const std::function<void(MaintenanceLease&,
+                             RuntimeMutationAdmission::Lease&)>& callback) {
+    verify_held();
+    callback(*maintenance_, runtime_);
+    verify_held();
+}
+
 void NdmsNativeWriterLease::verify_held() {
     if (!held()) {
         throw std::runtime_error("native cooperative writer lease is not held");

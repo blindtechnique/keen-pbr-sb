@@ -26,15 +26,18 @@ import {
   FieldLabel,
 } from "@/components/shared/field"
 import { OutboundSelect } from "@/components/shared/outbound-select"
+import { OperationErrorMessage } from "@/components/shared/operation-error-message"
 import {
   UpsertPage,
   type UpsertPagePresentation,
 } from "@/components/shared/upsert-page"
 import { useUpsertPageClose } from "@/components/shared/upsert-page-context"
 import { ServerValidationAlert } from "@/components/shared/server-validation-alert"
+import { getFirstFieldError } from "@/lib/form-field-error"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
 import { Checkbox } from "@/components/ui/checkbox"
 import { DnsPresetPicker } from "@/components/dns/dns-preset-picker"
 import {
@@ -46,11 +49,13 @@ import i18n from "@/i18n"
 import {
   applyFormApiErrors,
   clearFormServerErrors,
+  getUnmappedFormErrors,
 } from "@/lib/form-api-errors"
 import { getTagNameValidationError } from "@/lib/tag-name-validation"
 import { isSemanticallyDirty } from "@/lib/semantic-dirty"
 import { semanticJsonEqual } from "@/lib/semantic-json"
 import { makeTechnicalId } from "@/lib/technical-id"
+import { normalizeDnsDomainBindings } from "@/lib/dns-domain-bindings"
 import {
   buildUpdatedConfigForDnsServerUpsert,
   getDnsServerDraft,
@@ -63,6 +68,7 @@ import {
 } from "@/pages/dns-server-upsert-utils"
 import { useForm } from "@tanstack/react-form"
 import { useStore } from "@tanstack/react-store"
+import { useCatalogNavigation } from "@/hooks/use-catalog-navigation"
 
 const DNS_SERVER_FIELD_NAMES = {
   displayName: "displayName",
@@ -70,6 +76,7 @@ const DNS_SERVER_FIELD_NAMES = {
   type: "type",
   address: "address",
   detour: "detour",
+  domains: "domains",
 } as const
 
 type DnsServerFieldName =
@@ -86,6 +93,7 @@ export function DnsServerUpsertPage({
 }) {
   const { t } = useTranslation()
   const [, navigate] = useLocation()
+  const catalogNavigation = useCatalogNavigation()
   const [dirty, setDirty] = useState(false)
   const configQuery = useGetConfig()
   const config = selectConfig(configQuery.data)
@@ -107,13 +115,20 @@ export function DnsServerUpsertPage({
         cardDescription={t("pages.dnsServerUpsert.missingCardDescription")}
         cardTitle={t("pages.dnsServerUpsert.missingCardTitle")}
         description={t("pages.dnsServerUpsert.missingDescription")}
-        onClose={() => navigate("/dns-servers")}
+        onClose={() =>
+          navigate("/dns-servers", catalogNavigation.navigationOptions)
+        }
         presentation={presentation}
         showAdvancedEditor={false}
         title={t("pages.dnsServerUpsert.editTitle")}
       >
         <div className="flex justify-end">
-          <Button onClick={() => navigate("/dns-servers")} variant="outline">
+          <Button
+            onClick={() =>
+              navigate("/dns-servers", catalogNavigation.navigationOptions)
+            }
+            variant="outline"
+          >
             {t("pages.dnsServerUpsert.back")}
           </Button>
         </div>
@@ -133,7 +148,9 @@ export function DnsServerUpsertPage({
       }
       description={t("pages.dnsServerUpsert.description")}
       dirty={dirty}
-      onClose={() => navigate("/dns-servers")}
+      onClose={() =>
+        navigate("/dns-servers", catalogNavigation.navigationOptions)
+      }
       presentation={presentation}
       title={
         mode === "create"
@@ -147,7 +164,9 @@ export function DnsServerUpsertPage({
         key={`${mode}:${serverTag ?? "new"}:${existingServer ? "loaded" : "empty"}`}
         mode={mode}
         onDirtyChange={setDirty}
-        onSaved={() => navigate("/dns-servers")}
+        onSaved={() =>
+          navigate("/dns-servers", catalogNavigation.navigationOptions)
+        }
         presentation={presentation}
         serverTag={serverTag}
       />
@@ -175,6 +194,7 @@ function DnsServerForm({
   const { t } = useTranslation()
   const close = useUpsertPageClose()
   const [apiErrorMessage, setApiErrorMessage] = useState<string | null>(null)
+  const [operationError, setOperationError] = useState<ApiError | null>(null)
   const [baselineDraft] = useState(initialDraft)
   const initialPreset = findDnsPresetByAddress(initialDraft.address)
   const [presetSelection, setPresetSelection] = useState<DnsPresetSelection>(
@@ -206,6 +226,7 @@ function DnsServerForm({
         return
       }
       if (presetSelection === "custom" && customSecondaryInvalid) {
+        setOperationError(null)
         setApiErrorMessage(
           t("pages.dnsServerUpsert.validation.templateAddressInvalid")
         )
@@ -256,6 +277,7 @@ function DnsServerForm({
           ...(backupAddress ? { secondary_ipv4: backupAddress } : {}),
         })
         if (!updatedConfig) {
+          setOperationError(null)
           setApiErrorMessage(
             t("pages.dnsServerUpsert.validation.templateInvalid")
           )
@@ -264,18 +286,13 @@ function DnsServerForm({
       }
 
       setApiErrorMessage(null)
+      setOperationError(null)
       clearFormServerErrors(form)
       postConfigMutation.mutate({ data: updatedConfig })
     },
   })
-  const unmappedServerErrors = useStore(
-    form.store,
-    (state) =>
-      (
-        state.errorMap.onServer as
-          | { unmapped?: { path: string; message: string }[] }
-          | undefined
-      )?.unmapped ?? []
+  const unmappedServerErrors = useStore(form.store, (state) =>
+    getUnmappedFormErrors(state.errorMap.onServer)
   )
   const formIsDirty = useStore(form.store, (state) =>
     isSemanticallyDirty(state.values, baselineDraft, {
@@ -293,21 +310,22 @@ function DnsServerForm({
       onSuccess: () => {
         clearFormServerErrors(form)
         setApiErrorMessage(null)
+        setOperationError(null)
         onSaved()
       },
       onError: (error) => {
-        setApiErrorMessage(
-          applyFormApiErrors({
-            error: error as ApiError,
-            fieldNames: Object.values(DNS_SERVER_FIELD_NAMES),
-            form,
-            resolvePath: (path) =>
-              resolveDnsServerFieldPath(
-                path,
-                form.state.values.tag || serverTag || initialDraft.tag
-              ),
-          }) ?? null
-        )
+        const formMessage = applyFormApiErrors({
+          error: error as ApiError,
+          fieldNames: Object.values(DNS_SERVER_FIELD_NAMES),
+          form,
+          resolvePath: (path) =>
+            resolveDnsServerFieldPath(
+              path,
+              form.state.values.tag || serverTag || initialDraft.tag
+            ),
+        })
+        setApiErrorMessage(null)
+        setOperationError(formMessage ? (error as ApiError) : null)
       },
     },
   })
@@ -679,6 +697,60 @@ function DnsServerForm({
           }}
         </form.Subscribe>
 
+        <form.Field
+          name={DNS_SERVER_FIELD_NAMES.domains}
+          validators={{
+            onChange: ({ value }) =>
+              normalizeDnsDomainBindings(value) === null
+                ? t("pages.dnsServerUpsert.validation.domainsInvalid")
+                : undefined,
+          }}
+        >
+          {(field) => {
+            const error = getFirstFieldError(field.state.meta.errors)
+            const domains = normalizeDnsDomainBindings(field.state.value)
+            return (
+              <Field invalid={Boolean(error)}>
+                <FieldLabel htmlFor="dns-server-domains">
+                  {t("pages.dnsServerUpsert.fields.domains")}
+                </FieldLabel>
+                <FieldContent>
+                  <Textarea
+                    aria-describedby="dns-server-domains-hint"
+                    aria-invalid={Boolean(error)}
+                    autoCapitalize="none"
+                    autoComplete="off"
+                    id="dns-server-domains"
+                    onBlur={field.handleBlur}
+                    onChange={(event) => field.handleChange(event.target.value)}
+                    placeholder={t(
+                      "pages.dnsServerUpsert.fields.domainsPlaceholder"
+                    )}
+                    rows={3}
+                    spellCheck={false}
+                    value={field.state.value}
+                  />
+                  <div id="dns-server-domains-hint">
+                    <FieldHint
+                      description={t(
+                        "pages.dnsServerUpsert.fields.domainsHint"
+                      )}
+                      error={error}
+                    />
+                  </div>
+                  {domains?.length ? (
+                    <p className="text-xs break-words text-muted-foreground">
+                      {t("pages.dnsServerUpsert.fields.domainsPreview", {
+                        domains: domains.join(", "),
+                      })}
+                    </p>
+                  ) : null}
+                </FieldContent>
+              </Field>
+            )
+          }}
+        </form.Field>
+
         {mode === "create" &&
         (presetSelection !== "custom" ||
           customSecondaryAddress.trim().length > 0) ? (
@@ -720,6 +792,7 @@ function DnsServerForm({
         </Alert>
       ) : null}
 
+      <DnsServerOperationError error={operationError} />
       <ServerValidationAlert errors={unmappedServerErrors} />
 
       <div className="flex justify-end gap-3" data-upsert-actions>
@@ -768,9 +841,20 @@ function DnsServerForm({
   )
 }
 
-function getFirstFieldError(errors: unknown[]) {
-  const error = errors.find((item) => typeof item === "string")
-  return typeof error === "string" ? error : null
+export function DnsServerOperationError({ error }: { error: ApiError | null }) {
+  const { t } = useTranslation()
+  if (!error) return null
+
+  return (
+    <Alert className="border-destructive/30 bg-destructive/5 text-destructive">
+      <AlertDescription>
+        <OperationErrorMessage
+          error={error}
+          fallbackSummary={t("operationErrors.unknown")}
+        />
+      </AlertDescription>
+    </Alert>
+  )
 }
 
 function getTagError(value: string, servers: DnsServer[], editingTag?: string) {
@@ -848,6 +932,13 @@ function resolveDnsServerFieldPath(
 
   if (path === `dns.servers.${normalizedTag}.detour`) {
     return DNS_SERVER_FIELD_NAMES.detour
+  }
+
+  if (
+    path === `dns.servers.${normalizedTag}.domains` ||
+    path.startsWith(`dns.servers.${normalizedTag}.domains.`)
+  ) {
+    return DNS_SERVER_FIELD_NAMES.domains
   }
 
   return undefined

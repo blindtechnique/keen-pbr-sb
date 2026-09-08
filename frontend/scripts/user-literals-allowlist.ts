@@ -59,6 +59,31 @@ export const allowedLiterals: readonly string[] = [
   "native delete route staging failed",
   "native delete route apply failed",
   "native delete tracker removal failed",
+  // Точные причины остаются в диагностике, но не в основном сообщении UI:
+  // log-diagnostics-tools.tsx выводит OperationErrorMessage с переводимым
+  // контекстом, а исходный текст — только внутри закрытых «Подробностей».
+  "Invalid log response",
+  "Invalid log response: lines must be an array of strings",
+  // Тайм-аут сохраняется только в скачиваемом JSON диагностики. Его язык и
+  // формат не должны менять машинно-читаемый снимок при смене языка панели.
+  "Request timed out after ${…} ms",
+  // AuthGate.refresh перехватывает эту внутреннюю причину без вывода текста;
+  // пользователю показываются существующие локализованные состояния входа.
+  "invalid auth status",
+  // Query-ошибка не показывается напрямую: TransportUpsertPage использует
+  // локализованный loadFailed; TransportsPage не выводит environmentQuery.error.
+  "transport environment unavailable",
+  // catalog-page.tsx и setup-wizard-page.tsx передают исходную ошибку в
+  // OperationErrorMessage: основной текст локализован, причина — в Details.
+  "Unexpected catalogue preview response",
+  "Unexpected catalogue apply response",
+  // lib/runtime-readiness.ts и probes services-status-card.tsx сохраняют
+  // исходные причины готовности. Все три обработчика ошибок перезапуска
+  // выводят ServiceRestartError → OperationErrorMessage: переводимый итог
+  // и закрытые Details, без изменения условий готовности и тайм-аутов.
+  "Runtime did not become ready: ${…}",
+  "routing health endpoint returned an error",
+  "transport manager is unavailable",
   // Команды оболочки, которые пользователь копирует как есть. Перевод сломал бы
   // их: это не текст, а ввод для терминала.
   'sh -c "$(curl -fsSL https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/main/install.sh)"',
@@ -70,26 +95,10 @@ export const allowedLiterals: readonly string[] = [
  * Перенести оставшиеся русские подписи, backup-тексты и dependency labels в
  * словари».
  *
- * Ровно эти строки пункт и имеет в виду. Порядок разбора предлагается такой:
- *
- * Список пуст: подписи общих примитивов уехали в `common.chrome.*`, а
- * backup-тексты — в `pages.settings.backup.*` и
- * `pages.settings.softwareUpdate.*`. Пустой список здесь — это не «нечего
- * проверять», а достигнутое состояние: любая новая строка вне словарей роняет
- * гейт, и внести её сюда можно только с причиной.
+ * Подписи общих примитивов уехали в `common.chrome.*`, backup-тексты — в
+ * `pages.settings.backup.*` и `pages.settings.softwareUpdate.*`.
+ * Оставшиеся записи требуют проверки именно основного пользовательского
+ * сообщения. Точные технические причины не переводятся задним числом и
+ * переходят в allowedLiterals только после проверки всех путей их показа.
  */
-export const untranslatedDebt: readonly string[] = [
-  // Эти сообщения могут дойти до общей обработки ошибок и потому должны быть
-  // заменены кодами/ключами i18n. Пока они явно названы здесь, гейт не пропустит
-  // новый долг и потребует удалить запись после миграции.
-  "Runtime did not become ready: ${…}",
-  "routing health endpoint returned an error",
-  "transport manager is unavailable",
-  "Invalid log response",
-  "Invalid log response: lines must be an array of strings",
-  "Request timed out after ${…} ms",
-  "invalid auth status",
-  "transport environment unavailable",
-  "Unexpected catalogue preview response",
-  "Unexpected catalogue apply response",
-]
+export const untranslatedDebt: readonly string[] = []

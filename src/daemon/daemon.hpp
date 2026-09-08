@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "../config/config.hpp"
+#include "../config/route_failure_policy.hpp"
 #include "../dns/keenetic_dns.hpp"
 #include "../dns/dns_txt_client.hpp"
 #include "config_store.hpp"
@@ -498,6 +499,8 @@ private:
         std::vector<RuleState> realized_rules;
         FirewallBackend firewall_backend{FirewallBackend::iptables};
         bool unapplied_draft{false};
+        RawPreroutingMode raw_prerouting{};
+        std::uint32_t firewall_mark_mask{0xffffffffU};
     };
     RoutingTestSnapshot capture_routing_test_snapshot();
     void wake_control_loop();
@@ -853,6 +856,12 @@ private:
     void run_tunnel_probe_pass(const Config& config) noexcept;
     // Runs a probe round immediately, for the manual refresh button.
     void probe_interfaces_now() noexcept;
+    RouteFailureHealthSnapshot capture_route_failure_health(
+        const Config& config,
+        const OutboundMarkMap& marks,
+        const std::map<std::string, std::string>& selections) const;
+    void refresh_route_failure_policy_after_probe(
+        const RouteFailureHealthSnapshot& previous_health);
     // Starts an already-admitted single-flight round. Completion either
     // launches the one coalesced trailing request or releases manual state.
     void start_interface_probe_round() noexcept;
@@ -961,7 +970,8 @@ private:
     void setup_api();
     void retire_api_runtime_resources() noexcept;
     TestRoutingResult run_api_routing_test(
-        const std::string& target);
+        const std::string& target,
+        std::optional<std::string> http_probe_ip = std::nullopt);
     RuntimeMutationAdmission::Lease acquire_runtime_mutation_or_throw(
         std::string label,
         bool require_runtime_running,
@@ -969,7 +979,8 @@ private:
     ConfigApplyResult apply_validated_config_via_control_task_with_lease_return(
         Config config,
         std::string saved_config_json,
-        RuntimeMutationAdmission::Lease& lease);
+        RuntimeMutationAdmission::Lease& lease,
+        std::optional<ConfigDraftRebase> draft_rebase = std::nullopt);
     void run_runtime_control_operation_or_throw(const std::string& label,
                                                 const char* operation_name,
                                                 std::function<void()> task);
@@ -1007,7 +1018,8 @@ private:
         PreparedRuntimeInputs candidate,
         PreparedRuntimeInputs rollback,
         std::string saved_config_json,
-        RuntimeFirewallPreownedTerminalContinuation final_continuation)
+        RuntimeFirewallPreownedTerminalContinuation final_continuation,
+        std::shared_ptr<ConfigDraftRebase> draft_rebase = {})
         noexcept;
     void begin_preowned_runtime_firewall_config_bootstrap(
         std::unique_ptr<RuntimeMutationAdmission::Lease> lease,
@@ -1015,7 +1027,8 @@ private:
         PreparedRuntimeInputs candidate,
         PreparedRuntimeInputs rollback,
         std::string saved_config_json,
-        RuntimeFirewallPreownedTerminalContinuation final_continuation)
+        RuntimeFirewallPreownedTerminalContinuation final_continuation,
+        std::shared_ptr<ConfigDraftRebase> draft_rebase = {})
         noexcept;
     // Sibling of staged-save publication for SIGHUP/list-refresh callers.
     // It keeps the exact pre-owned lease and candidate/rollback machinery but
@@ -1034,7 +1047,8 @@ private:
         PreparedRuntimeInputs candidate,
         PreparedRuntimeInputs rollback,
         std::string staged_serialized,
-        RuntimeFirewallPreownedTerminalContinuation final_continuation)
+        RuntimeFirewallPreownedTerminalContinuation final_continuation,
+        std::shared_ptr<ConfigDraftRebase> draft_rebase = {})
         noexcept;
     bool start_preowned_runtime_firewall_config_phase(
         const std::shared_ptr<DaemonConfigGenerationTransaction>& transaction,
@@ -1056,7 +1070,7 @@ private:
         const std::shared_ptr<DaemonConfigGenerationTransaction>& transaction,
         RuntimeFirewallLifecycleTerminal terminal,
         std::unique_ptr<RuntimeMutationAdmission::Lease> lease) noexcept;
-    ListRefreshOperationResult refresh_lists_via_api(std::optional<std::string> requested_name);
+    ListRefreshOperationResult refresh_lists_via_api(const api::ListRefreshRequest& request);
     void setup_conntrack_events();
     void handle_conntrack_events(uint32_t events);
     void publish_conntrack_revision();

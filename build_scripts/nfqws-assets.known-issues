@@ -5,19 +5,9 @@
 # gate падает на любое неизвестное расхождение и на устаревший waiver.
 # Поля разделены `|`, чтобы имена профилей с пробелами оставались однозначными.
 
-# Пулы без реальной circular-ротации. Точная форма (наличие circular и число
-# вариантов) входит в ключ, поэтому переход от нуля к одному варианту потребует
-# нового решения, а не будет скрыт старой waiver-строкой.
-shallow-pool|default|quic|present=1|sha256=bbfd8a3e63516763132900afab2f226997bc50b8364339ef5399334aec7353ca|circular=0|ids=0|bodies=0
-shallow-pool|ver1|quic|present=1|sha256=bbfd8a3e63516763132900afab2f226997bc50b8364339ef5399334aec7353ca|circular=0|ids=0|bodies=0
-shallow-pool|ver1 (alt)|quic|present=1|sha256=bbfd8a3e63516763132900afab2f226997bc50b8364339ef5399334aec7353ca|circular=0|ids=0|bodies=0
-shallow-pool|ver1 (alt)|udp|present=1|sha256=93e45c069f4b2eb2d5b76f41e13b58504b8b34c6ee925ba1e2424cebd1c6a8f4|circular=0|ids=0|bodies=0
-shallow-pool|ver2|quic|present=1|sha256=bbfd8a3e63516763132900afab2f226997bc50b8364339ef5399334aec7353ca|circular=0|ids=0|bodies=0
-shallow-pool|ver2|udp|present=1|sha256=2b0b4c8178f45a4f0ad2b93cc60d632c1690b78828243da3733b47974687b252|circular=0|ids=0|bodies=0
-shallow-pool|ver3 safe|quic|present=1|sha256=bbfd8a3e63516763132900afab2f226997bc50b8364339ef5399334aec7353ca|circular=0|ids=0|bodies=0
-shallow-pool|ver3 safe|udp|present=1|sha256=2b0b4c8178f45a4f0ad2b93cc60d632c1690b78828243da3733b47974687b252|circular=0|ids=0|bodies=0
-shallow-pool|ver4|quic|present=1|sha256=bbfd8a3e63516763132900afab2f226997bc50b8364339ef5399334aec7353ca|circular=0|ids=0|bodies=0
-shallow-pool|ver4|udp|present=1|sha256=2b0b4c8178f45a4f0ad2b93cc60d632c1690b78828243da3733b47974687b252|circular=0|ids=0|bodies=0
+# Десять прежних shallow-pool исключений устранены адресными пулами:
+# исходный slot 1 сохранён, отдельные keys и ranges проверяются генератором
+# и executable Lua fixture. Прочие восемь исключений ниже не изменены.
 
 # Остатки переписки автора с ассистентом. Каждый точный marker учитывается
 # отдельно, поэтому второй фрагмент в уже известном профиле остаётся новым долгом.

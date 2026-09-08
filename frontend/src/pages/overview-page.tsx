@@ -1,9 +1,7 @@
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { Download, WandSparklesIcon } from "lucide-react"
-import { useLocation } from "wouter"
-
-import type { ApiError } from "@/api/client"
+import { useLocation, useSearch } from "wouter"
 
 import type { DnsCheckStatus } from "@/hooks/use-dns-check"
 import {
@@ -21,6 +19,10 @@ import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { SectionCard } from "@/components/shared/section-card"
 import { RoutingHealthCard } from "@/components/overview/routing-health-card"
+import {
+  routingHealthErrorPresentation,
+  selectOverviewRoutingHealth,
+} from "@/components/overview/routing-health-result"
 import { DnsCheckWidget } from "@/components/overview/dns-check-widget"
 import { OutboundStateList } from "@/components/overview/outbound-state-list"
 import { RouteTrafficShareCard } from "@/components/overview/route-traffic-share-card"
@@ -28,16 +30,20 @@ import { ServicesStatusCard } from "@/components/overview/services-status-card"
 import { RouterInfoPanel } from "@/components/overview/router-info-card"
 import { DiagnosticsDownloadDialog } from "@/components/overview/diagnostics-download-dialog"
 import { RoutingTestPanel } from "@/components/overview/routing-test-panel"
+import { FirstRunCard } from "@/components/overview/first-run-card"
+import { RuntimeEventsFeed } from "@/components/overview/runtime-events-feed"
+import { shouldOfferInitialSetup } from "@/components/overview/first-run-state"
 import { SystemStatusSummary } from "@/components/overview/system-status-summary"
 import { ActiveInterfaceTraffic } from "@/components/overview/active-interface-traffic"
 import { selectDashboardRuntimeOutbounds } from "@/components/overview/dashboard-outbound-relevance"
 import { dashboardSectionIds } from "@/components/overview/system-status-summary-model"
 import { useDocumentTitle } from "@/hooks/use-document-title"
-import { getApiErrorMessage } from "@/lib/api-errors"
 
 export function OverviewPage() {
   const { t } = useTranslation()
   const [, navigate] = useLocation()
+  const search = useSearch()
+  const siteCheckRef = useRef<HTMLDivElement>(null)
   const [dnsCheckStatus, setDnsCheckStatus] = useState<DnsCheckStatus>("idle")
   const [isDiagnosticsDialogOpen, setIsDiagnosticsDialogOpen] = useState(false)
   const serviceHealthQuery = useGetHealthService()
@@ -62,10 +68,13 @@ export function OverviewPage() {
   const loadedConfig = selectConfig(configQuery.data)
   const configIsDraft =
     configQuery.data?.status === 200 ? configQuery.data.data.is_draft : false
-  const routingHealth =
-    routingHealthQuery.data?.status === 200
-      ? routingHealthQuery.data.data
-      : undefined
+  const routingHealthResult = selectOverviewRoutingHealth(
+    routingHealthQuery.data
+  )
+  const routingHealth = routingHealthResult.report
+  const routingHealthError =
+    routingHealthResult.error ??
+    (routingHealthQuery.isError ? routingHealthQuery.error : undefined)
   const runtimeOutbounds = useMemo(
     () =>
       runtimeOutboundsQuery.data?.status === 200
@@ -127,8 +136,45 @@ export function OverviewPage() {
     dnsCheckStatus !== "checking" &&
     !configIsDraft
 
-  const routingHealthErrorMessage = routingHealthQuery.isError
-    ? getRoutingHealthErrorMessage(routingHealthQuery.error, t)
+  const showFirstRun = shouldOfferInitialSetup({
+    config: loadedConfig,
+    isDraft: configIsDraft,
+    loadFailed: configQuery.isError || transportsQuery.isError,
+    transports: transportStatuses,
+  })
+
+  useEffect(() => {
+    const params = new URLSearchParams(search)
+    const checkSite = params.get("check") === "1"
+    const section = params.get("section")
+    const sectionId =
+      section === "dns"
+        ? dashboardSectionIds.dns
+        : section === "service"
+          ? dashboardSectionIds.service
+          : section === "routing"
+            ? dashboardSectionIds.routing
+            : undefined
+    if (!checkSite && !sectionId) return
+    // Run after the route's normal scroll-to-top effect. No network probe is
+    // started until the user chooses a site and presses Check.
+    const frame = requestAnimationFrame(() => {
+      if (checkSite) {
+        siteCheckRef.current?.scrollIntoView({ block: "start" })
+        siteCheckRef.current
+          ?.querySelector("input")
+          ?.focus({ preventScroll: true })
+      } else if (sectionId) {
+        const element = document.getElementById(sectionId)
+        element?.scrollIntoView({ block: "start" })
+        element?.focus({ preventScroll: true })
+      }
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [search])
+
+  const routingHealthErrorMessage = routingHealthError
+    ? routingHealthErrorPresentation(routingHealthError, t)
     : null
 
   // The dashboard has no PageHeader — its heading is the status line — so the
@@ -148,13 +194,17 @@ export function OverviewPage() {
         outbounds={dashboardRuntimeOutbounds}
         outboundsQueryFailed={runtimeOutboundsQuery.isError}
         routeRules={loadedConfig?.route?.rules}
-        routingOverall={routingHealth?.overall}
+        routingOverall={
+          routingHealth?.overall ?? routingHealthResult.error?.overall
+        }
         ruleCount={loadedConfig?.route?.rules?.length ?? 0}
         service={serviceHealth}
         serviceQueryFailed={serviceHealthQuery.isError}
       >
         <RouterInfoPanel />
       </SystemStatusSummary>
+
+      {showFirstRun ? <FirstRunCard /> : null}
 
       <div className="grid gap-x-3 gap-y-6 xl:grid-cols-5">
         <SectionCard
@@ -170,7 +220,10 @@ export function OverviewPage() {
               </AlertDescription>
             </Alert>
           ) : null}
-          {!configQuery.isLoading &&
+          {!showFirstRun &&
+          !configQuery.isLoading &&
+          !configQuery.isError &&
+          loadedConfig &&
           (loadedConfig?.outbounds ?? []).length === 0 ? (
             <ListPlaceholder
               action={
@@ -206,7 +259,11 @@ export function OverviewPage() {
             измерено 402 px колонки при контейнере 343. Сама карточка слева
             сжимается за счёт overflow-hidden, а этой обёртке сжиматься нечем. */}
         <div className="min-w-0 space-y-6 xl:col-span-2">
-          <div className="scroll-mt-24" id={dashboardSectionIds.service}>
+          <div
+            className="scroll-mt-24"
+            id={dashboardSectionIds.service}
+            tabIndex={-1}
+          >
             <ServicesStatusCard />
           </div>
           {/* Под службами, в той же колонке: «куда уходит трафик» — вопрос,
@@ -221,15 +278,33 @@ export function OverviewPage() {
         </div>
       </div>
 
-      <RoutingTestPanel
-        lists={loadedConfig?.lists}
-        outbounds={loadedConfig?.outbounds}
-      />
+      <div className="scroll-mt-6" ref={siteCheckRef}>
+        <RoutingTestPanel
+          lists={loadedConfig?.lists}
+          outbounds={loadedConfig?.outbounds}
+        />
+      </div>
 
       <div className="grid gap-x-3 gap-y-6 xl:grid-cols-3">
-        <div className="scroll-mt-24" id={dashboardSectionIds.dns}>
+        <div
+          className="scroll-mt-24"
+          id={dashboardSectionIds.dns}
+          tabIndex={-1}
+        >
           <DnsCheckWidget
-            dnsProbeEnabled={Boolean(loadedConfig?.dns?.dns_test_server)}
+            dnsProbeEnabled={
+              loadedConfig && !configIsDraft && !configQuery.isError
+                ? Boolean(loadedConfig.dns?.dns_test_server)
+                : undefined
+            }
+            dnsEnforcement={
+              loadedConfig && !configQuery.isError
+                ? (loadedConfig.dns?.client_dns_enforcement ?? {
+                    enabled: false,
+                  })
+                : undefined
+            }
+            configIsDraft={Boolean(configIsDraft)}
             onStatusChange={setDnsCheckStatus}
           />
         </div>
@@ -238,6 +313,7 @@ export function OverviewPage() {
           className="h-full scroll-mt-24 xl:col-span-2"
           contentClassName="flex flex-1 flex-col"
           id={dashboardSectionIds.routing}
+          tabIndex={-1}
           title={t("overview.routing.title")}
           action={
             <Button
@@ -252,10 +328,20 @@ export function OverviewPage() {
           }
         >
           {routingHealthQuery.isLoading ? <TableSkeleton /> : null}
-          {routingHealthQuery.isError ? (
+          {routingHealthErrorMessage ? (
             <Alert variant="destructive">
               <AlertDescription className="whitespace-pre-wrap">
-                {routingHealthErrorMessage}
+                <p>{routingHealthErrorMessage.summary}</p>
+                {routingHealthErrorMessage.detail ? (
+                  <details className="mt-2 text-xs">
+                    <summary className="cursor-pointer">
+                      {t("overview.routing.technicalDetails")}
+                    </summary>
+                    <p className="mt-1 font-mono break-words">
+                      {routingHealthErrorMessage.detail}
+                    </p>
+                  </details>
+                ) : null}
               </AlertDescription>
             </Alert>
           ) : null}
@@ -277,6 +363,11 @@ export function OverviewPage() {
         </SectionCard>
       </div>
 
+      <RuntimeEventsFeed
+        outbounds={loadedConfig?.outbounds ?? []}
+        transports={transportStatuses ?? []}
+      />
+
       {loadedConfig &&
       serviceHealth &&
       routingHealth &&
@@ -292,22 +383,5 @@ export function OverviewPage() {
         />
       ) : null}
     </div>
-  )
-}
-
-function getRoutingHealthErrorMessage(
-  error: unknown,
-  t: (key: string) => string
-) {
-  if (error && typeof error === "object" && "error" in error) {
-    const message = (error as { error?: unknown }).error
-    if (typeof message === "string" && message.trim().length > 0) {
-      return message
-    }
-  }
-
-  return (
-    getApiErrorMessage(error as ApiError | null) ||
-    t("overview.routing.loadError")
   )
 }

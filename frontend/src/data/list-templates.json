@@ -44,7 +44,14 @@
   {
     "id": "ai",
     "name": "Все AI сервисы",
+    "name_i18n": {
+      "ru": "Все AI сервисы",
+      "en": "All AI services"
+    },
     "description": "ChatGPT, Claude, Gemini, Perplexity и другие (кроме китайских)",
+    "description_i18n": {
+      "en": "ChatGPT, Claude, Gemini, Perplexity and other AI services, excluding Chinese services"
+    },
     "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ai-!cn.srs",
     "category": "ai"
   },
@@ -100,7 +107,14 @@
   {
     "id": "meta",
     "name": "Meta (все сервисы)",
+    "name_i18n": {
+      "ru": "Meta (все сервисы)",
+      "en": "Meta (all services)"
+    },
     "description": "Facebook, Instagram, Threads, WhatsApp — sing-box: geosite-meta.",
+    "description_i18n": {
+      "en": "Facebook, Instagram, Threads, WhatsApp — sing-box: geosite-meta."
+    },
     "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-meta.srs",
     "category": "social",
     "catalogPresetId": "meta"
@@ -216,6 +230,9 @@
     "id": "kino_pub",
     "name": "Kino.pub",
     "description": "Полный список и вариант без тяжёлых видео-CDN доступны в каталоге.",
+    "description_i18n": {
+      "en": "The full list and a version without high-bandwidth video CDNs are available in the catalog."
+    },
     "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-kinopub.srs",
     "category": "media",
     "catalogPresetId": "kinopub"
@@ -279,7 +296,14 @@
   {
     "id": "list",
     "name": "Всё медиа",
+    "name_i18n": {
+      "ru": "Всё медиа",
+      "en": "All media"
+    },
     "description": "Композитный список стриминговых сервисов",
+    "description_i18n": {
+      "en": "A combined list of streaming services"
+    },
     "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-media.srs",
     "category": "media"
   },
@@ -349,7 +373,14 @@
   {
     "id": "list",
     "name": "Все игры",
+    "name_i18n": {
+      "ru": "Все игры",
+      "en": "All games"
+    },
     "description": "Steam, Epic, PlayStation, Xbox, Nintendo, Blizzard и другие",
+    "description_i18n": {
+      "en": "Steam, Epic, PlayStation, Xbox, Nintendo, Blizzard and other gaming services"
+    },
     "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-games.srs",
     "category": "gaming"
   },
@@ -476,6 +507,9 @@
     "id": "cloudflare",
     "name": "Cloudflare",
     "description": "Список покрывает сайты и сервисы на инфраструктуре Cloudflare (CDN, reverse proxy, Workers). Выбирая его, вы буквально заворачиваете в правило огромную часть интернета — используйте осознанно.",
+    "description_i18n": {
+      "en": "Covers websites and services on Cloudflare infrastructure (CDN, reverse proxy, Workers). This rule can affect a large part of the internet. Enable it with care."
+    },
     "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cloudflare.srs",
     "category": "cloud"
   },
@@ -517,20 +551,38 @@
   {
     "id": "adult_content_18",
     "name": "Adult content (18+)",
+    "name_i18n": {
+      "ru": "Контент для взрослых (18+)",
+      "en": "Adult content (18+)"
+    },
     "description": "Контент 18+ через VPN",
+    "description_i18n": {
+      "en": "Adult content (18+) through VPN"
+    },
     "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-porn.srs",
     "category": "block"
   },
   {
     "id": "list",
     "name": "Заблокировано в РФ",
+    "name_i18n": {
+      "ru": "Заблокировано в РФ",
+      "en": "Blocked in Russia"
+    },
     "description": "Содержит более 90 000 доменов, заблокированных в РФ. Источник — hoaxisr/rulesets",
+    "description_i18n": {
+      "en": "Over 90,000 domains blocked in Russia. Source: hoaxisr/rulesets"
+    },
     "url": "https://repo.hoaxisr.ru/rulesets/srs/rkn.srs",
     "category": "block"
   },
   {
     "id": "hoaxisr_rulesets",
     "name": "Недоступно из РФ (hoaxisr/rulesets)",
+    "name_i18n": {
+      "ru": "Недоступно из РФ (hoaxisr/rulesets)",
+      "en": "Unavailable from Russia (hoaxisr/rulesets)"
+    },
     "description": "",
     "url": "https://repo.hoaxisr.ru/rulesets/srs/unavailable-in-russia.srs",
     "category": "block"
@@ -538,7 +590,14 @@
   {
     "id": "list",
     "name": "Реклама и трекеры",
+    "name_i18n": {
+      "ru": "Реклама и трекеры",
+      "en": "Ads and trackers"
+    },
     "description": "Блокирует рекламу и трекеры через action:reject — выбор маршрута не требуется",
+    "description_i18n": {
+      "en": "Blocks ads and trackers with action:reject. No route selection is required."
+    },
     "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ads-all.srs",
     "category": "block"
   }

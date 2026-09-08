@@ -2,6 +2,7 @@
 
 #include "../src/daemon/runtime_route_health_plan.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <future>
 #include <stdexcept>
@@ -171,6 +172,45 @@ TEST_CASE("runtime route health plan observes once and completes interface reach
     CHECK(result.plan->reachability.count("fixed") == 0U);
     CHECK(request.outbound_marks == original_marks);
     CHECK_FALSE(result.plan->routing.routes.empty());
+}
+
+TEST_CASE("runtime route health plan keeps working gateway families independent") {
+    auto request = route_health_request();
+    auto outbound = interface_outbound("vpn", "wg-vpn", "10.8.0.1");
+    outbound.gateway6 = "2001:db8::1";
+    request.config.outbounds = std::vector<Outbound>{outbound};
+    request.outbound_marks = {{"vpn", 1U}};
+    FakeRuntimeRouteHealthServices services;
+    services.interfaces = {DumpedInterface{"wg-vpn", true}};
+    int working_family = AF_INET;
+    bool ipv6_enabled = false;
+    SUBCASE("IPv6 disabled and its gateway absent cannot disable IPv4") {}
+    SUBCASE("IPv6 enabled and its gateway absent cannot disable IPv4") { ipv6_enabled = true; }
+    SUBCASE("IPv4 gateway absent cannot disable working IPv6") {
+        working_family = AF_INET6;
+        ipv6_enabled = true;
+    }
+    SUBCASE("disabled IPv6 alone does not make an outbound usable") { working_family = AF_INET6; }
+    services.ipv6_decision = {ipv6_enabled, ipv6_enabled
+        ? Ipv6SupportDecision::Reason::Enabled
+        : Ipv6SupportDecision::Reason::DisabledByConfig};
+    // The same-interface default must reach only its own gateway family.
+    services.routes.push_back(DumpedRoute{"default", 254U, "wg-vpn", std::nullopt,
+                                         false, false, working_family, 0U, 0U});
+    const auto result = execute_runtime_route_health_plan(request, services);
+    REQUIRE(result.succeeded());
+    const auto family = result.plan->family_reachability.at("vpn");
+    CHECK(family.ipv4 == (working_family == AF_INET));
+    CHECK(family.ipv6 == (working_family == AF_INET6));
+    const bool usable = working_family == AF_INET || ipv6_enabled;
+    CHECK(result.plan->reachability.at("vpn") == usable);
+    CHECK(result.plan->routing.routes.size() == (usable ? 1U : 0U));
+    for (const auto& route : result.plan->routing.routes) {
+        CHECK(route.family == working_family);
+        CHECK_FALSE(route.unreachable);
+    }
+    CHECK(services.route_calls == 1);
+    CHECK(services.interface_calls == 1);
 }
 
 TEST_CASE("runtime route health plan retains the exact failed observation stage") {

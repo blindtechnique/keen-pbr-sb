@@ -351,6 +351,38 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "offline backup recovery restores subscriptions and preserves legacy omissions") {
+    RecoveryTempDir temporary;
+    const auto layout = test_layout(temporary.path);
+    const auto subscriptions =
+        layout.persistent.config.parent_path() / "subscriptions.json";
+    write_binary(layout.persistent.config, valid_config_json());
+    write_binary(layout.persistent.transports, "{}\n");
+    write_binary(subscriptions, "[]\n");
+    REQUIRE(::chmod(subscriptions.c_str(), 0600) == 0);
+    const auto snapshot_files = backup::prepare_persistent_restore(
+        layout.persistent, backup::make_full_snapshot(layout.persistent));
+    auto snapshot = backup::make_operation_snapshot(snapshot_files);
+    bool includes_subscriptions = true;
+    SUBCASE("new operation snapshot restores interrupted subscriptions") {}
+    SUBCASE("old operation snapshot leaves subscriptions unchanged") {
+        snapshot = exact_operation_snapshot(layout);
+        includes_subscriptions = false;
+    }
+    begin_operation(layout, backup::RecoveryOperation::backup_restore,
+                    kBackupTransaction, snapshot_payload(snapshot));
+    const std::string interrupted = "[{\"id\":\"interrupted\"}]\n";
+    write_binary(subscriptions, interrupted);
+    REQUIRE(::chmod(subscriptions.c_str(), 0644) == 0);
+    backup::RecoveryCoordinator coordinator(layout);
+    const auto result = coordinator.recover();
+    CHECK(result.outcome == backup::RecoveryOutcome::rollback_completed);
+    CHECK(read_binary(subscriptions) == (includes_subscriptions ? "[]\n" : interrupted));
+    CHECK(metadata_of(subscriptions).mode == (includes_subscriptions ? 0600 : 0644));
+    CHECK_FALSE(coordinator.global_unknown_present());
+}
+
+TEST_CASE(
     "recovery hook reconciles runtime while the exact WAL is active") {
     RecoveryTempDir temporary;
     const auto layout = test_layout(temporary.path);

@@ -15,5 +15,11 @@ if ! /opt/etc/init.d/S80keen-pbr "$stop_action"; then
 fi
 /opt/etc/init.d/S79transport-manager stop || true
 
+# Also detach on force-reinstall: some opkg versions omit PKG_UPGRADE there.
+# postinst restores only this helper's own standalone block. If replacement is
+# interrupted, dnsmasq no longer depends on a temporarily absent package file.
+if [ -x /opt/usr/lib/keen-pbr/dnsmasq-package.sh ]; then
+    /opt/usr/lib/keen-pbr/dnsmasq-package.sh detach || exit 1
+fi
 
 exit 0

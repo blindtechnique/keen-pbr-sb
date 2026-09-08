@@ -14,7 +14,11 @@ import {
   RestoreDialog,
 } from "@/components/settings/backup-dialogs"
 import { KeeneticStatus } from "@/components/shared/keenetic-status"
-import { getSoftwareUpdateDialogContent } from "@/components/settings/software-update-view"
+import { OperationErrorMessage } from "@/components/shared/operation-error-message"
+import {
+  getSoftwareUpdateDialogContent,
+  softwareUpdateResponseError,
+} from "@/components/settings/software-update-view"
 import { Button } from "@/components/ui/button"
 import {
   Card,
@@ -101,7 +105,10 @@ export function BackupAndRestoreCard() {
 export function SoftwareUpdateCard() {
   const { t } = useTranslation()
   const [status, setStatus] = useState<SoftwareUpdateStatus | null>(null)
-  const [error, setError] = useState("")
+  const [error, setError] = useState<{
+    cause: unknown
+    fallbackSummary: string
+  } | null>(null)
   const [open, setOpen] = useState(false)
   const [showResult, setShowResult] = useState(false)
   const [confirmInstall, setConfirmInstall] = useState(false)
@@ -136,10 +143,15 @@ export function SoftwareUpdateCard() {
           SoftwareUpdateStatus & { error: string }
         >
         if (!response.ok)
-          throw new Error(body.error ?? `HTTP ${response.status}`)
+          throw softwareUpdateResponseError(response.status, body)
         setStatus(body as SoftwareUpdateStatus)
         setError(
-          body.check_error ? t("pages.settings.softwareUpdate.checkFailed") : ""
+          body.check_error
+            ? {
+                cause: body.check_error,
+                fallbackSummary: t("pages.settings.softwareUpdate.checkFailed"),
+              }
+            : null
         )
         if (showFeedback) {
           if (body.check_error) {
@@ -177,8 +189,15 @@ export function SoftwareUpdateCard() {
             check_error: detail || message,
           }
         })
-        setError(message)
-        if (showFeedback) toast.error(message, { richColors: true })
+        setError({ cause: refreshError, fallbackSummary: message })
+        if (showFeedback)
+          toast.error(
+            <OperationErrorMessage
+              error={refreshError}
+              fallbackSummary={message}
+            />,
+            { richColors: true }
+          )
       } finally {
         if (showFeedback) setChecking(false)
       }
@@ -192,21 +211,20 @@ export function SoftwareUpdateCard() {
       const body = (await response.json().catch(() => ({}))) as Partial<
         SoftwareUpdateProgress & { error: string }
       >
-      if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`)
+      if (!response.ok) throw softwareUpdateResponseError(response.status, body)
       setStatus((previous) =>
         previous
           ? { ...previous, ...(body as SoftwareUpdateProgress) }
           : previous
       )
-      setError("")
+      setError(null)
     } catch (refreshError) {
       // The daemon is restarted while its package is replaced. Keep the last
       // known running state so polling resumes as soon as it is reachable.
-      setError(
-        refreshError instanceof Error
-          ? refreshError.message
-          : t("pages.settings.softwareUpdate.checkFailed")
-      )
+      setError({
+        cause: refreshError,
+        fallbackSummary: t("pages.settings.softwareUpdate.progressUnavailable"),
+      })
     }
   }, [t])
 
@@ -234,7 +252,7 @@ export function SoftwareUpdateCard() {
     setConfirmInstall(false)
     setShowResult(true)
     setStarting(true)
-    setError("")
+    setError(null)
     setStatus((previous) =>
       previous
         ? {
@@ -260,7 +278,7 @@ export function SoftwareUpdateCard() {
       const body = (await response.json().catch(() => ({}))) as {
         error?: string
       }
-      if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`)
+      if (!response.ok) throw softwareUpdateResponseError(response.status, body)
       setStatus((previous) =>
         previous ? { ...previous, running: true } : previous
       )
@@ -271,11 +289,10 @@ export function SoftwareUpdateCard() {
           ? { ...previous, phase: "failed", running: false, success: false }
           : previous
       )
-      setError(
-        updateError instanceof Error
-          ? updateError.message
-          : t("pages.settings.softwareUpdate.startFailed")
-      )
+      setError({
+        cause: updateError,
+        fallbackSummary: t("pages.settings.softwareUpdate.operationFailed"),
+      })
     } finally {
       setStarting(false)
     }
@@ -285,7 +302,7 @@ export function SoftwareUpdateCard() {
     setConfirmRollback(false)
     setShowResult(true)
     setStarting(true)
-    setError("")
+    setError(null)
     setStatus((previous) =>
       previous
         ? {
@@ -305,7 +322,7 @@ export function SoftwareUpdateCard() {
       const body = (await response.json().catch(() => ({}))) as {
         error?: string
       }
-      if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`)
+      if (!response.ok) throw softwareUpdateResponseError(response.status, body)
       setStatus((previous) =>
         previous ? { ...previous, running: true } : previous
       )
@@ -316,11 +333,10 @@ export function SoftwareUpdateCard() {
           ? { ...previous, phase: "failed", running: false, success: false }
           : previous
       )
-      setError(
-        rollbackError instanceof Error
-          ? rollbackError.message
-          : t("pages.settings.softwareUpdate.rollbackFailed")
-      )
+      setError({
+        cause: rollbackError,
+        fallbackSummary: t("pages.settings.softwareUpdate.operationFailed"),
+      })
     } finally {
       setStarting(false)
     }
@@ -405,7 +421,14 @@ export function SoftwareUpdateCard() {
 
           <div className="min-h-0 space-y-4 overflow-y-auto pr-1">
             <UpdateVersionSummary status={status} />
-            {error ? <p className="text-sm text-destructive">{error}</p> : null}
+            {error ? (
+              <div className="text-sm text-destructive">
+                <OperationErrorMessage
+                  error={error.cause}
+                  fallbackSummary={error.fallbackSummary}
+                />
+              </div>
+            ) : null}
             <UpdateStateMessage status={status} />
             <RollbackAvailabilityNotice status={status} />
             {status && showUpdateLog ? (
@@ -415,19 +438,26 @@ export function SoftwareUpdateCard() {
               <ReleaseNotes status={status} />
             ) : null}
             {showUpdateLog ? (
-              <div className="space-y-2 rounded-md border p-3">
-                <p className="font-medium">
-                  {t("pages.settings.softwareUpdate.result")}
-                </p>
+              <details
+                className="space-y-2 rounded-md border p-3"
+                open={status?.success !== false || status?.running === true}
+              >
+                <summary className="cursor-pointer rounded-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring">
+                  {status?.success === false
+                    ? t("operationErrors.details")
+                    : t("pages.settings.softwareUpdate.result")}
+                </summary>
                 <pre
                   aria-live="polite"
                   className="max-h-72 overflow-auto rounded bg-muted p-3 text-xs whitespace-pre-wrap"
                   ref={logRef}
                 >
-                  {status?.log ||
+                  {(status?.success === false
+                    ? [status.message, status.log].filter(Boolean).join("\n\n")
+                    : status?.log) ||
                     t("pages.settings.softwareUpdate.waitingForLog")}
                 </pre>
-              </div>
+              </details>
             ) : null}
             {confirmInstall ? (
               <div className="space-y-3 rounded-md border border-primary/35 bg-primary/5 p-4">
@@ -533,9 +563,7 @@ function UpdateVersionSummary({
         <span className="text-muted-foreground">
           {t("pages.settings.softwareUpdate.current")}:{" "}
         </span>
-        <code>
-          {status?.current || __APP_VERSION__ || "—"}
-        </code>
+        <code>{status?.current || __APP_VERSION__ || "—"}</code>
       </div>
       <div>
         <span className="text-muted-foreground">
@@ -601,6 +629,9 @@ function UpdateStateMessage({
       </p>
     )
   }
+  // A failed release check may still carry a cached `available: false`.
+  // That is not confirmation that the installed version is current.
+  if (status?.check_error) return null
   if (status?.current_ahead) {
     return (
       <p className="text-sm text-muted-foreground">
@@ -626,7 +657,9 @@ function UpdateProgress({ status }: { status: SoftwareUpdateStatus }) {
     <div className="space-y-2" aria-live="polite">
       <div className="flex items-center justify-between gap-4 text-sm">
         <span>
-          {status.message ?? t("pages.settings.softwareUpdate.inProgress")}
+          {status.success === false && !status.running
+            ? t("pages.settings.softwareUpdate.operationFailed")
+            : (status.message ?? t("pages.settings.softwareUpdate.inProgress"))}
         </span>
         <span className="shrink-0 text-muted-foreground tabular-nums">
           {percent}%

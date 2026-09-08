@@ -15,14 +15,14 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
-import { useLocation } from "wouter"
+import { useLocation, useSearch } from "wouter"
+import { useCatalogNavigation } from "@/hooks/use-catalog-navigation"
+import { CatalogReturnHint } from "@/components/shared/catalog-return-hint"
 
 import type { ApiError } from "@/api/client"
 import type { NdmsNativeImportRecoveryResult } from "@/api/native-mutation"
 import {
   getTransportConfigExport,
-  postConfig,
-  postConfigSave,
   postTransportConfig,
 } from "@/api/generated/keen-api"
 import {
@@ -59,10 +59,7 @@ import { KeenPencilIcon } from "@/components/shared/keen-icons"
 import { EditDeleteActions } from "@/components/shared/edit-delete-actions"
 import { DataTable } from "@/components/shared/data-table"
 import { DeleteImpactDialog } from "@/components/shared/delete-impact-dialog"
-import {
-  buildUpdatedConfigForOutboundsDelete,
-  getOutboundDeleteImpact,
-} from "@/pages/outbounds-utils"
+import { getOutboundDeleteImpact } from "@/pages/outbounds-utils"
 import { getOutboundDeleteImpactItems } from "@/components/delete-impact/outbound-items"
 import { KeeneticStatus } from "@/components/shared/keenetic-status"
 import { PageActionBar } from "@/components/shared/page-action-bar"
@@ -72,6 +69,10 @@ import { SectionHeading } from "@/components/shared/section-heading"
 import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
 import { SubscriptionsPanel } from "@/components/transports/subscriptions-panel"
+import {
+  readSubscriptionDeepLink,
+  withoutSubscriptionDeepLink,
+} from "@/components/transports/subscription-settings-model"
 import { NativeInterfaceDetails } from "@/components/transports/native-interface-details"
 import { NativeInterfaceDeleteDialog } from "@/components/transports/native-interface-delete-dialog"
 import { summarizeNativeDeleteDependencies } from "@/components/transports/native-interface-delete-guard"
@@ -100,8 +101,11 @@ import type { Dependency } from "@/lib/dependencies"
 import { Badge } from "@/components/ui/badge"
 import { Switch } from "@/components/ui/switch"
 import { Button } from "@/components/ui/button"
-import { getApiErrorMessage } from "@/lib/api-errors"
-import { getOutboundDisplayName } from "@/lib/outbound-display"
+import { OperationErrorMessage } from "@/components/shared/operation-error-message"
+import {
+  getOutboundDisplayName,
+  getOutboundReferenceLabel,
+} from "@/lib/outbound-display"
 import {
   dismissNativeRouteOffer,
   pickNativeRouteOfferCandidates,
@@ -123,7 +127,7 @@ import {
   subscribeNativeMutationLock,
   type NativeMutationLock,
 } from "@/lib/native-mutation-lock"
-import { resolveNativeWireGuardImportLocation } from "@/lib/native-wireguard-import-geo"
+import { persistNativeWireGuardImportCountry } from "@/lib/native-wireguard-import-country"
 import {
   useNativeInterfaceLocations,
   useServerLocations,
@@ -256,6 +260,9 @@ export function TransportsPage({
   const queryClient = useQueryClient()
   const { t, i18n } = useTranslation()
   const [, navigate] = useLocation()
+  const search = useSearch()
+  const subscriptionLink = readSubscriptionDeepLink(search)
+  const catalogNavigation = useCatalogNavigation()
   const [processModeDialogOpen, setProcessModeDialogOpen] = useState(false)
   const [selectedProcessMode, setSelectedProcessMode] =
     useState<SingBoxProcessMode>("isolated")
@@ -439,6 +446,11 @@ export function TransportsPage({
     transportTabValues,
     transportTabValues[0] ?? "all"
   )
+  useEffect(() => {
+    if (subscriptionLink.open && activeTransportTab !== "subscriptions") {
+      setActiveTransportTab("subscriptions")
+    }
+  }, [activeTransportTab, setActiveTransportTab, subscriptionLink.open])
   const visibleItems =
     activeTransportTab === "all"
       ? managedItems
@@ -525,9 +537,17 @@ export function TransportsPage({
       if (body.installed) {
         toast.success(t("transports.naiveComponent.installed"))
       } else {
-        toast.error(body.log || t("transports.naiveComponent.failed"), {
-          richColors: true,
-        })
+        toast.error(
+          body.log ? (
+            <OperationErrorMessage
+              error={body.log}
+              fallbackSummary={t("transports.naiveComponent.failed")}
+            />
+          ) : (
+            t("transports.naiveComponent.failed")
+          ),
+          { richColors: true }
+        )
       }
     },
     onError: () => toast.error(t("transports.naiveComponent.failed")),
@@ -535,7 +555,7 @@ export function TransportsPage({
   const needsNaiveComponent =
     items.some((item) => item.protocol === "naive") &&
     naiveComponentQuery.data?.installed === false
-  const error = getApiErrorMessage(query.error as ApiError | null)
+  const error = query.error
   const runtimeOutboundsQuery = useGetRuntimeOutbounds()
   const probesQuery = useQuery<InterfaceProbesResponse>({
     queryKey: ["system-probes"],
@@ -585,12 +605,6 @@ export function TransportsPage({
       )
       .map((outbound) => [outbound.interface!, outbound])
   )
-  const selectedNativeDeleteOutbound = selectedNativeDeleteTarget?.kernelName
-    ? interfaceOutboundByInterface.get(selectedNativeDeleteTarget.kernelName)
-    : undefined
-  const selectedNativeDeleteTracker = selectedNativeDeleteTarget?.kernelName
-    ? nativeTrackerByInterface.get(selectedNativeDeleteTarget.kernelName)
-    : undefined
   // Вопрос «использовать новый туннель как VPN?»: владелец добавляет AWG в
   // KeeneticOS и ждёт, что keen-pbr-sb сам предложит привязать маршрут.
   // Спрашиваем только когда конфигурация загружена: иначе на мгновение
@@ -699,7 +713,7 @@ export function TransportsPage({
         )
       },
       onError: (mutationError) => {
-        toast.error(getApiErrorMessage(mutationError as ApiError), {
+        toast.error(<OperationErrorMessage error={mutationError} />, {
           richColors: true,
         })
       },
@@ -735,17 +749,13 @@ export function TransportsPage({
       toast.success(t("transports.processMode.applied"))
     },
     onError: (mutationError) => {
-      toast.error(getApiErrorMessage(mutationError), {
+      toast.error(<OperationErrorMessage error={mutationError} />, {
         richColors: true,
       })
     },
   })
-  // Удаление маршрута перед удалением туннеля. Порядок сознательный: маршрут
-  // уходит в черновик конфигурации (ничего не меняя на роутере до apply), и
-  // только после этого туннель удаляется по-настоящему. В обратном порядке
-  // упавший второй шаг оставил бы правила, ведущие в несуществующий туннель.
-  // Атомарной пары операций в API пока нет — это отмечено Codex в changelog.
-  const routeDeleteMutation = usePostConfigMutation()
+  // The backend deletes the transport and its linked routing state together.
+  // The browser never stages, saves, or restores an unrelated user draft.
   const configMutation = usePostTransportConfigMutation({
     mutation: {
       onSuccess: (_data, variables) => {
@@ -755,7 +765,7 @@ export function TransportsPage({
         )
       },
       onError: (mutationError) => {
-        toast.error(getApiErrorMessage(mutationError as ApiError), {
+        toast.error(<OperationErrorMessage error={mutationError} />, {
           richColors: true,
         })
       },
@@ -831,9 +841,10 @@ export function TransportsPage({
     },
     onError: (transferError) =>
       toast.error(
-        transferError instanceof Error
-          ? transferError.message
-          : t("configTransfer.invalidFormat"),
+        <OperationErrorMessage
+          error={transferError}
+          fallbackSummary={t("configTransfer.invalidFormat")}
+        />,
         { richColors: true }
       ),
     onSettled: () => {
@@ -858,9 +869,10 @@ export function TransportsPage({
       toast.success(t("configTransfer.exported"))
     } catch (exportError) {
       toast.error(
-        exportError instanceof Error
-          ? exportError.message
-          : t("configTransfer.exportFailed"),
+        <OperationErrorMessage
+          error={exportError}
+          fallbackSummary={t("configTransfer.exportFailed")}
+        />,
         { richColors: true }
       )
     } finally {
@@ -871,7 +883,7 @@ export function TransportsPage({
     mutation: {
       onSuccess: () => toast.success(t("transports.loopProtection.saved")),
       onError: (mutationError) =>
-        toast.error(getApiErrorMessage(mutationError as ApiError), {
+        toast.error(<OperationErrorMessage error={mutationError} />, {
           richColors: true,
         }),
     },
@@ -879,7 +891,7 @@ export function TransportsPage({
   const preferenceMutation = usePostConfigMutation({
     mutation: {
       onError: (mutationError) =>
-        toast.error(getApiErrorMessage(mutationError as ApiError), {
+        toast.error(<OperationErrorMessage error={mutationError} />, {
           richColors: true,
         }),
     },
@@ -887,7 +899,7 @@ export function TransportsPage({
   const routeOfferMutation = usePostConfigMutation({
     mutation: {
       onError: (mutationError) =>
-        toast.error(getApiErrorMessage(mutationError as ApiError), {
+        toast.error(<OperationErrorMessage error={mutationError} />, {
           richColors: true,
         }),
     },
@@ -906,19 +918,9 @@ export function TransportsPage({
       clearStagedNativeWireGuardImportCompletion(completionTag)
       return
     }
-    void resolveNativeWireGuardImportLocation(endpointHost)
-      .then(async (location) => {
-        if (!location) return
-        const response = await postTransportConfig({
-          operation: TransportConfigOperationOperation.update,
-          tag: transport.tag,
-          transport: {
-            ...transport,
-            country_code: location.country_code,
-            country: location.country,
-          },
-        })
-        if (response.status !== 200) return
+    void persistNativeWireGuardImportCountry(transport, endpointHost)
+      .then(async (updated) => {
+        if (!updated) return
         await queryClient.invalidateQueries({
           queryKey: queryKeys.transportConfig(),
         })
@@ -1006,10 +1008,11 @@ export function TransportsPage({
         )
         toast.success(t("transports.nativeImport.importedToast"), {
           id: NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID,
+          action: catalogNavigation.successAction(transport.tag),
         })
         return true
       } catch (mutationError) {
-        toast.error(getApiErrorMessage(mutationError as ApiError), {
+        toast.error(<OperationErrorMessage error={mutationError} />, {
           id: NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID,
           richColors: true,
         })
@@ -1033,6 +1036,7 @@ export function TransportsPage({
     ) {
       toast.success(t("transports.nativeImport.importedToast"), {
         id: NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID,
+        action: catalogNavigation.successAction(),
       })
       return true
     }
@@ -1069,10 +1073,11 @@ export function TransportsPage({
       })
       toast.success(t("transports.nativeImport.importedToast"), {
         id: NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID,
+        action: catalogNavigation.successAction(tag),
       })
       return true
     } catch (mutationError) {
-      toast.error(getApiErrorMessage(mutationError as ApiError), {
+      toast.error(<OperationErrorMessage error={mutationError} />, {
         id: NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID,
         richColors: true,
       })
@@ -1799,13 +1804,17 @@ export function TransportsPage({
     const editHref = `/outbounds/${encodeURIComponent(outbound.tag)}/edit?view=page`
     const cells: ReactNode[] = [
       <span key="power" />,
-      <span className="flex min-w-0 flex-col" key="name">
-        <span className="truncate text-sm font-medium">
-          {outbound.display_name?.trim() || outbound.tag}
-        </span>
-        <span className="truncate font-mono text-xs text-muted-foreground">
-          {outbound.interface}
-        </span>
+      <span
+        className="min-w-0 truncate text-sm font-medium"
+        key="name"
+        title={[
+          getOutboundReferenceLabel(outbound),
+          outbound.interface !== outbound.tag ? outbound.interface : undefined,
+        ]
+          .filter(Boolean)
+          .join(" · ")}
+      >
+        {getOutboundDisplayName(outbound)}
       </span>,
       <KeeneticStatus
         key="state"
@@ -1884,11 +1893,14 @@ export function TransportsPage({
           title={t("transports.title")}
         />
       )}
+      <CatalogReturnHint busy={nativeImportInProgress} />
       <PageActionBar
         primary={
           <Button
             disabled={nativeImportInProgress}
-            onClick={() => navigate(transportCreateHref)}
+            onClick={() =>
+              navigate(transportCreateHref, catalogNavigation.navigationOptions)
+            }
           >
             <PlusIcon />
             {t("transports.add")}
@@ -2016,7 +2028,9 @@ export function TransportsPage({
       {error ? (
         <Alert variant="destructive">
           <AlertTitle>{t("transports.unavailable")}</AlertTitle>
-          <AlertDescription>{error}</AlertDescription>
+          <AlertDescription>
+            <OperationErrorMessage error={error} />
+          </AlertDescription>
         </Alert>
       ) : null}
 
@@ -2097,7 +2111,14 @@ export function TransportsPage({
       {transportTabs.length > 1 ? (
         <SectionTabs
           ariaLabel={t("transports.tabs.ariaLabel")}
-          onValueChange={setActiveTransportTab}
+          onValueChange={(tab) => {
+            window.history.replaceState(
+              window.history.state,
+              "",
+              withoutSubscriptionDeepLink(window.location.href)
+            )
+            setActiveTransportTab(tab)
+          }}
           tabs={transportTabs}
           value={activeTransportTab}
         />
@@ -2107,7 +2128,10 @@ export function TransportsPage({
           сверху убирает лишний ритм над ней; снизу его быть не должно —
           кнопка наезжала на первую карточку. */}
       {activeTransportTab === "subscriptions" ? (
-        <SubscriptionsPanel transports={managedItems} />
+        <SubscriptionsPanel
+          transports={managedItems}
+          selectedSubscriptionId={subscriptionLink.id}
+        />
       ) : null}
       {activeTransportTab !== "subscriptions" && hiddenNativeCount > 0 ? (
         <div className="-mt-1 flex justify-start">
@@ -2190,78 +2214,7 @@ export function TransportsPage({
         expectedOwnershipRevision={
           nativeDeleteSelection?.expectedOwnershipRevision ?? ""
         }
-        linkedRouteName={
-          selectedNativeDeleteOutbound
-            ? getOutboundDisplayName(selectedNativeDeleteOutbound)
-            : undefined
-        }
         nativeInterface={selectedNativeDeleteTarget}
-        prepareLinkedRouteRemoval={async () => {
-          if (!selectedNativeDeleteOutbound && !selectedNativeDeleteTracker) {
-            return
-          }
-          if (!selectedNativeDeleteTarget) {
-            throw new Error("native delete configuration is unavailable")
-          }
-          if (selectedNativeDeleteOutbound && !keenConfig) {
-            throw new Error("native delete route configuration is unavailable")
-          }
-          const originalConfig = keenConfig
-          let routeRemoved = false
-          let trackerRemoved = false
-          const restore = async () => {
-            if (routeRemoved && originalConfig) {
-              const restored = await postConfig(originalConfig)
-              if (restored.status !== 200) {
-                throw new Error("native delete route restore staging failed")
-              }
-              const applied = await postConfigSave()
-              if (applied.status !== 200) {
-                throw new Error("native delete route restore apply failed")
-              }
-            }
-            if (trackerRemoved && selectedNativeDeleteTracker) {
-              const restored = await postTransportConfig({
-                operation: TransportConfigOperationOperation.create,
-                transport: selectedNativeDeleteTracker,
-              })
-              if (restored.status !== 200) {
-                throw new Error("native delete tracker restore failed")
-              }
-            }
-          }
-          try {
-            if (selectedNativeDeleteOutbound && originalConfig) {
-              const staged = await postConfig(
-                buildUpdatedConfigForOutboundsDelete(originalConfig, [
-                  selectedNativeDeleteOutbound.tag,
-                ])
-              )
-              if (staged.status !== 200) {
-                throw new Error("native delete route staging failed")
-              }
-              routeRemoved = true
-              const applied = await postConfigSave()
-              if (applied.status !== 200) {
-                throw new Error("native delete route apply failed")
-              }
-            }
-            if (selectedNativeDeleteTracker) {
-              const removed = await postTransportConfig({
-                operation: TransportConfigOperationOperation.delete,
-                tag: selectedNativeDeleteTracker.tag,
-              })
-              if (removed.status !== 200) {
-                throw new Error("native delete tracker removal failed")
-              }
-              trackerRemoved = true
-            }
-          } catch (error) {
-            await restore().catch(() => undefined)
-            throw error
-          }
-          return restore
-        }}
         onInventoryRefresh={refreshNativeMutationInventory}
         onOpenChange={(open) => {
           if (!open) setNativeDeleteSelection(undefined)
@@ -2290,51 +2243,18 @@ export function TransportsPage({
               : [{ label: deleting.tag }]
             : []
         }
-        isPending={configMutation.isPending || routeDeleteMutation.isPending}
+        isPending={configMutation.isPending}
         onConfirm={() => {
           if (!deleting) {
             return
           }
 
-          const deleteTransport = () =>
-            configMutation.mutate(
-              {
-                data: {
-                  operation: TransportConfigOperationOperation.delete,
-                  tag: deleting.tag,
-                },
-              },
-              deletingLinkedOutbound
-                ? {
-                    onSuccess: () => {
-                      toast.info(t("transports.routeStagedForDelete"))
-                    },
-                    onError: () => {
-                      // Маршрут уже в черновике на удаление, а туннель остался.
-                      // Молчать нельзя: состояния разъехались, и человек должен
-                      // знать, что повторить.
-                      toast.error(
-                        t("transports.deleteTunnelAfterRouteFailed"),
-                        { richColors: true }
-                      )
-                    },
-                  }
-                : undefined
-            )
-
-          if (deletingLinkedOutbound && keenConfig) {
-            routeDeleteMutation.mutate(
-              {
-                data: buildUpdatedConfigForOutboundsDelete(keenConfig, [
-                  deletingLinkedOutbound.tag,
-                ]),
-              },
-              { onSuccess: deleteTransport }
-            )
-            return
-          }
-
-          deleteTransport()
+          configMutation.mutate({
+            data: {
+              operation: TransportConfigOperationOperation.delete,
+              tag: deleting.tag,
+            },
+          })
         }}
         onOpenChange={(open) => !open && setDeleting(undefined)}
         open={Boolean(deleting)}

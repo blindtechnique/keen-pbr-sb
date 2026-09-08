@@ -1,9 +1,11 @@
 #ifdef WITH_API
 
 #include "handler_nfqws.hpp"
+#include "config_validation_json.hpp"
 #include "handler_backup.hpp"
 #include "maintenance_api.hpp"
 #include "../update/component_capture.hpp"
+#include "../update/nfqws_script_effects.hpp"
 #include "../update/component_package_transaction.hpp"
 #include "../update/component_transaction_journal.hpp"
 #include "../update/package_footprint.hpp"
@@ -13,6 +15,7 @@
 #include "../util/nfqws_runtime_state.hpp"
 
 #include "../http/http_client.hpp"
+#include "../log/nfqws_log_reader.hpp"
 #include "../util/network_routes.hpp"
 #include "../util/nfqws_config.hpp"
 #include "../util/nfqws_file_writer.hpp"
@@ -271,13 +274,9 @@ nlohmann::json successful_write_response(bool durable) {
 
 [[noreturn]] void throw_candidate_invalid(
     const std::vector<ConfigValidationIssue>& issues) {
-    nlohmann::json rendered = nlohmann::json::array();
-    for (const auto& issue : issues) {
-        rendered.push_back({{"path", issue.path}, {"message", issue.message}});
-    }
     const nlohmann::json body{
         {"error", "The nfqws2 strategy candidate is invalid"},
-        {"validation_errors", std::move(rendered)},
+        {"validation_errors", serialize_config_validation_issues(issues)},
         {"saved", false},
         {"applied", false},
     };
@@ -368,6 +367,26 @@ std::map<std::string, std::string> read_candidate_configs() {
     return result;
 }
 
+std::string save_default_strategy_content(const std::string& content,
+                                          bool& durable) {
+    std::error_code ec;
+    const auto base = dated_default_name();
+    for (unsigned int suffix = 1; suffix < 100; ++suffix) {
+        const auto name = suffix == 1 ? base : base + " " + std::to_string(suffix);
+        const auto destination = fs::path(kUserStrategies) / (name + ".conf");
+        if (fs::is_regular_file(destination, ec)) {
+            if (nfqws_config_without_ipv6_toggle(read_file(destination)) ==
+                nfqws_config_without_ipv6_toggle(content)) {
+                return name;
+            }
+            continue;
+        }
+        merge_durability(durable, save_nfqws_file(destination, content));
+        return name;
+    }
+    throw ApiError("too many nfqws default strategies for this date", 409);
+}
+
 std::string save_updated_default_strategy(
     const std::string& previous,
     const std::map<std::string, std::string>& candidates_before_upgrade,
@@ -383,23 +402,7 @@ std::string save_updated_default_strategy(
             continue;
         }
         if (nfqws_config_without_ipv6_toggle(updated) == old_semantics) continue;
-
-        const auto base = dated_default_name();
-        for (unsigned int suffix = 1; suffix < 100; ++suffix) {
-            const auto name = suffix == 1 ? base : base + " " + std::to_string(suffix);
-            const auto destination = fs::path(kUserStrategies) / (name + ".conf");
-            if (fs::is_regular_file(destination, ec)) {
-                if (nfqws_config_without_ipv6_toggle(read_file(destination)) ==
-                    nfqws_config_without_ipv6_toggle(updated)) {
-                    return name;
-                }
-                continue;
-            }
-            merge_durability(
-                durable, save_nfqws_file(destination, updated));
-            return name;
-        }
-        throw ApiError("too many nfqws default strategies for this date", 409);
+        return save_default_strategy_content(updated, durable);
     }
     return {};
 }
@@ -625,7 +628,7 @@ ExecCaptureResult run_nfqws_package_command(
 // describe the mutation could not be written, because a mutation nobody can
 // later read about is the one this whole path exists to prevent.
 using NfqwsPreparedHook =
-    std::function<bool(const BoundedOpkgUpgradeResult&)>;
+    std::function<bool(BoundedOpkgUpgradeResult&)>;
 
 // Every package command passes through this, so the operator log carries
 // each command's output with the same truncation, deadline and termination
@@ -1111,7 +1114,7 @@ bool reinstall_exact_previous_nfqws_package(
         return false;
     }
     output += "Exact previous package " + expected_version +
-              " reinstalled; opkg metadata restored.\n";
+              " reinstalled; reported version matches.\n";
     return true;
 }
 
@@ -1287,9 +1290,9 @@ std::mutex& nfqws_operation_mutex() {
 // that actually runs, /opt/usr/bin/nfqws2, is absent from the list entirely
 // because the postinst creates it with `cp`.
 //
-// So opkg's record is the starting point, never the answer. The two paths this
-// project already knows about are added explicitly; the listed ones are
-// observed as they are, without deciding which absences were intended.
+// The runtime binary and init belong to the required footprint. Additional
+// maintainer-script leaves extend the optional upgrade capture below, without
+// making an unusual old backup file a new prerequisite for an update.
 PackagePathList nfqws_package_paths() {
     auto result = read_opkg_file_list_bounded(kOpkgPackageFileList);
     if (!result.complete) return result;
@@ -1330,6 +1333,72 @@ PackageFootprint require_nfqws_footprint() {
             409);
     }
     return footprint;
+}
+
+// Extend the existing restore point while the verified candidate is still
+// only staged. Its payload inventory survives in the same capture generation,
+// so recovery does not need the new opkg .list to have survived an unpack.
+// Older/uninspectable package layouts keep the established file-only updater;
+// this improvement does not become another prerequisite for ordinary updates.
+bool capture_nfqws_upgrade_payload(
+    const PackageFootprint& before, std::string& output,
+    bool& extraction_uncertain) {
+    try {
+        ComponentIpkStore store(kComponentStoreRoot, kNfqwsPackage);
+        ComponentPackageTransaction inventory(
+            nfqws_package_options({}), store,
+            [&](const std::vector<std::string>& argv,
+                SafeExecTimeouts timeouts, const fs::path& cwd) {
+                const auto result = run_nfqws_package_command(argv, timeouts, cwd);
+                extraction_uncertain |= result.termination_uncertain;
+                return result;
+            });
+        const auto targets = inventory.candidate_data_paths();
+        if (extraction_uncertain) {
+            output += "The package inventory process did not stop; the install "
+                      "was not started.\n";
+            return false;
+        }
+        auto target_paths = targets.paths;
+        if (!targets.complete) {
+            target_paths.clear();
+            for (const auto& file : before.files)
+                target_paths.push_back(file.path);
+        }
+        const auto script_effects = nfqws_known_script_effect_paths();
+        target_paths.insert(target_paths.end(), script_effects.begin(), script_effects.end());
+        const ComponentOpkgMetadataPaths metadata{
+            kNfqwsPackage, "/opt/lib/opkg/status", "/opt/lib/opkg/info",
+            "/opt/tmp/opkg.lock"};
+        const auto metadata_capture = capture_component_upgrade_files(
+            before, target_paths, kNfqwsCapture, metadata);
+        if (metadata_capture.complete) {
+            output += "Restore point includes the package's opkg records.\n";
+            output += "Restore point includes known installer-created files "
+                      "and their pre-install absence.\n";
+            if (targets.complete)
+                output += "Restore point includes the target package files "
+                          "and their pre-install absence.\n";
+            return true;
+        }
+        output += "The opkg records could not be added to the restore point; "
+                  "keeping captured-file recovery.\n";
+        if (capture_component_upgrade_files(
+                before, target_paths, kNfqwsCapture).complete) {
+            output += "Restore point includes known installer-created files "
+                      "and their pre-install absence.\n";
+            if (targets.complete)
+                output += "Restore point includes the target package files "
+                          "and their pre-install absence.\n";
+            return true;
+        }
+        output += "Target payload inventory could not extend the restore point; "
+                  "the existing captured-file recovery remains available.\n";
+    } catch (const std::exception& error) {
+        output += std::string("Target payload capture was unavailable: ") +
+                  error.what() + "\n";
+    }
+    return !extraction_uncertain;
 }
 
 struct PostUpgradeFootprintAssessment {
@@ -1946,10 +2015,29 @@ bool restore_nfqws_capture_after_failed_upgrade(
     // after those, not before. Only then are the bytes the operator
     // actually had written back over the package's defaults.
     if (exact_previous_available) {
-        output += "\nThe upgrade did not finish safely; reinstalling the "
-                  "exact previous package.\n";
-        package_metadata_restored = reinstall_exact_previous_nfqws_package(
-            version_before, [] { return installed_version(); }, output);
+        // opkg reads and rewrites the shared status database itself. Repair a
+        // torn component paragraph before it runs, not after it may already
+        // have replaced a damaged database with target-only package state.
+        const auto prepared = prepare_component_capture_reinstall(
+            kNfqwsCapture, version_before);
+        if (prepared.complete) {
+            if (prepared.shared_database_reconstructed)
+                output += "The shared opkg database was reconstructed from the "
+                          "restore point and current package records. Surviving "
+                          "entries were preserved; lost status-only changes "
+                          "cannot be verified.\n";
+            else if (prepared.status_repaired)
+                output += "The interrupted package status entry was restored; "
+                          "other package entries were preserved.\n";
+            output += "\nThe upgrade did not finish safely; reinstalling the "
+                      "exact previous package.\n";
+            package_metadata_restored = reinstall_exact_previous_nfqws_package(
+                version_before, [] { return installed_version(); }, output);
+        } else {
+            output += "The shared opkg database could not be prepared for package "
+                      "reinstall: " + prepared.error +
+                      ". Captured files and service recovery will continue.\n";
+        }
     }
     output +=
         package_metadata_restored
@@ -1967,8 +2055,20 @@ bool restore_nfqws_capture_after_failed_upgrade(
         return false;
     }
 
-    const auto restored = restore_component_files(kNfqwsCapture);
-    output += restored.complete
+    // Only this journal-backed rollback may remove target files recorded as
+    // absent before installation, and only after the old package is back.
+    // The separate manual restore action remains captured-bytes-only.
+    const bool exact_reinstall_ok = package_metadata_restored;
+    const auto restored = restore_component_files(
+        kNfqwsCapture, /*restore_absent=*/exact_reinstall_ok, version_before);
+    if (restored.metadata_recorded) {
+        package_metadata_restored = exact_reinstall_ok && restored.metadata_restored;
+        output += package_metadata_restored
+            ? "The package's saved opkg records were restored; other packages were preserved.\n"
+            : "The package's opkg records could not be fully restored; "
+              "the old payload/runtime recovery continues.\n";
+    }
+    output += restored.payload_restored
                   ? "Restored " + std::to_string(restored.restored) +
                         " files.\n"
                   : "Restore did not complete: " +
@@ -1977,7 +2077,12 @@ bool restore_nfqws_capture_after_failed_upgrade(
                                    " file(s) failed"
                              : restored.refused) +
                         ".\n";
-    if (!restored.complete) return false;
+    if (!restored.payload_restored) return false;
+
+    if (restored.removed != 0) {
+        output += "Removed " + std::to_string(restored.removed) +
+                  " file(s) introduced by the interrupted package.\n";
+    }
 
     bool runtime_restored = false;
     if (record.runtime_was_running) {
@@ -2045,7 +2150,9 @@ nlohmann::json list_strategies() {
             if (overridden) {
                 const auto expected = render_wan_interfaces(packaged_content);
                 canonical = nfqws_config_matches_packaged_strategy(
-                    content, packaged_content, expected);
+                    nfqws_config_without_version_metadata(content),
+                    nfqws_config_without_version_metadata(packaged_content),
+                    nfqws_config_without_version_metadata(expected));
             }
             result.push_back({{"name", name}, {"builtin", true}, {"overridden", overridden},
                               {"canonical", canonical}, {"content", content}});
@@ -2316,7 +2423,8 @@ std::string last_nonempty_line(const std::string& text) {
 }
 
 void validate_candidate_or_throw(const std::string& name,
-                                 const std::string& content) {
+                                 const std::string& content,
+                                 bool require_engine_check = false) {
     const auto packaged_assets =
         strategy_asset_validation_paths(name, content);
     const NfqwsPathResolver resolve_path =
@@ -2347,7 +2455,13 @@ void validate_candidate_or_throw(const std::string& name,
             throw_candidate_verification_unavailable(
                 "the nfqws2 capability probe did not complete; nothing was changed");
         }
-        if (capability == NfqwsDryRunCapability::unsupported) return;
+        if (capability == NfqwsDryRunCapability::unsupported) {
+            if (require_engine_check) {
+                throw_candidate_verification_unavailable(
+                    "the new nfqws2 cannot check the preserved strategy before migration");
+            }
+            return;
+        }
 
         auto args = build_nfqws_dry_run_args(
             content, configured_nfqueue_num(), resolve_path);
@@ -2375,7 +2489,8 @@ void validate_candidate_or_throw(const std::string& name,
                      std::to_string(verified.exit_code) + ')';
         }
         issues.push_back(
-            {"NFQWS_ARGS", "nfqws2 --dry-run: " + reason});
+            {"NFQWS_ARGS", "nfqws2 --dry-run: " + reason,
+             "nfqws.binary.rejected"});
         throw_candidate_invalid(issues);
     }
     throw_candidate_verification_unavailable(
@@ -2638,9 +2753,8 @@ NfqwsBootRecoveryResult run_nfqws_boot_recovery_with(
         step.rolled_back && (!exact_required || step.package_metadata_restored);
     if (!succeeded) {
         note(exact_required && step.rolled_back
-                 ? "Captured files and runtime were restored, but the exact "
-                   "previous package was not reinstalled; package metadata "
-                   "stays unverified."
+                 ? "Captured files and runtime were restored, but complete "
+                   "package metadata recovery stays unverified."
                  : "The component could not be restored; the journal stays.");
         return finish(NfqwsBootRecoveryOutcome::failed);
     }
@@ -3182,12 +3296,14 @@ void register_nfqws_handler_impl(
         if (fs::is_regular_file(active_config, ec)) {
             active_content = read_file(active_config);
             const auto active_identity =
-                nfqws_config_strategy_identity(active_content);
+                nfqws_config_without_version_metadata(
+                    nfqws_config_strategy_identity(active_content));
             for (const auto& strategy : strategies) {
                 const auto name = strategy.value("name", std::string{});
                 auto expected = strategy.value("content", std::string{});
                 if (automatic_wan_strategy(name)) expected = render_wan_interfaces(expected);
-                if (nfqws_config_strategy_identity(expected) ==
+                if (nfqws_config_without_version_metadata(
+                        nfqws_config_strategy_identity(expected)) ==
                     active_identity) {
                     active_strategy = strategy.value("name", std::string{});
                     break;
@@ -3261,17 +3377,13 @@ void register_nfqws_handler_impl(
 
         if (action == "read_file") {
             const auto [path, category] = file_path(request.value("category", ""), request.value("name", ""));
-            auto content = read_file(path);
             if (category == "log") {
-                std::vector<std::string> lines;
-                std::string line;
-                std::istringstream input(content);
-                while (std::getline(input, line)) lines.push_back(line);
-                std::reverse(lines.begin(), lines.end());
-                content.clear();
-                for (const auto& item : lines) content += item + "\n";
+                auto tail = read_nfqws_log_tail(path, kMaxNfqwsFileSize);
+                reverse_nfqws_log_lines(tail.content);
+                return nlohmann::json{{"content", tail.content},
+                                      {"truncated", tail.truncated}}.dump();
             }
-            return nlohmann::json{{"content", content}}.dump();
+            return nlohmann::json{{"content", read_file(path)}}.dump();
         }
         if (action == "save_file" || action == "create_file") {
             const auto [path, category] = file_path(request.value("category", ""), request.value("name", ""));
@@ -3725,6 +3837,9 @@ void register_nfqws_handler_impl(
             bool footprint_verified = false;
             std::string config_outcome_name = "unknown";
             bool config_migrated = false;
+            bool rotator_config_preserved = false;
+            std::string preserved_config_sha256;
+            std::optional<std::string> migrated_package_defaults;
             std::string runtime_outcome_name = "unknown";
             std::string created;
             bool package_mutation_started = false;
@@ -3745,7 +3860,12 @@ void register_nfqws_handler_impl(
                 [&]() {
                     const auto opkg = run_bounded_nfqws_opkg_upgrade(
                         version_before,
-                        [&](const BoundedOpkgUpgradeResult& prepared) {
+                        [&](BoundedOpkgUpgradeResult& prepared) {
+                            if (!capture_nfqws_upgrade_payload(
+                                    footprint_before, output,
+                                    prepared.termination_uncertain)) {
+                                return false;
+                            }
                             // Still nothing mutated. Record which versions
                             // the install is about to move between and
                             // whether the previous one is held byte-exact,
@@ -3841,6 +3961,35 @@ void register_nfqws_handler_impl(
                     // enter the single captured-file recovery funnel.
                     recovery_safe = true;
 
+                    // Keep the selected strategy (including our durable Lua
+                    // binding) when preinst moved it aside for CONFIG_VERSION.
+                    // Only transfer settings the existing parser understands,
+                    // then ask the NEW engine to check them before any start.
+                    // Unsupported migrations retain the existing rollback path;
+                    // never accept package defaults merely because Lua was added.
+                    if (status == 0 && config_migrated &&
+                        nfqws_config_has_owned_rotator_telemetry(previous) &&
+                        judge_nfqws_config(config_before, observe_nfqws_config()) ==
+                            NfqwsConfigOutcome::replaced_by_package) {
+                        const auto package_defaults = read_file(active_config);
+                        const auto migrated = migrate_nfqws_config_preserving_settings(
+                            previous, package_defaults);
+                        if (migrated) {
+                            validate_candidate_or_throw({}, *migrated,
+                                                        /*require_engine_check=*/true);
+                            merge_durability(durable, provision_rotator_reporter(*migrated));
+                            merge_durability(durable, save_nfqws_file(active_config, *migrated));
+                            migrated_package_defaults = package_defaults;
+                            rotator_config_preserved = true;
+                            preserved_config_sha256 = Sha256::hex(*migrated);
+                            // The panel's flag means the user's config was
+                            // replaced. Its settings are now retained instead.
+                            config_migrated = false;
+                            output += "\nKept the selected nfqws2 strategy and keen-pbr Lua "
+                                      "integration in the new configuration version.\n";
+                        }
+                    }
+
                     // A scripted install suppressed the package's own start,
                     // so the transaction restores the pre-upgrade runtime
                     // state itself before judging it: a service that was
@@ -3848,15 +3997,17 @@ void register_nfqws_handler_impl(
                     // under the same lease that installed it. A start that
                     // does not come up is left to the runtime verdict below,
                     // which routes it into the captured-file recovery.
-                    if (opkg.scripted && opkg.scripted_ok && status == 0 &&
-                        runtime_before.process_present) {
+                    if (status == 0 && runtime_before.process_present &&
+                        ((opkg.scripted && opkg.scripted_ok) || rotator_config_preserved)) {
                         progress.step("start");
                         int start_status = 0;
-                        output += "\nStarting nfqws2 under the transaction "
-                                  "(the package's own start was "
-                                  "suppressed).\n";
+                        const bool already_started = !opkg.scripted;
+                        output += already_started
+                            ? "\nRestarting nfqws2 with its preserved strategy after package migration.\n"
+                            : "\nStarting nfqws2 under the transaction "
+                              "(the package's own start was suppressed).\n";
                         output +=
-                            run_nfqws_service_command("start", start_status);
+                            run_nfqws_service_command(already_started ? "restart" : "start", start_status);
                         if (start_status != 0) {
                             output += "The controlled start did not verify; "
                                       "the runtime check below decides.\n";
@@ -3873,8 +4024,11 @@ void register_nfqws_handler_impl(
                     binary_outcome = footprint_assessment.binary_outcome;
                     footprint_verified =
                         !footprint_assessment.recovery_required;
-                    const auto config_outcome = judge_nfqws_config(
-                        config_before, observe_nfqws_config());
+                    const auto config_after = observe_nfqws_config();
+                    const auto config_outcome = rotator_config_preserved &&
+                            config_after.active_sha256 == preserved_config_sha256
+                        ? NfqwsConfigOutcome::edited_in_place
+                        : judge_nfqws_config(config_before, config_after);
                     config_outcome_name =
                         nfqws_config_outcome_name(config_outcome);
                     const auto runtime_after = observe_nfqws_runtime();
@@ -3985,8 +4139,17 @@ void register_nfqws_handler_impl(
                                                         /*force=*/true);
                     }
                     if (!component_broken) {
-                        created = save_updated_default_strategy(
-                            previous, candidates_before_upgrade, durable);
+                        // A catalog copy is optional bookkeeping, not a reason
+                        // to roll back an already verified package and runtime.
+                        try {
+                            created = migrated_package_defaults
+                                ? save_default_strategy_content(*migrated_package_defaults, durable)
+                                : save_updated_default_strategy(previous, candidates_before_upgrade, durable);
+                        } catch (const std::exception& error) {
+                            output += std::string("\nThe update is working, but its default strategy "
+                                                  "could not be saved in the catalog: ") +
+                                      error.what() + "\n";
+                        }
                         append_durability_warning(output, durable);
                     }
                     return component_broken;
@@ -4047,7 +4210,7 @@ void register_nfqws_handler_impl(
             if (package_metadata_unverified) {
                 output +=
                     "\nThe captured files and runtime were restored, but opkg "
-                    "metadata and files introduced by the package were not. "
+                    "metadata recovery could not be fully verified. "
                     "The transaction remains degraded and web upgrades stay "
                     "blocked until the package state is repaired manually.\n";
             } else if (exact_rollback_verified) {
@@ -4662,13 +4825,20 @@ NfqwsBoundedOpkgTestResult run_nfqws_bounded_opkg_for_testing(
     const std::string& store_root,
     const std::string& feed_list,
     const ScriptedInstallPaths& scripted,
-    ScriptedServiceStop stop_service) {
+    ScriptedServiceStop stop_service,
+    std::function<bool(bool&)> on_prepared) {
     NfqwsPackagePaths paths;
     paths.store_root = store_root;
     paths.feed_list = feed_list;
     paths.scripted = scripted;
+    NfqwsPreparedHook hook;
+    if (on_prepared) {
+        hook = [&](BoundedOpkgUpgradeResult& prepared) {
+            return on_prepared(prepared.termination_uncertain);
+        };
+    }
     const auto result = run_bounded_nfqws_opkg_upgrade(
-        execute, installed_version, paths, {}, stop_service);
+        execute, installed_version, paths, hook, stop_service);
     return NfqwsBoundedOpkgTestResult{
         result.output,
         result.status,

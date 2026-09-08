@@ -22,9 +22,11 @@ inline constexpr std::size_t kMaxSnapshotBytes =
     16U * 1024U * 1024U;
 inline constexpr std::size_t kMaxManagedFileBytes =
     2U * 1024U * 1024U;
+inline constexpr std::size_t kMaxSubscriptionFileBytes =
+    4U * 1024U * 1024U;
 inline constexpr std::size_t kMaxManagedFiles = 512U;
 inline constexpr std::size_t kMaxSnapshotEntries =
-    kMaxManagedFiles + 2U;
+    kMaxManagedFiles + 3U;
 inline constexpr const char* kPersistentSnapshotFormat =
     "keen-pbr-sb-rollback";
 inline constexpr int kPersistentSnapshotSchema = 1;
@@ -70,6 +72,7 @@ enum class PersistentTargetKind {
     transports,
     nfqws_config,
     nfqws_lists,
+    subscriptions,
 };
 
 const char* persistent_scope_for_kind(
@@ -81,6 +84,8 @@ struct PersistentLayout {
     std::filesystem::path nfqws{"/opt/etc/nfqws2"};
     std::filesystem::path strategies{
         "/opt/etc/keen-pbr/nfqws-strategies"};
+    // Appended for existing aggregate callers. Empty uses config's directory.
+    std::filesystem::path subscriptions{};
 };
 
 struct ResolvedPersistentTarget {

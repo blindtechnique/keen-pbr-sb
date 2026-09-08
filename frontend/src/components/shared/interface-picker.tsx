@@ -8,6 +8,7 @@ import { useTranslation } from "react-i18next"
 import type { RuntimeInterfaceInventoryEntry } from "@/api/generated/model"
 import { FieldError } from "@/components/shared/field"
 import { useInterfaceDisplayNames } from "@/hooks/use-interface-display-names"
+import { buildChoiceDisplayNames } from "@/lib/choice-display-names"
 import { kernelInterfaceKind } from "@/lib/kernel-interface-kind"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -213,7 +214,7 @@ type InterfaceMultiSelectListProps = {
   emptyMessage?: string
   placeholderTitle?: string
   placeholderDescription?: string
-  error?: string | null
+  error?: ReactNode
   flat?: boolean
 }
 
@@ -401,9 +402,21 @@ export function InterfaceRowContent({
   showAddressesInline?: boolean
 }) {
   const { t } = useTranslation()
-  const { labelFor } = useInterfaceDisplayNames()
-  const label = labelFor(name)
-  const hasFirmwareLabel = label !== name
+  const { names, labelFor } = useInterfaceDisplayNames()
+  const rawLabel = labelFor(name)
+  const label = useMemo(
+    () =>
+      buildChoiceDisplayNames([
+        ...Object.entries(names).map(([value, entry]) => ({
+          value,
+          label: entry.label?.trim() || value,
+        })),
+        { value: name, label: rawLabel },
+      ]).get(name) ?? rawLabel,
+    [name, names, rawLabel]
+  )
+  const hasFirmwareLabel = rawLabel !== name
+  const title = hasFirmwareLabel ? `${label} · ${name}` : label
   // Когда прошивка не дала человеческого имени, единственный источник смысла —
   // само имя ядра: br0 — мост, apcli0 — приём чужого Wi-Fi. Говорим ровно то,
   // что имя доказывает; неизвестное имя остаётся без описания.
@@ -416,17 +429,11 @@ export function InterfaceRowContent({
 
   const content = (
     <>
-      {/* Название из NDMS впереди, имя ядра следом и тише. Настраивать
-          маршрутизацию без второго нельзя, а узнать интерфейс по первому
-          куда проще. */}
+      {/* Идентификатор остаётся в значении и подсказке. Нумерация совпадающих
+          имён берётся из полного индекса, а не меняется при фильтрации. */}
       <span className="truncate text-sm font-medium text-foreground">
         {label}
       </span>
-      {hasFirmwareLabel ? (
-        <span className="truncate font-mono text-xs text-muted-foreground">
-          {name}
-        </span>
-      ) : null}
       {kindKey ? (
         <span className="truncate text-xs text-muted-foreground">
           {t(`common.interfacePicker.kinds.${kindKey}`)}
@@ -463,12 +470,16 @@ export function InterfaceRowContent({
   )
 
   if (!addresses.length || showAddressesInline) {
-    return <div className={className}>{content}</div>
+    return (
+      <div className={className} title={title}>
+        {content}
+      </div>
+    )
   }
 
   return (
     <Tooltip>
-      <TooltipTrigger render={<div className={className} />}>
+      <TooltipTrigger render={<div className={className} title={title} />}>
         {content}
       </TooltipTrigger>
       <TooltipContent
@@ -494,8 +505,7 @@ export function OutboundInterfaceLabel({
   /**
    * Имя туннеля вместо технического тега маршрута: раз туннель=маршрут,
    * в выборе участников группы человек ищет туннель по имени, а не по
-   * тегу вроде `vpn_main`. Техническое имя интерфейса остаётся рядом
-   * приглушённым.
+   * тегу вроде `vpn_main`. Технические имена доступны в подсказке.
    */
   label?: string
   interfaceName?: string
@@ -509,7 +519,9 @@ export function OutboundInterfaceLabel({
     (address) => !isLinkLocalIpv6(address)
   )
   const primary = label?.trim() || tag
-  const technical = interfaceName ?? (primary === tag ? undefined : tag)
+  const title = [
+    ...new Set([primary, tag, interfaceName].filter(Boolean)),
+  ].join(" · ")
 
   return (
     /* Имя — главное в строке и не сжимается (владелец: «имя должно быть
@@ -519,15 +531,10 @@ export function OutboundInterfaceLabel({
     <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
       <span
         className="max-w-[min(24rem,100%)] shrink-0 truncate text-sm font-medium text-foreground"
-        title={primary}
+        title={title}
       >
         {primary}
       </span>
-      {technical ? (
-        <span className="shrink-0 text-xs text-muted-foreground">
-          ({technical})
-        </span>
-      ) : null}
       {interfaceName ? (
         runtimeInterface ? (
           <>

@@ -21,6 +21,7 @@ export function firstLatency(
 export type OutboundDeleteImpact = {
   deletedOutboundTags: string[]
   routeRuleIndexes: number[]
+  fallbackRuleIndexes: number[]
   dnsServerDetours: string[]
   listDownloadRoutes: Array<{
     listName: string
@@ -102,6 +103,15 @@ export function getOutboundDeleteImpact(
   const routeRuleIndexes = (config.route?.rules ?? []).flatMap((rule, index) =>
     deletedTags.has(rule.outbound) ? [index] : []
   )
+  const fallbackRuleIndexes = (config.route?.rules ?? []).flatMap(
+    (rule, index) =>
+      !deletedTags.has(rule.outbound) &&
+      rule.failure_policy === "fallback" &&
+      rule.fallback_outbound &&
+      deletedTags.has(rule.fallback_outbound)
+        ? [index]
+        : []
+  )
   const dnsServerDetours = (config.dns?.servers ?? []).flatMap((server) =>
     server.detour && deletedTags.has(server.detour) ? [server.tag] : []
   )
@@ -176,6 +186,7 @@ export function getOutboundDeleteImpact(
   return {
     deletedOutboundTags: deletedTagList,
     routeRuleIndexes,
+    fallbackRuleIndexes,
     dnsServerDetours,
     listDownloadRoutes,
     globalListRefreshRoute,
@@ -190,6 +201,7 @@ export function buildUpdatedConfigForOutboundsDelete(
 ): ConfigObject {
   const impact = getOutboundDeleteImpact(config, initialTags)
   const deletedTags = new Set(impact.deletedOutboundTags)
+  const fallbackRuleIndexes = new Set(impact.fallbackRuleIndexes)
 
   return {
     ...config,
@@ -198,9 +210,17 @@ export function buildUpdatedConfigForOutboundsDelete(
       .map((outbound) => cleanupOutboundReferences(outbound, deletedTags)),
     route: {
       ...config.route,
-      rules: (config.route?.rules ?? []).filter(
-        (rule) => !deletedTags.has(rule.outbound)
-      ),
+      rules: (config.route?.rules ?? [])
+        .map((rule, index) => {
+          if (!fallbackRuleIndexes.has(index)) {
+            return rule
+          }
+
+          const nextRule = { ...rule, failure_policy: "block" as const }
+          delete nextRule.fallback_outbound
+          return nextRule
+        })
+        .filter((rule) => !deletedTags.has(rule.outbound)),
     },
     dns: {
       ...config.dns,
@@ -258,7 +278,10 @@ function cleanupListRefreshRoute(
   }
 
   if (refresh.detour && deletedTags.has(refresh.detour)) {
-    return {}
+    const next = { ...refresh }
+    delete next.detour
+    delete next.fallback_detours
+    return next
   }
 
   const fallbackDetours = refresh.fallback_detours ?? []

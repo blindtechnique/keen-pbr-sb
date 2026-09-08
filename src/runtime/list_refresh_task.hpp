@@ -99,8 +99,10 @@ public:
 
     // Retains a typed one-shot handoff for the admitted mutation lease until
     // the control-loop owner takes it or terminal publication releases it. A
-    // `upgrade_active` can atomically attach a reload to an active read-only
-    // task. `force_new` carries the same durable reconcile obligation when a
+    // `upgrade_active` can attach reload intent without a lease to an active
+    // download; runtime ownership is acquired later at publication. Existing
+    // preowned callers may still supply their exact lease. `force_new` carries
+    // the same durable reconcile obligation when a
     // deferred retry starts only after that original task has terminalized.
     ListRefreshTaskBeginResult begin(
         std::size_t total,

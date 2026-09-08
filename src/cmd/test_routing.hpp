@@ -4,6 +4,8 @@
 #include "../config/config.hpp"
 #include "../routing/firewall_state.hpp"
 #include "../routing/fib_lookup.hpp"
+#include "../firewall/rule_counter_evidence.hpp"
+#include "../health/routing_http_probe.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -85,6 +87,13 @@ struct TestRoutingEntry {
     RoutingMatchEvaluation evaluation{RoutingMatchEvaluation::NotMatched};
     std::vector<std::string> unknown_conditions;
     RoutingFibResult fib;
+    // Exact positions in the captured active rule array, not an outbound-tag
+    // lookup. Default routing and inconclusive evaluations have no index.
+    std::optional<std::size_t> expected_rule_index;
+    std::optional<std::size_t> actual_rule_index;
+    // Optional WebUI-only observation, tied to the captured realized rule.
+    // These are classifier totals, not traffic counters for this IP/site.
+    std::optional<FirewallClassifierEvidence> firewall_counters;
 };
 
 struct RuleIpDiagnostic {
@@ -117,6 +126,13 @@ struct TestRoutingResult {
     std::optional<std::string> dns_error;
     std::vector<std::string> warnings;
     bool unapplied_draft{false};
+    std::string dns_source{"literal"}; // literal/configured_resolver/system_resolver
+    // The explicitly queried resolver, not an upstream behind local dnsmasq.
+    std::optional<std::string> dns_server;
+    std::uint32_t fwmark_mask{0};
+    // Explicit WebUI-only one-address HTTP observation. Default/CLI requests
+    // do not perform it; it remains visible if DNS no longer returns that IP.
+    std::optional<RoutingHttpProbe> http_probe;
 };
 
 // Compute expected (config+cache) and actual (kernel ipset/nftset) routing for

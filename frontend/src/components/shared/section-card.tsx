@@ -17,6 +17,7 @@ export function SectionCard({
   className,
   contentClassName,
   id,
+  tabIndex,
   // Cards are reserved for the system overview; every other page renders the
   // same sections flat, the way KeeneticOS does.
   flat = false,
@@ -28,11 +29,13 @@ export function SectionCard({
   className?: string
   contentClassName?: string
   id?: string
+  tabIndex?: number
   flat?: boolean
 }) {
   return (
     <Card
       id={id}
+      tabIndex={tabIndex}
       className={cn(
         // `overflow-visible` здесь не косметика. У карточки в основе стоит
         // `overflow-hidden` — он обрезает скруглённые углы у картинок и таблиц

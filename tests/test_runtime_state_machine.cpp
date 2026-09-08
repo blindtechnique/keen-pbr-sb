@@ -428,6 +428,7 @@ TEST_CASE("owned conntrack authority is built from one immutable rule view") {
     RuleState active_rule;
     active_rule.action_type = RuleActionType::Mark;
     active_rule.fwmark = 0x00020000U;
+    active_rule.fwmark_ipv6 = 0x00050000U;
 
     const auto snapshot = make_owned_conntrack_cleanup_snapshot(
         /*runtime_generation=*/17U,
@@ -438,11 +439,40 @@ TEST_CASE("owned conntrack authority is built from one immutable rule view") {
 
     CHECK(snapshot.runtime_generation == 17U);
     CHECK(snapshot.marks ==
-          std::set<std::uint32_t>{0x00020000U, 0x00030000U});
+          std::set<std::uint32_t>{0x00020000U, 0x00030000U, 0x00050000U});
     CHECK(snapshot.priority_marks ==
-          std::set<std::uint32_t>{0x00020000U});
+          std::set<std::uint32_t>{0x00020000U, 0x00050000U});
     CHECK(ordered_owned_conntrack_marks(snapshot) ==
-          std::vector<std::uint32_t>{0x00020000U, 0x00030000U});
+          std::vector<std::uint32_t>{0x00020000U, 0x00050000U, 0x00030000U});
+}
+
+TEST_CASE("conntrack rule identity includes the family selector and IPv6 leaf mark") {
+    RuleState previous;
+    previous.rule_index = 0U;
+    previous.action_type = RuleActionType::Mark;
+    previous.list_names = {"family-list"};
+    previous.fwmark = 0x00010000U;
+    auto current = previous;
+    SUBCASE("only the IPv6 leaf changes") { current.fwmark_ipv6 = 0x00020000U; }
+    SUBCASE("only the concrete selector family changes") { current.criteria.family = AF_INET6; }
+    CHECK_FALSE(runtime_recovery_detail::firewall_rule_states_equal(previous, current));
+    CHECK(runtime_recovery_detail::firewall_rule_states_equal(current, current));
+    const auto changed = plan_conntrack_destination_retirement({previous}, {current});
+    CHECK(changed.current_list_names == std::set<std::string>{"family-list"});
+    current.criteria.src_addr = {"192.0.2.1/32"};
+    CHECK(plan_conntrack_destination_retirement({previous}, {current}).current_list_names.empty());
+}
+
+TEST_CASE("continuous reconnect recognizes a realized IPv6-only mark") {
+    RuleState rule;
+    rule.rule_index = 0U;
+    rule.action_type = RuleActionType::Mark;
+    rule.list_names = {"family-list"};
+    rule.fwmark_ipv6 = 0x00020000U;
+    CHECK(active_destination_only_reconnect_list_names({"family-list"}, {rule}) ==
+          std::set<std::string>{"family-list"});
+    rule.criteria.proto = L4Proto::Tcp;
+    CHECK(active_destination_only_reconnect_list_names({"family-list"}, {rule}).empty());
 }
 
 TEST_CASE("SNAT recovery retains the owned mark snapshot from confirmed loss") {

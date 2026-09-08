@@ -5,6 +5,7 @@
  * REST API for the keen-pbr policy-based routing daemon.
  * OpenAPI spec version: 3.0.0
  */
+import type { RouteRuleFailurePolicy } from './routeRuleFailurePolicy';
 
 export interface RouteRule {
   /**
@@ -28,6 +29,12 @@ export interface RouteRule {
   list?: string[];
   /** Outbound tag to route matched traffic through. */
   outbound: string;
+  /** Behavior of this rule when its outgoing path is known to be unavailable. Omitted, null, or `inherit` preserves the existing global and per-outbound strict-enforcement behavior. `block` blocks new matching connections; `fallback` uses the explicitly selected fallback_outbound, or blocks if it too is unavailable. This does not change other rules or globally reset connections.
+   */
+  failure_policy?: RouteRuleFailurePolicy;
+  /** Reserved outgoing path used only with failure_policy=fallback. Must name a different interface or urltest outbound. Group selection and health checks use the existing runtime.
+   */
+  fallback_outbound?: string | null;
   /** Protocol to match ("tcp", "udp", or "tcp/udp"). Omit for any. */
   proto?: string;
   /**

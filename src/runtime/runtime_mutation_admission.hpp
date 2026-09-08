@@ -21,13 +21,22 @@ namespace keen_pbr3 {
 // its lease is released. This lets daemon shutdown quiesce accepted work
 // instead of invalidating it halfway through a commit.
 class RuntimeMutationAdmission {
+public:
+    enum class Kind : std::uint8_t {
+        Foreground,
+        Background,
+    };
+
 private:
     struct State {
         mutable std::mutex mutex;
         std::uint64_t next_token{0};
         std::uint64_t active_token{0};
         std::string active_label;
+        Kind active_kind{Kind::Foreground};
         std::uint64_t handoff_count{0};
+        std::uint64_t handoff_token{0};
+        std::uint64_t foreground_waiters{0};
         bool accepting{true};
         // Process shutdown may need one final typed cleanup after ordinary
         // writers have quiesced. This latch prevents that private authority
@@ -83,7 +92,9 @@ public:
                     return;
                 }
                 state->active_token = 0;
-                state->active_label.clear();
+                if (state->handoff_count == 0) {
+                    state->active_label.clear();
+                }
             }
             state->idle_cv.notify_all();
         }
@@ -135,6 +146,12 @@ public:
                 if (state->handoff_count != 0) {
                     --state->handoff_count;
                 }
+                if (state->handoff_count == 0) {
+                    state->handoff_token = 0;
+                    if (state->active_token == 0) {
+                        state->active_label.clear();
+                    }
+                }
             }
             state->idle_cv.notify_all();
         }
@@ -165,29 +182,36 @@ public:
         std::string label;
     };
 
-    std::optional<Lease> try_acquire(std::string label) {
+    std::optional<Lease> try_acquire(
+        std::string label, Kind kind = Kind::Foreground) {
         std::lock_guard<std::mutex> lock(state_->mutex);
         if (!state_->accepting || state_->active_token != 0 ||
-            state_->handoff_count != 0) {
+            state_->handoff_count != 0 || state_->foreground_waiters != 0) {
             return std::nullopt;
         }
 
-        ++state_->next_token;
-        if (state_->next_token == 0) {
-            ++state_->next_token;
-        }
-        state_->active_token = state_->next_token;
-        state_->active_label = std::move(label);
-        return Lease{state_, state_->active_token};
+        return acquire_locked(state_, std::move(label), kind);
     }
 
     // Foreground API mutations normally fail immediately when another writer
-    // owns the runtime. Background firewall work and URLTEST selection are
-    // different: they normally only need to finish their current terminal.
-    // Wait for that exact predecessor once, then claim the
-    // admission under the same mutex which observed its release. If another
-    // owner wins, shutdown starts, or the predecessor does not finish within
-    // the caller's small budget, no claim is made.
+    // owns the runtime. Explicitly classified background work is
+    // different: it normally only needs to finish its current terminal.
+    // Reserve priority over new background probes while that exact predecessor
+    // and its handoff finish, then claim admission under the same mutex.
+    // Another waiting foreground may win, but a background successor cannot
+    // repeatedly take its place. Timeout and shutdown release only this wait.
+    template<class Rep, class Period>
+    std::optional<Lease> try_acquire_after_background_for(
+        std::string label,
+        const std::chrono::duration<Rep, Period>& timeout) {
+        return try_acquire_after_matching_for(
+            std::move(label), timeout, [](const State& active) {
+                return active.active_kind == Kind::Background;
+            });
+    }
+
+    // Compatibility for callers which intentionally wait for one named owner.
+    // Production foreground admission uses the explicit background kind above.
     template<class Rep, class Period>
     std::optional<Lease> try_acquire_after_for(
         std::string label,
@@ -202,23 +226,55 @@ public:
         std::string label,
         std::initializer_list<std::string_view> waitable_active_labels,
         const std::chrono::duration<Rep, Period>& timeout) {
+        return try_acquire_after_matching_for(
+            std::move(label), timeout, [waitable_active_labels](const State& active) {
+                return std::find(waitable_active_labels.begin(),
+                                 waitable_active_labels.end(), active.active_label)
+                    != waitable_active_labels.end();
+            });
+    }
+
+private:
+    template<class Rep, class Period, class Waitable>
+    std::optional<Lease> try_acquire_after_matching_for(
+        std::string label,
+        const std::chrono::duration<Rep, Period>& timeout,
+        Waitable waitable) {
         const auto state = state_;
         std::unique_lock<std::mutex> lock(state->mutex);
-        if (!state->accepting || state->handoff_count != 0) {
+        if (!state->accepting) {
             return std::nullopt;
         }
-        if (state->active_token == 0) {
+        if (state->active_token == 0 && state->handoff_count == 0) {
+            if (state->foreground_waiters != 0) return std::nullopt;
             return acquire_locked(state, std::move(label));
         }
-        if (std::find(waitable_active_labels.begin(), waitable_active_labels.end(),
-                      state->active_label) == waitable_active_labels.end()) {
+        if (!waitable(*state)) {
             return std::nullopt;
         }
 
-        const auto predecessor_token = state->active_token;
+        const auto predecessor_token = state->active_token != 0
+            ? state->active_token
+            : state->handoff_token;
+        // The scope is destroyed while lock still owns state->mutex, including
+        // every timeout/exception path; no pending operation or body is stored.
+        struct ForegroundWaitPriority {
+            State& state;
+            explicit ForegroundWaitPriority(State& value) noexcept
+                : state(value) {
+                ++state.foreground_waiters;
+            }
+            ~ForegroundWaitPriority() noexcept {
+                --state.foreground_waiters;
+                state.idle_cv.notify_all();
+            }
+        } priority{*state};
         if (!state->idle_cv.wait_for(lock, timeout, [&] {
                 return !state->accepting ||
-                       state->active_token != predecessor_token;
+                       (state->active_token != 0 &&
+                        state->active_token != predecessor_token) ||
+                       (state->active_token == 0 &&
+                        state->handoff_count == 0);
             })) {
             return std::nullopt;
         }
@@ -229,6 +285,7 @@ public:
         return acquire_locked(state, std::move(label));
     }
 
+public:
     // Admit exactly one internal cleanup only after shutdown() has closed
     // ordinary writers and every previously accepted lease/handoff has
     // quiesced. The returned object is the same exact RAII Lease used by
@@ -247,6 +304,7 @@ public:
             next_token = 1U;
         }
         state_->active_label = std::move(label);
+        state_->active_kind = Kind::Foreground;
         state_->next_token = next_token;
         state_->active_token = next_token;
         state_->shutdown_cleanup_claimed = true;
@@ -261,6 +319,7 @@ public:
             lease.token_ == 0 || state->active_token != lease.token_) {
             return std::nullopt;
         }
+        state->handoff_token = lease.token_;
         ++state->handoff_count;
         return HandoffGate{state};
     }
@@ -273,10 +332,11 @@ public:
         state->idle_cv.wait(lock, [state] {
             return !state->accepting ||
                    (state->active_token == 0 &&
-                    state->handoff_count == 0);
+                    state->handoff_count == 0 &&
+                    state->foreground_waiters == 0);
         });
         return state->accepting && state->active_token == 0 &&
-               state->handoff_count == 0;
+               state->handoff_count == 0 && state->foreground_waiters == 0;
     }
 
     // Shutdown uses a bounded wait while pumping the control queue. Unlike
@@ -322,13 +382,15 @@ public:
 private:
     static Lease acquire_locked(
         const std::shared_ptr<State>& state,
-        std::string label) {
+        std::string label,
+        Kind kind = Kind::Foreground) {
         ++state->next_token;
         if (state->next_token == 0) {
             ++state->next_token;
         }
         state->active_token = state->next_token;
         state->active_label = std::move(label);
+        state->active_kind = kind;
         return Lease{state, state->active_token};
     }
 

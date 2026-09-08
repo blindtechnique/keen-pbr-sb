@@ -143,10 +143,10 @@ struct CatalogDirectOutboundPlanSummary {
 struct CatalogSetupSummary {
     CatalogSetupMode mode{CatalogSetupMode::none};
     std::vector<CatalogListPlanSummary> lists;
-    // One catalogue setup session receives one independently editable route
-    // rule and one DNS rule containing every uncovered list reference. The
-    // vectors remain extensible and the singular fields remain compatibility
-    // projections for clients predating sb.12.
+    // Policies changed or created for the selected lists. Retargeting mixed
+    // rules can split them while retaining unrelated references and ordering;
+    // fresh uncovered lists share one new rule. Singular fields remain
+    // compatibility projections for clients predating sb.12.
     std::vector<CatalogRouteRulePlanSummary> route_rules;
     std::vector<CatalogDnsRulePlanSummary> dns_rules;
     std::optional<CatalogRouteRulePlanSummary> route_rule;

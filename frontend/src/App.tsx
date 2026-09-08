@@ -4,6 +4,7 @@ import { Redirect, Route, Switch, useSearch } from "wouter"
 
 import { AppShell } from "@/components/layout/app-shell"
 import { AuthGate } from "@/components/auth-gate"
+import { StatusEventBridge } from "@/api/status-event-bridge"
 import { StepUpDialog } from "@/components/step-up-dialog"
 import { ScrollToTopOnRouteChange } from "@/components/layout/scroll-route"
 import { KeenSpinner } from "@/components/shared/keen-spinner"
@@ -279,6 +280,9 @@ function TransportEditorRoute({
 function App() {
   return (
     <AuthGate>
+      {/* Start the stream after login. A pre-login EventSource can close on
+          HTTP 401 and will not start itself again when the cookie changes. */}
+      <StatusEventBridge />
       {/* Inside the gate, so it only exists once there is a session to step
           up from, and above the pages, so no privileged screen has to mount
           its own copy. */}

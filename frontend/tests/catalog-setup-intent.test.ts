@@ -164,8 +164,44 @@ describe("catalog setup intent", () => {
     ).toBeNull()
   })
 
-  test("falls back to list-only setup when no routable output exists", () => {
-    expect(resolveCatalogDestination("", [], "__direct__")).toBe("__direct__")
+  test("does not silently turn missing or removed VPNs into list-only setup", () => {
+    expect(resolveCatalogDestination("", [], "__direct__")).toBe("")
+    expect(resolveCatalogDestination("removed", ["vpn"], "__direct__")).toBe("")
+    expect(resolveCatalogDestination("", ["vpn"], "__direct__")).toBe("vpn")
+    expect(resolveCatalogDestination("__direct__", [], "__direct__")).toBe(
+      "__direct__"
+    )
+  })
+
+  test("routing selections require a destination while direct and block presets do not", () => {
+    const common = {
+      presets,
+      destination: "",
+      directDestination: "__direct__",
+      sourceDetour: "",
+      combinedDisplayName: "Catalog",
+    }
+    expect(
+      createCatalogSetupIntent({
+        ...common,
+        selectedIds: new Set(["instagram"]),
+        selectionMode: "route",
+      })
+    ).toBeNull()
+    expect(
+      createCatalogSetupIntent({
+        ...common,
+        selectedIds: new Set(["ads"]),
+        selectionMode: "reject",
+      })?.mode
+    ).toBe("block")
+    expect(
+      createCatalogSetupIntent({
+        ...common,
+        selectedIds: new Set(["russian-services"]),
+        selectionMode: "direct",
+      })?.mode
+    ).toBe("direct")
   })
 
   test("recognises a live catalogue CIDR-only preset", () => {
@@ -288,7 +324,10 @@ describe("catalog setup intent", () => {
 
   test("direct pairs with neither routing nor blocking", () => {
     expect(
-      getCatalogSelectionMode(presets, new Set(["instagram", "russian-services"]))
+      getCatalogSelectionMode(
+        presets,
+        new Set(["instagram", "russian-services"])
+      )
     ).toBe("mixed")
     expect(
       getCatalogSelectionMode(presets, new Set(["ads", "russian-services"]))

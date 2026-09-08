@@ -5,16 +5,31 @@
  * REST API for the keen-pbr policy-based routing daemon.
  * OpenAPI spec version: 3.0.0
  */
+import type { RoutingTestConnections } from './routingTestConnections';
 import type { RoutingTestEntry } from './routingTestEntry';
+import type { RoutingTestHttpProbe } from './routingTestHttpProbe';
 import type { RoutingTestNfqws } from './routingTestNfqws';
 import type { RoutingTestResponseConfigScope } from './routingTestResponseConfigScope';
 import type { RoutingTestRuleDiagnostic } from './routingTestRuleDiagnostic';
 
 export interface RoutingTestResponse {
+  http_probe?: RoutingTestHttpProbe;
   /** The original input value passed to the test. */
   target: string;
   /** true when the target was interpreted as a domain name. */
   is_domain: boolean;
+  /** literal for an IP target; configured_resolver for the configured diagnostic resolver; system_resolver for the platform resolver. This does not identify a downstream dnsmasq upstream server or cache hit.
+   */
+  dns_source?: string;
+  /** Explicit resolver address actually used by this check; absent for system resolution or invalid configuration. */
+  dns_server?: string;
+  /**
+     * Active configuration's owned mark mask, for comparing conntrack marks without foreign bits.
+     * @minimum 0
+     * @maximum 4294967295
+     */
+  fwmark_mask?: number;
+  connections?: RoutingTestConnections;
   /** Diagnostics always use the applied active configuration. */
   config_scope: RoutingTestResponseConfigScope;
   /** true when a separate unapplied configuration draft exists. */

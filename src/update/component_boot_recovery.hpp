@@ -9,25 +9,23 @@
 namespace keen_pbr3 {
 
 // What to do about a component transaction journal found at boot, decided
-// from evidence alone. This is the decision and only the decision: acting on
-// it runs opkg and the service, which must happen under the same
-// update/lifecycle lock as S80 and the web installer, and that lock is a
-// separate piece of work. Keeping the decision pure means it can be tested
-// against every shape of leftover state without a router, and the executor,
-// when it exists, inherits a verdict instead of re-deriving one.
+// from evidence alone. This pure decision is separate from the existing
+// executor, which runs opkg and restores the service under the shared
+// update/lifecycle lock. Keeping the decision pure lets tests cover leftover
+// state without a router; the executor consumes this verdict.
 enum class ComponentBootRecoveryAction {
     // No journal, or one another live process owns. Nothing to do here.
     none,
     // The journal says nothing was mutated. Remove it; the component is as
     // it was.
     clear_journal,
-    // The installed package is provably the pre-mutation one (version and
-    // binary digest both match the journal). Only captured files may differ:
-    // restore them, then clear.
+    // No exact IPK is available, but the installed version and binary digest
+    // match the journal. Preserve the existing captured-file repair fallback;
+    // these observations alone do not verify every opkg metadata file.
     restore_files,
-    // The package state differs from the journal's pre-mutation record, and
-    // the store holds that exact previous version: reinstall it, restore the
-    // captured files over it, verify, clear.
+    // An abandoned mutating/verifying upgrade has an exact previous IPK and
+    // a usable capture. Reinstall package metadata even when the observed
+    // version and binary still match, then restore captured files and runtime.
     reinstall_previous,
     // No exact previous package, but a usable capture: restore files only.
     // opkg metadata stays unverified, so the journal must be retained

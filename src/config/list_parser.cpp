@@ -4,6 +4,7 @@
 #include <arpa/inet.h>
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 
 namespace keen_pbr3 {
@@ -48,60 +49,81 @@ static std::string format_entry_for_log(std::string_view entry) {
     return result;
 }
 
-bool ListParser::is_ipv4(std::string_view s) {
-    int octets = 0;
-    size_t pos = 0;
-    while (pos <= s.size() && octets < 4) {
-        auto dot = s.find('.', pos);
-        if (dot == std::string_view::npos) dot = s.size();
-        auto part = s.substr(pos, dot - pos);
-        if (part.empty() || part.size() > 3) return false;
-        int val = 0;
-        auto [ptr, ec] = std::from_chars(part.data(), part.data() + part.size(), val);
-        if (ec != std::errc{} || ptr != part.data() + part.size()) return false;
-        if (val < 0 || val > 255) return false;
-        ++octets;
-        pos = dot + 1;
+const char* ListParser::ip_cidr_error_message(IpCidrError error) noexcept {
+    switch (error) {
+    case IpCidrError::none: return "";
+    case IpCidrError::leading_zeros: return "IPv4 addresses must not contain leading zeros";
+    case IpCidrError::invalid_address: return "IP/CIDR address is invalid";
+    case IpCidrError::invalid_prefix: return "IP/CIDR prefix length is invalid";
     }
-    return octets == 4 && pos == s.size() + 1;
+    return "IP/CIDR address is invalid";
 }
 
-bool ListParser::is_ipv6(std::string_view s) {
-    if (s.empty()) return false;
-    // Reject CIDR suffixes and scoped zone IDs. This parser classifies plain IPs;
-    // CIDR is handled separately and zone IDs are not supported downstream.
-    if (s.find('/') != std::string_view::npos) return false;
-    if (s.find('%') != std::string_view::npos) return false;
+std::optional<std::string> ListParser::normalize_ip_or_cidr(
+    std::string_view entry, IpCidrError* error) {
+    if (error) *error = IpCidrError::none;
+    const auto fail = [&](IpCidrError reason) -> std::optional<std::string> {
+        if (error) *error = reason;
+        return std::nullopt;
+    };
+    entry = trim(entry);
+    if (entry.empty() || entry.find('\0') != std::string_view::npos) {
+        return fail(IpCidrError::invalid_address);
+    }
+    const auto slash = entry.find('/');
+    const auto host = entry.substr(0, slash);
+    const int family = host.find(':') == std::string_view::npos ? AF_INET : AF_INET6;
+    // Most remote entries are domains: avoid allocating an address string or
+    // invoking inet_pton for a hostname that the domain branch will handle.
+    if (family == AF_INET && host.find_first_not_of("0123456789.") != std::string_view::npos) {
+        return fail(IpCidrError::invalid_address);
+    }
+    if (host.find('.') != std::string_view::npos) {
+        // Also cover the dotted IPv4 tail in IPv4-mapped IPv6 literals.
+        const auto colon = host.rfind(':');
+        const auto dotted = colon == std::string_view::npos ? host : host.substr(colon + 1);
+        std::size_t start = 0;
+        while (start < dotted.size()) {
+            const auto dot = dotted.find('.', start);
+            const auto part = dotted.substr(start,
+                dot == std::string_view::npos ? dot : dot - start);
+            if (part.size() > 1 && part.front() == '0' &&
+                std::all_of(part.begin(), part.end(), [](char ch) { return ch >= '0' && ch <= '9'; })) {
+                return fail(IpCidrError::leading_zeros);
+            }
+            if (dot == std::string_view::npos) break;
+            start = dot + 1;
+        }
+    }
 
-    std::string ip(s);
-    in6_addr parsed{};
-    return inet_pton(AF_INET6, ip.c_str(), &parsed) == 1;
-}
-
-bool ListParser::is_cidr_v4(std::string_view s) {
-    auto slash = s.find('/');
-    if (slash == std::string_view::npos) return false;
-    auto ip_part = s.substr(0, slash);
-    auto prefix_part = s.substr(slash + 1);
-    if (!is_ipv4(ip_part)) return false;
-    if (prefix_part.empty() || prefix_part.size() > 2) return false;
-    int prefix = 0;
-    auto [ptr, ec] = std::from_chars(prefix_part.data(), prefix_part.data() + prefix_part.size(), prefix);
-    if (ec != std::errc{} || ptr != prefix_part.data() + prefix_part.size()) return false;
-    return prefix >= 0 && prefix <= 32;
-}
-
-bool ListParser::is_cidr_v6(std::string_view s) {
-    auto slash = s.find('/');
-    if (slash == std::string_view::npos) return false;
-    auto ip_part = s.substr(0, slash);
-    auto prefix_part = s.substr(slash + 1);
-    if (!is_ipv6(ip_part)) return false;
-    if (prefix_part.empty() || prefix_part.size() > 3) return false;
-    int prefix = 0;
-    auto [ptr, ec] = std::from_chars(prefix_part.data(), prefix_part.data() + prefix_part.size(), prefix);
-    if (ec != std::errc{} || ptr != prefix_part.data() + prefix_part.size()) return false;
-    return prefix >= 0 && prefix <= 128;
+    std::array<unsigned char, 16> address{};
+    const std::string host_text(host);
+    if (inet_pton(family, host_text.c_str(), address.data()) != 1) {
+        return fail(IpCidrError::invalid_address);
+    }
+    const unsigned max_prefix = family == AF_INET ? 32U : 128U;
+    unsigned prefix = max_prefix;
+    if (slash != std::string_view::npos) {
+        const auto suffix = entry.substr(slash + 1);
+        const auto [end, result] = std::from_chars(suffix.data(), suffix.data() + suffix.size(), prefix);
+        if (result != std::errc{} || end != suffix.data() + suffix.size() || prefix > max_prefix) {
+            return fail(IpCidrError::invalid_prefix);
+        }
+    }
+    for (unsigned byte = 0; byte < max_prefix / 8U; ++byte) {
+        const unsigned first_bit = byte * 8U;
+        if (prefix <= first_bit) address[byte] = 0;
+        else if (prefix < first_bit + 8U) {
+            address[byte] &= static_cast<unsigned char>(0xffU << (8U - (prefix - first_bit)));
+        }
+    }
+    std::array<char, INET6_ADDRSTRLEN> text{};
+    if (!inet_ntop(family, address.data(), text.data(), text.size())) {
+        return fail(IpCidrError::invalid_address);
+    }
+    std::string normalized(text.data());
+    if (prefix != max_prefix) normalized += "/" + std::to_string(prefix);
+    return normalized;
 }
 
 std::optional<std::string> ListParser::normalize_domain(std::string_view s) {
@@ -141,12 +163,9 @@ std::optional<std::string> ListParser::normalize_domain(std::string_view s) {
 }
 
 bool ListParser::classify_entry(std::string_view entry, ListEntryVisitor& visitor) {
-    if (is_cidr_v4(entry) || is_cidr_v6(entry)) {
-        visitor.on_entry(EntryType::Cidr, entry);
-        return true;
-    }
-    if (is_ipv4(entry) || is_ipv6(entry)) {
-        visitor.on_entry(EntryType::Ip, entry);
+    if (const auto normalized = normalize_ip_or_cidr(entry)) {
+        const auto type = normalized->find('/') == std::string::npos ? EntryType::Ip : EntryType::Cidr;
+        visitor.on_entry(type, *normalized);
         return true;
     }
     if (auto domain = normalize_domain(entry)) {

@@ -6,6 +6,8 @@
  * OpenAPI spec version: 3.0.0
  */
 import type { CacheGeneration } from './cacheGeneration';
+import type { ListShrinkRejection } from './listShrinkRejection';
+import type { ListSourceFormat } from './listSourceFormat';
 
 export interface CacheMetadata {
   current?: CacheGeneration;
@@ -18,7 +20,10 @@ export interface CacheMetadata {
   last_refresh_error?: string;
   last_refresh_url?: string;
   last_refresh_detour?: string;
+  last_refresh_shrink_rejection?: ListShrinkRejection | null;
   srs_decoder_revision?: number;
+  source_format?: ListSourceFormat;
+  source_decoder_revision?: number;
   ips?: number;
   cidrs?: number;
   domains?: number;

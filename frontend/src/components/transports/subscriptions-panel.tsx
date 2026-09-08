@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query"
 import { Plus, RefreshCw } from "lucide-react"
-import { useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
@@ -9,6 +9,7 @@ import {
   postSubscriptionRefresh,
   postSubscriptionRename,
   postSubscriptionRemove,
+  postSubscriptionSettings,
   useGetSubscriptions,
 } from "@/api/generated/keen-api"
 import type { SavedSubscription, TransportStatus } from "@/api/generated/model"
@@ -27,31 +28,81 @@ import {
 import { Input } from "@/components/ui/input"
 import { subscriptionBytes, subscriptionUsage } from "./subscription-usage"
 import { SubscriptionImportDialog } from "./subscription-import-dialog"
+import { useCatalogNavigation } from "@/hooks/use-catalog-navigation"
+import { queryKeys } from "@/api/query-keys"
+import { OperationErrorMessage } from "@/components/shared/operation-error-message"
+import { cn } from "@/lib/utils"
+import { SubscriptionRefreshFields } from "./subscription-refresh-fields"
+import {
+  DEFAULT_SUBSCRIPTION_REFRESH_SECONDS,
+  subscriptionCardId,
+  subscriptionRefreshDraft,
+  subscriptionRefreshSeconds,
+} from "./subscription-settings-model"
 
 type Action =
-  | { kind: "rename"; id: string; name: string }
+  | {
+      kind: "edit"
+      record: SavedSubscription
+      name: string
+      refreshIntervalSeconds: number
+    }
   | { kind: "refresh" | "remove"; id: string }
 
 export function SubscriptionsPanel({
   transports,
+  selectedSubscriptionId,
 }: {
   transports: TransportStatus[]
+  selectedSubscriptionId?: string
 }) {
   const { t, i18n } = useTranslation()
+  const catalogNavigation = useCatalogNavigation()
   const client = useQueryClient()
   const query = useGetSubscriptions({ query: { retry: false } })
   const [editing, setEditing] = useState<SavedSubscription | null>(null)
-  const [importing, setImporting] = useState(false)
+  const [importing, setImporting] = useState<"new" | SavedSubscription | null>(
+    null
+  )
   const [removing, setRemoving] = useState<SavedSubscription | null>(null)
   const [name, setName] = useState("")
+  const [refreshDraft, setRefreshDraft] = useState(() =>
+    subscriptionRefreshDraft()
+  )
+  const refreshIntervalSeconds = subscriptionRefreshSeconds(refreshDraft)
+  const lastFocusedSubscription = useRef<string | null>(null)
+  const importSeed = useMemo(
+    () =>
+      importing && importing !== "new"
+        ? { subscription_id: importing.id, pending_only: true as const }
+        : undefined,
+    [importing]
+  )
   const names = new Map(
     transports.map((item) => [item.tag, item.display_name || item.tag])
   )
   const mutation = useMutation({
     mutationFn: async (action: Action) => {
       switch (action.kind) {
-        case "rename":
-          return postSubscriptionRename({ id: action.id, name: action.name })
+        case "edit": {
+          if (action.name !== action.record.name) {
+            await postSubscriptionRename({
+              id: action.record.id,
+              name: action.name,
+            })
+          }
+          if (
+            action.refreshIntervalSeconds !==
+            (action.record.refresh_interval_seconds ??
+              DEFAULT_SUBSCRIPTION_REFRESH_SECONDS)
+          ) {
+            return postSubscriptionSettings({
+              id: action.record.id,
+              refresh_interval_seconds: action.refreshIntervalSeconds,
+            })
+          }
+          return undefined
+        }
         case "refresh":
           return postSubscriptionRefresh({ id: action.id })
         case "remove":
@@ -62,11 +113,27 @@ export function SubscriptionsPanel({
       await client.invalidateQueries({
         queryKey: getGetSubscriptionsQueryKey(),
       })
-      if (action.kind === "rename") {
+      if (action.kind === "edit") {
         setEditing(null)
       }
       if (action.kind === "remove") setRemoving(null)
-      if ("error" in response.data && response.data.error)
+      if (action.kind === "refresh") {
+        await Promise.all(
+          [
+            queryKeys.transportConfig(),
+            queryKeys.transports(),
+            queryKeys.runtimeInterfaces(),
+            queryKeys.runtimeOutbounds(),
+            queryKeys.config(),
+          ].map((queryKey) => client.invalidateQueries({ queryKey }))
+        )
+      }
+      if (
+        action.kind === "refresh" &&
+        response &&
+        (("error" in response.data && response.data.error) ||
+          ("last_sync_error" in response.data && response.data.last_sync_error))
+      )
         toast.error(t("subscriptions.refreshFailed"))
       else
         toast.success(
@@ -76,10 +143,37 @@ export function SubscriptionsPanel({
         )
     },
   })
-  const records = query.data?.status === 200 ? query.data.data : []
+  const records = useMemo(
+    () => (query.data?.status === 200 ? query.data.data : []),
+    [query.data]
+  )
+  useEffect(() => {
+    if (!selectedSubscriptionId) {
+      lastFocusedSubscription.current = null
+      return
+    }
+    if (
+      lastFocusedSubscription.current === selectedSubscriptionId ||
+      !records.some((record) => record.id === selectedSubscriptionId)
+    )
+      return
+    const card = document.getElementById(
+      subscriptionCardId(selectedSubscriptionId)
+    )
+    if (!card) return
+    lastFocusedSubscription.current = selectedSubscriptionId
+    card.focus({ preventScroll: true })
+    card.scrollIntoView({
+      block: "center",
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+        ? "auto"
+        : "smooth",
+    })
+  }, [records, selectedSubscriptionId])
   const edit = (record: SavedSubscription) => {
     mutation.reset()
     setName(record.name)
+    setRefreshDraft(subscriptionRefreshDraft(record.refresh_interval_seconds))
     setEditing(record)
   }
   const close = () => {
@@ -101,9 +195,9 @@ export function SubscriptionsPanel({
           {t("subscriptions.description")}
         </p>
         <Button
-          onClick={() => setImporting(true)}
+          onClick={() => setImporting("new")}
           variant="outline"
-          disabled={importing || mutation.isPending}
+          disabled={importing !== null || mutation.isPending}
         >
           <Plus />
           {t("subscriptions.add")}
@@ -131,9 +225,22 @@ export function SubscriptionsPanel({
           {t("subscriptions.empty")}
         </div>
       ) : null}
+      {selectedSubscriptionId &&
+      !query.isLoading &&
+      !query.isError &&
+      !records.some((record) => record.id === selectedSubscriptionId) ? (
+        <p className="text-sm text-muted-foreground" role="status">
+          {t("subscriptions.targetMissing")}
+        </p>
+      ) : null}
       {mutation.isError && !editing && !removing ? (
         <Alert variant="destructive">
-          <AlertDescription>{t("subscriptions.actionFailed")}</AlertDescription>
+          <AlertDescription>
+            <OperationErrorMessage
+              error={mutation.error}
+              fallbackSummary={t("subscriptions.actionFailed")}
+            />
+          </AlertDescription>
         </Alert>
       ) : null}
       {records.map((record) => {
@@ -146,8 +253,15 @@ export function SubscriptionsPanel({
         return (
           <article
             data-row-actions
-            className="space-y-4 rounded-lg border p-4 sm:p-5"
+            className={cn(
+              "scroll-mt-24 space-y-4 rounded-lg border p-4 outline-none sm:p-5",
+              selectedSubscriptionId === record.id &&
+                "border-primary ring-2 ring-primary/25"
+            )}
             key={record.id}
+            id={subscriptionCardId(record.id)}
+            tabIndex={-1}
+            aria-label={record.name}
           >
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
@@ -175,7 +289,7 @@ export function SubscriptionsPanel({
                 <EditDeleteActions
                   editDisabled={mutation.isPending}
                   deleteDisabled={mutation.isPending}
-                  editTitle={t("subscriptions.rename")}
+                  editTitle={t("subscriptions.edit")}
                   deleteTitle={t("subscriptions.remove")}
                   onEdit={() => edit(record)}
                   onDelete={() => {
@@ -260,6 +374,52 @@ export function SubscriptionsPanel({
                 ? t("subscriptions.updated", { date: date(record.updated_at) })
                 : t("subscriptions.neverUpdated")}
             </p>
+            <div className="space-y-1 text-xs text-muted-foreground">
+              <p>
+                {t("subscriptions.autoRefresh")}:{" "}
+                {(record.refresh_interval_seconds ??
+                  DEFAULT_SUBSCRIPTION_REFRESH_SECONDS) === 0
+                  ? t("subscriptions.autoRefreshOff")
+                  : t("subscriptions.autoRefreshHours", {
+                      hours:
+                        (record.refresh_interval_seconds ??
+                          DEFAULT_SUBSCRIPTION_REFRESH_SECONDS) / 3_600,
+                    })}
+              </p>
+              {record.next_check_at ? (
+                <p>
+                  {t("subscriptions.nextRefresh", {
+                    date: date(record.next_check_at),
+                  })}
+                </p>
+              ) : null}
+            </div>
+            {(record.pending_new_servers_count ?? 0) > 0 ? (
+              <div className="space-y-2 rounded-[4px] border border-primary/30 bg-primary/5 p-3">
+                <p className="text-sm font-medium">
+                  {t("subscriptions.newServers", {
+                    count: record.pending_new_servers_count,
+                  })}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {t("subscriptions.newServersHint")}
+                </p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={mutation.isPending || importing !== null}
+                  onClick={() => setImporting(record)}
+                >
+                  {t("subscriptions.previewNewServers")}
+                </Button>
+              </div>
+            ) : null}
+            {record.last_sync_error ? (
+              <OperationErrorMessage
+                error={record.last_sync_error}
+                fallbackSummary={t("subscriptions.syncFailed")}
+              />
+            ) : null}
             {record.error ? (
               <p role="status" className="text-sm text-destructive">
                 {t("subscriptions.refreshFailed")}
@@ -271,9 +431,22 @@ export function SubscriptionsPanel({
       {importing ? (
         <SubscriptionImportDialog
           open
-          onOpenChange={setImporting}
-          onComplete={() => setImporting(false)}
-          onResultsDismiss={() => setImporting(false)}
+          seed={importSeed}
+          onOpenChange={(open) => {
+            if (!open) setImporting(null)
+          }}
+          onComplete={(results) => {
+            setImporting(null)
+            toast.success(
+              t("transports.subscriptionImport.completed", {
+                count: results.results.length,
+              }),
+              {
+                action: catalogNavigation.successAction(),
+              }
+            )
+          }}
+          onResultsDismiss={() => setImporting(null)}
         />
       ) : null}
       <Dialog
@@ -284,17 +457,23 @@ export function SubscriptionsPanel({
       >
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle>{t("subscriptions.rename")}</DialogTitle>
+            <DialogTitle>{t("subscriptions.edit")}</DialogTitle>
           </DialogHeader>
           <form
             className="space-y-4"
             onSubmit={(event) => {
               event.preventDefault()
-              if (!editing || mutation.isPending) return
+              if (
+                !editing ||
+                mutation.isPending ||
+                refreshIntervalSeconds === undefined
+              )
+                return
               mutation.mutate({
-                kind: "rename",
-                id: editing.id,
+                kind: "edit",
+                record: editing,
                 name: name.trim(),
+                refreshIntervalSeconds,
               })
             }}
           >
@@ -309,10 +488,22 @@ export function SubscriptionsPanel({
                 disabled={mutation.isPending}
               />
             </label>
+            <SubscriptionRefreshFields
+              draft={refreshDraft}
+              onChange={setRefreshDraft}
+              originalSeconds={
+                editing?.refresh_interval_seconds ??
+                DEFAULT_SUBSCRIPTION_REFRESH_SECONDS
+              }
+              disabled={mutation.isPending}
+            />
             {mutation.isError ? (
-              <p role="alert" className="text-sm text-destructive">
-                {t("subscriptions.saveFailed")}
-              </p>
+              <div role="alert" className="text-sm text-destructive">
+                <OperationErrorMessage
+                  error={mutation.error}
+                  fallbackSummary={t("subscriptions.saveFailed")}
+                />
+              </div>
             ) : null}
             <DialogFooter>
               <Button
@@ -323,7 +514,14 @@ export function SubscriptionsPanel({
               >
                 {t("subscriptions.cancel")}
               </Button>
-              <Button type="submit" disabled={mutation.isPending}>
+              <Button
+                type="submit"
+                disabled={
+                  mutation.isPending ||
+                  !name.trim() ||
+                  refreshIntervalSeconds === undefined
+                }
+              >
                 {mutation.isPending
                   ? t("subscriptions.saving")
                   : t("subscriptions.save")}

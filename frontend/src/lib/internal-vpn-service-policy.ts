@@ -70,8 +70,7 @@ export function buildInternalVpnServiceOptions({
       service as NdmsVpnServerService & {
         bound_interface_label?: string | null
       }
-    ).bound_interface_label
-      ?.trim()
+    ).bound_interface_label?.trim()
 
     byId.set(serviceId, {
       key: serviceId,
@@ -167,6 +166,7 @@ export function updateInternalVpnServiceOverride({
     }
   } else {
     next.set(normalizedId, {
+      ...(next.get(normalizedId) ?? baselineMatch),
       service_id: normalizedId,
       process_clients: processClients,
     })
@@ -255,6 +255,7 @@ export function normalizeInternalVpnServiceOverrides(
       continue
     }
     byId.set(serviceId, {
+      ...value,
       service_id: serviceId,
       process_clients: value.process_clients === true,
     })

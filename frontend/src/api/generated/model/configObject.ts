@@ -19,9 +19,14 @@ import type { TunnelProbeConfig } from './tunnelProbeConfig';
 import type { UiPreferencesConfig } from './uiPreferencesConfig';
 
 /**
- * keen-pbr configuration file.
+ * Current normalized keen-pbr configuration. Legacy JSON without schema_version is accepted as version 1 and migrated before validation.
  */
 export interface ConfigObject {
+  /**
+     * Configuration format version, independent of the application version. Current output uses version 2. Future versions are rejected before configuration validation or runtime changes.
+     * @minimum 1
+     */
+  schema_version: number;
   daemon?: DaemonConfig;
   api?: ApiConfig;
   outbounds?: Outbound[];

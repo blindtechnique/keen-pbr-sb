@@ -8,6 +8,12 @@
 import type { ValidationError } from './validationError';
 
 export interface ErrorResponse {
+  /**
+     * Optional stable operation failure code for localized presentation. The error message and HTTP status retain their existing meaning. Initial save/import codes include busy, draft_pending, draft_changed, validation, recovery_required, apply_unchanged, rolled_back, preview_expired, service_unavailable and subscription_unavailable. Clients must accept unknown future codes and use existing outcome fields, when present, to describe whether changes were applied or restored. Older servers may omit this field or return null.
+
+     * @nullable
+     */
+  code?: string | null;
   /** Error message. */
   error: string;
   /** Optional list of validation failures returned by `POST /api/config`. */

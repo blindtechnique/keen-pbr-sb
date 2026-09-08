@@ -4,8 +4,12 @@
 
 #include <charconv>
 #include <cstdint>
+#include <utility>
 
 namespace keen_pbr3 {
+
+DnsError::DnsError(std::string message, std::string code)
+    : std::runtime_error(std::move(message)), code_(std::move(code)) {}
 
 namespace {
 
@@ -16,11 +20,11 @@ uint16_t parse_dns_port_or_throw(const std::string& address, std::string_view po
                                      port);
     if (ec != std::errc{} || ptr != port_str.data() + port_str.size()) {
         throw DnsError("Invalid DNS server address: '" + address +
-                       "' (non-numeric port)");
+                       "' (non-numeric port)", "config.dns.port_number");
     }
     if (port < 1 || port > 65535) {
         throw DnsError("Invalid DNS server address: '" + address +
-                       "' (port out of range 1-65535)");
+                       "' (port out of range 1-65535)", "config.dns.port_range");
     }
     return static_cast<uint16_t>(port);
 }
@@ -78,7 +82,7 @@ std::optional<std::string> canonical_ipv6(const std::string& addr) {
 
 ParsedDnsAddress parse_dns_address_str(const std::string& address) {
     if (address.empty()) {
-        throw DnsError("Invalid DNS server address: empty string");
+        throw DnsError("Invalid DNS server address: empty string", "config.value.required");
     }
 
     std::string ip;
@@ -89,13 +93,13 @@ ParsedDnsAddress parse_dns_address_str(const std::string& address) {
         auto close = address.find(']');
         if (close == std::string::npos) {
             throw DnsError("Invalid DNS server address: '" + address +
-                           "' (missing closing ']')");
+                           "' (missing closing ']')", "config.dns.closing_bracket");
         }
         ip = address.substr(1, close - 1);
         if (close + 1 < address.size()) {
             if (address[close + 1] != ':') {
                 throw DnsError("Invalid DNS server address: '" + address +
-                               "' (expected ':' after ']')");
+                               "' (expected ':' after ']')", "config.dns.port_separator");
             }
             port = parse_dns_port_or_throw(address,
                                            std::string_view(address).substr(close + 2));
@@ -129,7 +133,7 @@ ParsedDnsAddress parse_dns_address_str(const std::string& address) {
         ip = *canonical;
     } else {
         throw DnsError("Invalid DNS server address: '" + address +
-                       "' (not a valid IPv4 or IPv6 address)");
+                       "' (not a valid IPv4 or IPv6 address)", "config.dns.address");
     }
 
     return {ip, port};

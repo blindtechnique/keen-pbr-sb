@@ -8,10 +8,34 @@
 import type { LogLevel } from './logLevel';
 
 /**
- * Both fields optional. A field of the wrong JSON type is ignored rather than rejected, which means a typed mistake leaves the old value in force - check the returned `settings` rather than assuming.
+ * Fields are optional. Size limits must be integers within the documented range. Check the returned settings and error before reporting success.
 
  */
 export interface LogSettingsRequest {
+  size_limit_enabled?: boolean;
+  age_limit_enabled?: boolean;
+  /**
+     * @minimum 1
+     * @maximum 365
+     */
+  max_age_days?: number;
+  nfqws_size_limit_enabled?: boolean;
+  nfqws_age_limit_enabled?: boolean;
+  /**
+     * @minimum 1
+     * @maximum 365
+     */
+  nfqws_max_age_days?: number;
+  /**
+     * @minimum 65536
+     * @maximum 16777216
+     */
+  max_file_bytes?: number;
+  /**
+     * @minimum 65536
+     * @maximum 16777216
+     */
+  nfqws_max_file_bytes?: number;
   file_enabled?: boolean;
   level?: LogLevel;
 }

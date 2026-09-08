@@ -19,4 +19,6 @@ export interface DnsConfig {
   dns_test_server?: DnsTestServer;
   system_resolver?: DnsSystemResolver;
   client_dns_enforcement?: ClientDnsEnforcement;
+  /** Return NXDOMAIN for Mozilla's use-application-dns.net canary to ask Firefox to keep using network DNS instead of automatically enabled DoH. Omitted or null means true, preserving earlier releases. Does not override manually enabled DoH or control Chrome, Edge, or Yandex Browser. Independent of client_dns_enforcement; does not block HTTPS resolver providers or change the router's upstream DNS. */
+  firefox_doh_canary?: boolean | null;
 }

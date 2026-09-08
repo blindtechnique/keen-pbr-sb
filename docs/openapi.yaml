@@ -72,6 +72,117 @@ paths:
               schema:
                 $ref: "#/components/schemas/ReloadResponse"
 
+  /api/service/restart-processes:
+    post:
+      summary: Restart keen-pbr and transport-manager processes
+      description: >
+        Schedules the installed Keenetic service scripts after the HTTP reply.
+        Managed sing-box connections restart too. nfqws is not restarted.
+      operationId: postServiceRestartProcesses
+      responses:
+        "200":
+          description: Process restart scheduled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReloadResponse"
+
+  /api/lists/query:
+    post:
+      summary: Query a page of configured list summaries
+      description: >
+        Read-only filtering and sorting of the current editable configuration,
+        preferring its staged draft when present. Each request uses one visible
+        configuration snapshot; no server-side cursor or saved query is created.
+        Search terms are case-insensitive and must all match across list names,
+        source paths/URLs and the names of dependent routing/DNS rules or exits.
+        Inline domain/IP arrays are never returned by this endpoint.
+      operationId: queryLists
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ListQueryRequest"
+      responses:
+        "200":
+          description: A bounded page from the current visible list collection
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListPage"
+        "400":
+          description: Invalid paging, search or sorting options
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/lists/preview:
+    post:
+      summary: Preview a remote or inline list in an explicitly selected format
+      description: >
+        Authenticated read-only preview using the runtime list parser. Exactly
+        one of url or text is required. Downloads use the active configuration's
+        list download chain unless an override is explicitly supplied. No cache,
+        configuration draft, firewall, or service state is changed. This optional
+        preview never becomes a prerequisite for saving or applying a list.
+        Input is limited to 2 MiB and analysis to 50000 physical lines. A raw
+        line over the runtime reader's 4096-byte limit stops the analysis. Counts
+        describe only the analyzed prefix when complete is false. Only the first
+        50 normalized unique entries and 50 errors are returned. Samples omitted
+        from the response do not make full-input counts incomplete.
+      operationId: postListSourcePreview
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ListSourcePreviewRequest"
+      responses:
+        "200":
+          description: Preview or non-mutating download/format failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListSourcePreviewResponse"
+        "400":
+          description: Invalid source or download route options
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/lists/import:
+    post:
+      summary: Normalize list contents for a local editor without saving
+      description: >
+        Parses text, a JSON string array, or a YAML payload block sequence.
+        Returns all normalized entries only if the entire input is valid.
+        Does not create a draft or change configuration, caches, or routing.
+        Limited to 2 MiB, 50000 entries and 4096 bytes per scalar. This is not
+        a general Clash or sing-box configuration importer.
+      operationId: postListContentImport
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ListContentImportRequest"
+      responses:
+        "200":
+          description: Normalized entries or line-numbered parser errors
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListContentImportResponse"
+        "400":
+          description: Invalid request or unknown explicit format
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/lists/refresh:
     post:
       summary: Refresh remote URL lists
@@ -1628,6 +1739,41 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/transports/geo:
+    post:
+      summary: Complete an automatic native transport country lookup
+      description: >
+        Updates country metadata only, without applying runtime configuration.
+        The manager merges into the current definition atomically and returns
+        updated=false if the transport is no longer native, no longer uses
+        automatic country lookup, or its interface changed.
+      operationId: postTransportGeo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransportGeoUpdate"
+      responses:
+        "200":
+          description: Country updated or obsolete lookup ignored
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransportGeoUpdateResponse"
+        "400":
+          description: Invalid country metadata or identity
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Transport manager is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/transports/config/apply:
     post:
       summary: Atomically create a transport and its linked outgoing route
@@ -1704,6 +1850,56 @@ paths:
                   $ref: "#/components/schemas/TransportSpec"
         "503":
           description: Transport manager unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/notifications:
+    get:
+      summary: Current shared notification feed
+      description: >
+        Last 200 log lines with stable identities and router-owned dismissals.
+        Dismissing a notice does not delete logs.
+      operationId: getNotifications
+      responses:
+        "200":
+          description: Notification feed and shared dismissal state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotificationsResponse"
+
+  /api/notifications/dismiss:
+    post:
+      summary: Dismiss the supplied notifications on every device
+      description: >
+        Merges identities into bounded state stored beside the configuration.
+        No runtime restart or additional login is needed. New notices not in
+        this request stay visible. The notification_state SSE event publishes
+        shared state on connection and after dismissal on the existing stream.
+      operationId: dismissNotifications
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NotificationDismissRequest"
+      responses:
+        "200":
+          description: Shared state after dismissal
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotificationDismissalState"
+        "400":
+          description: Invalid notification identities or request size
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Dismissal state could not be saved
           content:
             application/json:
               schema:
@@ -1790,11 +1986,32 @@ paths:
               schema:
                 $ref: "#/components/schemas/LogSettingsResult"
 
+  /api/system/metrics:
+    get:
+      summary: Local router resource metrics
+      description: >
+        Read-only kernel and filesystem observations, cached for one second.
+        This endpoint never calls RCI or waits for firmware observations.
+        Every field is optional: absent means unavailable, not zero. CPU
+        utilization is measured between samples and is absent on the first
+        sample or when the kernel counters cannot be compared.
+      operationId: getSystemMetrics
+      responses:
+        "200":
+          description: Available local resource measurements
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RouterMetrics"
+
   /api/system/router:
     get:
       summary: Hardware and firmware facts
       description: >
-        Served from a 5-second cache, so polling it costs nothing extra.
+        Firmware facts use the shared version cache. WAN and client counts
+        use independent 60-second caches, retaining their last known-good
+        observations on errors. Local metrics remain in this response for
+        compatibility; frequent resource polling should use system/metrics.
 
 
         Every field is optional and present only when this router could be
@@ -2856,7 +3073,7 @@ paths:
 
   /api/subscriptions/refresh:
     post:
-      summary: Refresh provider metadata without changing nodes or routing
+      summary: Refresh subscription and apply changed parameters of linked VPNs
       operationId: postSubscriptionRefresh
       requestBody:
         required: true
@@ -2866,7 +3083,25 @@ paths:
               $ref: "#/components/schemas/SubscriptionIdRequest"
       responses:
         "200":
-          description: Current metadata; failed fetch keeps the previous counters and reports error
+          description: Current source state; new nodes require import and missing nodes are not removed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SavedSubscription"
+
+  /api/subscriptions/settings:
+    post:
+      summary: Set the daemon-side automatic refresh interval of a subscription
+      operationId: postSubscriptionSettings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubscriptionSettingsRequest"
+      responses:
+        "200":
+          description: Updated subscription schedule
           content:
             application/json:
               schema:
@@ -4084,12 +4319,46 @@ components:
       type: object
       required: [file_enabled, level]
       properties:
+        size_limit_enabled:
+          type: boolean
+          default: true
+        age_limit_enabled:
+          type: boolean
+          default: false
+        max_age_days:
+          type: integer
+          minimum: 1
+          maximum: 365
+          default: 7
+        nfqws_size_limit_enabled:
+          type: boolean
+          default: true
+        nfqws_age_limit_enabled:
+          type: boolean
+          default: false
+        nfqws_max_age_days:
+          type: integer
+          minimum: 1
+          maximum: 365
+          default: 7
+        max_file_bytes:
+          type: integer
+          minimum: 65536
+          maximum: 16777216
+          default: 1048576
+          description: Size bound per keen-pbr log generation; one previous generation is retained.
+        nfqws_max_file_bytes:
+          type: integer
+          minimum: 65536
+          maximum: 16777216
+          default: 1048576
+          description: Per-file nfqws limit checked by daemon maintenance; temporary overshoot is possible.
         file_enabled:
           type: boolean
           description: >
             When false the daemon writes nothing to its log file. A quiet log
-            then says nothing about the daemon's health, and rotation never
-            runs either, so the file also stops changing size.
+            then says nothing about the daemon's health. Enabled age cleanup
+            continues even while new file logging is disabled.
         level:
           allOf:
             - $ref: "#/components/schemas/LogLevel"
@@ -4101,10 +4370,33 @@ components:
     LogSettingsRequest:
       type: object
       description: >
-        Both fields optional. A field of the wrong JSON type is ignored rather
-        than rejected, which means a typed mistake leaves the old value in
-        force - check the returned `settings` rather than assuming.
+        Fields are optional. Size limits must be integers within the documented
+        range. Check the returned settings and error before reporting success.
       properties:
+        size_limit_enabled:
+          type: boolean
+        age_limit_enabled:
+          type: boolean
+        max_age_days:
+          type: integer
+          minimum: 1
+          maximum: 365
+        nfqws_size_limit_enabled:
+          type: boolean
+        nfqws_age_limit_enabled:
+          type: boolean
+        nfqws_max_age_days:
+          type: integer
+          minimum: 1
+          maximum: 365
+        max_file_bytes:
+          type: integer
+          minimum: 65536
+          maximum: 16777216
+        nfqws_max_file_bytes:
+          type: integer
+          minimum: 65536
+          maximum: 16777216
         file_enabled:
           type: boolean
         level:
@@ -4154,6 +4446,50 @@ components:
         error:
           type: string
           enum: [script_missing, install_failed]
+
+    RouterMetrics:
+      type: object
+      description: >
+        Local observations only, without RCI. Missing measurements are
+        omitted; no missing counter or sensor is represented as zero.
+      properties:
+        cpu_model:
+          type: string
+        cpu_load_percent:
+          type: integer
+          minimum: 0
+          maximum: 100
+        cpu_temperature_c:
+          type: number
+        memory_total_mb:
+          type: integer
+        memory_used_mb:
+          type: integer
+        memory_used_percent:
+          type: integer
+        disk_total_mb:
+          type: integer
+          format: int64
+        disk_used_mb:
+          type: integer
+          format: int64
+        disk_used_percent:
+          type: integer
+        uptime_seconds:
+          type: integer
+          format: int64
+        load_average:
+          type: array
+          minItems: 3
+          maxItems: 3
+          items:
+            type: number
+        conntrack_total:
+          type: integer
+          format: int64
+        conntrack_free:
+          type: integer
+          format: int64
 
     RouterInfo:
       type: object
@@ -4426,6 +4762,7 @@ components:
           type: boolean
         transports:
           type: boolean
+          description: Includes transport definitions and subscription sources, schedules and VPN bindings.
         outbounds:
           type: boolean
         dns:
@@ -4460,6 +4797,15 @@ components:
         schema:
           type: integer
           enum: [1]
+        config_schema_version:
+          type: integer
+          format: int64
+          minimum: 1
+          description: >
+            Source configuration format, independent of this archive's schema.
+            Included even when general settings are not selected. Older archives
+            use general.schema_version when present, otherwise legacy version 1.
+            Selected sections are migrated before merging with current settings.
         created_at:
           type: integer
           format: int64
@@ -4477,6 +4823,20 @@ components:
               type: object
             transports:
               type: object
+            subscriptions:
+              type: array
+              maxItems: 64
+              description: >
+                Private subscription metadata, including credential-bearing source
+                URLs, schedules and bindings. Exported with transports. Never show
+                source URLs in restore previews. Omission in an older archive keeps
+                current sources and reconciles their bindings with restored VPNs;
+                an explicit empty array restores an empty source list. No provider
+                download or VPN import occurs during restore. The section is limited
+                to 4 MiB and is validated before writes.
+              items:
+                type: object
+                additionalProperties: true
             outbounds:
               type: array
               description: Serialized outbound objects from the selected configuration.
@@ -4686,6 +5046,116 @@ components:
               description: >
                 Why the remote check failed while a cached release was still
                 returned. Empty when the check succeeded.
+
+    NotificationDismissalState:
+      type: object
+      required: [revision, log_ids, update_ids]
+      properties:
+        revision:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Persisted revision; stale responses cannot undo a dismissal.
+        log_ids:
+          type: array
+          maxItems: 512
+          items:
+            type: string
+            maxLength: 128
+        update_ids:
+          type: array
+          maxItems: 512
+          items:
+            type: string
+            maxLength: 128
+
+    NotificationDismissRequest:
+      type: object
+      properties:
+        log_ids:
+          type: array
+          maxItems: 200
+          items:
+            type: string
+            maxLength: 128
+        update_ids:
+          type: array
+          maxItems: 512
+          items:
+            type: string
+            maxLength: 128
+
+    NotificationsResponse:
+      type: object
+      required: [lines, line_ids, state]
+      properties:
+        subscription_notices:
+          type: array
+          maxItems: 256
+          items:
+            $ref: "#/components/schemas/SubscriptionNotice"
+        subscription_notices_error:
+          type: boolean
+          description: Subscription metadata could not be read; other notifications remain available.
+        lines:
+          type: array
+          maxItems: 200
+          items:
+            type: string
+        line_ids:
+          type: array
+          maxItems: 200
+          description: Opaque identities in exactly the same order as lines.
+          items:
+            type: string
+        state:
+          $ref: "#/components/schemas/NotificationDismissalState"
+
+    SubscriptionNoticeKind:
+      type: string
+      enum: [new_servers, traffic_low, traffic_exhausted, expires_soon, expired, sync_failed]
+
+    SubscriptionNotice:
+      type: object
+      required: [id, subscription_id, name, kind]
+      properties:
+        id:
+          type: string
+          maxLength: 128
+        subscription_id:
+          type: string
+        name:
+          type: string
+        kind:
+          $ref: "#/components/schemas/SubscriptionNoticeKind"
+        count:
+          type: integer
+          minimum: 0
+        days:
+          type: integer
+          minimum: 0
+        remaining_percent:
+          type: integer
+          minimum: 0
+          maximum: 100
+
+    StatusEventSubscriptions:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [subscriptions]
+
+    StatusEventNotificationState:
+      type: object
+      required: [type, data]
+      properties:
+        type:
+          type: string
+          enum: [notification_state]
+        data:
+          $ref: "#/components/schemas/NotificationDismissalState"
 
     StatusEventSnapshot:
       type: object
@@ -4972,10 +5442,17 @@ components:
     SubscriptionPreviewRequest:
       type: object
       description: >
-        Exactly one of `url` or `document`. A subscription an operator pastes
+        Exactly one of `url`, `document` or `subscription_id`. A subscription an operator pastes
         as a link is fetched by the daemon; one they hand over as a file is
         already in front of them, so it is planned as given and never fetched.
       properties:
+        subscription_id:
+          type: string
+          description: Saved source ID; the URL is resolved internally and never sent back to the browser.
+        pending_only:
+          type: boolean
+          default: false
+          description: With subscription_id, show only newly discovered servers not yet imported.
         url:
           type: string
           description: >
@@ -5049,6 +5526,28 @@ components:
       type: object
       required: [id, name, source_host, transport_tags, checked_at]
       properties:
+        refresh_interval_seconds:
+          type: integer
+          minimum: 0
+          maximum: 604800
+          default: 21600
+          description: Zero disables automatic refresh; otherwise 3600..604800 seconds.
+        next_check_at:
+          type: integer
+          description: Next daemon-side check, Unix seconds; absent when automatic refresh is off.
+        pending_new_servers_count:
+          type: integer
+          minimum: 0
+        pending_servers_revision:
+          type: string
+          description: Stable identity of the current pending server set, not a refresh timestamp.
+        usage_cycle:
+          type: integer
+          minimum: 0
+          description: Increments when provider usage counters reset so a new allowance can warn again.
+        last_sync_error:
+          type: string
+          description: Finite code for the last imported VPN parameter update failure; never includes credentials.
         id:
           type: string
         name:
@@ -5086,6 +5585,18 @@ components:
         error:
           type: string
           description: Stable error code; never includes provider response or credential-bearing URL.
+
+    SubscriptionSettingsRequest:
+      type: object
+      required: [id, refresh_interval_seconds]
+      properties:
+        id:
+          type: string
+        refresh_interval_seconds:
+          type: integer
+          minimum: 0
+          maximum: 604800
+          description: Zero disables automatic refresh; otherwise 3600..604800 seconds.
 
     SubscriptionSourceRequest:
       type: object
@@ -5187,6 +5698,13 @@ components:
       type: object
       required: [line, outcome]
       properties:
+        code:
+          type: [string, "null"]
+          description: >
+            Optional stable failure code assigned by the server, independent
+            of the diagnostic error text. Non-null only for a failed entry;
+            current codes include invalid_connection, name_in_use and
+            no_interface_name. Clients must accept unknown future codes.
         line:
           type: integer
         outcome:
@@ -5420,6 +5938,31 @@ components:
           type: string
         transport:
           $ref: "#/components/schemas/TransportSpec"
+
+    TransportGeoUpdate:
+      type: object
+      additionalProperties: false
+      required: [tag, expected_interface, country_code, country]
+      properties:
+        tag:
+          type: string
+        expected_interface:
+          type: string
+        country_code:
+          type: string
+          pattern: "^[A-Za-z]{2}$"
+        country:
+          type: string
+
+    TransportGeoUpdateResponse:
+      type: object
+      additionalProperties: false
+      required: [updated, config_revision]
+      properties:
+        updated:
+          type: boolean
+        config_revision:
+          type: string
 
     TransportConfigResponse:
       type: object
@@ -5940,6 +6483,15 @@ components:
         when the list already has an explicit `detour`, and as `inherit`
         otherwise.
 
+    ListSourceFormat:
+      type: string
+      pattern: '^(text|json-array|yaml-payload)$'
+      description: >
+        Explicit source syntax: text (default, preserving legacy SRS URL handling),
+        json-array (a root array of strings), or yaml-payload (one payload block
+        sequence of scalar strings). Applies to URL and router-file sources only.
+        Domains match the root and subdomains; other rule-set semantics are not inferred.
+
     ListConfig:
       type: object
       description: >
@@ -5971,6 +6523,11 @@ components:
           type: string
           description: URL to a remote list file to download and cache.
           example: "https://raw.githubusercontent.com/v2fly/domain-list-community/refs/heads/master/data/apple"
+        source_format:
+          $ref: "#/components/schemas/ListSourceFormat"
+        shrink_policy:
+          $ref: "#/components/schemas/ListSourceShrinkPolicy"
+          nullable: true
         domains:
           type: array
           description: Inline list of domain patterns (supports `*.` wildcards).
@@ -6017,6 +6574,22 @@ components:
           items:
             type: string
 
+    ListSourceShrinkPolicy:
+      type: object
+      description: Optional per-source thresholds; omitted fields use the existing defaults.
+      properties:
+        min_previous_entries:
+          type: integer
+          format: int64
+          minimum: 0
+          default: 50
+        min_retained_fraction:
+          type: number
+          minimum: 0
+          maximum: 1
+          default: 0.5
+          description: Zero disables the ratio threshold, but an empty replacement still requires explicit acceptance when the previous size reaches the minimum.
+
     DnsServer:
       type: object
       required: [tag]
@@ -6054,6 +6627,21 @@ components:
           type: string
           description: Outbound tag to use when querying this DNS server.
           example: "vpn"
+        domains:
+          type: array
+          description: >
+            Optional direct domain suffix bindings, without list references.
+            Each domain includes its subdomains. Matching is case-insensitive;
+            a leading "*." and a trailing dot are accepted. Names must be
+            DNS-compatible ASCII (use punycode for international names).
+            Direct bindings override list-based DNS rules and inherited
+            Keenetic DNS policy for the same suffix and its subdomains.
+            Among direct bindings, the most specific suffix wins. Binding
+            the same suffix to several servers supplies multiple upstreams.
+            Global fallback and traffic routing rules are not changed.
+          items:
+            type: string
+          example: ["youtube.com", "googlevideo.com"]
 
     DnsRule:
       type: object
@@ -6154,15 +6742,26 @@ components:
           $ref: "#/components/schemas/DnsSystemResolver"
         client_dns_enforcement:
           $ref: "#/components/schemas/ClientDnsEnforcement"
+        firefox_doh_canary:
+          type: boolean
+          nullable: true
+          description: >-
+            Return NXDOMAIN for Mozilla's use-application-dns.net canary to
+            ask Firefox to keep using network DNS instead of automatically
+            enabled DoH. Omitted or null means true, preserving earlier releases.
+            Does not override manually enabled DoH or control Chrome, Edge,
+            or Yandex Browser. Independent of client_dns_enforcement; does not
+            block HTTPS resolver providers or change the router's upstream DNS.
+          example: true
 
     ClientDnsEnforcement:
       type: object
       description: >
         Forces LAN clients to use the router's DNS. When enabled, plain DNS
         (port 53) from inbound interfaces is transparently redirected to the
-        local resolver and DNS-over-TLS (port 853) is blocked, so browser
-        Secure DNS cannot bypass domain-based routing. DNS-over-HTTPS on port
-        443 cannot be blocked generically.
+        local resolver. DNS-over-TLS (port 853) is also blocked unless block_dot
+        is false. This does not prevent DNS-over-HTTPS on port 443 from bypassing
+        domain-based routing; HTTPS cannot be blocked generically.
       properties:
         enabled:
           type: boolean
@@ -6214,6 +6813,24 @@ components:
           type: string
           description: Outbound tag to route matched traffic through.
           example: "vpn"
+        failure_policy:
+          type: string
+          nullable: true
+          enum: [inherit, block, fallback]
+          description: >
+            Behavior of this rule when its outgoing path is known to be
+            unavailable. Omitted, null, or `inherit` preserves the existing
+            global and per-outbound strict-enforcement behavior. `block`
+            blocks new matching connections; `fallback` uses the explicitly
+            selected fallback_outbound, or blocks if it too is unavailable.
+            This does not change other rules or globally reset connections.
+        fallback_outbound:
+          type: string
+          nullable: true
+          description: >
+            Reserved outgoing path used only with failure_policy=fallback.
+            Must name a different interface or urltest outbound.
+            Group selection and health checks use the existing runtime.
         proto:
           type: string
           description: Protocol to match ("tcp", "udp", or "tcp/udp"). Omit for any.
@@ -6313,10 +6930,11 @@ components:
           type: boolean
           description: >
             Whether traffic and DNS requests from the service client pool are
-            processed by keen-pbr. For OpenConnect, false preserves ordinary
-            destination-based routing policies and bypasses only forced DNS
-            redirection from an exact verified ocN ingress. For other native
-            VPN services, false installs an early source-pool bypass.
+            processed by keen-pbr. False installs an early source-pool bypass
+            of keen-pbr routing and forced DNS redirection. For OpenConnect,
+            false sends all destinations directly through the ordinary WAN
+            path, leaving nfqws processing intact. True uses configured VPN
+            routes while other destinations retain direct nfqws processing.
 
     RouteConfig:
       type: object
@@ -6508,6 +7126,46 @@ components:
         exclude_file:
           type: string
           description: The file the never-list is kept in.
+        config_is_draft:
+          type: boolean
+          description: A configuration draft exists; host actions still edit the active automation list.
+        review_available:
+          type: boolean
+          description: Review history is readable and belongs to the current ISP and tunnel configuration.
+        review_limited:
+          type: boolean
+          description: Current routed membership exceeds the bounded review capacity of 512 hosts.
+        reviews:
+          type: array
+          maxItems: 512
+          items:
+            $ref: "#/components/schemas/TunnelProbeHostReview"
+
+    TunnelProbeHostReview:
+      type: object
+      additionalProperties: false
+      required: [host, direct_successes, required_successes, suggested]
+      description: Router-side observations only; never an automatic routing change.
+      properties:
+        host:
+          type: string
+        direct_successes:
+          type: integer
+          minimum: 0
+        required_successes:
+          type: integer
+          minimum: 1
+        suggested:
+          type: boolean
+          description: Several direct probes succeeded; the user may explicitly remove this host from the automatic list.
+        last_checked_unix_ms:
+          type: integer
+          format: int64
+          minimum: 0
+        next_check_unix_ms:
+          type: integer
+          format: int64
+          minimum: 0
 
     TunnelProbeHostRequest:
       type: object
@@ -6566,9 +7224,8 @@ components:
             type: string
           description: >
             Hosts that pass added to the list, and so moved into the tunnel.
-            Not reversible in practice: nfqws2's rules are bound to the
-            provider interface, so a routed host stops producing the evidence
-            that put it there.
+            Existing entries are rechecked separately with both probe legs
+            bound to devices. Removing an entry always requires a user action.
         held_back:
           type: array
           items:
@@ -6679,8 +7336,19 @@ components:
 
     ConfigObject:
       type: object
-      description: keen-pbr configuration file.
+      description: >-
+        Current normalized keen-pbr configuration. Legacy JSON without
+        schema_version is accepted as version 1 and migrated before validation.
+      required: [schema_version]
       properties:
+        schema_version:
+          type: integer
+          minimum: 1
+          default: 2
+          description: >-
+            Configuration format version, independent of the application version.
+            Current output uses version 2. Future versions are rejected before
+            configuration validation or runtime changes.
         daemon:
           $ref: "#/components/schemas/DaemonConfig"
         api:
@@ -6711,6 +7379,7 @@ components:
         tunnel_probe:
           $ref: "#/components/schemas/TunnelProbeConfig"
       example:
+        schema_version: 2
         daemon:
           pid_file: "/var/run/keen-pbr.pid"
           cache_dir: "/var/cache/keen-pbr"
@@ -6816,6 +7485,80 @@ components:
           type: string
           description: IP address or domain name to test routing for.
           example: "www.google.com"
+        http_probe_ip:
+          type: string
+          description: >
+            Explicit opt-in to one HTTPS HEAD request for this IP after fresh
+            routing evaluation. The server derives mark and interface; the IP
+            must still occur in that evaluation. Absent means no HTTP request.
+
+    RoutingTestHttpProbe:
+      type: object
+      required: [status, reason, ip, url, method, scope, interface, attempted_at]
+      description: >
+        One explicitly requested router-originated HTTPS HEAD probe to port 443
+        and path /. Uses the freshly evaluated IP, full mark and interface,
+        preserves hostname TLS verification, and does not follow redirects.
+        Any HTTP response is evidence of a response, not site usability or
+        client PREROUTING/nfqws coverage. No retries or configuration changes.
+      properties:
+        status:
+          type: string
+          enum: [answered, failed, not_applicable, unavailable]
+        reason:
+          type: string
+          enum: [http_response, context_required, no_route, destination_changed, blocked_route, binding_failed, tls_error, timeout, connection_failed, unsupported_target, transport_error, budget_exhausted, response_limit]
+        ip:
+          type: string
+          description: Requested destination; a changed DNS answer does not silently select a different address.
+        url:
+          type: string
+          description: HTTPS root URL used, or empty when the target was not usable.
+        method:
+          type: string
+          enum: [HEAD]
+        scope:
+          type: string
+          enum: [router]
+        interface:
+          type: string
+          description: Fresh FIB interface requested for socket binding; empty when unavailable.
+        attempted_at:
+          type: integer
+          format: int64
+          description: Probe attempt time in Unix seconds; zero if no transfer was attempted.
+        fwmark:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 4294967295
+        table:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 4294967295
+        http_status:
+          type: integer
+          minimum: 100
+          maximum: 599
+        elapsed_ms:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Total transfer time in milliseconds, when measured.
+        connect_ms:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Time from transfer start until the transport connection was established, not a separate phase duration.
+        tls_ms:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Time from transfer start until TLS completed, not the standalone TLS handshake duration.
+        connected_ip:
+          type: string
+          description: Peer address observed by the HTTP transport when available.
 
     RoutingTestListMatch:
       type: object
@@ -6896,6 +7639,152 @@ components:
           type: string
           description: Safe diagnostic detail; empty when no detail is needed.
 
+    RoutingTestPolicyRule:
+      type: object
+      required: [family, priority, table, fwmark, fwmask, details_complete]
+      description: >
+        Candidate observed in the policy rule inventory. A fully represented
+        rule is compatible with the full queried mark. Incomplete rules remain
+        uncertain, including inversion or unrepresented actions/selectors.
+        Neither mark compatibility nor priority proves that this rule won.
+      properties:
+        family:
+          type: string
+          enum: [ipv4, ipv6]
+        priority:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 4294967295
+        table:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 4294967295
+        fwmark:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 4294967295
+        fwmask:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 4294967295
+          description: Kernel rule mask, not the application's owned-bit mask; zero matches any mark.
+        details_complete:
+          type: boolean
+          description: False when selectors, flags, action or metadata are not fully represented; not proof of a mismatch.
+
+    RoutingTestPolicyRules:
+      type: object
+      required: [status, snapshot_at, total, truncated, rules]
+      description: >
+        Read-only, per-family policy inventory, separate from the FIB lookup.
+        At most one dump per required family is made for the whole request.
+        Priority order is not a selected rule: table lookups may fall through.
+        A failed, interrupted or oversized dump is unavailable, never an empty
+        successful inventory. No routing state is changed.
+      properties:
+        status:
+          type: string
+          enum: [observed, unavailable, not_applicable]
+        snapshot_at:
+          type: integer
+          format: int64
+          description: Inventory attempt time in Unix seconds, zero if not attempted.
+        total:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Relevant candidates before the response limit.
+        truncated:
+          type: boolean
+        rules:
+          type: array
+          maxItems: 32
+          items:
+            $ref: "#/components/schemas/RoutingTestPolicyRule"
+
+    RoutingTestFirewallCounter:
+      type: object
+      required: [family, table, chain, position, action, set_name, packets, bytes]
+      description: >
+        Absolute counters of one physical PREROUTING classifier associated with
+        the captured realized rule. These count all traffic matching that rule,
+        not this site or diagnostic request. Recreating rules resets counters.
+        Adjacent CONNMARK, dispatcher and terminal helper rows are not summed.
+      properties:
+        family:
+          type: string
+          enum: [ipv4, ipv6]
+        table:
+          type: string
+        chain:
+          type: string
+        position:
+          type: integer
+          format: int64
+          minimum: 1
+          description: One-based position in the observed physical chain, not a persistent identifier.
+        action:
+          type: string
+          enum: [mark, drop, pass]
+        set_name:
+          type: string
+          description: Physical set name; empty for direct address or other selector rules.
+        fwmark:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 4294967295
+          description: Mark applied by this classifier, absent for drop or pass.
+        fwmask:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 4294967295
+        packets:
+          type: string
+          pattern: '^[0-9]+$'
+          description: Exact unsigned 64-bit count as a decimal string, preserving precision in JavaScript.
+        bytes:
+          type: string
+          pattern: '^[0-9]+$'
+          description: Exact unsigned 64-bit byte count as a decimal string.
+
+    RoutingTestFirewallCounters:
+      type: object
+      required: [status, snapshot_at, scope, total, truncated, rules]
+      description: >
+        Request-local read-only evidence for the actual realized rule and address
+        family. No periodic collection, counter reset, routing mutation or
+        traffic generation. An unreadable or ambiguous association is not zero
+        traffic. This is not a per-site measurement or proof of connectivity.
+      properties:
+        status:
+          type: string
+          enum: [observed, unavailable, not_applicable, ambiguous]
+        snapshot_at:
+          type: integer
+          format: int64
+          description: Snapshot attempt time in Unix seconds, zero if not attempted.
+        scope:
+          type: string
+          enum: [prerouting]
+        total:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Associated physical classifier rows before the response limit.
+        truncated:
+          type: boolean
+        rules:
+          type: array
+          maxItems: 32
+          items:
+            $ref: "#/components/schemas/RoutingTestFirewallCounter"
+
     RoutingTestEntry:
       type: object
       required: [ip, expected_outbound, actual_outbound, ok, evaluation, unknown_conditions, kernel_route]
@@ -6908,6 +7797,18 @@ components:
           $ref: "#/components/schemas/RoutingTestListMatch"
           description: >
             Details of the list entry that matched. Absent when no rule matched.
+        expected_rule_index:
+          type: integer
+          minimum: 0
+          description: Zero-based active rule index, only for a conclusive configured match.
+        actual_rule_index:
+          type: integer
+          minimum: 0
+          description: Zero-based realized rule index, only for a conclusive live set match; not an observed packet.
+        policy_rules:
+          $ref: "#/components/schemas/RoutingTestPolicyRules"
+        firewall_counters:
+          $ref: "#/components/schemas/RoutingTestFirewallCounters"
         expected_outbound:
           type: string
           description: >
@@ -6986,10 +7887,75 @@ components:
           items:
             $ref: "#/components/schemas/RoutingTestRuleIpDiagnostic"
 
+    RoutingTestConnection:
+      type: object
+      required: [protocol, state, source, source_port, destination, destination_port, mark, last_seen]
+      description: Original conntrack tuple observed in the latest readable bounded snapshot, not proof of HTTP success.
+      properties:
+        protocol:
+          type: string
+        state:
+          type: string
+        source:
+          type: string
+        source_port:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        destination:
+          type: string
+        destination_port:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        mark:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 4294967295
+          description: Raw conntrack mark, including bits not owned by keen-pbr-sb.
+        last_seen:
+          type: integer
+          format: int64
+          description: Latest kernel observation time in Unix seconds, including closing states.
+
+    RoutingTestConnections:
+      type: object
+      required: [snapshot_available, snapshot_at, total, truncated, items]
+      description: >
+        Read-only connection evidence for exact resolved destinations. Reuses the
+        existing bounded 1500-record RAM history and two-second kernel snapshot
+        cache, but excludes retained rows absent from the latest snapshot.
+        DNS, FIB and connection observations are not atomic. No matching row
+        does not imply a failed connection, and a row is not proof of HTTP success.
+      properties:
+        snapshot_available:
+          type: boolean
+          description: False when the latest kernel snapshot could not be read; stale rows are not returned as evidence.
+        snapshot_at:
+          type: integer
+          format: int64
+          description: Kernel snapshot attempt time in Unix seconds, not the response serialization time.
+        total:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Matching rows in the bounded snapshot, before the response limit.
+        truncated:
+          type: boolean
+          description: Response limit or bounded kernel history omitted records; total is not a full kernel count.
+        items:
+          type: array
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/RoutingTestConnection"
+
     RoutingTestResponse:
       type: object
       required: [target, is_domain, config_scope, unapplied_draft, resolved_ips, warnings, results, rule_diagnostics, no_matching_rule]
       properties:
+        http_probe:
+          $ref: "#/components/schemas/RoutingTestHttpProbe"
         target:
           type: string
           description: The original input value passed to the test.
@@ -6998,6 +7964,23 @@ components:
           type: boolean
           description: true when the target was interpreted as a domain name.
           example: true
+        dns_source:
+          type: string
+          description: >
+            literal for an IP target; configured_resolver for the configured
+            diagnostic resolver; system_resolver for the platform resolver.
+            This does not identify a downstream dnsmasq upstream server or cache hit.
+        dns_server:
+          type: string
+          description: Explicit resolver address actually used by this check; absent for system resolution or invalid configuration.
+        fwmark_mask:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 4294967295
+          description: Active configuration's owned mark mask, for comparing conntrack marks without foreign bits.
+        connections:
+          $ref: "#/components/schemas/RoutingTestConnections"
         config_scope:
           type: string
           enum: [active]
@@ -7247,7 +8230,14 @@ components:
           type: string
         last_refresh_detour:
           type: string
+        last_refresh_shrink_rejection:
+          $ref: "#/components/schemas/ListShrinkRejection"
+          nullable: true
         srs_decoder_revision:
+          type: integer
+        source_format:
+          $ref: "#/components/schemas/ListSourceFormat"
+        source_decoder_revision:
           type: integer
         ips:
           type: integer
@@ -7261,6 +8251,10 @@ components:
       required:
         [version, build, status, runtime_state, runtime_state_reason, os_type, os_version, build_variant, resolver_live_status, config_is_draft]
       properties:
+        daemon_pid:
+          type: integer
+          format: int64
+          description: Process identity used to observe a requested daemon restart.
         version:
           type: string
           description: Daemon version string.
@@ -7790,6 +8784,29 @@ components:
         last_error:
           type: string
           maxLength: 256
+
+        consecutive_failures:
+          type: integer
+          format: int64
+          minimum: 0
+          description: >-
+            Failures in a row since process start. Success and noop reset the
+            streak; skipped and abandoned attempts leave it unchanged.
+        scheduling_state:
+          type: string
+          pattern: '^(scheduled|not_scheduled|unknown)$'
+          description: >-
+            Read-only snapshot of existing task timers. A missing timer means
+            not_scheduled, not disabled: work may already be queued or running.
+            Unknown means the timer state could not be read.
+        next_run_at_unix_ms:
+          type: integer
+          format: int64
+          description: >-
+            Next scheduled callback, projected from the kernel monotonic timer
+            onto the snapshot wall clock. A pending expiration is due now.
+            The callback may skip unchanged or inactive work; this is not a
+            promise of an actual worker run or automatic recovery.
 
     PeriodicTaskMetricsResponse:
       type: object
@@ -9166,6 +10183,267 @@ components:
           type: string
           example: "Routing runtime restarted"
 
+    ListSourcePreviewRequest:
+      type: object
+      properties:
+        format:
+          $ref: "#/components/schemas/ListSourceFormat"
+        url:
+          type: string
+          maxLength: 8192
+          description: HTTP or HTTPS list in the selected format, including operator LAN sources.
+        text:
+          type: string
+          maxLength: 2097152
+          description: List contents in the selected format; mutually exclusive with url.
+        refresh_detour_mode:
+          $ref: "#/components/schemas/ListRefreshDetourMode"
+        detour:
+          type: string
+        fallback_detours:
+          type: array
+          maxItems: 3
+          items:
+            type: string
+
+    ListContentImportRequest:
+      type: object
+      required: [text, format]
+      properties:
+        text:
+          type: string
+          maxLength: 2097152
+        format:
+          $ref: "#/components/schemas/ListSourceFormat"
+
+    ListContentImportResponse:
+      type: object
+      required: [complete, domains, ip_cidrs, duplicates, errors, errors_limited]
+      properties:
+        complete:
+          type: boolean
+        domains:
+          type: array
+          maxItems: 50000
+          items:
+            type: string
+        ip_cidrs:
+          type: array
+          maxItems: 50000
+          items:
+            type: string
+        duplicates:
+          type: integer
+          format: int64
+        errors:
+          type: array
+          maxItems: 50
+          items:
+            $ref: "#/components/schemas/ListSourcePreviewError"
+        errors_limited:
+          type: boolean
+        limit_reason:
+          type: string
+
+    ListSourcePreviewEntry:
+      type: object
+      required: [line, value, type]
+      properties:
+        line:
+          type: integer
+          format: int64
+          minimum: 1
+        value:
+          type: string
+          description: Canonical value from the shared parser.
+        type:
+          type: string
+          enum: [ipv4, ipv6, domain]
+
+    ListSourcePreviewError:
+      type: object
+      required: [line, code, value]
+      properties:
+        line:
+          type: integer
+          format: int64
+          minimum: 1
+        code:
+          type: string
+          description: >
+            Stable parser error code for localized presentation: invalid_entry,
+            leading_zeros, invalid_address, invalid_prefix, or line_too_long.
+        value:
+          type: string
+          maxLength: 160
+          description: Bounded excerpt of the invalid line.
+
+    ListSourcePreviewResponse:
+      type: object
+      required: [status, complete, lines, valid_entries, unique_entries, duplicates,
+        invalid_entries, ignored_lines, ipv4, ipv6, domains, entries, errors,
+        entries_limited, errors_limited]
+      properties:
+        status:
+          type: string
+          enum: [ok, download_failed, too_large, unsupported_format, route_unavailable]
+        complete:
+          type: boolean
+          default: false
+        lines:
+          type: integer
+          format: int64
+          default: 0
+        valid_entries:
+          type: integer
+          format: int64
+          default: 0
+        unique_entries:
+          type: integer
+          format: int64
+          default: 0
+        duplicates:
+          type: integer
+          format: int64
+          default: 0
+        invalid_entries:
+          type: integer
+          format: int64
+          default: 0
+        ignored_lines:
+          type: integer
+          format: int64
+          default: 0
+        ipv4:
+          type: integer
+          format: int64
+          default: 0
+          description: Unique IPv4 addresses and networks in the analyzed prefix.
+        ipv6:
+          type: integer
+          format: int64
+          default: 0
+          description: Unique IPv6 addresses and networks in the analyzed prefix.
+        domains:
+          type: integer
+          format: int64
+          default: 0
+          description: Unique domains in the analyzed prefix.
+        entries:
+          type: array
+          maxItems: 50
+          items:
+            $ref: "#/components/schemas/ListSourcePreviewEntry"
+        errors:
+          type: array
+          maxItems: 50
+          items:
+            $ref: "#/components/schemas/ListSourcePreviewError"
+        entries_limited:
+          type: boolean
+          default: false
+        errors_limited:
+          type: boolean
+          default: false
+        limit_reason:
+          type: string
+
+    ListQueryRequest:
+      title: ListQueryRequest
+      type: object
+      properties:
+        offset:
+          type: integer
+          format: int64
+          minimum: 0
+          default: 0
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+        search:
+          type: string
+          maxLength: 256
+        sort:
+          $ref: "#/components/schemas/ListQuerySort"
+        order:
+          $ref: "#/components/schemas/SortOrder"
+      description: >
+        Defaults to id ascending. Numeric portions of names and sources use
+        natural ordering, with the stable list id breaking equal sort keys.
+        An offset beyond the filtered collection is clamped to its last page.
+
+    ListQuerySort:
+      type: string
+      enum: [id, name, source]
+      default: id
+
+    ListPageItem:
+      title: ListPageItem
+      type: object
+      required: [id, domain_count, ipv4_count, ipv6_count]
+      properties:
+        id:
+          type: string
+        display_name:
+          type: string
+        url:
+          type: string
+        file:
+          type: string
+        domain_count:
+          type: integer
+          format: int64
+          minimum: 0
+        ipv4_count:
+          type: integer
+          format: int64
+          minimum: 0
+        ipv6_count:
+          type: integer
+          format: int64
+          minimum: 0
+      description: >
+        Counts describe inline configuration entries only, not downloaded or
+        file-backed content. No list entries or unrelated configuration fields
+        are included.
+
+    ListPage:
+      title: ListPage
+      type: object
+      required: [items, total, filtered_total, offset, limit, has_refreshable_lists, is_draft, revision]
+      properties:
+        items:
+          type: array
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/ListPageItem"
+        total:
+          type: integer
+          format: int64
+          minimum: 0
+        filtered_total:
+          type: integer
+          format: int64
+          minimum: 0
+        offset:
+          type: integer
+          format: int64
+          minimum: 0
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 200
+        has_refreshable_lists:
+          type: boolean
+          description: True when any list in the visible configuration has a URL, including lists outside this page or search.
+        is_draft:
+          type: boolean
+        revision:
+          type: string
+          description: The same visible configuration revision returned by GET /api/config.
+
     ListRefreshRequest:
       type: object
       properties:
@@ -9175,10 +10453,58 @@ components:
             Optional list name. When omitted, all URL-backed lists from the
             active config are refreshed.
           example: "apple"
+        force_refresh:
+          type: boolean
+          default: false
+          description: Download without conditional HTTP headers. Does not bypass the shrink policy.
+        accept_shrink:
+          $ref: "#/components/schemas/ListShrinkAcceptance"
+
+    ListShrinkAcceptance:
+      type: object
+      required: [previous_sha256, candidate_sha256]
+      description: Accept one exact smaller replacement for a named list. Implies unconditional download; never applies to all lists.
+      properties:
+        previous_sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        candidate_sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+
+    ListShrinkRejection:
+      type: object
+      required: [previous_entries, candidate_entries, previous_sha256, candidate_sha256, min_previous_entries, min_retained_fraction]
+      properties:
+        previous_entries:
+          type: integer
+          format: int64
+          minimum: 0
+        candidate_entries:
+          type: integer
+          format: int64
+          minimum: 0
+        previous_sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        candidate_sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        min_previous_entries:
+          type: integer
+          format: int64
+          minimum: 0
+        min_retained_fraction:
+          type: number
+          minimum: 0
+          maximum: 1
 
     ListRefreshState:
       type: object
       properties:
+        shrink_rejection:
+          $ref: "#/components/schemas/ListShrinkRejection"
+          nullable: true
         last_updated:
           type: string
           description: >
@@ -9506,6 +10832,19 @@ components:
       type: object
       required: [error]
       properties:
+        code:
+          type: [string, "null"]
+          description: >
+            Optional stable operation failure code for localized presentation.
+            The error message and HTTP status retain their existing meaning.
+            Initial save/import codes include busy, draft_pending,
+            draft_changed, validation, recovery_required, apply_unchanged,
+            rolled_back, preview_expired, service_unavailable and
+            subscription_unavailable. Clients must accept unknown future
+            codes and use existing outcome fields, when present, to describe
+            whether changes were applied or restored. Older servers may omit
+            this field or return null.
+          example: "busy"
         error:
           type: string
           description: Error message.
@@ -9520,6 +10859,32 @@ components:
       type: object
       required: [message]
       properties:
+        code:
+          type: [string, "null"]
+          description: >
+            Optional stable field-validation code, assigned at the validation
+            source independently of the English message. Clients use a known
+            code and its parameters for localized presentation. Unknown codes
+            or invalid required parameters use a generic message with the
+            original details; they must not be reclassified from English prose.
+            Missing, null or empty codes retain legacy message presentation.
+            Initial families are config.value.*, config.ip_cidr.*,
+            config.schema_version.*, config.tag.* and config.reference.*.
+            This metadata does not change HTTP status, validation rules or
+            whether the configuration can be saved.
+          example: "config.value.integer_range"
+        params:
+          type: [object, "null"]
+          additionalProperties:
+            type: string
+          description: >
+            Optional parameters for the field code. Numeric constraints are
+            decimal strings to preserve exact values across C++ and JavaScript.
+            config.value.range and config.value.integer_range use min and max;
+            config.tag.too_long uses max; config.schema_version.unsupported
+            uses version and supported. Parameters contain constraints only,
+            not submitted configuration values, credentials or keys.
+          example: { min: "0", max: "65535" }
         path:
           type: string
           description: Dot-style config path associated with the validation failure.

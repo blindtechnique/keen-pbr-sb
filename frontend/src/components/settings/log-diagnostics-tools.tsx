@@ -7,6 +7,8 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react"
 
 import { CodeEditor } from "@/components/shared/code-editor"
+import { BackgroundTasksDetails } from "@/components/settings/background-tasks-details"
+import { OperationErrorMessage } from "@/components/shared/operation-error-message"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import {
@@ -179,6 +181,8 @@ export function LogDiagnosticsTools({
         </Button>
       </div>
 
+      <BackgroundTasksDetails />
+
       <Dialog
         open={logDialogOpen}
         onOpenChange={(open) => {
@@ -198,9 +202,12 @@ export function LogDiagnosticsTools({
 
           <div className="min-h-0 space-y-2">
             {logError ? (
-              <p className="text-sm text-destructive" role="alert">
-                {labels.logLoadFailed}: {logError}
-              </p>
+              <div className="text-sm text-destructive" role="alert">
+                <OperationErrorMessage
+                  error={logError}
+                  fallbackSummary={labels.logLoadFailed}
+                />
+              </div>
             ) : null}
             <CodeEditor
               aria-label={labels.logEditorAriaLabel}
@@ -264,9 +271,12 @@ export function LogDiagnosticsTools({
               <span>{labels.diagnosticsIncludeLists}</span>
             </Label>
             {diagnosticsError ? (
-              <p className="text-destructive" role="alert">
-                {labels.diagnosticsDownloadFailed}: {diagnosticsError}
-              </p>
+              <div className="text-destructive" role="alert">
+                <OperationErrorMessage
+                  error={diagnosticsError}
+                  fallbackSummary={labels.diagnosticsDownloadFailed}
+                />
+              </div>
             ) : null}
           </div>
 

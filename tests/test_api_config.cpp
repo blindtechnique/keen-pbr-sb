@@ -8,6 +8,7 @@
 #include "../src/backup/persistent_snapshot.hpp"
 #include "../src/backup/restore_journal.hpp"
 #include "../src/config/config_writer.hpp"
+#include "../src/config/config_migration.hpp"
 #include "../src/daemon/config_store.hpp"
 
 #include <algorithm>
@@ -341,7 +342,7 @@ ApiContext make_config_context(
         [] {},
         [] {},
         [] {},
-        [](std::optional<std::string>) {
+        [](const api::ListRefreshRequest&) {
             return ListRefreshOperationResult{};
         },
     };
@@ -463,6 +464,117 @@ bool corrupt_active_config_save_rollback(
 }
 
 } // namespace
+
+TEST_CASE("list import API normalizes changed IPs without blocking legacy lists") {
+    constexpr int api_port = 18274;
+    for (const bool recommended_setup : {false, true}) {
+        CAPTURE(recommended_setup);
+        ConfigApiTempDir directory;
+        Config active = make_valid_config("127.0.0.1:12121");
+        ListConfig legacy;
+        legacy.ip_cidrs = std::vector<std::string>{"old-invalid-address"};
+        active.lists = std::map<std::string, ListConfig>{{"legacy", legacy}};
+        ConfigStore store(active);
+        Config candidate = make_recommended_list_config(
+            "127.0.0.1:12121", "recommended");
+        candidate.lists->emplace("legacy", legacy);
+        candidate.lists->at("recommended").ip_cidrs =
+            std::vector<std::string>{" ", "# retained source line", "192.0.2.8", "192.0.2.8/33"};
+
+        SseBroadcaster broadcaster;
+        std::size_t begin_calls = 0;
+        std::size_t finish_calls = 0;
+        std::size_t apply_calls = 0;
+        auto context = make_config_context(
+            (directory.path / "config.json").string(), broadcaster,
+            active, nlohmann::json(active).dump(),
+            begin_calls, finish_calls, apply_calls);
+        connect_config_store(context, store);
+
+        ApiConfig api_config;
+        api_config.listen = "127.0.0.1:" + std::to_string(api_port);
+        ApiServer server(api_config);
+        register_config_handler_for_test(
+            server, context, [](const std::string&, const std::string&) {});
+        server.start();
+        httplib::Client client("127.0.0.1", api_port);
+        const auto initial_response = client.Get("/api/config");
+        REQUIRE(initial_response != nullptr);
+        REQUIRE(initial_response->status == 200);
+        const auto base_revision = nlohmann::json::parse(initial_response->body)
+                                       .at("revision").get<std::string>();
+        const auto post_candidate = [&]() {
+            const nlohmann::json body = recommended_setup
+                ? nlohmann::json{{"config", candidate},
+                                 {"list_id", "recommended"},
+                                 {"base_revision", base_revision}}
+                : nlohmann::json(candidate);
+            return client.Post(recommended_setup ? "/api/setup/list/stage" : "/api/config",
+                               body.dump(), "application/json");
+        };
+
+        const auto supported_version = candidate.schema_version;
+        candidate.schema_version = static_cast<std::int64_t>(kCurrentConfigSchemaVersion + 1U);
+        const auto future_response = post_candidate();
+        REQUIRE(future_response != nullptr);
+        CHECK(future_response->status == 400);
+        const auto future_body = nlohmann::json::parse(future_response->body);
+        REQUIRE(future_body.at("validation_errors").size() == 1U);
+        const auto& future_issue = future_body.at("validation_errors").at(0);
+        CHECK(future_issue.at("path") == "schema_version");
+        CHECK(future_issue.at("code") == "config.schema_version.unsupported");
+        CHECK(future_issue.at("params") == nlohmann::json{
+            {"version", std::to_string(kCurrentConfigSchemaVersion + 1U)},
+            {"supported", std::to_string(kCurrentConfigSchemaVersion)}});
+        CHECK_FALSE(future_issue.at("message").get<std::string>().empty());
+        CHECK(begin_calls == 0U);
+        CHECK(finish_calls == 0U);
+        CHECK_FALSE(store.config_is_draft());
+        candidate.schema_version = supported_version;
+
+        const auto invalid_response = post_candidate();
+        REQUIRE(invalid_response != nullptr);
+        CHECK(invalid_response->status == 400);
+        const auto invalid_body = nlohmann::json::parse(invalid_response->body);
+        REQUIRE(invalid_body.contains("validation_errors"));
+        REQUIRE(invalid_body.at("validation_errors").size() == 1U);
+        CHECK(invalid_body.at("validation_errors").at(0).at("path") ==
+              "lists.recommended.ip_cidrs[3]");
+        CHECK(invalid_body.at("validation_errors").at(0).at("message") ==
+              "IP/CIDR prefix length is invalid");
+        CHECK(invalid_body.at("validation_errors").at(0).at("code") ==
+              "config.ip_cidr.invalid_prefix");
+        CHECK_FALSE(invalid_body.at("validation_errors").at(0).contains("params"));
+        CHECK(begin_calls == 0U);
+        CHECK(finish_calls == 0U);
+        CHECK_FALSE(store.config_is_draft());
+
+        candidate.lists->at("recommended").ip_cidrs = std::vector<std::string>{
+            " # note", " ", "192.168.1.8/24", "192.168.1.0/24",
+            "2001:0DB8:0000:0000::1/128", "2001:db8::1",
+            "192.0.2.8/32", "192.0.2.8", "10.2.3.4/0"};
+        const auto valid_response = post_candidate();
+        server.stop();
+        REQUIRE(valid_response != nullptr);
+        INFO(valid_response->body);
+        REQUIRE(valid_response->status == 200);
+        CHECK(begin_calls == 1U);
+        CHECK(finish_calls == 1U);
+        CHECK(apply_calls == 0U);
+        CHECK(nlohmann::json(store.active_config()) == nlohmann::json(active));
+        const auto staged = store.staged_cas_snapshot();
+        REQUIRE(staged.has_value());
+        REQUIRE(staged->config.lists.has_value());
+        const auto& lists = *staged->config.lists;
+        CHECK(lists.at("legacy").ip_cidrs == legacy.ip_cidrs);
+        const std::vector<std::string> expected{
+            "192.168.1.0/24", "2001:db8::1", "192.0.2.8", "0.0.0.0/0"};
+        REQUIRE(lists.at("recommended").ip_cidrs.has_value());
+        CHECK(*lists.at("recommended").ip_cidrs == expected);
+        const auto serialized = parse_config(staged->serialized);
+        CHECK(serialized.lists->at("recommended").ip_cidrs == expected);
+    }
+}
 
 TEST_CASE(
     "recommended list setup stages only the visible config revision") {
@@ -603,6 +715,7 @@ TEST_CASE(
     const nlohmann::json error =
         nlohmann::json::parse(stage_response->body);
     CHECK(error.at("reason") == "base_revision_mismatch");
+    CHECK(error.at("code") == "draft_changed");
     CHECK(error.at("base_revision") == stale_revision);
     CHECK(error.at("current_base_revision") != stale_revision);
     CHECK(error.at("staged") == false);
@@ -762,6 +875,7 @@ TEST_CASE(
     const nlohmann::json error =
         nlohmann::json::parse(response->body);
     CHECK(error.at("reason") == "base_revision_mismatch");
+    CHECK(error.at("code") == "draft_changed");
     CHECK(error.at("current_base_revision") == newer_revision);
     CHECK(error.at("draft_preserved") == true);
     CHECK(error.at("staged") == false);
@@ -1233,6 +1347,7 @@ TEST_CASE(
     CHECK(payload.at("applied") == false);
     CHECK(payload.at("rolled_back") == false);
     REQUIRE(payload.at("validation_errors").size() == 1U);
+    CHECK(payload.at("code") == "validation");
     CHECK(payload.at("validation_errors")[0].at("path") ==
           "route.rules[0]");
     CHECK(payload.at("validation_errors")[0].at("message") ==
@@ -1272,6 +1387,137 @@ TEST_CASE(
              true,
              "synthetic invalid candidate"},
         });
+}
+
+TEST_CASE(
+    "config save keeps routing on uncommitted WAL write failures") {
+    struct FaultCase {
+        RestoreJournalFaultStage stage;
+        int error;
+        bool ambiguous;
+    };
+    const std::vector<FaultCase> faults{
+        {RestoreJournalFaultStage::snapshot_write, ENOSPC, false},
+        {RestoreJournalFaultStage::snapshot_file_fsync, EIO, false},
+        {RestoreJournalFaultStage::snapshot_rename, EROFS, false},
+        {RestoreJournalFaultStage::active_write, ENOSPC, false},
+        {RestoreJournalFaultStage::active_file_fsync, EIO, false},
+        {RestoreJournalFaultStage::active_rename, EROFS, false},
+        // A visible rename is intentionally not classified by this handler
+        // as an uncommitted temporary write, even before runtime mutation.
+        {RestoreJournalFaultStage::snapshot_directory_fsync, EIO, true},
+        {RestoreJournalFaultStage::active_directory_fsync, EIO, true},
+    };
+    for (const auto& fault : faults) {
+        CAPTURE(static_cast<int>(fault.stage));
+        CAPTURE(fault.error);
+        ConfigApiTempDir directory;
+        const auto config_path = directory.path / "config.json";
+        const Config original = make_valid_config("127.0.0.1:18350");
+        const Config staged = make_valid_config("127.0.0.1:18351");
+        const std::string original_json =
+            nlohmann::json(original).dump(1, '\t') + "\n";
+        const std::string staged_json =
+            nlohmann::json(staged).dump(1, '\t') + "\n";
+        write_text(config_path, original_json);
+        ConfigStore store(original);
+        store.stage_config(staged, staged_json);
+        const auto draft_before = store.staged_cas_snapshot();
+        REQUIRE(draft_before.has_value());
+
+        SseBroadcaster broadcaster;
+        std::size_t begin_calls = 0;
+        std::size_t finish_calls = 0;
+        std::size_t apply_calls = 0;
+        std::size_t write_calls = 0;
+        std::size_t emergency_calls = 0;
+        auto context = make_config_context(
+            config_path.string(), broadcaster, staged, staged_json,
+            begin_calls, finish_calls, apply_calls);
+        connect_config_store(context, store);
+        const auto maintenance = std::make_shared<FakeMaintenanceState>();
+        install_fake_maintenance(context, maintenance);
+        RuntimeMutationAdmission admission;
+        install_runtime_mutation_admission(context, admission);
+        context.enqueue_apply_validated_config_with_lease_return_fn =
+            [&](Config, std::string, RuntimeMutationAdmission::Lease&)
+                -> ConfigApplyResult {
+                ++apply_calls;
+                return {};
+            };
+        context.emergency_quiesce_runtime_fn = [] {
+            FAIL("production save must not use legacy emergency quiesce");
+        };
+        context.emergency_quiesce_runtime_with_lease_return_fn =
+            [&](RuntimeMutationAdmission::Lease& lease) {
+                ++emergency_calls;
+                CHECK(admission.owns(lease));
+            };
+        LifecycleOperationStore lifecycle_store;
+        LifecycleOperationCoordinator lifecycle(lifecycle_store);
+        context.lifecycle_operations = &lifecycle;
+
+        ConfigSaveTestOptions options;
+        options.restore_journal_hooks.fault_injector =
+            [fault](RestoreJournalFaultStage stage) {
+                if (stage == fault.stage) {
+                    throw std::system_error(
+                        fault.error, std::generic_category(),
+                        "injected journal preparation I/O failure");
+                }
+            };
+        try {
+            (void)commit_prepared_config_for_test(
+                context,
+                "config-save-wal-write-failure",
+                [&] {
+                    PreparedConfigCommit prepared;
+                    prepared.config = staged;
+                    prepared.serialized = staged_json;
+                    return prepared;
+                },
+                [&](const std::string&, const std::string&) {
+                    ++write_calls;
+                },
+                std::move(options));
+            FAIL("journal preparation failure must reject Save");
+        } catch (const ApiError& error) {
+            CHECK(error.status() == (fault.ambiguous ? 503 : 500));
+            REQUIRE(error.body().has_value());
+            const auto payload = nlohmann::json::parse(*error.body());
+            CHECK(payload.at("code") ==
+                  (fault.ambiguous ? "recovery_required" : "apply_unchanged"));
+            CHECK(payload.at("saved") == false);
+            CHECK(payload.at("applied") == false);
+            CHECK(payload.at("rolled_back") == false);
+            CHECK(payload.at("recovery_required") == fault.ambiguous);
+            if (!fault.ambiguous) {
+                CHECK(payload.at("runtime_unchanged") == true);
+            }
+        }
+        CHECK(write_calls == 0U);
+        CHECK(apply_calls == 0U);
+        CHECK(maintenance->reserve_calls == 0U);
+        CHECK(emergency_calls == (fault.ambiguous ? 1U : 0U));
+        CHECK(maintenance->active_leases == 0U);
+        CHECK(read_text(config_path) == original_json);
+        check_config_draft_unchanged(store, *draft_before);
+        CHECK_FALSE(admission.active().has_value());
+        // Verify the request also released its handoff gate, not just token.
+        CHECK(admission.try_acquire("following-user-save").has_value());
+        const auto completed = lifecycle_store.snapshot();
+        REQUIRE(completed.has_value());
+        CHECK(completed->result == LifecycleOperationResult::Failed);
+        CHECK(completed->finished_at.has_value());
+        RestoreJournal journal(config_save_journal_path(directory));
+        if (!fault.ambiguous) {
+            CHECK_FALSE(journal.unknown_present());
+            CHECK_FALSE(journal.read_active().has_value());
+        } else if (fault.stage ==
+                   RestoreJournalFaultStage::active_directory_fsync) {
+            CHECK(journal.unknown_present());
+        }
+    }
 }
 
 TEST_CASE(
@@ -1370,6 +1616,7 @@ TEST_CASE(
     CHECK(payload.at("applied") == false);
     CHECK(payload.at("rolled_back") == false);
     CHECK(payload.at("recovery_required") == true);
+    CHECK(payload.at("code") == "recovery_required");
     CHECK(payload.at("runtime_quiesced") == false);
     CHECK_FALSE(payload.contains("recovery_error"));
     CHECK(validation_calls == 1U);
@@ -1865,6 +2112,7 @@ TEST_CASE(
     CHECK(payload.at("applied") == false);
     CHECK(payload.at("rolled_back") == true);
     CHECK(payload.at("runtime_unchanged") == false);
+    CHECK(payload.at("code") == "rolled_back");
     CHECK(payload.at("file_rolled_back") == true);
     CHECK(payload.at("recovery_required") == false);
     CHECK(read_text(config_path) == original_json);
@@ -2078,6 +2326,7 @@ TEST_CASE(
     CHECK(payload.at("applied") == false);
     CHECK(payload.at("rolled_back") == false);
     CHECK(payload.at("runtime_unchanged") == true);
+    CHECK(payload.at("code") == "apply_unchanged");
     CHECK(payload.at("file_rolled_back") == true);
     CHECK(payload.at("recovery_required") == false);
     CHECK(read_text(config_path) == original_json);
@@ -2761,6 +3010,157 @@ TEST_CASE(
         "after-missing-owner-config-seam");
     REQUIRE(subsequent.has_value());
     subsequent->release();
+}
+
+TEST_CASE("targeted config commit preserves drafts and the borrowed native writer") {
+    ConfigApiTempDir directory;
+    const auto path = directory.path / "config.json";
+    const auto active = make_valid_config("127.0.0.1:18350");
+    auto draft = active;
+    draft.daemon->cache_dir = "/tmp/unrelated-user-draft";
+    auto candidate = active;
+    candidate.api->listen = "127.0.0.1:18351";
+    auto transformed_draft = draft;
+    transformed_draft.api->listen = candidate.api->listen;
+    const auto original_json = serialize_config_for_persistence(active);
+    write_text(path, original_json);
+    ConfigStore store(active);
+    store.stage_config(draft, serialize_config_for_persistence(draft));
+    const auto original_draft = store.staged_cas_snapshot();
+    REQUIRE(original_draft.has_value());
+    bool apply_failure = false;
+    bool finalizer_failure = false;
+    bool preparation_failure = false;
+    SUBCASE("success then compensation uses the same reserved writer") {}
+    SUBCASE("verified runtime rollback leaves original draft intact") { apply_failure = true; }
+    SUBCASE("metadata cleanup error cannot fail an applied config") { finalizer_failure = true; }
+    SUBCASE("preparation rejection returns the same borrowed writer") { preparation_failure = true; }
+
+    SseBroadcaster broadcaster;
+    std::size_t begin_calls = 0, finish_calls = 0, legacy_calls = 0;
+    auto context = make_config_context(path.string(), broadcaster, draft,
+        original_draft->serialized, begin_calls, finish_calls, legacy_calls);
+    connect_config_store(context, store);
+    const auto maintenance = std::make_shared<FakeMaintenanceState>();
+    install_fake_maintenance(context, maintenance);
+    RuntimeMutationAdmission admission;
+    install_runtime_mutation_admission(context, admission);
+    auto runtime = *std::move(admission.try_acquire("native-delete"));
+    const auto token = runtime.token();
+    FakeMaintenanceLease outer_maintenance(maintenance);
+    std::size_t apply_calls = 0, finalize_calls = 0, quiesce_calls = 0;
+    context.emergency_quiesce_runtime_fn = [&] { ++quiesce_calls; };
+    context.enqueue_apply_validated_config_with_lease_return_fn =
+        [&](Config, std::string, RuntimeMutationAdmission::Lease&) {
+            FAIL("targeted candidate must use the independent draft payload");
+            return ConfigApplyResult{};
+        };
+    context.enqueue_apply_validated_config_with_draft_rebase_fn =
+        [&](Config config, std::string serialized, ConfigDraftRebase rebase,
+            RuntimeMutationAdmission::Lease& exact) {
+            ++apply_calls;
+            CHECK(admission.owns(exact));
+            CHECK(exact.token() == token);
+            CHECK_FALSE(static_cast<bool>(runtime));
+            const auto prepared = ConfigStore::prepare_active_commit(
+                store.pin_active_snapshot(),
+                ConfigStore::prepare_active_snapshot(std::move(config), {}),
+                std::move(rebase));
+            // A runtime candidate has not published active or draft yet.
+            CHECK(store.staged_cas_snapshot()->serialized == original_draft->serialized);
+            ConfigApplyResult result;
+            if (apply_failure) {
+                result.error = "injected candidate failure with verified rollback";
+                result.rolled_back = true;
+                return result;
+            }
+            bool published = false;
+            REQUIRE(store.commit_prepared_active(prepared, [&]() noexcept { published = true; }) ==
+                    PreparedActiveConfigCommitResult::committed);
+            CHECK(published);
+            CHECK(read_text(path) == serialized);
+            result.applied = true;
+            return result;
+        };
+    const auto writer = [](const std::string& file, const std::string& body) {
+        write_config_atomically(file, body);
+    };
+    try {
+        const auto result = nlohmann::json::parse(commit_prepared_config_for_test(
+            context, "must-not-acquire-another-lease", [&] {
+                if (preparation_failure) throw ApiError("injected clean rejection", 409);
+                PreparedConfigCommit prepared;
+                prepared.config = candidate;
+                prepared.serialized = serialize_config_for_persistence(candidate);
+                prepared.draft_rebase = ConfigDraftRebase{original_draft,
+                    transformed_draft, serialize_config_for_persistence(transformed_draft)};
+                prepared.success_finalize = [&](MaintenanceLease& lease) {
+                    ++finalize_calls;
+                    CHECK(&lease == &outer_maintenance);
+                    CHECK(admission.active().has_value());
+                    CHECK_FALSE(admission.try_acquire("competing-writer").has_value());
+                    CHECK_FALSE(RestoreJournal(config_save_journal_path(directory)).read_active().has_value());
+                    if (finalizer_failure) throw std::runtime_error("injected metadata failure");
+                };
+                return prepared;
+            }, writer, {}, &outer_maintenance, &runtime));
+        CHECK_FALSE(apply_failure);
+        CHECK_FALSE(preparation_failure);
+        CHECK(result.at("applied") == true);
+    } catch (const ApiError&) {
+        CHECK((apply_failure || preparation_failure));
+    }
+    CHECK(admission.owns(runtime));
+    CHECK(runtime.token() == token);
+    CHECK(maintenance->active_leases == 1U);
+    CHECK(maintenance->reserve_calls == (preparation_failure ? 0U : 1U));
+    CHECK(begin_calls == 0U);
+    CHECK(finish_calls == 0U);
+    CHECK(legacy_calls == 0U);
+    CHECK(quiesce_calls == 0U);
+    CHECK(apply_calls == (preparation_failure ? 0U : 1U));
+    CHECK(finalize_calls == (apply_failure || preparation_failure ? 0U : 1U));
+    const auto after = store.staged_cas_snapshot();
+    REQUIRE(after.has_value());
+    if (apply_failure || preparation_failure) {
+        CHECK(after->serialized == original_draft->serialized);
+        CHECK(after->base_revision == original_draft->base_revision);
+        CHECK(read_text(path) == original_json);
+    } else {
+        CHECK(after->config.daemon->cache_dir == draft.daemon->cache_dir);
+        CHECK(store.active_config().daemon->cache_dir == active.daemon->cache_dir);
+        CHECK(after->base_revision == after->active_revision);
+        // Definite native rejection can compensate without a new generation
+        // or a gap in the outer writer, restoring the exact original draft.
+        context.enqueue_apply_validated_config_with_draft_rebase_fn =
+            [&](Config config, std::string, ConfigDraftRebase rebase,
+                RuntimeMutationAdmission::Lease& exact) {
+                CHECK(admission.owns(exact));
+                const auto prepared = ConfigStore::prepare_active_commit(
+                    store.pin_active_snapshot(),
+                    ConfigStore::prepare_active_snapshot(std::move(config), {}), std::move(rebase));
+                REQUIRE(store.commit_prepared_active(prepared, []() noexcept {}) ==
+                        PreparedActiveConfigCommitResult::committed);
+                ConfigApplyResult result;
+                result.applied = true;
+                return result;
+            };
+        CHECK_NOTHROW(commit_prepared_config_for_test(context, {}, [&] {
+            PreparedConfigCommit prepared;
+            prepared.config = active;
+            prepared.serialized = original_json;
+            prepared.draft_rebase = ConfigDraftRebase{store.staged_cas_snapshot(),
+                original_draft->config, original_draft->serialized, original_draft->base_revision};
+            return prepared;
+        }, writer, {}, &outer_maintenance, &runtime, false));
+        CHECK(maintenance->reserve_calls == 1U);
+        CHECK(admission.owns(runtime));
+        CHECK(runtime.token() == token);
+        CHECK(store.staged_cas_snapshot()->serialized == original_draft->serialized);
+        CHECK(store.staged_cas_snapshot()->base_revision == original_draft->base_revision);
+        CHECK(read_text(path) == original_json);
+    }
+    CHECK_FALSE(RestoreJournal(config_save_journal_path(directory)).read_active().has_value());
 }
 
 TEST_CASE(

@@ -11,6 +11,7 @@
 #include "nfqws_scan_source.hpp"
 #include "tunnel_candidate_scan.hpp"
 #include "tunnel_probe_automation.hpp"
+#include "tunnel_probe_review.hpp"
 
 #include "../config/config.hpp"
 
@@ -30,9 +31,22 @@ public:
     // free; a reader that has been away must not swallow the whole backlog at
     // once. What is left over is read by the next pass.
     static constexpr std::size_t kLogReadBudget = 512U * 1024U;
+    static constexpr std::size_t kListReadBudget = 512U * 1024U;
 
     struct Io {
         FileReader read_file;
+        // Missing files may be empty; unreadable/oversized files are nullopt.
+        // Production uses a bounded reader so review never loads a backlog.
+        std::function<std::optional<std::string>(const std::string&, std::size_t)>
+            read_limited_file;
+        std::function<std::uint64_t()> clock_unix_ms;
+        std::function<TunnelProbeReviewState(const std::string&, std::string&)>
+            load_review;
+        std::function<bool(const std::string&, const TunnelProbeReviewState&,
+                           std::string&)> save_review;
+        // Re-resolves the live target after network I/O. Missing means the
+        // automation was disabled or its current target no longer resolves.
+        std::function<std::optional<TunnelProbeSetup>()> current_setup;
         // Size and first bytes of the log, for deciding whether this is the
         // same file still growing or a new one after rotation. False when the
         // file cannot be inspected at all.
@@ -85,7 +99,10 @@ public:
         bool log_restarted{false};
         bool write_failed{false};
         std::size_t probed{0};
+        std::size_t reviewed{0};
         std::size_t remaining{0};
+        bool target_changed{false};
+        bool review_write_failed{false};
         std::vector<std::string> appended;
         std::vector<std::string> unconfirmed;
         std::vector<std::string> already_present;
@@ -106,6 +123,8 @@ private:
     // and rebuilt when the configuration names a different tunnel or list.
     std::unique_ptr<TunnelCandidateScan> scan_;
     std::string scan_key_;
+    // With a one-probe budget and both queues ready, alternate their turns.
+    bool single_probe_review_turn_{true};
     // Where the last pass stopped reading nfqws2's log.
     //
     // This is what makes the queue advance. Feeding the whole file again every

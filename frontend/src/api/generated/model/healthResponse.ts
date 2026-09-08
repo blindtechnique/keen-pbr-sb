@@ -13,6 +13,8 @@ import type { ResolverConfigSyncState } from './resolverConfigSyncState';
 import type { RuntimeOutboundStatus } from './runtimeOutboundStatus';
 
 export interface HealthResponse {
+  /** Process identity used to observe a requested daemon restart. */
+  daemon_pid?: number;
   /** Daemon version string. */
   version: string;
   /** Daemon build string (git commit UTC timestamp). */

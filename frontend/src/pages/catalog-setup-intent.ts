@@ -1,7 +1,4 @@
-import type {
-  CatalogPreset,
-  CatalogSelectionMode,
-} from "@/pages/catalog-model"
+import type { CatalogPreset, CatalogSelectionMode } from "@/pages/catalog-model"
 import type {
   CatalogSetupIntent,
   CatalogSetupMode,
@@ -18,7 +15,11 @@ export function resolveCatalogDestination(
   outboundTags: readonly string[],
   directDestination: string
 ): string {
-  return selectedDestination || outboundTags[0] || directDestination
+  if (selectedDestination === directDestination) return directDestination
+  if (selectedDestination) {
+    return outboundTags.includes(selectedDestination) ? selectedDestination : ""
+  }
+  return outboundTags[0] ?? ""
 }
 
 interface CreateCatalogSetupIntentOptions {
@@ -47,6 +48,7 @@ export function createCatalogSetupIntent({
 }: CreateCatalogSetupIntentOptions): CatalogSetupIntent | null {
   if (
     selectedIds.size === 0 ||
+    (selectionMode === "route" && !destination) ||
     selectionMode === "empty" ||
     selectionMode === "mixed"
   ) {
@@ -88,9 +90,7 @@ export function createCatalogSetupIntent({
     mode,
     ...(mode === "outbound" ? { outbound_tag: destination } : {}),
     dns_mode: mode === "outbound" ? "automatic" : "none",
-    ...(sourceDetour.trim()
-      ? { source_detour_tag: sourceDetour.trim() }
-      : {}),
+    ...(sourceDetour.trim() ? { source_detour_tag: sourceDetour.trim() } : {}),
     ...(mode !== "none" && suggestedRuleName
       ? { route_display_name: suggestedRuleName }
       : {}),

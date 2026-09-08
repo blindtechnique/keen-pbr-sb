@@ -42,6 +42,11 @@
 #include "../cache/cache_manager.hpp"
 #include "../cmd/test_routing.hpp"
 #include "../dns/dns_query_log_maintenance.hpp"
+#include "../log/file_sink.hpp"
+#include "../log/nfqws_log_maintenance.hpp"
+#ifdef WITH_API
+#include "../config/subscription_refresh.hpp"
+#endif
 #include "../dns/dns_router.hpp"
 #include "../dns/dnsmasq_access_policy.hpp"
 #include "../dns/dnsmasq_gen.hpp"
@@ -87,6 +92,7 @@
 #ifdef WITH_API
 #include "../api/handlers.hpp"
 #include "../api/handler_remote_access.hpp" // IWYU pragma: keep
+#include "../api/handler_router_info.hpp"
 #include "../api/server.hpp"
 #include "../api/sse_broadcaster.hpp"
 #include "../api/status_stream.hpp"
@@ -3298,6 +3304,8 @@ Daemon::RoutingTestSnapshot Daemon::capture_routing_test_snapshot() {
         firewall_state_.get_rules(),
         firewall_->backend(),
         config_store_.config_is_draft(),
+        firewall_->raw_prerouting_mode(),
+        firewall_state_.get_fwmark_mask(),
     };
 }
 
@@ -6300,6 +6308,15 @@ void Daemon::finish_preowned_runtime_firewall_urltest_selection(
         resume_urltest_firewall_recovery(
             transaction->runtime_generation);
     }
+    if (urltest_manager_) {
+        // Release after the exact lease and recovery handoff, so pending
+        // manual/health probes cannot invalidate an in-flight selection or
+        // race its own writer. A central recovery wake resumes deferred work.
+        urltest_manager_->complete_selection(
+            transaction->change.urltest_tag,
+            transaction->change.probe_generation,
+            /*resume_pending=*/!shutdown && !recovery_required);
+    }
 }
 
 #ifdef WITH_API
@@ -6885,7 +6902,8 @@ void Daemon::begin_preowned_runtime_firewall_config_apply(
     PreparedRuntimeInputs candidate,
     PreparedRuntimeInputs rollback,
     std::string saved_config_json,
-    RuntimeFirewallPreownedTerminalContinuation final_continuation)
+    RuntimeFirewallPreownedTerminalContinuation final_continuation,
+    std::shared_ptr<ConfigDraftRebase> draft_rebase)
     noexcept {
     begin_preowned_runtime_firewall_config_generation(
         RuntimeConfigGenerationPublicationMode::staged_save,
@@ -6894,7 +6912,8 @@ void Daemon::begin_preowned_runtime_firewall_config_apply(
         std::move(candidate),
         std::move(rollback),
         std::move(saved_config_json),
-        std::move(final_continuation));
+        std::move(final_continuation),
+        std::move(draft_rebase));
 }
 
 void Daemon::begin_preowned_runtime_firewall_config_bootstrap(
@@ -6903,7 +6922,8 @@ void Daemon::begin_preowned_runtime_firewall_config_bootstrap(
     PreparedRuntimeInputs candidate,
     PreparedRuntimeInputs rollback,
     std::string saved_config_json,
-    RuntimeFirewallPreownedTerminalContinuation final_continuation)
+    RuntimeFirewallPreownedTerminalContinuation final_continuation,
+    std::shared_ptr<ConfigDraftRebase> draft_rebase)
     noexcept {
     begin_preowned_runtime_firewall_config_generation(
         RuntimeConfigGenerationPublicationMode::
@@ -6913,7 +6933,8 @@ void Daemon::begin_preowned_runtime_firewall_config_bootstrap(
         std::move(candidate),
         std::move(rollback),
         std::move(saved_config_json),
-        std::move(final_continuation));
+        std::move(final_continuation),
+        std::move(draft_rebase));
 }
 
 void Daemon::begin_preowned_runtime_firewall_active_reload(
@@ -6940,7 +6961,8 @@ void Daemon::begin_preowned_runtime_firewall_config_generation(
     PreparedRuntimeInputs candidate,
     PreparedRuntimeInputs rollback,
     std::string staged_serialized,
-    RuntimeFirewallPreownedTerminalContinuation final_continuation)
+    RuntimeFirewallPreownedTerminalContinuation final_continuation,
+    std::shared_ptr<ConfigDraftRebase> draft_rebase)
     noexcept {
     const bool bootstrap_from_stopped = publication_mode ==
         RuntimeConfigGenerationPublicationMode::
@@ -7035,8 +7057,24 @@ void Daemon::begin_preowned_runtime_firewall_config_generation(
             publication_mode ==
                 RuntimeConfigGenerationPublicationMode::
                     staged_bootstrap_from_stopped) {
-            const auto staged = config_store_.staged_snapshot();
-            if (staged && staged->second != staged_serialized) {
+            bool draft_changed = false;
+            if (draft_rebase) {
+                const auto staged = config_store_.staged_cas_snapshot();
+                const auto& expected = draft_rebase->expected;
+                draft_changed = staged.has_value() != expected.has_value() ||
+                    (staged && expected &&
+                     (staged->serialized != expected->serialized ||
+                      staged->base_revision != expected->base_revision ||
+                      staged->active_revision != expected->active_revision));
+                if (staged) expected_staged_serialized = staged->serialized;
+            } else {
+                // Ordinary Save keeps its original byte-CAS path; it does
+                // not need the extra draft/base hashes of a scoped edit.
+                const auto staged = config_store_.staged_snapshot();
+                draft_changed = staged && staged->second != staged_serialized;
+                if (staged) expected_staged_serialized = staged->second;
+            }
+            if (draft_changed) {
                 reject(
                     std::move(final_continuation), std::move(lease),
                     "staged configuration changed before candidate "
@@ -7047,7 +7085,6 @@ void Daemon::begin_preowned_runtime_firewall_config_generation(
             // Linked VPN creates and backup restore commit directly: the
             // validated candidate is not a separately staged panel draft.
             // Preserve the observed optional draft in the existing commit.
-            if (staged) expected_staged_serialized = staged->second;
         }
         const auto base_runtime_generation =
             runtime_generation_.load(std::memory_order_acquire);
@@ -7192,8 +7229,12 @@ void Daemon::begin_preowned_runtime_firewall_config_generation(
         case RuntimeConfigGenerationPublicationMode::staged_save:
         case RuntimeConfigGenerationPublicationMode::
                  staged_bootstrap_from_stopped:
-            transaction->active_commit =
-                ConfigStore::prepare_active_commit(
+            transaction->active_commit = draft_rebase
+                ? ConfigStore::prepare_active_commit(
+                    base_active_snapshot,
+                    candidate_active_snapshot,
+                    std::move(*draft_rebase))
+                : ConfigStore::prepare_active_commit(
                     base_active_snapshot,
                     candidate_active_snapshot,
                     std::move(expected_staged_serialized));
@@ -8752,7 +8793,7 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
     if (!context->retained_mutation_lease) {
         try {
             mutation_lease = runtime_mutation_admission_.try_acquire(
-                "runtime-firewall-worker");
+                "runtime-firewall-worker", RuntimeMutationAdmission::Kind::Background);
         } catch (const std::exception& error) {
         state.preworker_failure_kind =
             DaemonRuntimeFirewallOperationState::PreworkerFailureKind::
@@ -8933,6 +8974,19 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                 prepared_native_vpn_catalog
                 ? prepared_native_vpn_catalog->service_resolution
                 : prepare_internal_vpn_service_resolution_from_cache();
+            const auto& prepared_service_targets =
+                state.internal_vpn_service_resolution.effective_targets;
+            if (prepared_native_vpn_catalog && std::any_of(
+                    prepared_service_targets.begin(),
+                    prepared_service_targets.end(),
+                    internal_vpn_target_is_openconnect)) {
+                // Same-generation NEWADDR can follow a prepared idle
+                // catalogue while its worker is queued. Keep the verified
+                // pools, but use the current OC peer for both DNS and firewall.
+                refresh_prepared_openconnect_service_ingress(
+                    state.internal_vpn_service_resolution,
+                    netlink_.dump_interfaces());
+            }
             if (prepared_native_vpn_catalog) {
                 context->schedule_catalog_refresh =
                     prepared_native_vpn_catalog->schedule_catalog_refresh;
@@ -9085,6 +9139,9 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                           : state.urltest_selection_transaction
                                 ->rollback_selections)
                    : firewall_state_.get_urltest_selections());
+        transaction.failure_health = capture_route_failure_health(
+            transaction.config, transaction.outbound_marks,
+            transaction.urltest_selections);
         transaction.effective_internal_vpn_servers =
             state.internal_vpn_resolution.effective_servers;
         transaction.effective_internal_vpn_targets =
@@ -9300,12 +9357,20 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                 -> RuntimeFirewallWorkerAttemptResultPtr {
                 SystemRuntimeRouteHealthServices route_health_services{
                     netlink_};
+                // The worker owns this small observation map. Route discovery
+                // strengthens it before the same frozen value reaches the
+                // classifier; no additional health probe or writer is needed.
+                auto failure_health = input.transaction.failure_health;
+                OutboundFamilyReachabilitySnapshot family_reachability;
                 return
                     execute_runtime_firewall_worker_attempt_durable_with_route_preparation(
                     input,
                     route_health_services,
-                    [this, &input](const RuntimeRouteHealthPlan& plan,
+                    [this, &input, &failure_health, &family_reachability](const RuntimeRouteHealthPlan& plan,
                                    RouteReconcileMode reconcile_mode) {
+                        merge_route_failure_link_health(
+                            failure_health, plan.reachability);
+                        family_reachability = plan.family_reachability;
                         RuntimeRouteWorkerMutationResult result;
                         const auto exact_worker_input =
                             plan.operation_serial ==
@@ -9614,7 +9679,7 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                         }
                         return result;
                     },
-                    [this, &input]() {
+                    [this, &input, &failure_health, &family_reachability]() {
                         // Route observation, mutation and the control-only
                         // publication rendezvous have already completed.
                         // Hold this lock only for firewall/conntrack.
@@ -9625,7 +9690,8 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                             input,
                             *firewall_,
                             conntrack_manager_,
-                            netlink_);
+                            netlink_,
+                            &failure_health, &family_reachability);
                     });
             }};
         const bool enqueued = context->retained_mutation_lease
@@ -14363,6 +14429,20 @@ void Daemon::drain_runtime_firewall_terminal(
 }
 
 void Daemon::handle_interface_event(const InterfaceMonitor::Event& event) {
+#ifdef WITH_API
+    // Read-only overview invalidation precedes routing's own early returns:
+    // WAN/client facts must also refresh when policy routing is stopped.
+    try {
+        if (invalidate_router_info(event) && status_stream_)
+            status_stream_->publish_router_info_change();
+    } catch (...) {
+        // Optional overview/SSE work must never skip a routing event. The
+        // normal metadata TTL and reconnect refresh remain fallback paths.
+    }
+#endif
+    // Neighbor observations are only a client-metadata hint. They must not
+    // tear down conntrack monitoring, probe VPNs, or rebuild routing/firewall.
+    if (event.neighbor_changed) return;
     if (event.route_changed) {
         // The route-health worker consumes main-table reachability. A route
         // event invalidates that immutable plan and also retains one generic
@@ -14597,6 +14677,16 @@ void Daemon::reconnect_interface_monitor() {
             interface_monitor_->reconnect();
             register_interface_monitor_fd();
             Logger::instance().warn("Interface monitor reconnected after netlink error");
+#ifdef WITH_API
+            try {
+                InterfaceMonitor::Event metadata_gap;
+                metadata_gap.observation_gap = true;
+                if (invalidate_router_info(metadata_gap) && status_stream_)
+                    status_stream_->publish_router_info_change();
+            } catch (...) {
+                // Metadata delivery must not interrupt native VPN recovery.
+            }
+#endif
             // Events may have been lost while the socket was unavailable.
             // Treat every successful reconnect as an observation gap instead
             // of trusting a potentially stale NDMS-id to kernel-name mapping.
@@ -14943,9 +15033,45 @@ void Daemon::run() {
     // API startup. Scheduler registration has its own strong rollback, so a
     // failed timerfd/epoll registration leaves no partial task to duplicate.
     try {
+        const auto maintenance_pending = std::make_shared<std::atomic<bool>>(false);
         scheduler_->schedule_repeating(
             DNS_QUERY_LOG_MAINTENANCE_INTERVAL,
-            []() { (void)maintain_dns_query_log(); },
+            [this, maintenance_pending]() {
+                if (maintenance_pending->exchange(true)) return;
+#ifdef WITH_API
+                const auto subscriptions = api_ctx_ ? api_ctx_->subscription_refresh_service : nullptr;
+#endif
+                const bool queued = blocking_executor_.try_post("log-subscription-maintenance",
+                    [this, maintenance_pending
+#ifdef WITH_API
+                     , subscriptions
+#endif
+                    ]() {
+                        struct Finish {
+                            std::shared_ptr<std::atomic<bool>> pending;
+                            ~Finish() { pending->store(false); }
+                        } finish{maintenance_pending};
+                        if (!running_.load()) return;
+                        (void)maintain_dns_query_log();
+                        maintain_file_logs();
+                        maintain_nfqws_logs();
+#ifdef WITH_API
+                        if (subscriptions && running_.load()) {
+                            try {
+                                if (subscriptions->refresh_due_once()) {
+                                    (void)post_control_task([this, subscriptions]() {
+                                        if (api_ctx_ && api_ctx_->subscription_refresh_service == subscriptions && status_stream_)
+                                            status_stream_->publish_subscription_change();
+                                    }, "subscription-refresh-complete");
+                                }
+                            } catch (...) {
+                                Logger::instance().warn("Subscription auto-refresh failed");
+                            }
+                        }
+#endif
+                    });
+                if (!queued) maintenance_pending->store(false);
+            },
             "dns-query-log-maintenance");
     } catch (const std::exception& error) {
         log.warn(

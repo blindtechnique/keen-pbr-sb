@@ -5,8 +5,21 @@
  * REST API for the keen-pbr policy-based routing daemon.
  * OpenAPI spec version: 3.0.0
  */
+import type { ValidationErrorParams } from './validationErrorParams';
 
 export interface ValidationError {
+  /**
+     * Optional stable field-validation code, assigned at the validation source independently of the English message. Clients use a known code and its parameters for localized presentation. Unknown codes or invalid required parameters use a generic message with the original details; they must not be reclassified from English prose. Missing, null or empty codes retain legacy message presentation. Initial families are config.value.*, config.ip_cidr.*, config.schema_version.*, config.tag.* and config.reference.*. This metadata does not change HTTP status, validation rules or whether the configuration can be saved.
+
+     * @nullable
+     */
+  code?: string | null;
+  /**
+     * Optional parameters for the field code. Numeric constraints are decimal strings to preserve exact values across C++ and JavaScript. config.value.range and config.value.integer_range use min and max; config.tag.too_long uses max; config.schema_version.unsupported uses version and supported. Parameters contain constraints only, not submitted configuration values, credentials or keys.
+
+     * @nullable
+     */
+  params?: ValidationErrorParams;
   /** Dot-style config path associated with the validation failure. */
   path?: string;
   /** Human-readable validation message. */

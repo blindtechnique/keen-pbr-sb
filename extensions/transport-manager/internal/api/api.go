@@ -16,14 +16,19 @@ import (
 )
 
 type API struct {
-	manager TransportRuntime
-	key     string
-	admin   TransportAdmin
+	manager   TransportRuntime
+	key       string
+	admin     TransportAdmin
+	lifecycle context.Context
 }
 
 // Mirrors the public subscription planner's maximum entry count. The internal
 // batch endpoint must accept every selection the public API can produce.
 const maximumTransportBatchSize = 512
+
+// Shorter than the installer's 20-second loopback response timeout. Ordinary
+// manual actions keep their existing detached 90-second lifecycle context.
+const temporaryInstallStopTimeout = 15 * time.Second
 
 type TransportRuntime interface {
 	Statuses(context.Context) []transport.Status
@@ -75,6 +80,14 @@ type ConditionalTransportBatchAdmin interface {
 	) (revision string, matched bool, err error)
 }
 
+type ConditionalTransportDeleteAdmin interface {
+	DeleteIfRevision(
+		context.Context,
+		string,
+		string,
+	) (revision string, matched bool, err error)
+}
+
 type TransportConfigValidator interface {
 	ValidateCreateAtRevision(
 		transport.TransportSpec,
@@ -110,11 +123,17 @@ type TransportRuntimeSettingsAdmin interface {
 }
 
 func New(manager TransportRuntime, key string, admins ...TransportAdmin) http.Handler {
+	return NewWithContext(context.Background(), manager, key, admins...)
+}
+
+// NewWithContext separates service shutdown from an individual browser request.
+// Confirmed lifecycle writes survive navigation, but not the manager stopping.
+func NewWithContext(lifecycle context.Context, manager TransportRuntime, key string, admins ...TransportAdmin) http.Handler {
 	var admin TransportAdmin
 	if len(admins) > 0 {
 		admin = admins[0]
 	}
-	a := &API{manager: manager, key: key, admin: admin}
+	a := &API{manager: manager, key: key, admin: admin, lifecycle: lifecycle}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", a.health)
 	mux.HandleFunc("GET /v1/transports", a.list)
@@ -124,6 +143,7 @@ func New(manager TransportRuntime, key string, admins ...TransportAdmin) http.Ha
 	mux.HandleFunc("GET /v1/config/transports", a.listConfig)
 	mux.HandleFunc("GET /v1/config/transports/state", a.configState)
 	mux.HandleFunc("GET /v1/config/transports/export", a.exportConfig)
+	mux.HandleFunc("POST /v1/config/transports/geo", a.updateNativeGeo)
 	mux.HandleFunc("POST /v1/config/transports/validate", a.validateCreateConfig)
 	mux.HandleFunc("POST /v1/config/transports/batch/validate", a.validateCreateBatchConfig)
 	mux.HandleFunc("POST /v1/config/transports/batch/validate-items", a.validateCreateItemsConfig)
@@ -166,7 +186,7 @@ func (a *API) updateSettings(w http.ResponseWriter, r *http.Request) {
 		write(w, http.StatusBadRequest, map[string]string{"error": "invalid transport settings JSON"})
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(a.lifecycle, 30*time.Second)
 	defer cancel()
 	settings, err := admin.SetSingBoxProcessMode(ctx, request.SingBoxProcessMode)
 	if err != nil {
@@ -527,11 +547,35 @@ func (a *API) deleteConfig(w http.ResponseWriter, r *http.Request) {
 		write(w, http.StatusServiceUnavailable, map[string]string{"error": "transport admin unavailable"})
 		return
 	}
-	if err := a.admin.Delete(r.Context(), r.PathValue("tag")); err != nil {
+	expectedRevision, conditional, err := parseIfMatch(r)
+	if err != nil {
 		write(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	write(w, http.StatusOK, map[string]string{"status": "deleted", "tag": r.PathValue("tag")})
+	tag := r.PathValue("tag")
+	if conditional {
+		admin, ok := a.admin.(ConditionalTransportDeleteAdmin)
+		if !ok {
+			write(w, http.StatusServiceUnavailable, map[string]string{"error": "conditional transport admin unavailable"})
+			return
+		}
+		revision, matched, err := admin.DeleteIfRevision(r.Context(), tag, expectedRevision)
+		if !matched {
+			writePreconditionFailed(w, revision)
+			return
+		}
+		if err != nil {
+			writeRevisionError(w, http.StatusBadRequest, revision, err)
+			return
+		}
+		writeRevisionResult(w, http.StatusOK, "deleted", tag, revision)
+		return
+	}
+	if err := a.admin.Delete(r.Context(), tag); err != nil {
+		write(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeRevisionResult(w, http.StatusOK, "deleted", tag, a.currentRevision())
 }
 
 func parseIfMatch(r *http.Request) (string, bool, error) {
@@ -605,6 +649,10 @@ func writeRevisionError(w http.ResponseWriter, status int, revision string, err 
 
 func (a *API) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if a.lifecycle.Err() != nil {
+			write(w, http.StatusServiceUnavailable, map[string]string{"error": "transport manager is shutting down"})
+			return
+		}
 		if r.URL.Path == "/healthz" {
 			next.ServeHTTP(w, r)
 			return
@@ -682,14 +730,18 @@ func (a *API) action(w http.ResponseWriter, r *http.Request) {
 	// sing-box TUN up takes several seconds and SingBox.Up() kills the freshly
 	// started process when its context is cancelled. A client that navigates
 	// away, retries, or times out mid-restart would otherwise leave the
-	// transport permanently down.
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	// transport permanently down. Service shutdown must still cancel the action.
+	ctx, cancel := context.WithTimeout(a.lifecycle, 90*time.Second)
 	defer cancel()
 	switch r.PathValue("action") {
 	case "up":
 		err = a.manager.Up(ctx, r.PathValue("tag"))
 	case "down":
-		err = a.manager.Down(ctx, r.PathValue("tag"))
+		if r.Header.Get("X-KeenPbr-Temporary-Stop") == "1" {
+			err = a.temporaryInstallStop(r.Context(), r.PathValue("tag"), temporaryInstallStopTimeout)
+		} else {
+			err = a.manager.Down(ctx, r.PathValue("tag"))
+		}
 	case "restart":
 		err = a.manager.Restart(ctx, r.PathValue("tag"))
 	default:
@@ -701,6 +753,43 @@ func (a *API) action(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	write(w, http.StatusAccepted, map[string]any{"status": "accepted", "at": time.Now().UTC()})
+}
+
+// The installer resumes every addressed transport, including one whose Down
+// response was lost. If that resume overtakes a queued/long-running Down, this
+// server-side compensation runs strictly AFTER Down returns and restores the
+// original intent again. No new lifecycle owner or ordering assumption is used.
+func (a *API) temporaryInstallStop(requestCtx context.Context, tag string, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(requestCtx, timeout)
+	stopShutdown := context.AfterFunc(a.lifecycle, cancel)
+	defer stopShutdown()
+	defer cancel()
+	status, err := a.manager.Status(ctx, tag)
+	if err != nil {
+		return err
+	}
+	if !strings.HasPrefix(status.Type, "sing-box") {
+		return errors.New("temporary install stop requires a sing-box transport")
+	}
+	wasRunning := status.DesiredUp || status.PID > 0 || status.State == transport.StateUp ||
+		status.State == transport.StateStarting || status.State == transport.StateDegraded
+	if !wasRunning {
+		return nil
+	}
+	err = a.manager.Down(ctx, tag)
+	err = errors.Join(err, ctx.Err())
+	if err == nil || a.lifecycle.Err() != nil {
+		return err
+	}
+	// A failed Down can have set desired=false before returning its error.
+	// Shared-mode transitions can also finish after request cancellation. Wait
+	// for that terminal above, then restore without inheriting the dead request.
+	resumeCtx, resumeCancel := context.WithTimeout(a.lifecycle, 90*time.Second)
+	defer resumeCancel()
+	if resumeErr := a.manager.Up(resumeCtx, tag); resumeErr != nil {
+		return errors.Join(err, errors.New("temporary install stop could not restore the transport"), resumeErr)
+	}
+	return err
 }
 func write(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")

@@ -4,6 +4,7 @@
 
 #include <map>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace keen_pbr3 {
@@ -48,13 +49,38 @@ struct World {
     std::vector<std::string> probed;
     int list_changed_calls{0};
     bool write_succeeds{true};
+    TunnelProbeReviewState review_state;
+    std::uint64_t now{1000000U};
+    int review_writes{0};
+    bool review_write_succeeds{true};
+    std::function<void(const std::string&)> during_probe;
 
-    TunnelProbeTask::Io io() {
+    TunnelProbeTask::Io io(bool reviews = false) {
         TunnelProbeTask::Io io;
         io.read_file = [this](const std::string& path) -> std::string {
             const auto it = files.find(path);
             return it == files.end() ? std::string{} : it->second;
         };
+        io.read_limited_file = [this](const std::string& path, std::size_t limit)
+            -> std::optional<std::string> {
+            const auto it = files.find(path);
+            if (it == files.end()) return std::string{};
+            if (it->second.size() > limit) return std::nullopt;
+            return it->second;
+        };
+        if (reviews) {
+            io.clock_unix_ms = [this]() { return now; };
+            io.load_review = [this](const std::string&, std::string&) {
+                return review_state;
+            };
+            io.save_review = [this](const std::string&, const TunnelProbeReviewState& state,
+                                    std::string&) {
+                ++review_writes;
+                if (!review_write_succeeds) return false;
+                review_state = state;
+                return true;
+            };
+        }
         io.write_file = [this](const std::string& path,
                                const std::string& contents) {
             if (!write_succeeds) return false;
@@ -90,6 +116,7 @@ struct World {
             requests.push_back(request);
             const auto host = host_of(request.url);
             probed.push_back(host);
+            if (during_probe) during_probe(host);
             DifferentialProbeReport report;
             const auto it = verdicts.find(host);
             report.verdict = it == verdicts.end()
@@ -402,6 +429,344 @@ TEST_CASE("pass: switched off creates nothing at all") {
     task.run(Config{});
 
     CHECK(world.ensured.empty());
+}
+
+TEST_CASE("review pass: an owned host is checked without new or available debug logs") {
+    for (int log_case = 0; log_case < 3; ++log_case) {
+        World world;
+        world.with_nfqws_config();
+        if (log_case == 0) world.files[kLogFile] = "";
+        if (log_case == 2) world.files[kNfqwsConfigPath] = "ISP_INTERFACE=\"eth3\"\n";
+        world.files[kListFile] = "old.example\n";
+        world.verdicts["old.example"] = DifferentialVerdict::works_without_help;
+        TunnelProbeTask task(world.io(true));
+
+        const auto outcome = task.run(enabled_config());
+
+        CHECK(outcome.ran);
+        CHECK(outcome.reviewed == 1U);
+        CHECK(outcome.probed == 1U);
+        REQUIRE(world.requests.size() == 1U);
+        CHECK(world.requests.front().direct.interface == "eth3");
+        CHECK(world.requests.front().tunnel.interface == "kpbr9786265a");
+        CHECK(world.written.empty());
+        CHECK(world.list_changed_calls == 0);
+        CHECK(world.files[kListFile] == "old.example\n");
+        REQUIRE(world.review_state.entries.size() == 1U);
+        CHECK(world.review_state.entries.front().record.direct_successes == 1U);
+        CHECK_FALSE(world.review_state.entries.front().eligible);
+        CHECK(TunnelProbeTask::describe(outcome).find("reviewed 1") != std::string::npos);
+    }
+}
+
+TEST_CASE("review pass: disabled automation does not read, write or probe review history") {
+    World world;
+    world.files[kListFile] = "old.example\n";
+    TunnelProbeTask task(world.io(true));
+    task.run(Config{});
+    CHECK(world.probed.empty());
+    CHECK(world.ensured.empty());
+    CHECK(world.review_writes == 0);
+}
+
+TEST_CASE("review pass: idle passes neither re-probe nor rewrite history before the due time") {
+    World world;
+    world.with_nfqws_config();
+    world.files[kListFile] = "old.example\n";
+    world.verdicts["old.example"] = DifferentialVerdict::works_without_help;
+    TunnelProbeTask task(world.io(true));
+    task.run(enabled_config());
+    REQUIRE(world.review_state.entries.size() == 1U);
+    const auto due = world.review_state.entries.front().next_due_unix_ms;
+    const auto writes = world.review_writes;
+    world.now = due - 1U;
+    const auto idle = task.run(enabled_config());
+    CHECK(idle.probed == 0U);
+    CHECK(world.review_writes == writes);
+    world.now = due;
+    const auto next = task.run(enabled_config());
+    CHECK(next.reviewed == 1U);
+    CHECK(world.review_state.entries.front().record.direct_successes == 2U);
+    CHECK(world.list_changed_calls == 0);
+}
+
+TEST_CASE("review pass: reviews share the candidate budget without consuming its queued tail") {
+    World world;
+    world.with_nfqws_config();
+    world.files[kListFile] = "old.example\n";
+    world.files[kLogFile] = log_for("a.example") + log_for("b.example") + log_for("c.example");
+    auto config = enabled_config();
+    config.tunnel_probe->max_probes_per_pass = 3;
+    TunnelProbeTask task(world.io(true));
+
+    const auto first = task.run(config);
+    CHECK(first.probed == 3U);
+    CHECK(first.reviewed == 1U);
+    CHECK(first.remaining == 1U);
+    const auto second = task.run(config);
+    CHECK(second.probed == 1U);
+    CHECK(second.reviewed == 0U);
+    CHECK(second.remaining == 0U);
+    REQUIRE(world.probed.size() == 4U);
+    CHECK(world.probed[3] != world.probed[1]);
+    CHECK(world.probed[3] != world.probed[2]);
+}
+
+TEST_CASE("review pass: a one-probe budget alternates due reviews and queued candidates") {
+    World world;
+    world.with_nfqws_config();
+    world.files[kListFile] = "old-a.example\nold-b.example\nold-c.example\n";
+    world.files[kLogFile] = log_for("candidate-a.example") + log_for("candidate-b.example");
+    auto config = enabled_config();
+    config.tunnel_probe->max_probes_per_pass = 1;
+    TunnelProbeTask task(world.io(true));
+    for (int pass = 0; pass < 4; ++pass) {
+        const auto outcome = task.run(config);
+        CHECK(outcome.probed == 1U);
+        CHECK(outcome.reviewed == (pass % 2 == 0 ? 1U : 0U));
+    }
+    REQUIRE(world.probed.size() == 4U);
+    CHECK(world.probed[1].find("candidate-") == 0U);
+    CHECK(world.probed[3].find("candidate-") == 0U);
+    CHECK(world.probed[1] != world.probed[3]);
+}
+
+TEST_CASE("review pass: neither failed path observations nor suggestions alter routing") {
+    World world;
+    world.with_nfqws_config();
+    world.files[kListFile] = "old.example\n";
+    world.verdicts["old.example"] = DifferentialVerdict::works_without_help;
+    TunnelProbeTask task(world.io(true));
+    for (int pass = 0; pass < 3; ++pass) {
+        task.run(enabled_config());
+        REQUIRE(world.review_state.entries.size() == 1U);
+        world.now = world.review_state.entries.front().next_due_unix_ms;
+    }
+    CHECK(world.review_state.entries.front().eligible);
+    world.verdicts["old.example"] = DifferentialVerdict::down_everywhere;
+    task.run(enabled_config());
+    CHECK(world.review_state.entries.front().record.direct_successes == 3U);
+    CHECK(world.review_state.entries.front().last_observation == DifferentialVerdict::down_everywhere);
+    CHECK(world.written.empty());
+    CHECK(world.list_changed_calls == 0);
+}
+
+TEST_CASE("review pass: a live target change during the network discards the old observation") {
+    World world;
+    world.with_nfqws_config();
+    world.files[kListFile] = "old.example\n";
+    world.verdicts["old.example"] = DifferentialVerdict::works_without_help;
+    auto current = resolve_tunnel_probe_setup(enabled_config()).setup;
+    auto io = world.io(true);
+    io.current_setup = [&]() { return current; };
+    world.during_probe = [&](const std::string&) { current->interface = "different-tunnel"; };
+    TunnelProbeTask task(std::move(io));
+    const auto outcome = task.run(enabled_config());
+    CHECK(outcome.target_changed);
+    REQUIRE(world.review_state.entries.size() == 1U);
+    CHECK(world.review_state.entries.front().record.direct_successes == 0U);
+    CHECK(world.review_state.entries.front().last_checked_unix_ms == 0U);
+    CHECK(world.written.empty());
+}
+
+TEST_CASE("review pass: a changed provider device cannot contribute to the old context") {
+    World world;
+    world.with_nfqws_config();
+    world.files[kListFile] = "old.example\n";
+    world.verdicts["old.example"] = DifferentialVerdict::works_without_help;
+    world.during_probe = [&](const std::string&) {
+        world.files[kNfqwsConfigPath] = "ISP_INTERFACE=\"eth4\"\n";
+    };
+    TunnelProbeTask task(world.io(true));
+    const auto outcome = task.run(enabled_config());
+    CHECK(outcome.target_changed);
+    REQUIRE(world.review_state.entries.size() == 1U);
+    CHECK(world.review_state.entries.front().record.direct_successes == 0U);
+}
+
+TEST_CASE("review pass: disabled or changed target before a queued pass creates nothing") {
+    World world;
+    auto io = world.io(true);
+    io.current_setup = []() -> std::optional<TunnelProbeSetup> { return std::nullopt; };
+    TunnelProbeTask task(std::move(io));
+    const auto outcome = task.run(enabled_config());
+    CHECK(outcome.target_changed);
+    CHECK(world.ensured.empty());
+    CHECK(world.probed.empty());
+    CHECK(world.review_writes == 0);
+}
+
+TEST_CASE("review pass: removing the current host while probing does not reactivate it") {
+    World world;
+    world.with_nfqws_config();
+    world.files[kListFile] = "old.example\n";
+    world.verdicts["old.example"] = DifferentialVerdict::works_without_help;
+    world.during_probe = [&](const std::string&) { world.files[kListFile] = "# removed in panel\n"; };
+    TunnelProbeTask task(world.io(true));
+    task.run(enabled_config());
+    REQUIRE(world.review_state.entries.size() == 1U);
+    CHECK_FALSE(world.review_state.entries.front().active);
+    CHECK(world.review_state.entries.front().record.direct_successes == 0U);
+    CHECK(world.files[kListFile] == "# removed in panel\n");
+    CHECK(world.written.empty());
+}
+
+TEST_CASE("pass: appending a candidate retains intervening list edits and removed hosts") {
+    World world;
+    world.with_nfqws_config();
+    world.files[kLogFile] = log_for("new.example");
+    world.files[kListFile] = "removed.example\n";
+    world.verdicts["new.example"] = DifferentialVerdict::blocked_here;
+    world.registry["new.example"] = true;
+    world.during_probe = [&](const std::string&) {
+        world.files[kListFile] = "# changed in panel\nother.example\n";
+    };
+    TunnelProbeTask task(world.io());
+    task.run(enabled_config());
+    CHECK(world.files[kListFile] == "# changed in panel\nother.example\nnew.example\n");
+    CHECK(world.list_changed_calls == 1);
+}
+
+TEST_CASE("pass: an exclusion added during a candidate probe prevents its append") {
+    World world;
+    world.with_nfqws_config();
+    world.files[kLogFile] = log_for("new.example");
+    world.verdicts["new.example"] = DifferentialVerdict::blocked_here;
+    world.registry["new.example"] = true;
+    world.during_probe = [&](const std::string&) {
+        world.files[std::string(kListFile) + ".excluded"] = "new.example\n";
+    };
+    TunnelProbeTask task(world.io());
+    task.run(enabled_config());
+    CHECK(world.written.empty());
+    CHECK(world.list_changed_calls == 0);
+}
+
+TEST_CASE("review pass: bounded file reads cannot turn a partial list into a replacement") {
+    World world;
+    world.with_nfqws_config();
+    world.files[kListFile] = std::string(TunnelProbeTask::kListReadBudget + 1U, 'x');
+    TunnelProbeTask task(world.io(true));
+    const auto outcome = task.run(enabled_config());
+    CHECK(outcome.write_failed);
+    CHECK(world.probed.empty());
+    CHECK(world.written.empty());
+    CHECK(world.review_writes == 0);
+}
+
+TEST_CASE("pass: network calls never hold the panel's short list I/O mutex") {
+    World world;
+    world.with_nfqws_config();
+    world.files[kListFile] = "old.example\n";
+    world.files[kLogFile] = log_for("new.example");
+    world.during_probe = [&](const std::string&) {
+        bool available = false;
+        std::thread panel([&]() {
+            std::unique_lock<std::mutex> edit(tunnel_probe_list_io_mutex(), std::try_to_lock);
+            available = edit.owns_lock();
+        });
+        panel.join();
+        CHECK(available);
+    };
+    TunnelProbeTask task(world.io(true));
+    const auto outcome = task.run(enabled_config());
+    CHECK(outcome.probed == 2U);
+}
+
+TEST_CASE("pass: removing an owned host permits fresh evidence without resetting the log cursor") {
+    World world;
+    world.with_nfqws_config();
+    world.files[kListFile] = "returned.example\n";
+    world.files[kLogFile] = log_for("returned.example") + log_for("already-answered.example");
+    TunnelProbeTask task(world.io());
+    const auto first = task.run(enabled_config());
+    REQUIRE(world.probed.size() == 1U);
+    CHECK(world.probed.front() == "already-answered.example");
+    CHECK(first.new_log_lines == 6U);
+
+    world.files[kListFile] = "";
+    world.files[kLogFile] += log_for("returned.example");
+    const auto second = task.run(enabled_config());
+    CHECK(second.new_log_lines == 3U);
+    CHECK_FALSE(second.log_restarted);
+    REQUIRE(world.probed.size() == 2U);
+    CHECK(world.probed.back() == "returned.example");
+}
+
+TEST_CASE("pass: excluding a queued host drops it while retaining other evidence and the cursor") {
+    World world;
+    world.with_nfqws_config();
+    world.files[kLogFile] = log_for("a.example") + log_for("b.example") + log_for("c.example");
+    auto config = enabled_config();
+    config.tunnel_probe->max_probes_per_pass = 1;
+    TunnelProbeTask task(world.io());
+    const auto first = task.run(config);
+    REQUIRE(world.probed.size() == 1U);
+    CHECK(world.probed.front() == "a.example");
+    CHECK(first.remaining == 2U);
+
+    world.files[std::string(kListFile) + ".excluded"] = "b.example\n";
+    const auto second = task.run(config);
+    CHECK(second.new_log_lines == 0U);
+    CHECK_FALSE(second.log_restarted);
+    CHECK(second.remaining == 0U);
+    REQUIRE(world.probed.size() == 2U);
+    CHECK(world.probed.back() == "c.example");
+}
+
+TEST_CASE("pass: an exclusion added during another probe skips the next network request") {
+    World world;
+    world.with_nfqws_config();
+    world.files[kLogFile] = log_for("a.example") + log_for("sub.b.example");
+    world.during_probe = [&](const std::string&) {
+        world.files[std::string(kListFile) + ".excluded"] = "b.example\n";
+    };
+    TunnelProbeTask task(world.io());
+    const auto outcome = task.run(enabled_config());
+    CHECK(outcome.probed == 1U);
+    CHECK(outcome.remaining == 0U);
+    REQUIRE(world.probed.size() == 1U);
+    CHECK(world.probed.front() == "a.example");
+}
+
+TEST_CASE("review pass: a just-excluded due host is not probed or counted as an observation") {
+    World world;
+    world.with_nfqws_config();
+    world.files[kListFile] = "sub.old.example\n";
+    auto io = world.io(true);
+    const auto save = io.save_review;
+    io.save_review = [&](const std::string& path, const TunnelProbeReviewState& state,
+                         std::string& error) {
+        const auto result = save(path, state, error);
+        world.files[std::string(kListFile) + ".excluded"] = "old.example\n";
+        return result;
+    };
+    TunnelProbeTask task(std::move(io));
+    const auto outcome = task.run(enabled_config());
+    CHECK(outcome.probed == 0U);
+    CHECK(outcome.reviewed == 0U);
+    CHECK(world.probed.empty());
+    REQUIRE(world.review_state.entries.size() == 1U);
+    CHECK_FALSE(world.review_state.entries.front().active);
+    CHECK(world.review_state.entries.front().last_checked_unix_ms == 0U);
+}
+
+TEST_CASE("review pass: initial metadata write failure leaves the budget for candidates") {
+    World world;
+    world.with_nfqws_config();
+    world.files[kListFile] = "old.example\n";
+    world.files[kLogFile] = log_for("new.example");
+    world.review_write_succeeds = false;
+    auto config = enabled_config();
+    config.tunnel_probe->max_probes_per_pass = 1;
+    TunnelProbeTask task(world.io(true));
+    const auto outcome = task.run(config);
+    CHECK(outcome.review_write_failed);
+    CHECK(outcome.reviewed == 0U);
+    CHECK(outcome.probed == 1U);
+    REQUIRE(world.probed.size() == 1U);
+    CHECK(world.probed.front() == "new.example");
+    CHECK(world.review_writes == 1);
 }
 
 TEST_CASE("describe: every early exit says which one it was") {

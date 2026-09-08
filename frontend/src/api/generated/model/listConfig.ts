@@ -6,6 +6,8 @@
  * OpenAPI spec version: 3.0.0
  */
 import type { ListRefreshDetourMode } from './listRefreshDetourMode';
+import type { ListSourceFormat } from './listSourceFormat';
+import type { ListSourceShrinkPolicy } from './listSourceShrinkPolicy';
 
 /**
  * Defines a named list of domains and/or IP CIDRs used in routing and DNS rules. At least one of `url`, `domains`, `ip_cidrs`, or `file` must be provided. List names (the keys under `lists`) must match `^[a-z][a-z0-9_]*$` and be at most 24 characters. `display_name` is presentation-only: rules, caches, sets, and API references always use the map key.
@@ -27,6 +29,8 @@ export interface ListConfig {
   catalog_identity?: string;
   /** URL to a remote list file to download and cache. */
   url?: string;
+  source_format?: ListSourceFormat;
+  shrink_policy?: ListSourceShrinkPolicy | null;
   /** Inline list of domain patterns (supports `*.` wildcards). */
   domains?: string[];
   /** Inline list of IP addresses or CIDR ranges. */

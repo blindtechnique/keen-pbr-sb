@@ -276,7 +276,7 @@ void Daemon::request_keenetic_dns_refresh() {
     const auto generation =
         runtime_generation_.load(std::memory_order_acquire);
     auto admitted = runtime_mutation_admission_.try_acquire(
-        "keenetic-dns-refresh");
+        "keenetic-dns-refresh", RuntimeMutationAdmission::Kind::Background);
     if (!admitted.has_value()) {
         schedule_deferred_keenetic_dns_refresh(generation);
         return;

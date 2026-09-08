@@ -33,6 +33,79 @@ bool matches_args(const std::vector<std::string>& actual,
 
 } // namespace
 
+TEST_CASE("C1 verifiers accept distinct IPv4 and IPv6 leaf marks") {
+    RuleState expected;
+    expected.rule_index = 0;
+    expected.action_type = RuleActionType::Mark;
+    expected.fwmark = 65536;
+    expected.fwmark_ipv6 = 131072;
+    expected.criteria.proto = L4Proto::Tcp;
+    expected.criteria.dst_port = "443";
+    bool listed = false;
+    SUBCASE("selector only") {}
+    SUBCASE("named destination sets") {
+        listed = true;
+        expected.list_names = {"mixed"};
+        expected.set_names = {"kpbr4_mixed", "kpbr6_mixed"};
+    }
+    const auto ipt_runner = [listed](const std::vector<std::string>& args) {
+        if (args.empty() || (args.front() != "iptables" && args.front() != "ip6tables"))
+            return command_result({}, 1);
+        const bool ipv6 = args.front() == "ip6tables";
+        const std::string set = listed ? std::string("-m set --match-set ") +
+            (ipv6 ? "kpbr6_mixed" : "kpbr4_mixed") + " dst " : "";
+        return command_result("-N KeenPbrTable\n-A KeenPbrTable " + set +
+            "-p tcp --dport 443 -j MARK --set-xmark " +
+            (ipv6 ? "0x20000" : "0x10000") + "/0xffffffff\n");
+    };
+    IptablesFirewallVerifier iptables(ipt_runner);
+    const auto ipt_checks = iptables.verify_rules({expected});
+    REQUIRE(ipt_checks.size() == 2);
+    for (const auto& check : ipt_checks) CHECK(check.status == CheckStatus::ok);
+
+    std::string nft_json = "{\"nftables\":[";
+    for (const bool ipv6 : {false, true}) {
+        if (ipv6) nft_json += ",";
+        nft_json += R"({"rule":{"family":"inet","table":"KeenPbrTable","chain":"prerouting","expr":[)";
+        nft_json += R"({"match":{"op":"==","left":{"meta":{"key":"nfproto"}},"right":")";
+        nft_json += ipv6 ? "ipv6\"}}," : "ipv4\"}},";
+        if (listed) {
+            nft_json += R"({"match":{"op":"==","left":{"payload":{"protocol":")";
+            nft_json += ipv6 ? "ip6" : "ip";
+            nft_json += R"(","field":"daddr"}},"right":"@)";
+            nft_json += ipv6 ? "kpbr6_mixed\"}}," : "kpbr4_mixed\"}},";
+        }
+        nft_json += R"({"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":443}},)";
+        nft_json += R"({"mangle":{"key":{"meta":{"key":"mark"}},"value":)";
+        nft_json += ipv6 ? "131072}}]}}" : "65536}}]}}";
+    }
+    nft_json += "]}";
+    const auto nft_runner = [&nft_json](const std::vector<std::string>& args) {
+        return matches_args(args, {"nft", "-j", "list", "chain", "inet", "KeenPbrTable", "prerouting"})
+            ? command_result(nft_json) : command_result({}, 1);
+    };
+    NftablesFirewallVerifier nftables(nft_runner);
+    const auto nft_checks = nftables.verify_rules({expected});
+    REQUIRE(nft_checks.size() == 2);
+    for (const auto& check : nft_checks) CHECK(check.status == CheckStatus::ok);
+    expected.fwmark_ipv6 = 196608;
+    NftablesFirewallVerifier wrong_mark(nft_runner);
+    const auto wrong_checks = wrong_mark.verify_rules({expected});
+    REQUIRE(wrong_checks.size() == 2);
+    CHECK(wrong_checks[1].status != CheckStatus::ok);
+    if (!listed) {
+        const std::string family4 = R"({"match":{"op":"==","left":{"meta":{"key":"nfproto"}},"right":"ipv4"}},)";
+        const auto position = nft_json.find(family4);
+        REQUIRE(position != std::string::npos);
+        nft_json.erase(position, family4.size());
+        expected.fwmark_ipv6 = 131072;
+        NftablesFirewallVerifier generic_ipv4(nft_runner);
+        const auto generic_checks = generic_ipv4.verify_rules({expected});
+        REQUIRE(generic_checks.size() == 2);
+        CHECK(generic_checks[0].status != CheckStatus::ok);
+    }
+}
+
 TEST_CASE("routing health never treats incomplete owner inventory as authoritative") {
     NetlinkManager netlink;
     const FirewallState firewall_state;
@@ -373,6 +446,53 @@ TEST_CASE("parse_nft_json: wrong table name returns empty state") {
 // =============================================================================
 // IptablesFirewallVerifier::verify_rules with injected CommandRunner
 // =============================================================================
+
+TEST_CASE("IptablesFirewallVerifier distinguishes named-empty lists from selector-only rules") {
+    for (const auto action : {RuleActionType::Mark, RuleActionType::Drop,
+                              RuleActionType::Pass}) {
+        CAPTURE(static_cast<int>(action));
+        RuleState expected;
+        expected.action_type = action;
+        expected.fwmark = 65536u;
+        expected.criteria.src_addr = {"192.0.2.10"};
+        expected.criteria.proto = L4Proto::Tcp;
+        expected.criteria.dst_port = "443";
+        // Empty, comment-only and unavailable named lists all have this
+        // realized state: a list condition, but no destination sets/rules.
+        expected.list_names = {"empty-list"};
+
+        std::string chain_rules = "-N KeenPbrTable\n";
+        const auto runner = [&chain_rules](const std::vector<std::string>& args) {
+            if (matches_args(args, {"iptables", "-t", "mangle", "-S",
+                                    "KeenPbrTable"})) {
+                return command_result(chain_rules);
+            }
+            if (matches_args(args, {"iptables", "-t", "mangle", "-S",
+                                    "PREROUTING"})) {
+                return command_result("-A PREROUTING -j KeenPbrTable\n");
+            }
+            return command_result({}, 1);
+        };
+
+        IptablesFirewallVerifier empty_list_verifier(runner);
+        CHECK(empty_list_verifier.verify_rules({expected}).empty());
+
+        expected.list_names.clear();
+        IptablesFirewallVerifier missing_direct_verifier(runner);
+        const auto missing = missing_direct_verifier.verify_rules({expected});
+        REQUIRE(missing.size() == 1);
+        CHECK(missing[0].status == CheckStatus::missing);
+
+        chain_rules += "-A KeenPbrTable -s 192.0.2.10 -p tcp --dport 443 ";
+        chain_rules += action == RuleActionType::Mark
+            ? "-j MARK --set-mark 65536\n"
+            : (action == RuleActionType::Drop ? "-j DROP\n" : "-j RETURN\n");
+        IptablesFirewallVerifier present_direct_verifier(runner);
+        const auto present = present_direct_verifier.verify_rules({expected});
+        REQUIRE(present.size() == 1);
+        CHECK(present[0].status == CheckStatus::ok);
+    }
+}
 
 TEST_CASE("IptablesFirewallVerifier::verify_rules: mark rule ok") {
     const std::string chain_rules =
@@ -834,6 +954,57 @@ TEST_CASE("IptablesFirewallVerifier::verify_chain: chain without prerouting jump
 // =============================================================================
 // NftablesFirewallVerifier::verify_rules with injected CommandRunner
 // =============================================================================
+
+TEST_CASE("NftablesFirewallVerifier distinguishes named-empty lists from selector-only rules") {
+    for (const auto action : {RuleActionType::Mark, RuleActionType::Drop,
+                              RuleActionType::Pass}) {
+        CAPTURE(static_cast<int>(action));
+        RuleState expected;
+        expected.action_type = action;
+        expected.fwmark = 65536u;
+        expected.criteria.src_addr = {"192.0.2.10"};
+        expected.criteria.proto = L4Proto::Tcp;
+        expected.criteria.dst_port = "443";
+        expected.list_names = {"empty-list"};
+
+        const std::string scaffold = R"({"nftables":[
+            {"chain":{"family":"inet","table":"KeenPbrTable",
+                      "name":"prerouting","type":"filter","hook":"prerouting"}})";
+        std::string chain_rules = scaffold + "]}";
+        const auto runner = [&chain_rules](const std::vector<std::string>& args) {
+            if (matches_args(args, {"nft", "-j", "list", "chain", "inet",
+                                    "KeenPbrTable", "prerouting"})) {
+                return command_result(chain_rules);
+            }
+            return command_result({}, 1);
+        };
+
+        NftablesFirewallVerifier empty_list_verifier(runner);
+        CHECK(empty_list_verifier.verify_rules({expected}).empty());
+
+        expected.list_names.clear();
+        NftablesFirewallVerifier missing_direct_verifier(runner);
+        const auto missing = missing_direct_verifier.verify_rules({expected});
+        REQUIRE(missing.size() == 1);
+        CHECK(missing[0].status == CheckStatus::missing);
+
+        chain_rules = scaffold + R"(,
+            {"rule":{"family":"inet","table":"KeenPbrTable","chain":"prerouting",
+                "expr":[
+                    {"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"saddr"}},
+                              "right":"192.0.2.10"}},
+                    {"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},
+                              "right":443}},)";
+        chain_rules += action == RuleActionType::Mark
+            ? R"({"mangle":{"key":{"meta":{"key":"mark"}},"value":65536}})"
+            : (action == RuleActionType::Drop ? R"({"drop":null})" : R"({"accept":null})");
+        chain_rules += "]}}]}";
+        NftablesFirewallVerifier present_direct_verifier(runner);
+        const auto present = present_direct_verifier.verify_rules({expected});
+        REQUIRE(present.size() == 1);
+        CHECK(present[0].status == CheckStatus::ok);
+    }
+}
 
 TEST_CASE("NftablesFirewallVerifier::verify_rules: mark rule ok") {
     const std::string canned = R"({

@@ -7,27 +7,45 @@ import type { ListRefreshDetourMode } from "@/api/generated/model/listRefreshDet
 import { getDnsServerDisplayName } from "@/lib/dns-display"
 import { withListDisplayName } from "@/lib/list-display"
 import { makeTechnicalId } from "@/lib/technical-id"
+import { configKnownFields } from "@/lib/config-known-fields.generated"
+import {
+  toConfigUnknownFieldsDraft,
+  type ConfigUnknownFieldsDraft,
+} from "@/lib/config-unknown-fields"
+import {
+  getListShrinkPolicyFromDraft,
+  listShrinkPolicyToDraft,
+  type ListShrinkPolicyDraft,
+} from "@/lib/list-refresh-controls"
+import {
+  normalizeRouteFailurePolicy,
+  type RouteFailurePolicy,
+} from "@/lib/route-failure-policy"
 import {
   buildUpdatedConfigForDnsServerUpsert,
   normalizeDnsAddress,
 } from "@/pages/dns-server-upsert-utils"
 
-export type ListDraft = {
-  displayName: string
-  name: string
-  ttlMs: string
-  refreshDetourMode: ListRefreshDetourMode
-  detour: string
-  fallbackDetours: string[]
-  domains: string
-  ipCidrs: string
-  url: string
-  file: string
-}
+export type ListDraft = ListShrinkPolicyDraft &
+  ConfigUnknownFieldsDraft & {
+    displayName: string
+    name: string
+    ttlMs: string
+    refreshDetourMode: ListRefreshDetourMode
+    detour: string
+    fallbackDetours: string[]
+    domains: string
+    ipCidrs: string
+    url: string
+    file: string
+    sourceFormat?: ListConfig["source_format"]
+  }
 
 export type QuickSetup = {
   createRouteRule: boolean
   routeOutbound: string
+  routeFailurePolicy?: RouteFailurePolicy
+  routeFallbackOutbound?: string
   createDnsRule: boolean
   dnsServer: string
 }
@@ -70,12 +88,14 @@ export function createListDraft(
       : "",
     ttlMs: "7200000",
     refreshDetourMode: "inherit",
+    ...listShrinkPolicyToDraft(),
     detour: "",
     fallbackDetours: [],
     domains: "",
     ipCidrs: "",
     url: "",
     file: "",
+    sourceFormat: "text",
   }
 }
 
@@ -154,6 +174,7 @@ export function addRecommendedDnsServer(
     type: DnsServerType.static,
     address,
     detour: normalizedOutboundTag,
+    domains: "",
   })
 
   return updated ? { config: updated, serverTag } : null
@@ -168,9 +189,11 @@ export function getDraftFromMapEntry(
   }
 
   return {
+    ...toConfigUnknownFieldsDraft(listConfig, configKnownFields.ListConfig),
     displayName: listConfig.display_name ?? "",
     name,
     ttlMs: String(listConfig.ttl_ms ?? 0),
+    ...listShrinkPolicyToDraft(listConfig.shrink_policy),
     refreshDetourMode:
       listConfig.refresh_detour_mode ??
       (listConfig.detour || (listConfig.fallback_detours?.length ?? 0) > 0
@@ -182,6 +205,7 @@ export function getDraftFromMapEntry(
     ipCidrs: (listConfig.ip_cidrs ?? []).join("\n"),
     url: listConfig.url ?? "",
     file: listConfig.file ?? "",
+    sourceFormat: listConfig.source_format ?? "text",
   }
 }
 
@@ -230,6 +254,10 @@ export function buildUpdatedConfigForListUpsert(
           enabled: true,
           list: [resolvedName],
           outbound: quickSetup.routeOutbound,
+          ...normalizeRouteFailurePolicy(
+            quickSetup.routeFailurePolicy,
+            quickSetup.routeFallbackOutbound
+          ),
         },
       ],
     }
@@ -318,16 +346,26 @@ export function getListConfigFromDraft(draft: ListDraft): ListConfig {
     draft.refreshDetourMode ?? (trimmedDetour ? "override" : "inherit")
   const ttlMs = Number.parseInt(draft.ttlMs.trim(), 10)
 
-  const listConfig: ListConfig = {}
+  const listConfig: ListConfig = { ...draft.unknownFields }
   listConfig.ttl_ms = Number.isNaN(ttlMs) ? 0 : ttlMs
 
   if (trimmedUrl) {
     listConfig.url = trimmedUrl
     listConfig.refresh_detour_mode = refreshDetourMode
+    const shrinkPolicy = getListShrinkPolicyFromDraft(draft)
+    if (shrinkPolicy) listConfig.shrink_policy = shrinkPolicy
   }
 
   if (trimmedFile) {
     listConfig.file = trimmedFile
+  }
+
+  if (
+    (trimmedUrl || trimmedFile) &&
+    draft.sourceFormat &&
+    draft.sourceFormat !== "text"
+  ) {
+    listConfig.source_format = draft.sourceFormat
   }
 
   if (domains.length > 0) {
@@ -353,6 +391,7 @@ export function getListConfigFromDraft(draft: ListDraft): ListConfig {
 
 function sameListSource(left: ListConfig, right: ListConfig): boolean {
   return (
+    (left.source_format ?? "text") === (right.source_format ?? "text") &&
     normalizedOptionalText(left.url) === normalizedOptionalText(right.url) &&
     normalizedOptionalText(left.file) === normalizedOptionalText(right.file) &&
     sameNormalizedValues(left.domains, right.domains) &&
@@ -381,9 +420,23 @@ function sameNormalizedValues(
 }
 
 export function normalizeListDraftForComparison(draft: ListDraft) {
+  const config = getListConfigFromDraft(draft)
+  if (config.shrink_policy) {
+    const policy = config.shrink_policy
+    const previous = policy.min_previous_entries ?? 50
+    const retained = policy.min_retained_fraction ?? 0.5
+    if (previous === 50 && retained === 0.5) {
+      delete config.shrink_policy
+    } else {
+      config.shrink_policy = {
+        min_previous_entries: previous,
+        min_retained_fraction: retained,
+      }
+    }
+  }
   return {
     name: draft.name.trim(),
-    config: getListConfigFromDraft(draft),
+    config,
   }
 }
 
@@ -391,6 +444,12 @@ export function normalizeQuickSetupForComparison(quickSetup: QuickSetup) {
   return {
     createRouteRule: quickSetup.createRouteRule,
     routeOutbound: quickSetup.createRouteRule ? quickSetup.routeOutbound : "",
+    ...(quickSetup.createRouteRule
+      ? normalizeRouteFailurePolicy(
+          quickSetup.routeFailurePolicy,
+          quickSetup.routeFallbackOutbound
+        )
+      : {}),
     createDnsRule: quickSetup.createDnsRule,
     dnsServer: quickSetup.createDnsRule ? quickSetup.dnsServer : "",
   }
@@ -465,6 +524,13 @@ export function narrowDraftToSourceGroups(
     narrowed.refreshDetourMode = "inherit"
     narrowed.detour = ""
     narrowed.fallbackDetours = []
+    narrowed.shrinkMinPreviousEntries = ""
+    narrowed.shrinkMinRetainedPercent = ""
+    delete narrowed.initialShrinkPolicy
+  }
+
+  if (!groups.includes("url") && !groups.includes("file")) {
+    narrowed.sourceFormat = "text"
   }
 
   return narrowed

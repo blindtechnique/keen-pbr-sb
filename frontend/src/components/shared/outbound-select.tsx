@@ -6,6 +6,7 @@ import type { RuntimeOutboundState } from "@/api/generated/model/runtimeOutbound
 import { useGetRuntimeOutbounds } from "@/api/queries"
 import { RuntimeOutboundStatusLabel } from "@/components/shared/runtime-outbound-state"
 import { Badge } from "@/components/ui/badge"
+import { buildChoiceDisplayNames } from "@/lib/choice-display-names"
 import {
   getOutboundSelectDisplayName,
   getOutboundSelectReferenceLabel,
@@ -75,6 +76,12 @@ export function OutboundSelect({
     () => sortOutboundsByDisplayName(outbounds),
     [outbounds]
   )
+  const choiceNames = buildChoiceDisplayNames(
+    outbounds.map((outbound) => ({
+      value: outbound.tag,
+      label: getOutboundSelectDisplayName(outbound, interfaceLabelFor),
+    }))
+  )
 
   return (
     <Select
@@ -105,10 +112,13 @@ export function OutboundSelect({
                 <RuntimeOutboundStatusLabel
                   runtimeState={runtimeOutboundsByTag.get(selected)}
                   t={t}
-                  title={getOutboundSelectDisplayName(
-                    selectedOutbound,
-                    interfaceLabelFor
-                  )}
+                  title={
+                    choiceNames.get(selected) ??
+                    getOutboundSelectDisplayName(
+                      selectedOutbound,
+                      interfaceLabelFor
+                    )
+                  }
                 />
               </span>
             )
@@ -126,9 +136,17 @@ export function OutboundSelect({
             </SelectItem>
           ) : null}
           {sortedOutbounds.map((outbound) => (
-            <SelectItem key={outbound.tag} value={outbound.tag}>
+            <SelectItem
+              key={outbound.tag}
+              value={outbound.tag}
+              label={getOutboundSelectReferenceLabel(
+                outbound,
+                interfaceLabelFor
+              )}
+            >
               <OutboundSelectOption
                 outbound={outbound}
+                displayName={choiceNames.get(outbound.tag)}
                 interfaceLabelFor={interfaceLabelFor}
                 runtimeState={runtimeOutboundsByTag.get(outbound.tag)}
                 t={t}
@@ -141,18 +159,21 @@ export function OutboundSelect({
   )
 }
 
-function OutboundSelectOption({
+export function OutboundSelectOption({
   outbound,
+  displayName,
   interfaceLabelFor,
   runtimeState,
   t,
 }: {
   outbound: Outbound
+  displayName?: string
   interfaceLabelFor: (interfaceName: string) => string
   runtimeState?: RuntimeOutboundState
   t: (key: string, options?: Record<string, unknown>) => string
 }) {
-  const displayName = getOutboundSelectDisplayName(outbound, interfaceLabelFor)
+  const label =
+    displayName ?? getOutboundSelectDisplayName(outbound, interfaceLabelFor)
 
   return (
     <div
@@ -162,13 +183,8 @@ function OutboundSelectOption({
       <RuntimeOutboundStatusLabel
         runtimeState={runtimeState}
         t={t}
-        title={displayName}
+        title={label}
       />
-      {displayName !== outbound.tag ? (
-        <span className="truncate font-mono text-xs text-muted-foreground">
-          {outbound.tag}
-        </span>
-      ) : null}
       <span className="flex shrink-0 items-center gap-2">
         <Badge size="xs" variant="outline">
           {outbound.type}

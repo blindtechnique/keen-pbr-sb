@@ -15,7 +15,7 @@ export interface InternalVpnService {
      * @pattern ^[A-Za-z0-9._:-]+$
      */
   service_id: string;
-  /** Whether traffic and DNS requests from the service client pool are processed by keen-pbr. For OpenConnect, false preserves ordinary destination-based routing policies and bypasses only forced DNS redirection from an exact verified ocN ingress. For other native VPN services, false installs an early source-pool bypass.
+  /** Whether traffic and DNS requests from the service client pool are processed by keen-pbr. False installs an early source-pool bypass of keen-pbr routing and forced DNS redirection. For OpenConnect, false sends all destinations directly through the ordinary WAN path, leaving nfqws processing intact. True uses configured VPN routes while other destinations retain direct nfqws processing.
    */
   process_clients: boolean;
 }

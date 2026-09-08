@@ -1,8 +1,427 @@
 export const enTranslation = {
+  backgroundTasks: {
+    title: "Background tasks",
+    description:
+      "Updated when opened or when you select Refresh. Times use this browser's time zone.",
+    scheduleHint:
+      "Scheduled checks may skip work when nothing has changed or the task is inactive.",
+    refresh: "Refresh",
+    loading: "Loading task details…",
+    failed: "Could not load task details. Select Refresh to try again.",
+    empty: "No background tasks are registered in this snapshot.",
+    unknown: "No data",
+    notScheduled: "Not scheduled yet",
+    outcome: "Last outcome",
+    duration: "Last duration",
+    milliseconds: "{{value}} ms",
+    failures: "Consecutive failures",
+    inFlight: "In progress",
+    nextRun: "Next scheduled run",
+    technicalDetails: "Last attempt details",
+    names: {
+      resolver: "DNS resolver configuration check",
+      keeneticDns: "Keenetic DNS refresh",
+      snat: "SNAT health check",
+      interfaces: "Interface checks",
+      traffic: "Traffic counter collection",
+      other: "Background task",
+    },
+    outcomes: {
+      success: "Succeeded",
+      noop: "No changes needed",
+      failure: "Failed",
+      skipped: "Skipped",
+      abandoned: "Not completed",
+    },
+  },
+  listContentImport: {
+    title: "Import entries",
+    hint: "Paste contents or choose a file up to 2 MiB. Add entries to this draft, then save the list when ready.",
+    format: "Contents format",
+    formats: {
+      text: "Text",
+      jsonArray: "JSON array",
+      yamlPayload: "YAML payload",
+    },
+    sourceFormatHint:
+      "Applies to the URL and the file on the router. Keep Text for existing text and .srs sources.",
+    contents: "Contents to import",
+    textHint:
+      "One IP address, network or domain per line. Domains also match subdomains.",
+    jsonHint:
+      "A JSON array of strings containing IP addresses, networks or domains. Domains also match subdomains.",
+    yamlHint:
+      "One payload list of IP addresses, networks or domains. Entries must be single-line strings; other keys and nested structures are not supported. Domains also match subdomains.",
+    chooseFile: "Choose file",
+    add: "Add to draft",
+    reading: "Reading the file…",
+    checking: "Checking entries…",
+    tooLarge:
+      "Nothing was added: the contents exceed 2 MiB. Choose a smaller file or split the text.",
+    readFailed:
+      "The file could not be read. Choose it again or paste its contents. The draft is unchanged.",
+    requestFailed:
+      "The import could not be completed. Check your connection to the router and try again. The draft is unchanged.",
+    incomplete:
+      "Nothing was added because the import limit was reached. Shorten long lines or split the contents into smaller parts.",
+    invalid:
+      "Nothing was added. Correct the entries below or choose the matching format, then try again.",
+    added:
+      "Added to draft: {{domains}} domains, {{ipCidrs}} IP addresses/networks. Duplicates skipped: {{duplicates}}.",
+    errorsLimited:
+      "Only the first 10 errors are shown. Correct them and try again.",
+    errors: {
+      format: "Choose Text, JSON array or YAML payload.",
+      limit: "Use smaller parts: at most 2 MiB and 50,000 entries per import.",
+      encoding: "Save the file as UTF-8 and try again.",
+      jsonSyntax: "Correct the JSON syntax: check quotes, commas and brackets.",
+      jsonArray: "Use a JSON array of strings, not an object.",
+      jsonEntry: "Each JSON array entry must be a string.",
+      yamlPayload: "Use a single payload: key followed by a block list.",
+      yamlSyntax: "Check YAML indentation, list markers and quotes.",
+      yamlUnsupported:
+        "Use single-line strings under payload:. Remove extra keys, nesting, anchors and tags.",
+      entry: "Use an IP address, network or domain.",
+    },
+  },
+  listSourcePreview: {
+    title: "List contents",
+    button: "Preview contents",
+    hint: "Checks the source without saving changes. You can save the list without a preview.",
+    catalogTitle: "Preview selected list sources",
+    loadingRemote: "Downloading and checking the list…",
+    loadingInline: "Checking list entries…",
+    failed:
+      "The preview could not be completed. Check your connection to the router and try again. You can still save the list.",
+    downloadFailed:
+      "The list could not be downloaded. Check its address and download route, then try again. You can still save the list.",
+    tooLarge:
+      "This source exceeds the 2 MiB preview limit. Use a smaller file to check its contents. You can still save the list.",
+    unsupportedFormat:
+      "The source cannot be checked in this format. Choose the matching Text, JSON array or YAML payload format; use a text export for binary .srs files. You can still save the list.",
+    routeUnavailable:
+      "The selected download route is unavailable. Choose an available route and try again. You can still save the list.",
+    partial:
+      "Only part of the list was checked. Split the source into smaller files for a complete preview. You can still save the list.",
+    lineTooLongStop:
+      "Checking stopped because a source line exceeds 4,096 bytes. Shorten that line and try again. You can still save the list.",
+    empty: "No valid entries were found in the checked text.",
+    entries: "Preview entries ({{count}})",
+    entriesLimited:
+      "Only the first 50 unique entries are shown. Counts include all checked lines.",
+    errorsTitle: "Lines to check ({{count}})",
+    errorsLimited: "Only the first 50 errors are shown.",
+    line: "Line {{line}}",
+    errorLine: "Line {{line}}: {{message}}",
+    counts: {
+      lines: "Lines checked",
+      valid: "Valid entries",
+      unique: "Unique entries",
+      duplicates: "Duplicates",
+      invalid: "Invalid entries",
+      ignored: "Empty lines and comments",
+      ipv4: "Unique IPv4",
+      ipv6: "Unique IPv6",
+      domains: "Unique domains",
+    },
+    errors: {
+      ipv4LeadingZeros: "Remove leading zeros from the IPv4 address.",
+      prefix:
+        "Check the network prefix after /: 0–32 for IPv4, 0–128 for IPv6.",
+      ip: "Check the IP address or network notation.",
+      lineTooLong: "Shorten this line to 4,096 bytes or fewer.",
+      entry: "Use one IP address, network or domain per line.",
+    },
+  },
+  listPagination: {
+    range: "{{from}}–{{to}} of {{total}}",
+    previous: "Previous",
+    next: "Next",
+    selectPage: "Select all on this page",
+  },
+  serverValidation: {
+    listSourceFormat:
+      "Choose Text, JSON array or YAML payload for the list source.",
+    atLine: "Line {{line}}: {{message}}",
+    ipv4LeadingZeros:
+      "Remove leading zeros from the IPv4 address, for example 192.168.1.1 instead of 192.168.001.1.",
+    ipPrefixLength:
+      "Enter a whole prefix length after /: 0–32 for IPv4 or 0–128 for IPv6.",
+    futureSchemaVersion:
+      "This configuration uses format version {{version}}, but the service supports up to {{supported}}. Update keen-pbr-sb before loading it.",
+    invalidSchemaVersion:
+      "The configuration has an invalid format version. Select the original backup or check the configuration file.",
+    jsonSyntax:
+      "The JSON has a syntax error. Check commas, quotes and brackets.",
+    jsonNumberOverflow:
+      "A number is outside the supported range. Check its notation or use the original backup.",
+    jsonType:
+      "A JSON value has the wrong type. Open details and check the format of the reported field.",
+    jsonMissingField:
+      "A required JSON field is missing. Check its name in details and restore its value.",
+    jsonObject:
+      "The configuration must be a JSON object enclosed in { }. Check that you selected the correct file.",
+    jsonDecode:
+      "The JSON configuration could not be read. Check details or use the original backup.",
+    unknown:
+      "The router did not accept this value. See details for the reason.",
+    required: "Complete this field.",
+    integer: "Enter a whole number.",
+    tooManyEntries: "Keep no more than {{max}} entries.",
+    schemaMigration:
+      "The configuration needs conversion to supported format {{supported}}. Load the original backup; do not edit the version number manually.",
+    text: "Enter a text value.",
+    boolean: "Choose on or off.",
+    range: "Enter a value from {{min}} to {{max}}.",
+    integerRange: "Enter a whole number from {{min}} to {{max}}.",
+    nonNegative: "Enter a value of at least 0.",
+    positive: "Enter a value greater than 0.",
+    fraction: "Enter a number from 0 to 1.",
+    portList: "Separate ports or ranges with commas.",
+    portRange: "Use ports from 1 to 65535, for example 8000–9000.",
+    portRangeOrder: "The first port must not exceed the last.",
+    portNumber: "Enter a whole port number from 1 to 65535.",
+    addressList: "Separate IP addresses or subnets with commas.",
+    ipAddressOrCidr:
+      "Enter an IPv4/IPv6 address or subnet, such as 10.0.0.1, 10.0.0.0/8 or 2001:db8::/32.",
+    ipv4: "Enter a valid IPv4 address.",
+    ipv6: "Enter a valid IPv6 address.",
+    dnsDomain: "Enter a domain, without a URL scheme, path or IP address.",
+    urlScheme: "Enter a URL starting with http:// or https://.",
+    routeCondition:
+      "Add at least one condition: a list, DSCP, address or port.",
+    fallbackDifferent: "Choose a backup route different from the primary.",
+    fallbackRoutable: "Choose an interface or group as the backup route.",
+    fallbackMode: "A backup route is only used in fallback mode.",
+    nameEncoding: "The name contains invalid text. Enter it again.",
+    nameControls: "Remove control characters from the name.",
+    nameLength: "Shorten the name to {{max}} Unicode characters.",
+    tagPattern:
+      "Start the identifier with a lowercase Latin letter and use only lowercase Latin letters, digits and underscores.",
+    tagLength: "Shorten the identifier to {{max}} characters.",
+    dnsDifferent: "The primary and backup DNS addresses must differ.",
+    dnsAddress: "Enter the DNS server's IPv4 or IPv6 address.",
+    dnsPort: "Enter a whole DNS port number from 1 to 65535.",
+    dnsIpv6Bracket: "Close the IPv6 address with a ] bracket.",
+    dnsIpv6Separator:
+      "Add a colon before the port after the closing IPv6 bracket.",
+    unknownList: "Choose an existing list.",
+    unknownOutbound: "Choose an existing route or group.",
+    unknownDns: "Choose an existing DNS server.",
+    groupRequired: "Add at least one connection to the group.",
+    interfaceRequired: "Choose a network interface.",
+    stringArray: "Enter an array of text values.",
+    object: "Enter a JSON object with fields enclosed in braces.",
+    objectArray: "Enter a JSON array whose entries are objects.",
+    number: "Enter a number.",
+    hexValue:
+      "Enter a hexadecimal value as a string starting with 0x, for example 0x00010000.",
+    duplicateValue:
+      "This value is already used. Remove the duplicate or choose a different value.",
+    nonEmptyArray: "Add at least one entry.",
+    identifierWhitespace:
+      "Remove spaces at the start and end. The value must not be empty.",
+    interfaceInvalid:
+      "Check the length and characters of the interface name. See details for the exact requirements.",
+    metaUdp443Policy: "Choose a UDP/443 policy: balanced or messages_first.",
+    ppeDeoffloadMode: "Choose a PPE handling mode: off or auto.",
+    refreshDetourMode:
+      "Use the shared download route (inherit) or specify a route (override).",
+    ruleFailurePolicy:
+      "Choose what happens on failure: use shared settings (inherit), block, or use a fallback.",
+    dnsTemplateDuplicate:
+      "A template with these DNS addresses already exists. Remove the duplicate or change the addresses.",
+    groupCycle:
+      "Groups reference each other in a cycle. Change the group members to remove the cycle.",
+    vpnServiceId:
+      "Use a service identifier of 1–128 Latin letters, digits or these characters: . _ : -.",
+    cronInvalid:
+      "The schedule was not recognized. Check the cron expression; see details for the cause.",
+    catalogIdentity:
+      "Check the catalog identifier: use a SHA-256 digest of 64 characters from 0–9 and a–f.",
+    listSourceRequired:
+      "Add a list source: a URL, a file path, IP addresses/subnets, or domains.",
+    downloadPrimaryRequired:
+      "Choose the primary download route before adding backup routes.",
+    routingTableRequired:
+      "The selected route has no routing table. Choose an interface, routing table or group.",
+    downloadUrlRequired:
+      "Download routes apply only to URL lists. Add a URL or remove the download-route settings.",
+    downloadInheritConflict:
+      "Remove this list's routes to use the shared download route. Choose override to keep custom routes.",
+    conntrackGroupOnly:
+      "Connection handling on switch applies only to a group. Remove it from this route.",
+    groupChildType:
+      "Add an interface, routing table, blocking route or another group to this group.",
+    primaryExact:
+      "Choose an existing primary route and remove spaces around its identifier.",
+    primaryRoutable:
+      "Choose an interface or group as the primary route to set a failure action.",
+    fwmarkStart: "The starting fwmark is invalid. Check its format in details.",
+    fwmarkMask:
+      "The fwmark mask is invalid. Check its requirements in details.",
+    fwmarkAllocation:
+      "Route marks could not be assigned. Check the starting fwmark and mask; see details for the cause.",
+    reservedRoutingTable:
+      "This routing table number is reserved. Choose another, for example 150.",
+    multiportCombination:
+      "When a port list is used, iptables cannot combine source and destination ports in one rule. Split the rule.",
+    keeneticDnsBuild:
+      "Keenetic DNS is unavailable in this build. Choose a DNS server with an explicit IP address.",
+    keeneticDnsVersion:
+      "Keenetic DNS requires KeeneticOS 3 or newer. Choose an IP-based DNS server or update the OS.",
+    keeneticDnsAddress:
+      "Remove the Keenetic DNS address: the router supplies it automatically.",
+    dnsType:
+      "Choose the DNS type: static for an explicit IP address or keenetic for the router's DNS.",
+    keeneticDnsLimit: "Keep only one DNS entry with type keenetic.",
+    dnsProbeInvalid:
+      "Check the test DNS server address and settings. See details for the cause.",
+    conntrackNested:
+      "Choose preserve to keep existing connections when a group contains another group.",
+    conntrackShared:
+      "This member is shared by several groups. Keep connections or reconnect only after failure.",
+    conntrackRoute:
+      "A routing rule also uses this group member directly. Keep connections or reconnect only after failure.",
+    conntrackDns:
+      "A DNS server also uses this group member directly. Keep connections or reconnect only after failure.",
+    conntrackList:
+      "List downloads also use this group member directly. Keep connections or reconnect only after failure.",
+    nfqwsCommandSubstitution:
+      "Replace command substitutions with explicit values. Commands cannot run from this configuration.",
+    nfqwsExpansionSyntax:
+      "Use a simple variable reference such as ${NAME}, without shell expressions.",
+    nfqwsUndefinedVariable:
+      "Enter the value directly or use a variable assigned earlier in this file.",
+    nfqwsAssignmentsOnly:
+      "Use NAME=value assignments and comments only. Remove shell commands.",
+    nfqwsUnsupportedAssignment:
+      "Remove the unsupported variable from nfqws2.conf. See details for its name.",
+    nfqwsWhitespaceAfterEquals:
+      "Remove whitespace immediately after =. Put values containing spaces in quotes.",
+    nfqwsUnquotedWhitespace:
+      "Put the entire value in quotes so its spaces are treated as part of the value.",
+    nfqwsControlOperator:
+      "Remove shell commands and control operators. Keep only variable assignments.",
+    nfqwsUnterminatedQuote: "Close the quoted value with a matching quote.",
+    nfqwsLiteralVariable:
+      "Replace the variable reference with its value, or use double quotes to expand it.",
+    nfqwsWildcard:
+      "Replace wildcards with explicit values so the check and service start use the same arguments.",
+    nfqwsPortFilterRequired:
+      "Enter at least one port or range, for example 443 or 8000-9000.",
+    nfqwsPortEmptyItem:
+      "Remove empty items from the port list. Keep one comma between ports or ranges.",
+    nfqwsPortRangeSyntax:
+      "Write the port range as two numbers separated by one hyphen, for example 8000-9000.",
+    nfqwsWritableOwnedOnly:
+      "Use --writable=/var/run/keen-pbr-nfqws only in NFQWS_BASE_ARGS.",
+    nfqwsWritableDuplicate:
+      "Keep only one --writable argument in NFQWS_BASE_ARGS.",
+    nfqwsPathRequired: "Enter the path to the referenced file.",
+    nfqwsPathMissing:
+      "The referenced file was not found. Check the path in details and make sure the file exists on the router.",
+    nfqwsProfileNewForbidden:
+      "Move additional profiles separated by --new to NFQWS_ARGS_CUSTOM.",
+    nfqwsProfileEmptyBoundary:
+      "Place --new only between two non-empty custom profiles, not at the start or end.",
+    nfqwsProfileBoundaryName:
+      "Add a profile name after --new=, or use --new without a name.",
+    nfqwsProfileConsecutiveBoundaries:
+      "Remove repeated --new separators or add a profile between them.",
+    nfqwsProfileActionRequired:
+      "Add --lua-desync= or --dpi-desync= to the profile. Filters alone do not process traffic.",
+    nfqwsWebrtcPassthrough:
+      "For webrtc_passthrough, keep exactly --filter-udp=49152-65535 and --filter-l7=stun.",
+    nfqwsProfileRequired:
+      "Add a strategy profile. IPSET and mode settings alone do not process traffic.",
+    nfqwsQueueRange: "Enter a whole queue number from 0 to 65535.",
+    nfqwsUserCharacters:
+      "Use only letters, digits, underscores, hyphens and dots in the nfqws user name.",
+    nfqwsBinaryRejected:
+      "nfqws2 did not accept these settings. Open details and correct the reported options.",
+  },
+  routeFailurePolicy: {
+    label: "When the VPN fails",
+    inherit: "Use shared settings",
+    block: "Block",
+    fallback: "Fallback VPN or group",
+    inheritHint:
+      "Keeps the existing behavior: the service-wide setting and the setting of the selected VPN or group.",
+    blockHint:
+      "If the selected VPN or group is unavailable, new connections matching this rule are blocked.",
+    fallbackHint:
+      "If the primary VPN or group is unavailable, new connections matching this rule use the selected fallback.",
+    fallbackLabel: "Fallback VPN or group",
+    fallbackPlaceholder: "Select a fallback VPN or group",
+    fallbackBothDownHint:
+      "If both the primary and fallback routes are unavailable, new connections are blocked.",
+    fallbackRequired: "Select a fallback VPN or group.",
+    fallbackMustDiffer:
+      "The fallback route must differ from the primary route.",
+    fallbackUnavailable: "Select an existing VPN or group from the list.",
+    supportedPrimaryHint:
+      "This setting is available for a VPN interface or group. For other routes, select Use shared settings.",
+    unsupportedPrimary: "Select Use shared settings for this primary route.",
+  },
+  operationErrors: {
+    details: "Details",
+    busy: "The service is still handling another operation. Wait for it to finish, then try again.",
+    draft_pending:
+      "There are pending changes. Apply or discard them in the bottom bar, then continue.",
+    draft_changed:
+      "The settings have changed. Refresh the panel data and review your changes before applying them.",
+    recovery_required:
+      "The operation could not be completed and recovery could not be confirmed. Check the service status on the dashboard before trying again.",
+    apply_unchanged:
+      "The changes could not be applied. The working configuration is unchanged. See details for the cause.",
+    rolled_back:
+      "The changes could not be applied. The previous configuration was restored. See details for the cause.",
+    validation:
+      "The server rejected a value. Check the highlighted fields and error details.",
+    unauthenticated: "Sign in to the panel to continue.",
+    reauthentication_required:
+      "This action requires sign-in confirmation. Confirm it in the sign-in dialog.",
+    forbidden:
+      "You do not have permission for this action. Check your account permissions.",
+    preview_expired:
+      "The subscription preview has expired. Fetch the subscription again and select the connections.",
+    name_in_use: "This name is already in use. Choose another connection name.",
+    no_interface_name:
+      "No free interface name could be found. Check the existing connections before trying again.",
+    invalid_connection:
+      "The connection data was not accepted. Check the link or configuration with your provider.",
+    subscription_unavailable:
+      "The subscription could not be fetched. Check the link and the provider's availability.",
+    service_unavailable:
+      "The VPN management service is unavailable. Check the service status on the dashboard.",
+    network:
+      "No response was received from the service. Check the router connection and current panel data before trying again.",
+    unknown:
+      "The action could not be completed. Check the current panel data before trying again. The technical cause is available in details.",
+  },
   subscriptions: {
+    edit: "Subscription settings",
+    autoRefresh: "Automatic refresh",
+    autoRefreshOff: "Off",
+    autoRefreshHours: "Every {{hours}} h",
+    autoRefreshCustom: "Custom interval",
+    autoRefreshCustomHours: "Interval, h",
+    autoRefreshInvalid: "Enter a whole number of hours from 1 to 168.",
+    autoRefreshHint:
+      "Scheduled refresh updates subscription information and existing imported VPN settings, then applies the changes. New servers require confirmation; missing servers are not deleted.",
+    nextRefresh: "Next check: {{date}}",
+    newServers: "New servers: {{count}}",
+    previewNewServers: "Choose new servers",
+    newServersHint:
+      "Import will create the selected VPNs and their linked routes.",
+    noNewServers: "There are no new servers left to import.",
+    syncFailed:
+      "Could not apply the updated settings to imported VPNs. Check the connection and refresh the subscription again.",
+    targetMissing: "This subscription is no longer in the list.",
     title: "Subscriptions",
     description:
-      "Provider expiration and traffic limits. Refreshing metadata does not change VPNs or routes.",
+      "Provider expiration, traffic limits and server updates. You choose which new VPNs to import.",
     add: "Add subscription",
     rename: "Rename subscription",
     remove: "Remove subscription record",
@@ -415,6 +834,32 @@ export const enTranslation = {
       original: "Using the original nfqws2 repository",
     },
     settingsTitle: "nfqws2 settings",
+    logLimitLabel: "Maximum size of each nfqws log",
+    logLimitHint:
+      "Once a minute, old lines beyond the limit are removed while recent lines are retained. A file may temporarily exceed the limit between checks. No nfqws restart is needed.",
+    logAgeHint:
+      "Once a minute, records with recognized timestamps older than the selected age are removed. This works for the auto-hostlist log; diagnostic lines without dates are kept and can only be limited by size.",
+    logLimitSaved: "nfqws automatic log cleanup settings saved",
+    logLimitLoadFailed: "Could not load the log cleanup settings",
+    settingsLoadFailed:
+      "Could not load nfqws2 settings. Try loading them again.",
+    settingsSaveFailed:
+      "Could not finish saving. Check the details and try again.",
+    connectivity: {
+      savedRestartFailed:
+        "Exclusions were saved, but nfqws2 could not restart. Select “Retry applying”.",
+      retryApply: "Retry applying",
+      label: "Exclude Android connectivity checks from nfqws",
+      hint: "Enable if Android reports “Wi-Fi has no Internet” while websites still open. This may help when Keenetic is the gateway for a separate Wi-Fi access point.",
+      domains: "Which addresses are excluded",
+      scope:
+        "These domains and their subdomains are added to exclude.list. Exclusions take effect in strategies and modes that use this list. It includes all of google.com and two Google advertising domains; VPN routes stay unchanged.",
+      preserve:
+        "Disabling removes only entries added by this checkbox. Your pre-existing exclusions are kept.",
+      applyRunning: "Saving will restart nfqws2 to apply the exclusions.",
+      applyStopped:
+        "Changes will be saved to the exclusion list and take effect when nfqws2 next starts.",
+    },
     settingsDescription:
       "The form updates /opt/etc/nfqws2/nfqws2.conf while preserving other configuration lines.",
     strategiesTitle: "Strategies",
@@ -445,6 +890,9 @@ export const enTranslation = {
     clearLog: "Clear log",
     confirmClearLog: "Clear the selected nfqws2 log?",
     logCleared: "Log cleared",
+    logTailShown:
+      "Only the latest log entries are shown, newest first. Older entries remain in the file.",
+    fileLoadFailed: "Could not load the file.",
     configMissing: "nfqws2.conf was not found.",
     backup: {
       button: "Backups",
@@ -551,7 +999,12 @@ export const enTranslation = {
       unknown: "unknown",
     },
     help: {
+      title: "Help",
       about: "About this section",
+    },
+    systemOutbounds: {
+      wan: "Ordinary internet",
+      block: "Block",
     },
     moreControls: "More",
     expandable: {
@@ -738,6 +1191,106 @@ export const enTranslation = {
     },
   },
   notifications: {
+    subscriptions: {
+      open: "Open subscription",
+      chooseServers: "Choose servers",
+      newServers: "New servers are available in subscription “{{name}}”.",
+      newServersCount: "New servers in subscription “{{name}}”: {{count}}.",
+      trafficLow: "Subscription “{{name}}” is running low on traffic.",
+      trafficRemaining:
+        "Subscription “{{name}}” has {{percent}}% of its traffic remaining.",
+      trafficExhausted:
+        "Subscription “{{name}}” has used up its traffic allowance.",
+      expiresSoon: "Subscription “{{name}}” expires soon.",
+      expiresInDays: "Subscription “{{name}}” expires in {{days}} days.",
+      expired: "Subscription “{{name}}” has expired.",
+      syncFailed:
+        "Could not apply VPN updates from subscription “{{name}}”. Open the subscription and check the details.",
+      loadFailed:
+        "Could not check subscriptions. Other notifications are available.",
+    },
+    messages: {
+      subscriptionRefreshFailed:
+        "Automatic subscription refresh did not finish. Open Subscriptions and check the last check time and error details.",
+      unknownError:
+        "The service reported an error. Open the details or journal.",
+      unknownWarning:
+        "The service reported a warning. Open the details or journal.",
+      unknownInfo:
+        "Service message. Details are available below and in the journal.",
+      operationWasBusy:
+        "The action did not start because another operation was running at the time. Check its result in the panel before retrying.",
+      operationHadDraft:
+        "The action was declined because an unapplied draft existed. Check the current changes before retrying.",
+      operationNeededLogin:
+        "The action required sign-in confirmation. Check its result in the current session before retrying.",
+      vpnServiceUnavailable:
+        "The VPN management service was unavailable during the action. Check its current dashboard state.",
+      responseUnavailable:
+        "No service response was received for the action. Check the router connection and the action's result in the panel.",
+      groupSwitchRejected:
+        "The switch in group “{{name}}” was not applied; its previous selection was preserved. Check the group before trying again.",
+      groupSwitchUnverified:
+        "Neither switching group “{{name}}” nor restoring its previous selection could be confirmed. Check the group's current state.",
+      configDraftChanged:
+        "Changes were not applied because the draft changed before the operation started. Routing was unchanged at the time of the error. Refresh the data before retrying.",
+      configApplyFailed:
+        "Settings could not be applied. Check the service's current state and the details before retrying.",
+      configRecoveryVpnRestartFailed:
+        "Recovery after a save error did not finish because the VPN service could not be restarted. Check the service on the dashboard before retrying.",
+      configRecoveryUnverified:
+        "Saving did not finish, and recovery could not be confirmed. Check the current service state and configuration before retrying.",
+      routingStopFailed:
+        "Routing could not be stopped after a save error. Check the current service state on the dashboard.",
+      routingAnchorMissing:
+        "Routing could not be refreshed because an outgoing path for one rule could not be confirmed. Check the rules and their selected VPNs.",
+      firewallRefreshFailed:
+        "Routing and firewall rules could not be refreshed. Check the current routing state on the dashboard.",
+      controlResponseInterrupted:
+        "The response to a control command could not be delivered because the connection between services closed. Check the action's result in the panel.",
+      listsRefreshFailed:
+        "Lists could not be refreshed: {{names}}. Open Lists to check their sources and causes.",
+      listStatusDiskFull:
+        "The refresh error for list “{{name}}” could not be recorded because storage was full. Check the router's free storage space.",
+      listStatusSaveFailed:
+        "The refresh error for list “{{name}}” could not be recorded. Check the list's state and journal details.",
+      listSrsIncomplete:
+        "Some conditions in list “{{name}}” could not be imported from SRS. Check source-format compatibility; omitted conditions are listed in the details.",
+      metaPolicyUnverified:
+        "Meta/WhatsApp traffic rules could not be confirmed. Check the current routing state on the dashboard.",
+      accelerationRulesUnverified:
+        "Traffic-visibility rules for hardware acceleration could not be reconciled. Check this item in dashboard diagnostics.",
+      tunnelProbeRouted:
+        "Automatic checks routed {{count}} hosts through “{{name}}”. Review them in the automatic list on the dashboard.",
+      tunnelProbeFailed:
+        "Automatic site checks could not be completed. Check their dashboard status and the error details.",
+      resolverHookFailed:
+        "System DNS settings could not be applied: the handler exited with code {{code}}. Check DNS diagnostics.",
+      listDnsFailed:
+        "List “{{name}}” could not be refreshed because DNS did not resolve source {{source}}. Check DNS and the list URL.",
+      listTimedOut:
+        "List “{{name}}” could not be refreshed because source {{source}} did not respond in time. Check its availability and try again.",
+      listConnectionFailed:
+        "List “{{name}}” could not be refreshed because connecting to {{source}} failed. Check the source's availability and download route.",
+      listHttpFailed:
+        "Source {{source}} returned HTTP {{code}} while refreshing list “{{name}}”. Check the URL and source availability.",
+      listNotModifiedWithoutCache:
+        "Source {{source}} did not send the contents of list “{{name}}”, and there is no matching local copy. Choose Download again on the Lists page.",
+      listShrinkKept:
+        "List “{{name}}” shrank from {{previous}} to {{candidate}} entries; the previous version was kept. Open Lists to compare and accept the reduction.",
+      listEmptyKept:
+        "The update for list “{{name}}” contained no entries; its previous version with {{previous}} entries was kept. Check the list source and format.",
+      listSrsUnsupported:
+        "List “{{name}}” from {{source}} contained no supported domains or IP addresses. Check the source format.",
+      listDownloadRouteUnavailable:
+        "The configured route could not be used to download list “{{name}}”. Check the VPN or group selected for list downloads.",
+      listRefreshFailed:
+        "List “{{name}}” could not be refreshed from {{source}}. Check the source and error details.",
+    },
+    details: "Details",
+    clearFailed: "Could not save cleared notifications. Try again.",
+    loading: "Loading notifications…",
+    loadFailed: "Could not load notifications. Check the router connection.",
     clear: "Clear",
     title: "Notifications",
     empty: "Nothing to report",
@@ -763,6 +1316,12 @@ export const enTranslation = {
     activeOnly: "Active only",
     loadMore: "Load more ({{loaded}} of {{total}})",
     loadingMore: "Loading...",
+    loadFailed:
+      "Could not load connections. Check your connection to the router and retry.",
+    refreshFailed:
+      "Could not refresh connections. Previously loaded data is shown.",
+    loadMoreFailed:
+      "Could not load the next page. Previously loaded connections remain in the list.",
     sort: "Sort",
     sortRecent: "Newest first",
     sortSource: "By device",
@@ -1744,6 +2303,13 @@ export const enTranslation = {
         "The expected resolver hash ({{expected}}…) doesn't match dnsmasq's active hash ({{actual}}…).",
     },
   },
+  postApply: {
+    applied: "Changes applied",
+    routing: "Check a site affected by the routing changes.",
+    dns: "Check a site affected by the DNS changes.",
+    checkSite: "Check a site",
+    openDiagnostics: "Open diagnostics",
+  },
   lifecycle: {
     running: "Applying changes",
     runningDescription: "keen-pbr is executing the operation step by step.",
@@ -1762,6 +2328,49 @@ export const enTranslation = {
     },
   },
   overview: {
+    runtimeEvents: {
+      title: "Switches and recoveries",
+      description:
+        "The last 20 events observed while the panel is open. Reloading the page clears this history; it is not a complete system log.",
+      empty: "No important changes have been observed while the panel is open.",
+      loading: "Getting the initial state of services and routes…",
+      loadFailed:
+        "Could not get system state. New events will appear when the connection recovers.",
+      stale:
+        "Some data is not updating. Previously observed events remain here.",
+      openJournal: "Open log",
+      openDetails: "View state",
+      showMore: "Show all events",
+      showLess: "Show fewer",
+      observedTime: "Observation time in the panel, using this device's clock",
+      unknownName: "Unnamed",
+      groupSwitched: "Group “{{name}}” switched: “{{from}}” → “{{to}}”",
+      routeDegraded: "A check found a problem with route “{{name}}”",
+      routeUnavailable: "A check reported route “{{name}}” as unavailable",
+      routeRecovered: "A check confirmed that route “{{name}}” recovered",
+      dnsChanged: "DNS applied a new configuration",
+      dnsProblem: "The DNS state check found a problem",
+      dnsRecovered: "The DNS state check passed again",
+      runtimeFailed: "The keen-pbr-sb service reported an error",
+      runtimeRecovered: "The keen-pbr-sb service resumed operation",
+      serviceRestarted: "The keen-pbr-sb process restarted",
+      transportUnavailable:
+        "The VPN process for “{{name}}” stopped operating normally",
+      transportRecovered: "The VPN process for “{{name}}” resumed operation",
+      transportRestarted: "The VPN process for “{{name}}” restarted",
+    },
+    firstRun: {
+      title: "Start setting up routing",
+      description:
+        "The wizard helps you choose a VPN and the sites to route through it. Settings are applied only when you press an action button; opening the wizard changes nothing.",
+      connection: "Add a VPN with its route, or choose an existing one.",
+      dns: "The wizard selects DNS for domain lists automatically.",
+      catalog: "Choose services from the list catalogue.",
+      check: "Check a site and its route on the dashboard.",
+      restore: "Restore a backup",
+      repeatHint:
+        "The wizard is always available under More → Help, or at the bottom of the sidebar on a phone.",
+    },
     summary: {
       healthy: {
         title: "Everything is fine",
@@ -1829,6 +2438,11 @@ export const enTranslation = {
       restart: "Restart",
       restartRouting: "Restart routing",
       restartRequested: "Restart requested",
+      processRestarting: "Restarting keen-pbr-sb…",
+      processRestartingDetail:
+        "The panel and sing-box tunnels may disconnect briefly. nfqws is not restarted.",
+      processRestartUnconfirmed:
+        "Could not confirm the restart. Refresh the page and check the services.",
       restartComplete: "Restart complete: routing and DNS are ready",
       // The command's terminal result. A toast holds one line - enough to say
       // a restart failed, nowhere near enough to say why.
@@ -1838,6 +2452,8 @@ export const enTranslation = {
       outcomeNoExitCode: "No exit code reported",
       outcomeNoOutput: "The command produced no output.",
       restartFailed: "Restart failed",
+      readinessUnconfirmed:
+        "Routing, DNS and VPN readiness could not be confirmed. Check the service state.",
       restartFailedDetail: "Restart failed: {{error}}",
       switchFailed: "Could not switch the service",
       title: "Services",
@@ -1981,6 +2597,8 @@ export const enTranslation = {
     routing: {
       title: "Diagnostics",
       loadError: "Unable to load routing checks.",
+      inventoryUnavailable:
+        "Unable to check routing: the service has not refreshed its route data yet. The check retries automatically. If this message persists, check the service log.",
       emptyTitle: "No routing checks reported yet",
       emptyDescription:
         "Routing checks will appear after the next apply or runtime restart.",
@@ -2000,17 +2618,40 @@ export const enTranslation = {
         error: "Check failed",
         missing: "Missing",
         mismatch: "Mismatch",
+        unknown: "Unknown status",
       },
       actions: {
         mark: "mark",
         drop: "drop",
         pass: "pass",
+        unknown: "Unknown action",
       },
+      routeTypes: {
+        unicast: "Unicast route",
+        blackhole: "Discard traffic",
+        unreachable: "Network unreachable",
+        unknown: "Unknown route type",
+      },
+      technicalDetails: "Technical details",
       details: {
         disabledByConfiguration: "Disabled by configuration",
         ruleNotFound:
           "Rule not found in the {{backend}} {{table}} table ({{family}}, criteria: {{criteria}})",
         criteriaAny: "any",
+        unexpectedRoute: "An unexpected route was found in the table",
+        nftRuleNotFound:
+          "Rule not found in the nftables PREROUTING chain ({{family}}, criteria: {{criteria}})",
+        markMismatch: "Mark mismatch: expected {{expected}}, got {{actual}}",
+        markMaskMismatch:
+          "Mark or mask mismatch: expected {{expected}}, got {{actual}}",
+        actionMismatch:
+          "Rule action mismatch: expected {{expected}}, found {{actual}}",
+        routeTypeMismatch:
+          "Route type mismatch: expected {{expected}}, found {{actual}}",
+        metricMismatch:
+          "Metric mismatch: expected {{expected}}, got {{actual}}",
+        policyMissing:
+          "Policy rule missing for {{families}}: mark {{mark}}, table {{table}}",
       },
       ppe: {
         title: "Hardware acceleration visibility",
@@ -2049,14 +2690,14 @@ export const enTranslation = {
       },
       chain: "chain",
       prerouting: "prerouting",
-      defaultRoute: "default",
+      defaultRoute: "Default route",
       ipv4: "IPv4",
       ipv6: "IPv6",
       yes: "yes",
       no: "no",
       tableLabel: "table {{value}}",
       priorityLabel: "priority {{value}}",
-      fwmarkLabel: "fwmark {{value}}",
+      fwmarkLabel: "mark {{value}}",
       fwmarkExpectedActual: "expected {{expected}}, got {{actual}}",
       actualLabel: "actual {{value}}",
       routeTypeFallback: "route",
@@ -2091,7 +2732,7 @@ export const enTranslation = {
       card: {
         title: "DNS check",
         description:
-          "Verifies that DNS resolution through keen-pbr is working correctly from this browser or another device.",
+          "Checks whether a test DNS query from this browser reaches the router.",
         disabledDescription:
           "Enable `dns.dns_test_server` option in the config file to run the DNS self-check.",
         configuredServers: "Configured DNS servers",
@@ -2110,23 +2751,59 @@ export const enTranslation = {
         warning:
           "The DNS test query has not arrived yet. Make sure the device is using your router DNS and try the command again.",
         copyAria: "Copy command",
+        expired:
+          "The waiting period has ended. Run the check again to get a new command.",
+        browserUnconfirmed:
+          "The manual query reached the router, but the browser DNS path is unconfirmed. Your browser may have separate DNS settings.",
       },
       status: {
         disabled: "Built-in DNS probe is disabled in config.",
-        browserSuccess: "DNS request from the browser reached dnsmasq.",
-        manualProbeSuccess: "DNS request from the device reached dnsmasq.",
+        browserSuccess:
+          "The test DNS query from the browser reached the router.",
+        manualProbeSuccess:
+          "The test DNS query from the device reached the router.",
         browserProbeFail:
-          "The browser went out, but the probe saw no lookup. That also happens when everything is fine: the address was already cached, or the browser resolves through its own DNS past the router. Check from a computer to be sure.",
+          "DNS path unconfirmed: the router did not observe the test query. Another DNS path or a browser restriction may be involved; this does not mean DNS is broken. See the guidance below.",
         sseUnavailable:
-          "The live DNS event stream is unavailable, so the check could not start.",
+          "Check unavailable: the connection to router events was unavailable or interrupted. Run the check again; the DNS result is still unknown.",
         browserFail:
-          "Browser request ran, but the DNS lookup was not observed.",
-        sseFail: "Live DNS event stream is not connected.",
+          "The browser test DNS query was not observed. The cause is unknown.",
+        sseFail:
+          "Result unknown: the connection to router events was unavailable or interrupted.",
         browserChecking: "Checking browser DNS path...",
         browserUnknown: "Browser DNS status is not known yet.",
-        manualSuccess: "DNS request from the device reached dnsmasq.",
+        manualSuccess: "The manual DNS query reached the router.",
         manualWaiting: "Waiting for your manual nslookup command...",
-        manualIncomplete: "Manual device test has not completed yet.",
+        manualIncomplete: "No manual DNS query was observed.",
+        ready: "Select Run again to check this browser's DNS path.",
+      },
+      path: {
+        configUnknown: "The forced DNS setting is not available yet.",
+        draft:
+          "There is a settings draft. The currently applied forced DNS setting is not confirmed here.",
+        enforcementOn: "Forced DNS is enabled in the saved configuration.",
+        enforcementOff: "Forced DNS is disabled in the saved configuration.",
+        helpTitle: "If domain rules do not work everywhere",
+        scope:
+          "This result covers only the test query, not DNS in every app or device. Test on the affected device connected through this router; a separate VPN may change its DNS path.",
+        enforcementScope:
+          "Forced DNS sends plain queries (port 53) to the router only for clients processed by the service. It does not redirect DNS-over-HTTPS (port 443) or Private Relay. The displayed setting is not a check of installed firewall rules.",
+        dotBlocked:
+          "Port 853 blocking is also enabled in the configuration. A device with a custom DNS-over-TLS provider may stop resolving names: fallback to plain DNS is not guaranteed.",
+        dotAllowed:
+          "DNS-over-TLS (port 853) blocking is disabled in the configuration.",
+        encryptionTradeoff:
+          "For comparison, you can temporarily change the settings below and repeat the check. This reduces DNS or IP address privacy; restore the previous values afterwards if you need them.",
+        androidTitle: "Android: Private DNS",
+        android:
+          "Find Private DNS in the device settings. Temporarily turn it off for the comparison. Setting names vary by device.",
+        browserTitle: "Browser: secure DNS (DoH)",
+        browser:
+          "Check Use secure DNS or DNS-over-HTTPS in your browser's privacy settings. A custom provider may bypass router DNS even when the system uses plain DNS.",
+        appleTitle: "Apple: Private Relay",
+        apple:
+          "iCloud Private Relay hides DNS queries and changes Safari's traffic path. For comparison, you can temporarily turn off Limit IP Address Tracking for the current Wi-Fi network.",
+        openSettings: "Configure forced DNS",
       },
     },
     targetFacts: {
@@ -2202,6 +2879,16 @@ export const enTranslation = {
       registrySource: "Source: {{service}}",
     },
     routingTest: {
+      retry: "Check again",
+      guidance: {
+        deviceOnly:
+          "The router received a site response, but this device's browser did not. The connection path or browser-check restrictions may explain the difference; it does not prove a DNS problem.",
+        dns: "The router could not resolve the site's address. Review the DNS check and the servers in use.",
+        service:
+          "The service did not provide a result. Check its status first; the site's availability is still unknown.",
+        openDns: "View DNS diagnostics",
+        openService: "View service status",
+      },
       title: "Where does this traffic go?",
       placeholder: "e.g. google.com or 1.2.3.4",
       submit: "Check route",
@@ -2229,6 +2916,130 @@ export const enTranslation = {
       pathKernelNotApplicable: "Route lookup was not reached",
       resultTitle: "Routing result",
       ruleDetailsTitle: "Rule diagnostics",
+      evidence: {
+        title: "Diagnostic details",
+        scope:
+          "DNS, rules and connections were checked at different times. Route lookup runs on the router; it is not a complete test of a client's path or the site's response.",
+        dns: "1. DNS",
+        dnsLiteral: "An IP address was supplied; no DNS lookup is needed.",
+        dnsConfigured: "Resolver configured for this check",
+        dnsSystem: "Router's system resolver",
+        dnsUnknown: "The DNS response source was not reported.",
+        dnsScope:
+          "This identifies address resolution for this check, not the upstream DNS server or a cache hit.",
+        snapshot:
+          "Connection snapshot: {{time}}. Showing {{count}} of {{total}} records for the tested IPs in the bounded snapshot.",
+        snapshotUnavailable: "The current connection snapshot is unavailable.",
+        truncated:
+          "The snapshot or response is limited; not all records are shown.",
+        listRule: "2. List and rule",
+        noList: "No list match was found.",
+        expectedRule: "Active configuration rule: {{rule}}",
+        actualRule: "Rule from current firewall sets: {{rule}}",
+        mark: "3. Firewall mark",
+        counterTitle: "PREROUTING rule counters",
+        counterScope:
+          "Cumulative totals for the whole rule, not this site or check. Recreating the rule may reset its counters. Zero does not mean a failure.",
+        counterMissing: "The service did not provide rule counters.",
+        counterUnavailable: "The rule counters could not be read.",
+        counterAmbiguous:
+          "The counters could not be unambiguously associated with this rule.",
+        counterNotApplicable:
+          "Classification counters do not apply to this result.",
+        counterEmpty:
+          "The snapshot was read, but contains no associated physical rule rows.",
+        counterSnapshot:
+          "Counter snapshot: {{time}}. Showing {{count}} of {{total}} physical rule rows.",
+        counterTruncated: "The response is limited; not all rows are shown.",
+        counterRule:
+          "{{family}} · {{table}} / {{chain}} · position {{position}}",
+        counterMarkAction: "Action: mark",
+        counterDropAction: "Action: drop",
+        counterPassAction: "Action: skip marking",
+        counterSet: "IP set: {{set}}",
+        counterMark: "Mark: {{mark}}; mask: {{mask}}",
+        counterTotals: "Packets: {{packets}}; bytes: {{bytes}}",
+        markValue: "Mark: {{mark}}; keen-pbr-sb mask: {{mask}}",
+        policy: "4. Candidate policy routing rules",
+        policyScope:
+          "Order and a matching mark do not prove which rule was selected: if a table has no suitable route, the kernel may continue with the next rule.",
+        policyMissing: "The service did not provide a policy routing snapshot.",
+        policyUnavailable:
+          "The current policy routing rules could not be read.",
+        policyNotApplicable:
+          "Policy routing rule checks do not apply to this result.",
+        policySnapshot:
+          "Rule snapshot: {{time}}. Showing {{count}} of {{total}} candidate rules.",
+        policyTruncated:
+          "The response is limited; not all candidate rules are shown.",
+        policyEmpty:
+          "No candidate rules for this mark were found in the readable snapshot. This does not mean there is no route.",
+        policyRule: "{{family}} · priority {{priority}} · table {{table}}",
+        policyMark: "Rule mark: {{mark}}; rule mask: {{mask}}",
+        policyMarkMatching:
+          "The mark condition matches; selection of this rule is unconfirmed.",
+        policyIncomplete:
+          "Not all rule conditions or actions were parsed. Neither a match nor a mismatch is confirmed.",
+        fib: "5. Router-local route lookup",
+        fibResolved: "A route was found on the router.",
+        fibUnroutable: "The kernel returned a prohibited or unreachable route.",
+        fibNotApplicable: "Route lookup does not apply to this result.",
+        fibUnknown: "The route lookup result is unconfirmed.",
+        fibDetails: "Interface: {{interface}}; table: {{table}}",
+        connections: "6. Observed connections",
+        httpTitle: "7. Manual HTTPS check",
+        httpCheck: "Check HTTPS through this route",
+        httpScope:
+          "A HEAD request to the site's root over HTTPS on port 443, without following redirects. It originates on the router: it does not test a client's path, PREROUTING or nfqws.",
+        httpPending: "Running an HTTPS check from the router…",
+        httpRequestFailed:
+          "Could not obtain the HTTPS check result. The main diagnostic result is preserved.",
+        httpAnswered: "HTTP response received",
+        httpNotAttempted: "No HTTPS request was sent.",
+        httpUnavailable: "The HTTPS check result is unavailable.",
+        httpIncomplete: "The HTTPS check did not complete",
+        httpFresh:
+          "The route was evaluated again for this attempt. Its details may differ from the main snapshot.",
+        httpRoute:
+          "IP: {{ip}}; interface: {{interface}}; mark: {{mark}}; table: {{table}}",
+        httpConnectedIp: "Connected peer address: {{ip}}",
+        httpAttemptedAt: "Attempt time: {{time}}",
+        httpElapsed: "Total time: {{time}} ms",
+        httpConnect:
+          "Until connection established, from request start: {{time}} ms",
+        httpTls: "Until TLS completed, from request start: {{time}} ms",
+        httpResponse:
+          "An HTTP status, including 403, 405 or a redirect, confirms a response was received, not that the site works for a client.",
+        httpContextRequired:
+          "Client packet details are needed to select the route.",
+        httpNoRoute: "The route could not be determined for this attempt.",
+        httpDestinationChanged:
+          "The DNS answer changed and no longer contains the chosen IP. Run the main check again.",
+        httpBlockedRoute: "The current rules block this route.",
+        httpBindingFailed:
+          "The request could not be bound to the selected interface or mark.",
+        httpTlsError:
+          "TLS could not be completed. This does not prove a routing failure.",
+        httpTimeout:
+          "The request timed out. This does not prove a routing failure.",
+        httpConnectionFailed:
+          "A connection to the server could not be established.",
+        httpUnsupportedTarget:
+          "An HTTPS check is unavailable for this address.",
+        httpTransportError: "The HTTP check tool is unavailable or failed.",
+        httpBudgetExhausted:
+          "This request had no time left for the HTTPS check. Run it again manually.",
+        httpResponseLimit:
+          "The response headers exceeded the size limit. The complete check result was not obtained.",
+        noConnections:
+          "No connections to this IP appear in the snapshot. This does not mean the VPN or site is unavailable.",
+        markMatching: "The mark matches within the keen-pbr-sb mask.",
+        markDifferent: "The mark differs within the keen-pbr-sb mask.",
+        markUnconfirmed:
+          "Mark comparison is unconfirmed: a mark or non-zero mask is missing.",
+        connectionMark: "Raw connection mark: {{mark}}",
+        lastSeen: "Last observed: {{time}}",
+      },
       ip: "IP",
       resultListMatch: "List match",
       resultListMatchVia: "{{list}} (via {{via}})",
@@ -2315,6 +3126,23 @@ export const enTranslation = {
       selected: "Selected: {{count}}",
       addTunnel: "Add a tunnel",
       routeTo: "Route to",
+      continue: {
+        open: "Choose sites",
+        return: "Return to catalogue",
+        selectionKept: "Catalogue selection kept: {{count}}.",
+        operationPending: "Wait for the operation to finish.",
+        applyDnsFirst:
+          "Save and apply the DNS changes before configuring lists.",
+        selectRoute: "Choose a VPN or route",
+        chooseRoute:
+          "Choose a VPN, add one, or explicitly choose lists without a route.",
+        listsOnly: "Lists only, without a route",
+        setupIncomplete: "Setup is not complete yet",
+        configureDns:
+          "A DNS server using the “{{route}}” route is needed. Choose this route for a DNS server or add another DNS server. Save and apply the changes, then return to the catalogue.",
+        selectedVpn: "selected VPN",
+        openDns: "Configure DNS",
+      },
       blockSelected: "The selected lists will be blocked",
       directSelected:
         "The selected lists will bypass every tunnel and go direct",
@@ -2338,6 +3166,8 @@ export const enTranslation = {
       ipCompanionRemote: "Also included: {{name}} - URL-updated IP list",
       ipCompanionGeneric: "Also included: {{name}} - IP list",
       risks: {
+        unknownSummary:
+          "The catalogue reported an additional restriction. Open the details.",
         title: "Please note",
         broadTrafficScope:
           "This list covers a very large part of the internet. All matching traffic will use the selected route.",
@@ -2346,6 +3176,7 @@ export const enTranslation = {
         unknown: "The catalogue reported a risk: {{code}}.",
       },
       refreshState: {
+        failed: "Could not update the list.",
         success: "Succeeded: {{date}}",
         successVia: "Succeeded: {{date}} · via {{detour}}",
         attempt: "Last attempt: {{date}}",
@@ -2484,7 +3315,9 @@ export const enTranslation = {
             "Restore the selected groups from a file, or roll back the last change.",
         },
         secretsWarning:
-          "If VPN and proxies are selected, the file contains their UUIDs, passwords and keys in plain text. Keep the copy somewhere safe and do not pass it on.",
+          "If VPN and proxies are selected, the file contains their UUIDs, passwords, keys and subscription links in plain text. Keep the copy somewhere safe and do not pass it on.",
+        vpnHint:
+          "Includes subscription sources, auto-refresh schedules and VPN links.",
         validationNote:
           "The configuration is validated before it is written and applied only after the check passes.",
         createButton: "Create and download",
@@ -2492,13 +3325,24 @@ export const enTranslation = {
         created: "Backup created",
         createFailed: "Could not create the backup",
         readFailed: "Could not read the backup",
+        rollbackCheckFailed:
+          "Could not check whether rollback is available. Reopen the restore dialog to try again.",
         restored: "Configuration restored",
         rolledBack: "Rolled back",
-        actionFailed: "The operation did not complete",
+        restoredRefreshFailed:
+          "Restoration completed, but the panel could not refresh its data. Reload the page; do not repeat the restoration.",
+        actionFailed:
+          "Could not complete the restore operation. Check the service status before trying again.",
         confirmRestore: "Restore \u201c{{filename}}\u201d?",
         confirmRollback: "Roll the configuration back?",
         restoreHint:
           "A rollback copy is created automatically before the change.",
+        restoreSubscriptions:
+          "Subscription sources in this copy: {{count}}. Current sources and auto-refresh schedules will be replaced with those from the copy, and VPN links will be reconciled with the restored configuration.",
+        restoreSubscriptionsEmpty:
+          "This copy has no subscription sources. Current sources and their auto-refresh schedules will be removed.",
+        restoreSubscriptionsLegacy:
+          "This copy has no subscription section. Current sources and auto-refresh schedules will be kept, and VPN links will be reconciled with the restored configuration.",
         rollbackHint:
           "The state from before the last update or restore will be brought back.",
         cancel: "Cancel",
@@ -2535,8 +3379,19 @@ export const enTranslation = {
         level: "Verbosity",
         levelHint:
           "Normal is enough day to day. The detailed levels are for investigating a problem and grow the file noticeably.",
+        sizeLimitEnabled: "Automatically clean up by size",
+        ageLimitEnabled: "Automatically remove old records",
+        maxFileBytes: "Maximum log file size",
+        maxFileBytesHint:
+          "The current file and one previous copy are retained: up to {{size}} each ({{total}} in total). The limit applies on the next write without restarting.",
+        maxAgeDays: "Remove records older than (days)",
+        ageHint:
+          "Once a minute, records with recognized timestamps older than the selected age are removed. Lines without dates are kept. No service restart is needed.",
+        retentionDisabled: "Automatic cleanup is off. Log size is unlimited.",
+        sizeKiB: "{{size}} KiB",
+        sizeMiB: "{{size}} MiB",
         pathHint:
-          "File: /opt/var/log/keen-pbr.log. A new one starts at one megabyte and the previous is kept alongside.",
+          "File: /opt/var/log/keen-pbr.log. The previous rotated copy is keen-pbr.log.1.",
         viewer: {
           open: "Open log",
           title: "keen-pbr-sb log",
@@ -2655,15 +3510,21 @@ export const enTranslation = {
         ipv6EnabledLabel: "Enable IPv6 support",
         ipv6EnabledHint:
           "Install IPv6 routes, firewall rules, and dnsmasq targets. When explicitly disabled, managed dnsmasq suppresses AAAA and SVCB/HTTPS (types 64/65): A records keep working, but HTTP/3 and ECH discovery may be unavailable.",
+        firefoxDohCanaryLabel: "Disable automatic Secure DNS in Firefox",
+        firefoxDohCanaryHint:
+          "Helps Firefox use the network DNS so domain-based routing rules can apply.",
+        firefoxDohCanaryScopeLabel: "Which browser settings this affects",
+        firefoxDohCanaryScope:
+          "Applies only to automatically enabled DoH in Firefox. It does not change manually selected DoH or Secure DNS in Chrome, Edge or Yandex Browser. It does not block HTTPS DNS providers or websites.",
         clientDnsEnforcementLabel: "Force clients to use router DNS",
         clientDnsEnforcementHint:
-          "Transparently redirect plain DNS (port 53) from LAN clients to the router's resolver and block DNS-over-TLS (port 853), so browser Secure DNS cannot bypass domain-based routing. DNS-over-HTTPS on port 443 cannot be blocked this way; disable Secure DNS in browsers for full coverage.",
+          "Sends plain DNS (port 53) to the router for clients processed by the service. By default, also blocks port 853: devices with a custom DNS-over-TLS provider may lose name resolution. Does not redirect DNS-over-HTTPS (port 443) or Private Relay. Check device DNS settings before enabling.",
         tunnelProbeEnabledLabel:
           "Route hosts nfqws2 cannot fix through a tunnel",
         tunnelProbeEnabledHint:
           "Reads what nfqws2 recorded as failing, measures each host twice - once over your provider's own interface and once over the tunnel below - and adds only the ones that answered through the tunnel and not directly.",
         tunnelProbeHelp:
-          "This moves traffic on its own, and the move is not reversible in practice: nfqws2's rules are bound to the provider interface, so a host routed through a tunnel disappears from its view and stops producing the evidence that put it there. Confirmed hosts are appended to the list's own file; your configuration is never rewritten. A host is only acted on when the probe says it is blocked here and Russia's blocking registry names it - on real traffic that second question is what separates a censored site from an advertising endpoint failing for its own reasons.",
+          "Confirmed hosts are added to the automatic list's own file. A host must respond through the tunnel, fail directly, and appear in the blocking registry. The service later checks direct access from the router: after several successful checks, it suggests removing the host from this list. It does not remove hosts by itself. Router checks do not guarantee that the site is accessible from every device.",
         tunnelProbeOutboundLabel: "Tunnel to measure against",
         tunnelProbeOutboundAuto: "Choose automatically",
         tunnelProbeOutboundHint:
@@ -2680,6 +3541,26 @@ export const enTranslation = {
         tunnelProbeHostExcludeHint: "Take out and never route again",
         tunnelProbeHostRestore: "Restore",
         tunnelProbeHostRestoreHint: "Lift the bar; it may be found again",
+        tunnelProbeReviewSummary:
+          "Several checks from the router succeeded directly.",
+        tunnelProbeReviewHint:
+          "This only removes the host from the automatic list. Other rules may still route it through a VPN. Check the site on your device after the change.",
+        tunnelProbeReviewAction: "Try without the tunnel",
+        tunnelProbeReviewRefresh: "Refresh results",
+        tunnelProbeReviewRefreshHint:
+          "Results refresh when you return to the panel or press this button. This does not start a new site check.",
+        tunnelProbeReviewUnavailable:
+          "No repeat-check results are available yet. The listed hosts stay unchanged.",
+        tunnelProbeReviewLimited:
+          "Repeat checks cover up to 512 hosts in the list; the remaining hosts are not covered yet.",
+        tunnelProbeHostsDraftNotice:
+          "There is a settings draft. The buttons below change the active automatic list, not the draft.",
+        tunnelProbeHostChangeFailed:
+          "The automatic list could not be changed. Refresh the results and try again.",
+        tunnelProbeHostsRefreshFailed:
+          "The host list could not be refreshed. Check that the panel is reachable and try again.",
+        tunnelProbeHostRemoved:
+          "The host was removed from the automatic list. Other routing rules are unchanged.",
         tunnelProbeLastPass: "Last check",
         tunnelProbeNoPassYet: "No check has run yet.",
         tunnelProbeRefused: "Not running: {{reason}}.",
@@ -2848,6 +3729,10 @@ export const enTranslation = {
           "The configuration saved alongside the previous package is incomplete, so restoring it would not reproduce that version.",
         rollbackStarting: "Restoring the previous package",
         rollbackFailed: "Could not start the package rollback",
+        operationFailed:
+          "The operation could not be completed. Check the current version before trying again.",
+        progressUnavailable:
+          "Update progress is unavailable. The panel will keep checking automatically.",
         downloadBackupBefore: "Download a backup before installing",
         progressLabel: "Update progress",
         inProgress: "Update in progress",
@@ -2968,20 +3853,21 @@ export const enTranslation = {
         servers: {
           title: "Servers",
           description:
-            "Who the panel asks for domain addresses. The DNS rules below decide which server is asked about which domain.",
+            "Choose DNS servers for general queries or pin individual domains in the server editor.",
         },
       },
       title: "DNS Servers",
-      searchPlaceholder: "Search by name, address or route",
-      description: "Upstream DNS servers used for domain name resolution.",
-      fallbackSaved: "Fallback DNS order saved to the draft",
+      searchPlaceholder: "Search by name, address, domain or route",
+      domainBindings: "Domains: {{domains}}",
+      description: "DNS servers used to look up website addresses.",
+      fallbackSaved: "DNS server order for general queries saved to the draft",
       keeneticAddress: "Keenetic built-in DNS",
       actions: {
         add: "Add DNS server",
       },
       empty: {
         title: "No DNS servers yet",
-        description: "Add a DNS server to configure upstream resolution.",
+        description: "Add a DNS server to look up website addresses.",
       },
       loadErrorDescription:
         "We can't load DNS servers right now. Try refreshing the page.",
@@ -3005,7 +3891,9 @@ export const enTranslation = {
           serverPrefix: "DNS server",
           serverSuffix: "will be deleted.",
           dnsRule: "DNS rule “{{name}}” will be deleted.",
-          fallback: "Fallback DNS will be changed.",
+          domains:
+            "Domain bindings to this server will be removed: {{domains}}.",
+          fallback: "The DNS server list for general queries will change.",
         },
       },
       bulk: {
@@ -3029,7 +3917,7 @@ export const enTranslation = {
         "Return to the DNS servers table and choose a valid entry.",
       back: "Back to DNS servers",
       description:
-        "This server will be available in your DNS rules and as a fallback.",
+        "Select this server for specific DNS rules or for general DNS queries.",
       cardDescription:
         "Choose a ready-made provider or enter your own DNS server address.",
       editCardTitle: "Edit {{tag}}",
@@ -3038,7 +3926,7 @@ export const enTranslation = {
         custom: "Custom server",
         includeBackup: "Add the backup server",
         includeBackupHint:
-          "A second entry using {{address}} will be created in the same change.",
+          "Server {{address}} will be added with the same domain bindings. If it already exists, its bindings will be extended.",
         backupDisplayName: "{{name}} - backup",
         saveCustom: "Save as a custom template",
         saveCustomHint:
@@ -3078,6 +3966,11 @@ export const enTranslation = {
         addressPlaceholder: "1.1.1.1 or [2606:4700::1111]:53",
         addressHint:
           "The server's IP address, e.g. `1.1.1.1` or `[2606:4700::1111]:53`.",
+        domains: "Use for domains",
+        domainsPlaceholder: "youtube.com\ngooglevideo.com",
+        domainsHint:
+          "Optional. Separate domains with commas or new lines, without https:// or paths. Bindings include subdomains and take precedence over list-based DNS rules. Traffic routes stay unchanged.",
+        domainsPreview: "Domains and their subdomains: {{domains}}",
         secondaryAddress: "Template backup address",
         secondaryAddressPlaceholder: "For example, 1.0.0.1",
         secondaryAddressHint:
@@ -3097,6 +3990,8 @@ export const enTranslation = {
         addressRequired: "Address is required.",
         addressInvalid:
           "Address must be a valid IPv4/IPv6 value with an optional port.",
+        domainsInvalid:
+          "Check the domains: use names such as example.com, without https://, paths or IP addresses. Use punycode (xn--…) for international names.",
         templateAddressInvalid:
           "A saved template requires a valid IPv4 address without a port.",
         templateInvalid:
@@ -3110,7 +4005,7 @@ export const enTranslation = {
     setupWizard: {
       title: "Setup wizard",
       description:
-        "Three steps: connect a VPN, pick services and finish. The panel applies each safe operation as it completes.",
+        "Connect a VPN, choose services and check the result. Settings are saved when you press action buttons; opening the wizard changes nothing.",
       steps: {
         connection: "Connection",
         services: "Services",
@@ -3119,7 +4014,10 @@ export const enTranslation = {
       connection: {
         title: "Step 1. Connect a VPN",
         description:
-          "Paste the connection link from your VPN provider. The panel creates a sing-box tunnel and its outgoing route in one atomic operation.",
+          "Paste the connection link from your VPN provider. The panel creates a VPN through sing-box and its linked route.",
+        otherImport: "Import another VPN or a subscription",
+        otherImportHint:
+          "For WireGuard, AmneziaWG, a file or a subscription, open the regular import. Then return to the wizard and select the created route below.",
         linkLabel: "Connection link",
         linkHint:
           "Links like vless://, vmess://, trojan://, ss://, hy2:// work — your VPN provider issues them.",
@@ -3135,10 +4033,12 @@ export const enTranslation = {
         inventoryLoading: "Loading the current tunnels and routes…",
         inventoryErrorTitle: "The wizard could not be prepared",
         inventoryUnavailable:
-          "The current tunnels and routes could not be loaded. Creation is disabled to avoid overwriting or duplicating an existing setup.",
+          "The tunnels and routes could not be loaded. Retry loading to continue setup.",
       },
       services: {
         title: "Step 2. What goes through the VPN",
+        dnsHint:
+          "For domain lists, the wizard uses a suitable DNS server or creates one together with the rules. Other DNS settings stay unchanged.",
         description:
           "Tick the services — their traffic goes through “{{name}}”. The panel creates and applies the lists and rules itself; everything else stays direct.",
         loading: "Loading the catalogue…",
@@ -3162,12 +4062,17 @@ export const enTranslation = {
       done: {
         title: "Setup complete",
         summary:
-          "The setup is saved and applied. {{count}} services now use “{{name}}”.",
+          "Settings are saved and applied. {{count}} services are configured for “{{name}}”. Now check that a site opens.",
         summaryNoLists:
           "The route “{{name}}” is ready. Services can be added later from the list catalogue.",
         openDashboard: "Open dashboard",
         openTunnels: "Open VPN and proxies",
         openRules: "Open routing rules",
+        checkSite: "Check a site",
+        checkHint:
+          "Enter a site from a selected list to see its route and availability. Saving settings alone does not confirm that the site opens.",
+        openDns: "Open DNS servers",
+        openCatalog: "Open list catalogue",
       },
     },
     routingRules: {
@@ -3393,6 +4298,8 @@ export const enTranslation = {
           dependentOutboundPrefix: "Dependent group",
           dependentOutboundSuffix: "will be deleted.",
           routingRule: "Routing rule “{{name}}” will be removed.",
+          routingRuleFallback:
+            "Rule “{{name}}” will be kept without a fallback. If its primary VPN fails, new connections matching this rule will be blocked.",
           ruleDetail: "{{label}}: {{value}}",
           dnsDetour: 'DNS server "{{server}}" will be changed.',
           listDownloadRoutes:
@@ -3659,11 +4566,11 @@ export const enTranslation = {
       fallback: {
         title: "Primary DNS servers",
         description:
-          "The ordered DNS servers dnsmasq should use when no DNS rule matches.",
+          "DNS servers for queries that do not match a specific DNS rule, listed in your chosen order.",
         add: "Add primary DNS server",
         placeholderTitle: "No primary DNS servers selected",
         placeholderDescription:
-          "Add one or more DNS servers. The order is preserved and used in generated dnsmasq config.",
+          "Add one or more DNS servers in the order you want.",
         noneDefined: "No DNS servers defined on the DNS Servers page.",
         noneAvailable: "All DNS servers are already selected.",
       },
@@ -3758,6 +4665,7 @@ export const enTranslation = {
         new: "Add list",
         update: "Update",
         updateAll: "Update all",
+        forceRefreshHint: "Download again, keeping the list-reduction check.",
       },
       empty: {
         title: "No lists yet",
@@ -3822,11 +4730,23 @@ export const enTranslation = {
       messages: {
         refreshedOne: "List refresh finished.",
         refreshedAll: "Lists refresh finished.",
+        refreshUnconfirmed:
+          "Could not confirm the list refresh. Check its status in the table.",
+        refreshRequestFailed:
+          "Could not refresh the list. Check the connection and try again.",
         refreshFailedOne:
           'List "{{names}}" was not updated. See logs for details.',
         refreshFailedMany:
           "{{count}} lists were not updated: {{names}}. See logs for details.",
         refreshFailedMore: "+{{count}} more",
+      },
+      shrink: {
+        counts: "Entries: previously {{previous}} → received {{candidate}}.",
+        kept: "The list became much smaller. The previous version remains in use.",
+        accept: "Accept smaller list",
+        pending: "Updating…",
+        acceptHint:
+          "Use this version instead of the previous one. If the server returns a different reduced version, a new comparison will be shown.",
       },
       lastUpdated: "Updated: {{value}}",
       lastRefreshFailed: "Update failed at {{value}}: {{message}}",
@@ -3854,6 +4774,20 @@ export const enTranslation = {
       },
     },
     listUpsert: {
+      shrinkPolicy: {
+        title: "Smaller list updates",
+        description:
+          "These thresholds apply only to this URL source. If the list becomes much smaller, the previous version is kept; you can accept the new one on the Lists page.",
+        previousLabel: "Check lists with at least this many entries",
+        previousHint:
+          "If the previous version has fewer entries, reductions are accepted automatically. Leave blank for 50 entries.",
+        retainedLabel: "Minimum entries retained, %",
+        retainedHint:
+          "From 0 to 100%. Leave blank for 50%. An empty result still needs manual acceptance when the list-size threshold is reached.",
+        invalidPrevious:
+          "Enter a non-negative whole number of entries, or leave blank.",
+        invalidRetained: "Enter a number from 0 to 100, or leave blank.",
+      },
       templates: {
         button: "Pick a ready-made list",
         title: "Ready-made lists",

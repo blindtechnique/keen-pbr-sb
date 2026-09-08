@@ -3,13 +3,24 @@ import type { RouteRule } from "@/api/generated/model/routeRule"
 import { getApiErrorMessage as getSharedApiErrorMessage } from "@/lib/api-errors"
 import { stableJsonStringify } from "@/lib/semantic-json"
 import { makeTechnicalId } from "@/lib/technical-id"
+import { configKnownFields } from "@/lib/config-known-fields.generated"
+import {
+  toConfigUnknownFieldsDraft,
+  type ConfigUnknownFieldsDraft,
+} from "@/lib/config-unknown-fields"
+import {
+  normalizeRouteFailurePolicy,
+  type RouteFailurePolicy,
+} from "@/lib/route-failure-policy"
 
-export type RouteRuleDraft = {
+export type RouteRuleDraft = ConfigUnknownFieldsDraft & {
   id: string
   displayName: string
   enabled: boolean
   list: string[]
   outbound: string
+  failurePolicy: RouteFailurePolicy
+  fallbackOutbound: string
   proto: string
   dscp: string
   src_port: string
@@ -26,11 +37,15 @@ export function getRoutingRuleRowId(rule: RouteRule, index: number) {
 }
 
 function normalizeRouteRulesForComparison(rules: readonly RouteRule[]) {
-  return rules.map((rule) => ({
-    ...rule,
-    enabled: rule.enabled ?? true,
-    list: rule.list ?? [],
-  }))
+  return rules.map((rule) => {
+    const { failure_policy, fallback_outbound, ...rest } = rule
+    return {
+      ...rest,
+      enabled: rule.enabled ?? true,
+      list: rule.list ?? [],
+      ...normalizeRouteFailurePolicy(failure_policy, fallback_outbound),
+    }
+  })
 }
 
 export function getRouteRulesSemanticKey(rules: readonly RouteRule[]) {
@@ -50,6 +65,8 @@ export const emptyRouteRuleDraft: RouteRuleDraft = {
   enabled: true,
   list: [],
   outbound: "",
+  failurePolicy: "inherit",
+  fallbackOutbound: "",
   proto: "",
   dscp: "",
   src_port: "",
@@ -104,11 +121,14 @@ export function getRouteRuleDerivedName(
 
 export function toRouteRuleDraft(rule: RouteRule): RouteRuleDraft {
   return {
+    ...toConfigUnknownFieldsDraft(rule, configKnownFields.RouteRule),
     id: rule.id ?? "",
     displayName: rule.display_name ?? "",
     enabled: rule.enabled ?? true,
     list: rule.list ?? [],
     outbound: rule.outbound,
+    failurePolicy: rule.failure_policy ?? "inherit",
+    fallbackOutbound: rule.fallback_outbound ?? "",
     proto: rule.proto ?? "",
     dscp: rule.dscp?.toString() ?? "",
     src_port: rule.src_port ?? "",
@@ -120,11 +140,13 @@ export function toRouteRuleDraft(rule: RouteRule): RouteRuleDraft {
 
 export function normalizeRouteRuleDraft(draft: RouteRuleDraft): RouteRule {
   return {
+    ...draft.unknownFields,
     id: trimToUndefined(draft.id),
     display_name: trimToUndefined(draft.displayName),
     enabled: draft.enabled,
     list: draft.list,
     outbound: draft.outbound,
+    ...normalizeRouteFailurePolicy(draft.failurePolicy, draft.fallbackOutbound),
     proto: trimToUndefined(draft.proto),
     dscp: parseOptionalDscp(draft.dscp),
     src_port: trimToUndefined(draft.src_port),

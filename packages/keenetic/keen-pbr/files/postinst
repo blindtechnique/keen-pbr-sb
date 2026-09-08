@@ -211,6 +211,9 @@ if [ -d /opt/etc/nfqws2 ]; then
     done
     chmod 0644 /opt/etc/nfqws2/nfqws2.conf 2>/dev/null || true
 fi
+if [ -x /opt/usr/lib/keen-pbr/dnsmasq-package.sh ]; then
+    /opt/usr/lib/keen-pbr/dnsmasq-package.sh restore || exit 1
+fi
 if ! KEEN_PBR_PACKAGE_POSTINST=1 \
      /opt/etc/init.d/S79transport-manager start; then
     echo "Failed to start transport-manager service" >&2

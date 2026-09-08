@@ -25,6 +25,8 @@
 #include "../src/backup/recovery_coordinator.hpp"
 #include "../src/backup/restore_journal.hpp"
 #include "../src/config/config_writer.hpp"
+#include "../src/config/subscription_store.hpp"
+#include "../src/daemon/config_store.hpp"
 #include "../src/crypto/sha256.hpp"
 #include "../src/util/display_name.hpp"
 
@@ -141,7 +143,7 @@ ApiContext make_transports_test_context(SseBroadcaster& broadcaster,
         []() {},
         []() {},
         []() {},
-        [](std::optional<std::string>) { return ListRefreshOperationResult{}; },
+        [](const api::ListRefreshRequest&) { return ListRefreshOperationResult{}; },
     };
     context.maintenance_lease_factory_fn =
         [maintenance_state](std::string)
@@ -301,6 +303,29 @@ TEST_CASE("transports handler proxies authenticated companion response") {
             nlohmann::json{{"status", "created"}, {"tag", "native_two"}}.dump(),
             "application/json");
     });
+    std::vector<nlohmann::json> geo_requests;
+    companion.Post("/v1/config/transports/geo", [&](const httplib::Request& request,
+                                                 httplib::Response& response) {
+        if (request.get_header_value("Authorization") != "Bearer test-secret") {
+            response.status = 401;
+            return;
+        }
+        const auto body = nlohmann::json::parse(request.body);
+        geo_requests.push_back(body);
+        if (body.contains("transport")) {
+            response.status = 400;
+            response.set_content("{\"error\":\"unknown field transport\"}", "application/json");
+            return;
+        }
+        if (body.value("country", "") == "malformed") {
+            response.set_content("{\"updated\":\"not a boolean\"}", "application/json");
+            return;
+        }
+        response.set_content(nlohmann::json{
+            {"updated", body.value("tag", "") == "native_one"},
+            {"config_revision", "geo-revision"},
+        }.dump(), "application/json");
+    });
     const int companion_port = companion.bind_to_any_port("127.0.0.1");
     REQUIRE(companion_port > 0);
     {
@@ -386,6 +411,22 @@ TEST_CASE("transports handler proxies authenticated companion response") {
         }.dump(),
         "application/json");
 
+    const nlohmann::json geo_update{
+        {"tag", "native_one"}, {"expected_interface", "nwg1"},
+        {"country_code", "DE"}, {"country", "Germany"},
+    };
+    const auto geo_response = client.Post("/api/transports/geo", geo_update.dump(), "application/json");
+    auto obsolete_geo = geo_update;
+    obsolete_geo["tag"] = "deleted_transport";
+    const auto obsolete_geo_response = client.Post("/api/transports/geo", obsolete_geo.dump(), "application/json");
+    auto full_geo = geo_update;
+    full_geo["transport"] = {{"display_name", "stale alias"}};
+    const auto full_geo_response = client.Post("/api/transports/geo", full_geo.dump(), "application/json");
+    auto malformed_geo = geo_update;
+    malformed_geo["country"] = "malformed";
+    const auto malformed_geo_response = client.Post("/api/transports/geo", malformed_geo.dump(), "application/json");
+    const auto invalid_geo_response = client.Post("/api/transports/geo", "[]", "application/json");
+
     server.stop();
     companion.stop();
     companion_thread.join();
@@ -422,6 +463,174 @@ TEST_CASE("transports handler proxies authenticated companion response") {
     CHECK(nlohmann::json::parse(create_response->body)["status"] == "created");
     REQUIRE(invalid_alias_response != nullptr);
     CHECK(invalid_alias_response->status == 400);
+    REQUIRE(geo_response != nullptr);
+    CHECK(geo_response->status == 200);
+    CHECK(nlohmann::json::parse(geo_response->body)["updated"] == true);
+    REQUIRE(obsolete_geo_response != nullptr);
+    CHECK(obsolete_geo_response->status == 200);
+    CHECK(nlohmann::json::parse(obsolete_geo_response->body)["updated"] == false);
+    REQUIRE(full_geo_response != nullptr);
+    CHECK(full_geo_response->status == 400);
+    REQUIRE(malformed_geo_response != nullptr);
+    CHECK(malformed_geo_response->status == 502);
+    REQUIRE(invalid_geo_response != nullptr);
+    CHECK(invalid_geo_response->status == 400);
+    REQUIRE(geo_requests.size() == 4U);
+    CHECK(geo_requests.front() == geo_update);
+}
+
+TEST_CASE("linked transport delete keeps unrelated draft and detaches subscription only on success") {
+    bool reject_delete = false;
+    bool reject_apply = false;
+    SUBCASE("successful delete") {}
+    SUBCASE("manager revision conflict leaves both configurations intact") { reject_delete = true; }
+    SUBCASE("failed core apply restores transport and original draft") { reject_apply = true; }
+    const auto directory = std::filesystem::temp_directory_path() /
+        ("keen-pbr-linked-delete-" + std::to_string(::getpid()));
+    std::filesystem::remove_all(directory);
+    std::filesystem::create_directories(directory);
+    const auto config_path = directory / "config.json";
+    const auto transports_path = directory / "transports.json";
+    auto active_json = nlohmann::json::parse(valid_transport_core_config("127.0.0.1:12121"));
+    active_json["outbounds"].push_back({{"type", "interface"}, {"tag", "route_alias"},
+                                      {"interface", "tun-vpn"}, {"display_name", "VPN"}});
+    active_json["outbounds"].push_back({{"type", "interface"}, {"tag", "other"},
+                                      {"interface", "tun-other"}, {"display_name", "Original"}});
+    active_json["route"]["rules"].push_back({{"outbound", "route_alias"}, {"src_addr", "192.0.2.1"}});
+    const auto original_config = active_json.dump(2) + "\n";
+    write_transport_test_text(config_path, original_config);
+    ConfigStore config_store(parse_config(original_config));
+    auto draft_json = active_json;
+    draft_json["outbounds"][2]["display_name"] = "Unrelated draft name";
+    const auto original_draft = draft_json.dump(2) + "\n";
+    config_store.stage_config(parse_config(original_draft), original_draft);
+    const auto original_snapshot = config_store.staged_cas_snapshot();
+    REQUIRE(original_snapshot.has_value());
+
+    std::mutex manager_mutex;
+    std::string revision;
+    int deletes = 0;
+    bool authenticated = false;
+    bool conditional = false;
+    httplib::Server manager;
+    manager.Get("/healthz", [&](const httplib::Request&, httplib::Response& response) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        response.set_content(nlohmann::json{{"status", "ok"}, {"config_revision", revision}}.dump(), "application/json");
+    });
+    manager.Get("/v1/config/transports", [&](const httplib::Request& request, httplib::Response& response) {
+        CHECK(request.get_header_value("Authorization") == "Bearer test-secret");
+        response.set_content(R"([{"tag":"vpn","type":"sing-box","interface":"tun-vpn"}])", "application/json");
+    });
+    manager.Delete("/v1/config/transports/vpn", [&](const httplib::Request& request, httplib::Response& response) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        ++deletes;
+        authenticated = request.get_header_value("Authorization") == "Bearer test-secret";
+        conditional = request.get_header_value("If-Match") == "\"" + revision + "\"";
+        if (reject_delete) {
+            response.status = 412;
+            response.set_content(R"({"error":"revision changed"})", "application/json");
+            return;
+        }
+        auto committed = nlohmann::json::parse(read_transport_test_text(transports_path));
+        committed["specs"] = nlohmann::json::array();
+        const auto bytes = committed.dump(2) + "\n";
+        write_transport_test_text(transports_path, bytes);
+        revision = Sha256::hex(bytes);
+        response.set_content(nlohmann::json{{"status", "deleted"}, {"tag", "vpn"},
+                                           {"config_revision", revision}}.dump(), "application/json");
+    });
+    const auto port = manager.bind_to_any_port("127.0.0.1");
+    REQUIRE(port > 0);
+    const auto original_transports = nlohmann::json{
+        {"listen", "127.0.0.1:" + std::to_string(port)}, {"api_key", "test-secret"},
+        {"specs", {{{"tag", "vpn"}, {"type", "sing-box"}, {"interface", "tun-vpn"}}}}}.dump(2) + "\n";
+    write_transport_test_text(transports_path, original_transports);
+    revision = Sha256::hex(original_transports);
+    std::thread thread([&] { manager.listen_after_bind(); });
+    struct StopManager {
+        httplib::Server& server;
+        std::thread& thread;
+        ~StopManager() { server.stop(); thread.join(); }
+    } stop_manager{manager, thread};
+    while (!manager.is_running()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+    SubscriptionStore subscriptions((directory / "subscriptions.json").string());
+    const auto source = subscriptions.save("https://example.invalid/sub", "Plan", {}, {"vpn", "other"});
+    SseBroadcaster broadcaster;
+    auto context = make_transports_test_context(broadcaster, config_path.string());
+    context.get_active_config_fn = [&] { return config_store.active_config(); };
+    context.get_visible_config_fn = [&] { return config_store.visible_config(); };
+    context.config_is_draft_fn = [&] { return config_store.config_is_draft(); };
+    context.get_staged_config_cas_snapshot_fn = [&] { return config_store.staged_cas_snapshot(); };
+    context.validate_candidate_config_fn = [](const Config& candidate) { validate_config(candidate); };
+    RuntimeMutationAdmission admission;
+    context.acquire_runtime_mutation_fn = [&](std::string label, bool, bool) {
+        auto lease = admission.try_acquire(std::move(label));
+        REQUIRE(lease.has_value());
+        return std::move(*lease);
+    };
+    context.validate_runtime_mutation_lease_fn = [&](const auto& lease) { return admission.owns(lease); };
+    context.try_acquire_runtime_mutation_handoff_gate_fn = [&](const auto& lease) {
+        return admission.try_acquire_handoff_gate(lease);
+    };
+    context.enqueue_apply_validated_config_with_lease_return_fn = [](Config, std::string, auto&) {
+        FAIL("a scoped delete with a draft must use the draft-preserving apply callback");
+        return ConfigApplyResult{};
+    };
+    int applies = 0;
+    context.enqueue_apply_validated_config_with_draft_rebase_fn =
+        [&](Config candidate, std::string, ConfigDraftRebase rebase, auto& lease) {
+            ++applies;
+            CHECK(admission.owns(lease));
+            CHECK(candidate.outbounds->size() == 2);
+            CHECK(candidate.outbounds->back().display_name == std::optional<std::string>("Original"));
+            if (reject_apply) return ConfigApplyResult{false, true, std::nullopt, "injected apply failure"};
+            const auto prepared = ConfigStore::prepare_active_commit(config_store.pin_active_snapshot(),
+                ConfigStore::prepare_active_snapshot(candidate, {}), std::move(rebase));
+            CHECK(config_store.commit_prepared_active(prepared, []() noexcept {}) ==
+                  PreparedActiveConfigCommitResult::committed);
+            return ConfigApplyResult{true, false, std::nullopt, {}};
+        };
+    int restarts = 0;
+    context.restart_restore_service_fn = [&](const std::string& path) {
+        CHECK(path == "/opt/etc/init.d/S79transport-manager");
+        ++restarts;
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        revision = Sha256::hex(read_transport_test_text(transports_path));
+        return 0;
+    };
+    ConfigSaveTestOptions options;
+    options.recovery_state_root = directory / "recovery";
+    const auto run = [&] {
+        return commit_prepared_config_for_test(context, "transport-linked-delete", [&] {
+            return prepare_linked_transport_delete(context, "vpn");
+        }, write_transport_test_text, options);
+    };
+    if (reject_delete || reject_apply) {
+        CHECK_THROWS_AS(run(), ApiError);
+        CHECK(read_transport_test_text(config_path) == original_config);
+        CHECK(read_transport_test_text(transports_path) == original_transports);
+        CHECK(config_store.staged_cas_snapshot()->serialized == original_draft);
+        CHECK(config_store.staged_cas_snapshot()->base_revision == original_snapshot->base_revision);
+        CHECK(subscriptions.find(source.at("id")).at("transport_tags").size() == 2);
+    } else {
+        const auto result = nlohmann::json::parse(run());
+        CHECK(result.at("status") == "deleted");
+        CHECK(result.at("applied") == true);
+        CHECK(config_store.active_config().route->rules->empty());
+        const auto draft = config_store.staged_cas_snapshot();
+        REQUIRE(draft.has_value());
+        CHECK(draft->config.outbounds->size() == 2);
+        CHECK(draft->config.outbounds->back().display_name == std::optional<std::string>("Unrelated draft name"));
+        CHECK(draft->base_revision == draft->active_revision);
+        CHECK(subscriptions.find(source.at("id")).at("transport_tags") == nlohmann::json::array({"other"}));
+    }
+    CHECK(deletes == 1);
+    CHECK(authenticated);
+    CHECK(conditional);
+    CHECK(applies == (reject_delete ? 0 : 1));
+    CHECK(restarts == (reject_apply ? 1 : 0));
+    CHECK(admission.try_acquire("after-delete").has_value());
 }
 
 TEST_CASE("external lifecycle actions wait behind the sing-box install fence") {
@@ -923,8 +1132,15 @@ TEST_CASE(
     CHECK(invalid->status == 400);
     REQUIRE(draft_conflict != nullptr);
     CHECK(draft_conflict->status == 409);
+    const auto draft_body = nlohmann::json::parse(draft_conflict->body);
+    CHECK(draft_body.at("code") == "draft_pending");
+    CHECK(draft_body.at("error") ==
+          "Save or discard the current configuration draft before "
+          "creating a linked transport");
     REQUIRE(ownership_conflict != nullptr);
     CHECK(ownership_conflict->status == 409);
+    CHECK(nlohmann::json::parse(ownership_conflict->body)
+              .value("code", std::string{}) != "busy");
     CHECK(maintenance_acquisitions == 2);
     CHECK(save_begins == 2);
     CHECK(save_finishes == 2);

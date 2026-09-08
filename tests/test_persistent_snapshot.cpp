@@ -3,6 +3,7 @@
 #include "../src/backup/persistent_snapshot.hpp"
 #include "../src/config/config_writer.hpp"
 #include "../src/crypto/sha256.hpp"
+#include "../src/util/base64.hpp"
 
 #include <algorithm>
 #include <filesystem>
@@ -228,6 +229,146 @@ TEST_CASE(
     CHECK(
         operation.at("entries").front().at("target") ==
         "transports");
+}
+
+TEST_CASE(
+    "persistent subscriptions use the transports scope and derived or explicit path") {
+    PersistentSnapshotTempDir temporary;
+    auto layout = temporary_layout(temporary.path);
+    const auto derived = layout.config.parent_path() / "subscriptions.json";
+    CHECK(layout.subscriptions.empty());
+    CHECK(backup::classify_persistent_target("subscriptions") ==
+          backup::PersistentTargetKind::subscriptions);
+    CHECK(std::string(backup::persistent_scope_for_kind(
+              backup::PersistentTargetKind::subscriptions)) == "transports");
+    CHECK(backup::resolve_persistent_target(layout, "subscriptions").path == derived);
+    CHECK(backup::logical_target_for_path(layout, derived) == "subscriptions");
+    layout.subscriptions = temporary.path / "custom" / "sources.json";
+    CHECK(backup::resolve_persistent_target(layout, "subscriptions").path ==
+          layout.subscriptions);
+    CHECK(backup::logical_target_for_path(layout, layout.subscriptions) == "subscriptions");
+}
+
+TEST_CASE(
+    "persistent full snapshot round trips subscriptions bytes and permissions") {
+    PersistentSnapshotTempDir temporary;
+    const auto layout = temporary_layout(temporary.path);
+    const auto subscriptions = layout.config.parent_path() / "subscriptions.json";
+    const std::string original =
+        R"([{"id":"source","url":"https://provider.example/subscription","_bindings":[]}])";
+    write_binary(layout.config, valid_config_json());
+    write_binary(layout.transports, "{}\n");
+    write_binary(subscriptions, original);
+    REQUIRE(::chmod(subscriptions.c_str(), 0600) == 0);
+    const auto snapshot = backup::make_full_snapshot(layout);
+    const auto parsed = backup::parse_persistent_snapshot(snapshot);
+    REQUIRE(parsed.entries.size() == 3U);
+    CHECK(parsed.scopes.count("transports") == 1U);
+    write_binary(subscriptions, "[]\n");
+    REQUIRE(::chmod(subscriptions.c_str(), 0644) == 0);
+    const auto mutations = backup::prepare_persistent_restore(layout, snapshot);
+    const auto source = std::find_if(mutations.begin(), mutations.end(),
+        [](const auto& mutation) { return mutation.target == "subscriptions"; });
+    REQUIRE(source != mutations.end());
+    CHECK(source->replacement.max_content_bytes == backup::kMaxSubscriptionFileBytes);
+    backup::FileMutationTransaction transaction(mutations);
+    transaction.apply();
+    CHECK(read_binary(subscriptions) == original);
+    CHECK(mode_of(subscriptions) == 0600);
+    CHECK(transaction.rollback().empty());
+    CHECK(read_binary(subscriptions) == "[]\n");
+    CHECK(mode_of(subscriptions) == 0644);
+}
+
+TEST_CASE(
+    "persistent full snapshots remove subscriptions only with an explicit tombstone") {
+    PersistentSnapshotTempDir temporary;
+    const auto layout = temporary_layout(temporary.path);
+    const auto subscriptions = layout.config.parent_path() / "subscriptions.json";
+    write_binary(layout.config, valid_config_json());
+    write_binary(layout.transports, "{}\n");
+    const auto snapshot = backup::make_full_snapshot(layout);
+    write_binary(subscriptions, "[]\n");
+    SUBCASE("new full snapshot records that subscriptions did not exist") {
+        const auto mutations = backup::prepare_persistent_restore(layout, snapshot);
+        const auto source = std::find_if(mutations.begin(), mutations.end(),
+            [](const auto& mutation) { return mutation.target == "subscriptions"; });
+        REQUIRE(source != mutations.end());
+        CHECK(source->replacement.remove);
+        backup::FileMutationTransaction transaction(mutations);
+        transaction.apply();
+        CHECK_FALSE(fs::exists(subscriptions));
+        CHECK(transaction.rollback().empty());
+        CHECK(read_binary(subscriptions) == "[]\n");
+    }
+    SUBCASE("old transports scope without subscriptions leaves current file alone") {
+        const auto legacy = backup::make_persistent_snapshot({
+            {"config", backup::capture_file(layout.config, std::nullopt,
+                                           backup::kMaxSnapshotBytes)},
+            {"transports", backup::capture_file(layout.transports, std::nullopt,
+                                               backup::kMaxSnapshotBytes)},
+        }, {"config", "transports"});
+        const auto mutations = backup::prepare_persistent_restore(layout, legacy);
+        CHECK(std::none_of(mutations.begin(), mutations.end(),
+            [](const auto& mutation) { return mutation.target == "subscriptions"; }));
+        backup::FileMutationTransaction transaction(mutations);
+        transaction.apply();
+        CHECK(read_binary(subscriptions) == "[]\n");
+    }
+}
+
+TEST_CASE(
+    "persistent subscriptions operation snapshot restores exact before state") {
+    PersistentSnapshotTempDir temporary;
+    const auto layout = temporary_layout(temporary.path);
+    const auto subscriptions = layout.config.parent_path() / "subscriptions.json";
+    write_binary(subscriptions, "[]\n");
+    REQUIRE(::chmod(subscriptions.c_str(), 0600) == 0);
+    backup::FileReplacement replacement;
+    replacement.path = subscriptions;
+    replacement.content = "[{\"id\":\"changed\"}]\n";
+    replacement.max_content_bytes = backup::kMaxSubscriptionFileBytes;
+    const auto mutations = backup::snapshot_replacements(layout, {replacement});
+    const auto snapshot = backup::make_operation_snapshot(mutations);
+    CHECK(snapshot.at("scopes").empty());
+    REQUIRE(snapshot.at("entries").size() == 1U);
+    CHECK(snapshot.at("entries").front().at("target") == "subscriptions");
+    backup::FileMutationTransaction forward(mutations);
+    forward.apply();
+    const auto rollback = backup::prepare_persistent_restore(layout, snapshot);
+    backup::FileMutationTransaction restore(rollback);
+    restore.apply();
+    CHECK(read_binary(subscriptions) == "[]\n");
+    CHECK(mode_of(subscriptions) == 0600);
+}
+
+TEST_CASE(
+    "persistent subscriptions enforce the four MiB file limit in both codecs") {
+    PersistentSnapshotTempDir temporary;
+    const auto layout = temporary_layout(temporary.path);
+    const auto subscriptions = layout.config.parent_path() / "subscriptions.json";
+    backup::FileSnapshot source;
+    source.path = subscriptions;
+    source.existed = true;
+    source.content = std::string(backup::kMaxSubscriptionFileBytes, 'x');
+    auto snapshot = backup::make_persistent_snapshot({{"subscriptions", source}});
+    CHECK(backup::parse_persistent_snapshot(snapshot).entries.front().content.size() ==
+          backup::kMaxSubscriptionFileBytes);
+    source.content.push_back('x');
+    CHECK_THROWS_AS(backup::make_persistent_snapshot({{"subscriptions", source}}),
+                    backup::PersistentSnapshotError);
+    auto& entry = snapshot["entries"][0];
+    entry["data"] = base64_encode(source.content);
+    entry["size"] = source.content.size();
+    entry["sha256"] = Sha256::hex(source.content);
+    snapshot.erase("integrity");
+    const auto digest = Sha256::hex(snapshot.dump());
+    snapshot["integrity"] = {{"algorithm", "sha256"}, {"digest", digest}};
+    CHECK_THROWS_AS(backup::parse_persistent_snapshot(snapshot),
+                    backup::PersistentSnapshotError);
+    write_binary(layout.config, valid_config_json());
+    write_binary(subscriptions, source.content);
+    CHECK_THROWS_AS(backup::make_full_snapshot(layout), backup::PersistentSnapshotError);
 }
 
 TEST_CASE(

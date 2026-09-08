@@ -170,6 +170,8 @@ void IptablesFirewall::prepare_apply(FirewallApplyMode mode) {
     router_origin_snat_requested_ = false;
     snat_interfaces_.clear();
     source_egress_snat_selectors_.clear();
+    pending_native_forward_selectors_.clear();
+    native_forward_requested_ = false;
 
     prepared_mode_ = mode;
     if (mode == FirewallApplyMode::RulesOnly) {
@@ -370,7 +372,9 @@ void IptablesFirewall::append_rules_for_family(bool ipv6,
                                                PendingRule::Action action,
                                                uint32_t fwmark,
                                                const FirewallRuleCriteria& criteria,
-                                               bool output_scope) {
+                                                bool output_scope) {
+    if (criteria.family != AF_UNSPEC &&
+        criteria.family != (ipv6 ? AF_INET6 : AF_INET)) return;
     const std::vector<std::string> any_addr{""};
     const auto filtered_src_addrs = criteria.src_addr.empty()
         ? any_addr
@@ -540,6 +544,25 @@ void IptablesFirewall::create_source_egress_snat_rules(
     if (!source_egress_snat_selectors_.empty()) {
         router_origin_snat_requested_ = true;
     }
+}
+
+void IptablesFirewall::create_native_vpn_forward_rules(
+    const std::vector<FirewallNativeForwardSelector>& selectors) {
+    native_forward_requested_ = true;
+    for (const auto& selector : selectors) {
+        if (selector.ingress_interface.empty() || selector.source_cidr.empty() ||
+            selector.egress_interface.empty() || selector.fwmark == 0U ||
+            fwmark_mask() == 0U || (selector.fwmark & ~fwmark_mask()) != 0U) {
+            continue;
+        }
+        pending_native_forward_selectors_.push_back(selector);
+    }
+    std::sort(pending_native_forward_selectors_.begin(),
+              pending_native_forward_selectors_.end());
+    pending_native_forward_selectors_.erase(
+        std::unique(pending_native_forward_selectors_.begin(),
+                    pending_native_forward_selectors_.end()),
+        pending_native_forward_selectors_.end());
 }
 
 void IptablesFirewall::create_dns_redirect_rules() {
@@ -5840,6 +5863,94 @@ std::string IptablesFirewall::build_exact_tcp_reset_script(
     return script;
 }
 
+std::string IptablesFirewall::build_native_forward_script(
+    bool ipv6,
+    bool chain_exists,
+    std::size_t hook_count,
+    const std::vector<FirewallNativeForwardSelector>& selectors,
+    uint32_t fwmark_mask) {
+    std::vector<FirewallNativeForwardSelector> family_selectors;
+    for (const auto& selector : selectors) {
+        if (is_ipv6_addr(selector.source_cidr) == ipv6) {
+            family_selectors.push_back(selector);
+        }
+    }
+    if (!chain_exists && hook_count == 0U && family_selectors.empty()) {
+        return {};
+    }
+
+    std::string script = "*filter\n";
+    if (!chain_exists && !family_selectors.empty()) {
+        script += keen_pbr3::format(
+            ":{} - [0:0]\n", NATIVE_FORWARD_CHAIN_NAME);
+    }
+    if (chain_exists) {
+        script += keen_pbr3::format("-F {}\n", NATIVE_FORWARD_CHAIN_NAME);
+    }
+    for (const auto& selector : family_selectors) {
+        script += keen_pbr3::format(
+            "-A {} -i {} -s {} -o {} -m mark --mark {:#x}/{:#x} -j ACCEPT\n",
+            NATIVE_FORWARD_CHAIN_NAME, selector.ingress_interface,
+            selector.source_cidr, selector.egress_interface,
+            selector.fwmark, fwmark_mask);
+    }
+    for (std::size_t index = 0U; index < hook_count; ++index) {
+        script += keen_pbr3::format(
+            "-D FORWARD -j {}\n", NATIVE_FORWARD_CHAIN_NAME);
+    }
+    if (family_selectors.empty()) {
+        if (chain_exists) {
+            script += keen_pbr3::format("-X {}\n", NATIVE_FORWARD_CHAIN_NAME);
+        }
+    } else {
+        // Complete firmware's missing OpenConnect-to-policy-egress grants.
+        // Append deliberately: explicit firmware ACLs, Meta UDP rejection and
+        // an active exact TCP reset must still take precedence.
+        script += keen_pbr3::format(
+            "-A FORWARD -j {}\n", NATIVE_FORWARD_CHAIN_NAME);
+    }
+    script += "COMMIT\n";
+    return script;
+}
+
+void IptablesFirewall::reconcile_native_forward_rules(
+    bool ipv6,
+    const std::vector<FirewallNativeForwardSelector>& selectors) {
+    const bool expected = std::any_of(
+        selectors.begin(), selectors.end(), [ipv6](const auto& selector) {
+            return is_ipv6_addr(selector.source_cidr) == ipv6;
+        });
+    bool& created = ipv6 ? native_forward_v6_created_ : native_forward_v4_created_;
+    const char* command = ipv6 ? "ip6tables" : "iptables";
+    const std::vector<std::string> inspect_args{command, "-t", "filter", "-S"};
+    const auto before = run_iptables_control(inspect_args);
+    if (!expected && !created &&
+        (command_reports_table_unavailable(before) ||
+         (ipv6 && before.exit_code == 127 && !before.timed_out))) {
+        return;
+    }
+    if (classify_iptables_command(before) != IptablesCommandOutcome::Success) {
+        record_iptables_control_failure(inspect_args, before);
+        throw TransientFirewallError(
+            "could not inspect OpenConnect policy forwarding rules");
+    }
+    const bool chain_exists =
+        chain_declared(before.stdout_output, NATIVE_FORWARD_CHAIN_NAME);
+    const auto script = build_native_forward_script(
+        ipv6, chain_exists,
+        count_exact_jump(before.stdout_output, "FORWARD", NATIVE_FORWARD_CHAIN_NAME),
+        selectors, fwmark_mask());
+    // Retain observed ownership if a later restore fails, including leftovers
+    // from the previous daemon process. The restore changes only our chain.
+    created = created || chain_exists || expected;
+    if (!script.empty()) {
+        pipe_to_cmd(
+            {ipv6 ? "ip6tables-restore" : "iptables-restore", "--noflush", "--counters"},
+            script);
+    }
+    created = expected;
+}
+
 void IptablesFirewall::stage_forward_reject_generation(
     bool ipv6,
     FirewallSetGeneration generation) const {
@@ -6420,8 +6531,11 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
     // `create -exist` rejects incompatible existing set schemas. Detect a
     // dnsmasq-owned mismatch before cleanup or inactive-slot staging mutates
     // any live firewall state.
-    if (mode != FirewallApplyMode::Destructive ||
-        !clear_dynamic_sets_on_apply()) {
+    // RulesOnly already inspected every reused set, including dynamic ones.
+    // A separate PreserveSets fallback still gets its own fresh inventory.
+    if (mode != FirewallApplyMode::RulesOnly &&
+        (mode != FirewallApplyMode::Destructive ||
+         !clear_dynamic_sets_on_apply())) {
         preflight_dynamic_set_schemas(effective_ipv6);
     }
 
@@ -6543,6 +6657,16 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
     // the replacement first and only then remove the active NAT generation.
     apply_nat_rules(effective_ipv6, mode, effective_prefilter);
 
+    if (native_forward_requested_ || native_forward_v4_created_) {
+        reconcile_native_forward_rules(false, pending_native_forward_selectors_);
+    }
+    if (native_forward_v6_created_ ||
+        (native_forward_requested_ && ipv6_backend_available())) {
+        reconcile_native_forward_rules(
+            true, effective_ipv6 ? pending_native_forward_selectors_
+                                 : std::vector<FirewallNativeForwardSelector>{});
+    }
+
     // Phase 4: publish the staged Meta UDP/443 policy only after mangle and
     // NAT have converged. Dispatcher replacement and first-hook placement are
     // one atomic filter transaction, so a restore failure leaves the previous
@@ -6625,6 +6749,8 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
     pending_elements_.clear();
     pending_rules_.clear();
     pending_forward_udp_rejects_.clear();
+    pending_native_forward_selectors_.clear();
+    native_forward_requested_ = false;
 }
 
 void IptablesFirewall::cleanup_rules_impl(bool sweep_live_state) {
@@ -6720,6 +6846,14 @@ void IptablesFirewall::cleanup_rules_impl(bool sweep_live_state) {
                 "iptables cleanup could not prove the exact TCP reset "
                 "chain absent; retaining ownership for retry");
         }
+    }
+
+    if (native_forward_v4_created_ || sweep_live_state) {
+        reconcile_native_forward_rules(false, {});
+    }
+    if (native_forward_v6_created_ ||
+        (sweep_live_state && ipv6_backend_available())) {
+        reconcile_native_forward_rules(true, {});
     }
 
     if (forward_reject_v4_created_ || sweep_live_state) {
@@ -6922,30 +7056,18 @@ bool IptablesFirewall::is_dynamic_set_name(const std::string& set_name) {
            set_name.rfind("kpbr6d_", 0) == 0;
 }
 
-std::string IptablesFirewall::build_managed_set_teardown_script(
-    const std::string& ipset_save_output,
-    const bool preserve_dynamic_sets) {
-    std::istringstream input(ipset_save_output);
-    std::string verb;
-    std::string name;
-    std::string rest;
+std::string IptablesFirewall::build_set_teardown_script(
+    const std::vector<std::string>& names) {
     std::string script;
-    while (input >> verb >> name) {
-        std::getline(input, rest);
-        if (verb != "create") {
-            continue;
-        }
-        const bool managed =
-            name.rfind("kpbr4_", 0) == 0 || name.rfind("kpbr6_", 0) == 0 ||
-            name.rfind("kpbr4s_", 0) == 0 || name.rfind("kpbr6s_", 0) == 0 ||
-            name.rfind("kpbr4S_", 0) == 0 || name.rfind("kpbr6S_", 0) == 0 ||
-            name.rfind("kpbr4d_", 0) == 0 || name.rfind("kpbr6d_", 0) == 0 ||
-            name.rfind("kpbr4m_", 0) == 0 || name.rfind("kpbr6m_", 0) == 0;
-        if (!managed) {
-            continue;
-        }
-        if (preserve_dynamic_sets && is_dynamic_set_name(name)) {
-            continue;
+    for (const auto& name : names) {
+        // Do not reinterpret an argv argument as several restore tokens.
+        if (name.empty() || !std::all_of(name.begin(), name.end(), [](char ch) {
+                return (ch >= 'a' && ch <= 'z') ||
+                       (ch >= 'A' && ch <= 'Z') ||
+                       (ch >= '0' && ch <= '9') ||
+                       ch == '_' || ch == '-' || ch == '.' || ch == ':';
+            })) {
+            return {};
         }
         // Flush before destroy for the same reason the per-set path does it:
         // a set the kernel still holds references to refuses to be destroyed,
@@ -6956,20 +7078,22 @@ std::string IptablesFirewall::build_managed_set_teardown_script(
     return script;
 }
 
-void IptablesFirewall::cleanup_saved_sets(bool preserve_dynamic_sets) {
-    const auto result = safe_exec_capture({"ipset", "save"}, /*suppress_stderr=*/true);
-    if (result.exit_code != 0) {
+void IptablesFirewall::teardown_ipsets(
+    const std::vector<std::string>& names, bool strict_cleanup) {
+    if (names.empty()) {
         return;
     }
-
-    const auto script =
-        build_managed_set_teardown_script(result.stdout_output,
-                                          preserve_dynamic_sets);
-    if (script.empty()) {
-        return;
-    }
-    if (safe_exec_pipe_stdin({"ipset", "restore", "-exist"}, script, nullptr,
-                             SafeExecFailureLog::Suppressed) == 0) {
+    // Keep the existing time budgets: ordinary apply uses the configured
+    // command timeout; strict STOP cleanup has its shorter per-command bound.
+    const auto timeouts = strict_cleanup
+        ? SafeExecTimeouts{
+              std::chrono::seconds{4}, std::chrono::milliseconds{500}}
+        : safe_exec_timeouts();
+    const auto script = build_set_teardown_script(names);
+    if (!script.empty() &&
+        safe_exec_pipe_stdin({"ipset", "restore", "-exist"}, script, nullptr,
+                             SafeExecFailureLog::DiagnosticOnly, nullptr,
+                             timeouts) == 0) {
         return;
     }
 
@@ -6978,30 +7102,61 @@ void IptablesFirewall::cleanup_saved_sets(bool preserve_dynamic_sets) {
     // cannot be destroyed yet. The old path issued each command on its own and
     // ignored every failure, so falling back to it preserves exactly that
     // tolerance - at the cost of one wasted exec on the uncommon path.
-    std::istringstream input(result.stdout_output);
-    std::string verb;
-    std::string name;
-    std::string rest;
-    while (input >> verb >> name) {
-        std::getline(input, rest);
-        if (verb != "create") {
-            continue;
-        }
-        const bool managed =
-            name.rfind("kpbr4_", 0) == 0 || name.rfind("kpbr6_", 0) == 0 ||
-            name.rfind("kpbr4s_", 0) == 0 || name.rfind("kpbr6s_", 0) == 0 ||
-            name.rfind("kpbr4S_", 0) == 0 || name.rfind("kpbr6S_", 0) == 0 ||
-            name.rfind("kpbr4d_", 0) == 0 || name.rfind("kpbr6d_", 0) == 0 ||
-            name.rfind("kpbr4m_", 0) == 0 || name.rfind("kpbr6m_", 0) == 0;
-        if (!managed) {
-            continue;
-        }
-        if (preserve_dynamic_sets && is_dynamic_set_name(name)) {
-            continue;
-        }
-        safe_exec({"ipset", "flush", name}, /*suppress_output=*/true);
-        safe_exec({"ipset", "destroy", name}, /*suppress_output=*/true);
+    for (const auto& name : names) {
+        (void)safe_exec_with_timeouts(
+            {"ipset", "flush", name}, true, timeouts, {},
+            SafeExecFailureLog::DiagnosticOnly);
+        (void)safe_exec_with_timeouts(
+            {"ipset", "destroy", name}, true, timeouts, {},
+            SafeExecFailureLog::DiagnosticOnly);
     }
+}
+
+void IptablesFirewall::cleanup_saved_sets(bool preserve_dynamic_sets,
+                                         bool sweep_live_state) {
+    std::set<std::string> names;
+    for (const auto& [name, _] : created_sets_) {
+        if (!preserve_dynamic_sets || !is_dynamic_set_name(name)) {
+            names.insert(name);
+        }
+    }
+    if (sweep_live_state) {
+        // Cleanup needs names, not every address in potentially huge sets.
+        const auto live = safe_exec_capture(
+            {"ipset", "list", "-name"}, true, 256U * 1024U, false, true,
+            SafeExecFailureLog::DiagnosticOnly);
+        if (live.exit_code == 0 && !live.truncated && !live.timed_out &&
+            !live.termination_uncertain) {
+            // create_ipset() also tracks staged names that may not exist yet.
+            // Do not let a flush of an absent candidate abort the whole batch.
+            std::set<std::string> existing;
+            std::istringstream inventory(live.stdout_output);
+            std::string name;
+            while (std::getline(inventory, name)) {
+                if (!name.empty() && name.back() == '\r') {
+                    name.pop_back();
+                }
+                if (!name.empty()) {
+                    existing.insert(name);
+                }
+            }
+            for (auto it = names.begin(); it != names.end();) {
+                if (existing.count(*it) == 0) {
+                    it = names.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            for (const auto& live_name : existing) {
+                if (is_firewall_owned_ipset_name(live_name) &&
+                    (!preserve_dynamic_sets || !is_dynamic_set_name(live_name))) {
+                    names.insert(live_name);
+                }
+            }
+        }
+    }
+    // Known sets are still cleaned when live inventory could not be read.
+    teardown_ipsets(std::vector<std::string>{names.begin(), names.end()});
 }
 
 FirewallOwnedCleanupInspection
@@ -7030,24 +7185,8 @@ IptablesFirewall::cleanup_saved_sets_strict() {
             "could not inspect managed ipsets before strict cleanup",
         };
     }
-    for (const auto& name :
-         firewall_owned_ipset_names(before.stdout_output)) {
-        const SafeExecTimeouts mutation_timeouts{
-            std::chrono::seconds{4},
-            std::chrono::milliseconds{500}};
-        (void)safe_exec_with_timeouts(
-            {"ipset", "flush", name},
-            /*suppress_output=*/true,
-            mutation_timeouts,
-            {},
-            SafeExecFailureLog::DiagnosticOnly);
-        (void)safe_exec_with_timeouts(
-            {"ipset", "destroy", name},
-            /*suppress_output=*/true,
-            mutation_timeouts,
-            {},
-            SafeExecFailureLog::DiagnosticOnly);
-    }
+    teardown_ipsets(firewall_owned_ipset_names(before.stdout_output),
+                   /*strict_cleanup=*/true);
 
     const auto after = inspect_names();
     return inspect_iptables_owned_cleanup_absence(
@@ -7147,6 +7286,10 @@ void IptablesFirewall::clear_cleanup_state_after_verified_absence() {
     pending_forward_udp_rejects_.clear();
     source_egress_snat_selectors_.clear();
     chain_v4_created_ = false;
+    pending_native_forward_selectors_.clear();
+    native_forward_requested_ = false;
+    native_forward_v4_created_ = false;
+    native_forward_v6_created_ = false;
     chain_v6_created_ = false;
     forward_reject_v4_created_ = false;
     forward_reject_v6_created_ = false;
@@ -7189,23 +7332,11 @@ void IptablesFirewall::clear_cleanup_state_after_verified_absence() {
 
 void IptablesFirewall::cleanup_live_impl(bool preserve_dynamic_sets,
                                          bool sweep_live_state) {
-    auto& log = Logger::instance();
-
     cleanup_rules_impl(sweep_live_state);
     cleanup_nat_rules_impl(sweep_live_state);
 
-    // Destroy all created ipsets
-    for (const auto& [name, _] : created_sets_) {
-        if (preserve_dynamic_sets && is_dynamic_set_name(name)) {
-            continue;
-        }
-        log.verbose("iptables cleanup: destroying ipset {}", name);
-        safe_exec({"ipset", "flush", name}, /*suppress_output=*/true);
-        safe_exec({"ipset", "destroy", name}, /*suppress_output=*/true);
-    }
-    if (sweep_live_state) {
-        cleanup_saved_sets(preserve_dynamic_sets);
-    }
+    // One batch for known sets and the optional live sweep, without repeats.
+    cleanup_saved_sets(preserve_dynamic_sets, sweep_live_state);
 }
 
 void IptablesFirewall::cleanup_impl() {
@@ -7227,6 +7358,8 @@ void IptablesFirewall::cleanup_impl() {
     pending_rules_.clear();
     pending_forward_udp_rejects_.clear();
     source_egress_snat_selectors_.clear();
+    pending_native_forward_selectors_.clear();
+    native_forward_requested_ = false;
 }
 
 void IptablesFirewall::cleanup() {

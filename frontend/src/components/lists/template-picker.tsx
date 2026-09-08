@@ -3,6 +3,12 @@ import { SearchIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
 import templates from "@/data/list-templates.json"
+import {
+  getListTemplateDescription,
+  getListTemplateName,
+  matchesListTemplateSearch,
+  type ListTemplate,
+} from "@/components/lists/template-model"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -15,14 +21,7 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 
-export type ListTemplate = {
-  id: string
-  name: string
-  description: string
-  url: string
-  category: string
-  catalogPresetId?: string
-}
+export type { ListTemplate } from "@/components/lists/template-model"
 
 const CATEGORY_ORDER = [
   "ai",
@@ -51,17 +50,13 @@ export function TemplatePicker({
   open: boolean
   onOpenChange: (open: boolean) => void
 }) {
-  const { t } = useTranslation()
+  const { i18n, t } = useTranslation()
+  const language = i18n.resolvedLanguage ?? i18n.language
   const [query, setQuery] = useState("")
 
   const grouped = useMemo(() => {
-    const needle = query.trim().toLowerCase()
-    const matching = (templates as ListTemplate[]).filter(
-      (template) =>
-        !needle ||
-        `${template.name} ${template.description} ${template.url}`
-          .toLowerCase()
-          .includes(needle)
+    const matching = (templates as ListTemplate[]).filter((template) =>
+      matchesListTemplateSearch(template, query, language)
     )
 
     const byCategory = new Map<string, ListTemplate[]>()
@@ -74,7 +69,7 @@ export function TemplatePicker({
     return CATEGORY_ORDER.filter((category) => byCategory.has(category)).map(
       (category) => ({ category, items: byCategory.get(category) ?? [] })
     )
-  }, [query])
+  }, [query, language])
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
@@ -121,11 +116,11 @@ export function TemplatePicker({
                   >
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-sm font-medium">
-                        {template.name}
+                        {getListTemplateName(template, language)}
                       </div>
-                      {template.description ? (
+                      {getListTemplateDescription(template, language) ? (
                         <div className="text-xs text-muted-foreground">
-                          {template.description}
+                          {getListTemplateDescription(template, language)}
                         </div>
                       ) : null}
                       {template.catalogPresetId ? (

@@ -1,4 +1,4 @@
-import { QueryClient } from "@tanstack/react-query"
+import { QueryClient, type QueryKey } from "@tanstack/react-query"
 
 import { noteRouterClock } from "@/api/router-clock"
 
@@ -6,9 +6,7 @@ import {
   getGetHealthServiceQueryKey,
   getGetRuntimeInterfacesQueryKey,
   getGetRuntimeOutboundsQueryKey,
-  type getHealthServiceResponseSuccess,
   type getRuntimeInterfacesResponseSuccess,
-  type getRuntimeOutboundsResponseSuccess,
 } from "@/api/generated/keen-api"
 import type {
   HealthResponse,
@@ -42,6 +40,23 @@ function response<T>(data: T) {
   return { data, status: 200 as const, headers: new Headers() }
 }
 
+function setAuthoritativeResponse<T>(
+  queryClient: QueryClient,
+  queryKey: QueryKey,
+  data: T
+) {
+  const previous = queryClient.getQueryState(queryKey)
+  if (previous && previous.fetchStatus !== "idle") {
+    // A first GET with no cached data is reused by refetchQueries on SSE
+    // connect. Cancel its retryer before publishing the full snapshot so a
+    // late response cannot replace it. Default revert is synchronous and
+    // leaves the query idle; setQueryData below then publishes fresh success.
+    // Partial traffic events must not cancel an inventory baseline.
+    void queryClient.cancelQueries({ exact: true, queryKey })
+  }
+  queryClient.setQueryData(queryKey, response(data))
+}
+
 export function applyStatusEvent(
   queryClient: QueryClient,
   rawData: string
@@ -54,19 +69,18 @@ export function applyStatusEvent(
   }
 
   const setService = (data: HealthResponse) =>
-    queryClient.setQueryData<getHealthServiceResponseSuccess>(
-      getGetHealthServiceQueryKey(),
-      response(data)
-    )
+    setAuthoritativeResponse(queryClient, getGetHealthServiceQueryKey(), data)
   const setOutbounds = (data: RuntimeOutboundsResponse) =>
-    queryClient.setQueryData<getRuntimeOutboundsResponseSuccess>(
+    setAuthoritativeResponse(
+      queryClient,
       getGetRuntimeOutboundsQueryKey(),
-      response(data)
+      data
     )
   const setInterfaces = (data: RuntimeInterfaceInventoryResponse) =>
-    queryClient.setQueryData<getRuntimeInterfacesResponseSuccess>(
+    setAuthoritativeResponse(
+      queryClient,
       getGetRuntimeInterfacesQueryKey(),
-      response(data)
+      data
     )
   const mergeInterfaceTraffic = (data: RuntimeInterfaceTrafficUpdate) =>
     queryClient.setQueryData<getRuntimeInterfacesResponseSuccess>(

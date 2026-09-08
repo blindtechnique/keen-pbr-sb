@@ -15,7 +15,7 @@ import {
   subscribeSingBoxInstall,
   type SingBoxInstallState,
 } from "@/api/sing-box-install-events"
-import { getApiErrorMessage } from "@/lib/api-errors"
+import { OperationErrorMessage } from "@/components/shared/operation-error-message"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -106,18 +106,24 @@ export function SingBoxInstallButton({
       void capabilityQuery.refetch()
       const refused = singBoxInstallRefusedBlockers(error.details)
       const title = t(singBoxInstallFailureTitleKey(refused.length))
-      const detail =
+      const refusedSummary =
         refused.length > 0
-          ? refused.map((blocker) => t(singBoxInstallBlockerKey(blocker)))
-          : [getApiErrorMessage(error)]
-      if (singBoxInstallMayHaveApplied(refused.length, lastOutcome)) {
-        // The daemon verifies its lease AFTER the swap, so this error can
-        // arrive on an install that in fact completed. Saying it never started
-        // would leave the operator believing their transports still run the
-        // old binary.
-        detail.push(t("transports.singBoxInstall.mayHaveApplied"))
-      }
-      toast.error(title, { description: detail.join(" ") })
+          ? refused
+              .map((blocker) => t(singBoxInstallBlockerKey(blocker)))
+              .join(" ")
+          : undefined
+      toast.error(title, {
+        description: (
+          <div className="space-y-2">
+            <OperationErrorMessage error={error} summary={refusedSummary} />
+            {singBoxInstallMayHaveApplied(refused.length, lastOutcome) ? (
+              // The daemon verifies its lease AFTER the swap. Keep this
+              // warning visible rather than suggesting it never started.
+              <p>{t("transports.singBoxInstall.mayHaveApplied")}</p>
+            ) : null}
+          </div>
+        ),
+      })
     },
   })
 
@@ -169,7 +175,7 @@ export function SingBoxInstallButton({
       // Most likely "too late", which is a fact about their router rather than
       // a failure of the click.
       toast.info(t("transports.singBoxInstall.cancelRefused"), {
-        description: getApiErrorMessage(error),
+        description: <OperationErrorMessage error={error} />,
       })
     },
   })

@@ -9,17 +9,23 @@ import { useEffect, useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 
 import { type DnsCheckStatus, useDnsCheck } from "@/hooks/use-dns-check"
+import type { ClientDnsEnforcement } from "@/api/generated/model/clientDnsEnforcement"
 import { SectionCard } from "@/components/shared/section-card"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
 import { DnsCheckModal } from "./dns-check-modal"
+import { DnsPathGuidance } from "./dns-path-guidance"
 
 export function DnsCheckWidget({
   dnsProbeEnabled,
+  dnsEnforcement,
+  configIsDraft = false,
   onStatusChange,
 }: {
-  dnsProbeEnabled: boolean
+  dnsProbeEnabled: boolean | undefined
+  dnsEnforcement?: ClientDnsEnforcement
+  configIsDraft?: boolean
   onStatusChange?: (status: DnsCheckStatus) => void
 }) {
   const { t } = useTranslation()
@@ -40,7 +46,7 @@ export function DnsCheckWidget({
   }, [dnsProbeEnabled, reset, startCheck])
 
   const isChecking = status === "checking"
-  const isDisabled = !dnsProbeEnabled
+  const isDisabled = dnsProbeEnabled === false
 
   const cardClassName = useMemo(() => {
     if (isDisabled) {
@@ -48,19 +54,8 @@ export function DnsCheckWidget({
     }
 
     switch (status) {
-      // Ни один из этих двух исходов не доказывает, что DNS сломан.
-      //
-      // `sse-fail` — поток событий не подключился, проверка вообще не
-      // запустилась, о самом DNS мы не узнали ничего.
-      //
-      // `browser-fail` — проверка прошла, но отрицательный результат у неё
-      // неотличим от совершенно нормальных вещей: адрес уже лежал в кэше
-      // браузера и нового запроса не было, или браузер ходит в свой DoH мимо
-      // роутера. Отличить это отсюда нечем.
-      //
-      // Красная карточка на дашборде читается как «у тебя сломан DNS» — и
-      // человек идёт чинить то, что работает. Доказательная проверка здесь
-      // одна — команда с компьютера, на неё и указываем.
+      // Neither absent probe evidence nor an unavailable event stream proves
+      // DNS is broken. Only a matching test query confirms this one path.
       case "browser-fail":
       case "sse-fail":
         return "border-warning/40 bg-warning/5"
@@ -89,9 +84,18 @@ export function DnsCheckWidget({
         title={t("overview.dnsCheck.card.title")}
       >
         <div className="flex h-full flex-1 flex-col space-y-4">
-          <div className="flex min-h-20 items-center rounded-lg border border-border/60 bg-background/60 px-4 py-3">
+          <div
+            aria-live="polite"
+            role="status"
+            className="flex min-h-20 items-center rounded-lg border border-border/60 bg-background/60 px-4 py-3"
+          >
             <DnsStatusSummary disabled={isDisabled} status={status} />
           </div>
+
+          <DnsPathGuidance
+            configuration={dnsEnforcement}
+            configIsDraft={configIsDraft}
+          />
 
           <div className="mt-auto grid gap-2">
             <Button
@@ -184,6 +188,13 @@ function DnsStatusSummary({
         />
       )
     case "idle":
+      return (
+        <DnsStatusMessage
+          icon={<AlertCircle className="h-5 w-5 text-muted-foreground" />}
+          text={t("overview.dnsCheck.status.ready")}
+          tone="muted"
+        />
+      )
     case "checking":
       return (
         <div className="flex w-full items-center justify-center">

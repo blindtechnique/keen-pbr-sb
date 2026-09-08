@@ -80,6 +80,39 @@ TEST_CASE("status stream reports when no live subscribers remain") {
     CHECK_FALSE(stream.has_subscribers());
 }
 
+TEST_CASE("router metadata change uses the shared stream without RCI data or snapshot work") {
+    std::size_t builds = 0;
+    StatusStream stream([&] {
+        ++builds;
+        return make_snapshot();
+    });
+    stream.publish_router_info_change();
+    CHECK(builds == 0);
+    auto first = stream.subscribe();
+    REQUIRE(first);
+    (void)pop(first);
+    auto second = stream.subscribe();
+    REQUIRE(second);
+    (void)pop(second);
+    const auto before_change = builds;
+    stream.publish_router_info_change();
+    const std::string expected =
+        "event: router_info\ndata: {\"type\":\"router_info\"}\n\n";
+    CHECK(pop(first) == expected);
+    CHECK(pop(second) == expected);
+    CHECK(builds == before_change);
+    CHECK(queued(first) == 0);
+    CHECK(queued(second) == 0);
+    stream.unsubscribe(first);
+    stream.unsubscribe(second);
+    stream.publish_router_info_change();
+    CHECK(builds == before_change);
+    auto reconnected = stream.subscribe();
+    REQUIRE(reconnected);
+    CHECK(pop(reconnected).rfind("event: snapshot\n", 0) == 0);
+    CHECK(queued(reconnected) == 0); // Change notifications are not stale snapshots.
+}
+
 TEST_CASE("status stream skips snapshot work without live subscribers") {
     auto current = make_snapshot();
     std::size_t builds = 0;

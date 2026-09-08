@@ -23,8 +23,10 @@ namespace keen_pbr3 {
 //
 // The upgrade then reports success, the operator's strategy is gone, and the
 // file holding their settings sits at nfqws2.conf-old with nothing pointing at
-// it. The roadmap's requirement is not that this must not happen - it is
-// upstream's package and its migration - but that it must not happen silently.
+// it. This observer reports the replacement without guessing at a new format.
+// The panel can preserve an owned Lua strategy in a supported configuration
+// version before starting the new engine; unsupported migrations use the
+// existing rollback path instead of silently accepting lost settings.
 enum class NfqwsConfigOutcome {
     // Byte-identical before and after. Nothing to say.
     preserved,

@@ -41,6 +41,13 @@ public:
     // opaque task snapshot on the shared status stream so a reconnecting WebUI
     // can immediately resume progress rendering without another poller.
     void publish_list_refresh(nlohmann::json state);
+    // Dismissals share the existing stream so another browser updates without
+    // an extra subscription. Revisions keep concurrent replies in order.
+    void publish_notification_state(nlohmann::json state);
+    void publish_subscription_change();
+    // Invalidate the WebUI's existing router metadata query without exposing
+    // raw RCI fields or adding another stream. Reconnects refetch independently.
+    void publish_router_info_change();
     void revoke_active_subscriptions();
     // A package operation on an external component takes a minute or more
     // inside one request, and until now said nothing until it ended. The
@@ -73,6 +80,8 @@ private:
     bool connections_initialized_ GUARDED_BY(mutex_){false};
     nlohmann::json list_refresh_ GUARDED_BY(mutex_);
     bool list_refresh_initialized_ GUARDED_BY(mutex_){false};
+    nlohmann::json notification_state_ GUARDED_BY(mutex_);
+    bool notification_state_initialized_ GUARDED_BY(mutex_){false};
     nlohmann::json component_transaction_ GUARDED_BY(mutex_);
     bool component_transaction_initialized_ GUARDED_BY(mutex_){false};
     nlohmann::json sing_box_install_ GUARDED_BY(mutex_);

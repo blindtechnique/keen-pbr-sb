@@ -104,17 +104,16 @@ ListRefreshTaskBeginResult ListRefreshTaskCoordinator::begin(
         KPBR_LOCK_GUARD(mutex_);
         if (active_) {
             result.task = active_->snapshot;
-            if (upgrade_active && mutation_lease &&
-                mutation_lease->state() ==
-                    RuntimeMutationLeaseHandoffState::Ready &&
+            if (upgrade_active &&
+                (!mutation_lease || mutation_lease->state() ==
+                    RuntimeMutationLeaseHandoffState::Ready) &&
                 !active_->mutation_lease &&
                 !active_->snapshot.cancel_requested &&
                 (active_->snapshot.status == ListRefreshTaskStatus::Queued ||
                  active_->snapshot.status == ListRefreshTaskStatus::Running)) {
-                // Upgrade the exact in-flight read-only task atomically. The
-                // worker may already have committed cache data, so the lease
-                // and force-reconcile bit must become visible together before
-                // terminalization can observe either one.
+                // Reload is an intent, not ownership of the network download.
+                // Acquire runtime admission only at publication and coalesce
+                // this request without starting another download.
                 active_->mutation_lease = std::move(mutation_lease);
                 active_->force_reconcile = true;
                 result.accepted = true;

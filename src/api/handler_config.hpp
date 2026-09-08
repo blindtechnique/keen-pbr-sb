@@ -61,6 +61,10 @@ struct PreparedConfigCommit {
     std::optional<ConfigCommitTransportEffect> transport;
     std::string success_status{"ok"};
     std::string success_message{"Config saved and applied"};
+    std::optional<ConfigDraftRebase> draft_rebase;
+    // Ancillary metadata cleanup after a committed config/runtime result.
+    // Failures are logged, never converted into rollback/quiesce.
+    std::function<void(MaintenanceLease&)> success_finalize;
 };
 
 using PrepareConfigCommit =
@@ -69,11 +73,20 @@ using PrepareConfigCommit =
 // Runs validation, exact file snapshots, the single config-save WAL, optional
 // transport-manager mutation/readiness, and core apply under one maintenance
 // lease.  This is the only cross-layer commit path used by both /api/config/save
-// and composite transport creation.
+// and composite transport creation/deletion.
 std::string commit_prepared_config(
     ApiContext& ctx,
     std::string maintenance_operation,
     PrepareConfigCommit prepare);
+
+// Reuses the composite native operation's exact outer leases. Its single
+// generation reservation also covers a possible compensating config commit.
+std::string commit_prepared_config_with_lease(
+    ApiContext& ctx,
+    MaintenanceLease& maintenance,
+    RuntimeMutationAdmission::Lease& runtime,
+    PrepareConfigCommit prepare,
+    bool reserve_generation = true);
 
 std::string serialize_config_for_persistence(
     const Config& config);
@@ -107,7 +120,10 @@ std::string commit_prepared_config_for_test(
     std::string maintenance_operation,
     PrepareConfigCommit prepare,
     ConfigFileWriterForTest write_config_file,
-    ConfigSaveTestOptions options = {});
+    ConfigSaveTestOptions options = {},
+    MaintenanceLease* borrowed_maintenance = nullptr,
+    RuntimeMutationAdmission::Lease* borrowed_runtime = nullptr,
+    bool reserve_generation = true);
 
 void register_config_handler_for_test(
     ApiServer& server,

@@ -10,6 +10,45 @@ import {
 } from "../src/lib/internal-vpn-service-policy"
 
 describe("internal VPN service policy", () => {
+  test("keeps exact service extensions through policy edits, normalization and removal", () => {
+    const original = {
+      service_id: "ndms-service:oc-server",
+      process_clients: true,
+      future_service: { value: "first" },
+    }
+    const sibling = {
+      service_id: "ndms-service:sstp-server",
+      process_clients: true,
+      future_service: { value: "second" },
+    }
+    const baseline = [original, sibling]
+    const updated = updateInternalVpnServiceOverride({
+      serviceId: "ndms-service:oc-server",
+      processClients: false,
+      overrides: baseline,
+      baselineOverrides: baseline,
+    })!
+    expect(
+      updated.find((row) => row.service_id === original.service_id)
+    ).toEqual({ ...original, process_clients: false })
+    expect(
+      updated.find((row) => row.service_id === sibling.service_id)
+    ).toEqual(sibling)
+    const reconciled = reconcileInternalVpnServiceOverrides({
+      overrides: updated,
+      baselineOverrides: baseline,
+    })!
+    expect(reconciled).toEqual(updated)
+    expect(
+      removeInternalVpnServiceOverride({
+        serviceId: original.service_id,
+        overrides: reconciled,
+        baselineOverrides: baseline,
+      })
+    ).toEqual([sibling])
+    expect(original.process_clients).toBe(true)
+  })
+
   test("builds deterministic rows for every pooled Keenetic server kind", () => {
     const options = buildInternalVpnServiceOptions({
       services: [

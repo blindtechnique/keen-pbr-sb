@@ -8,6 +8,12 @@
 import type { SubscriptionApplyResultOutcome } from './subscriptionApplyResultOutcome';
 
 export interface SubscriptionApplyResult {
+  /**
+     * Optional stable failure code assigned by the server, independent of the diagnostic error text. Non-null only for a failed entry; current codes include invalid_connection, name_in_use and no_interface_name. Clients must accept unknown future codes.
+
+     * @nullable
+     */
+  code?: string | null;
   line: number;
   /** What happened to this entry. `already_imported` means no new POST was needed: either an earlier apply of the same preview created the line, or a transport with the same link fingerprint appeared after preview. It is deliberately not `failed`: nothing went wrong and there is nothing for the operator to fix.
    */

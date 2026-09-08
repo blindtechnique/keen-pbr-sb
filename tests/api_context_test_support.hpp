@@ -88,7 +88,7 @@ inline ApiContext make_minimal_api_context(
         [] {},
         [] {},
         [] {},
-        [](std::optional<std::string>) {
+        [](const api::ListRefreshRequest&) {
             return ListRefreshOperationResult{};
         },
     };

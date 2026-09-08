@@ -114,6 +114,9 @@ public:
     // them. Lines that name no host are ignored; a host that recovered leaves
     // the queue.
     void observe(const std::vector<std::string>& log_lines);
+    // Refresh operator-owned coverage without rebuilding the queue or its
+    // evidence. Covered queued hosts leave; removed hosts need fresh log lines.
+    void update_coverage(CoverageIndex coverage);
 
     // Probes the head of the queue and returns what it found. A host is taken
     // out of the queue whatever the verdict: an answer, even an unhelpful one,
@@ -121,6 +124,9 @@ public:
     // inconclusive will come back on its own the next time nfqws2 complains
     // about it.
     TunnelScanReport run_pass(const ProbeFn& probe);
+    // Share one pass budget with existing-entry reviews without consuming
+    // candidates that did not receive a network probe.
+    TunnelScanReport run_pass(const ProbeFn& probe, std::size_t pass_budget);
 
     std::size_t queued() const noexcept;
 

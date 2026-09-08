@@ -6,7 +6,9 @@
 
 #include <cerrno>
 #include <cstring>
+#include <limits>
 #include <new>
+#include <poll.h>
 #include <sys/epoll.h>
 #include <sys/timerfd.h>
 #include <unistd.h>
@@ -55,6 +57,19 @@ timespec duration_to_timespec(std::chrono::milliseconds duration) {
     spec.tv_sec = seconds.count();
     spec.tv_nsec = std::chrono::duration_cast<std::chrono::nanoseconds>(remainder).count();
     return spec;
+}
+
+std::optional<std::uint64_t> remaining_timespec_ms(const timespec& value) {
+    if (value.tv_sec < 0 || value.tv_nsec < 0 || value.tv_nsec >= 1'000'000'000L) {
+        return std::nullopt;
+    }
+    constexpr auto ceiling = std::numeric_limits<std::uint64_t>::max();
+    const auto seconds = static_cast<std::uint64_t>(value.tv_sec);
+    if (seconds > ceiling / 1000U) return ceiling;
+    const auto whole_ms = seconds * 1000U;
+    const auto fraction_ms =
+        (static_cast<std::uint64_t>(value.tv_nsec) + 999'999U) / 1'000'000U;
+    return fraction_ms > ceiling - whole_ms ? ceiling : whole_ms + fraction_ms;
 }
 
 } // namespace
@@ -415,6 +430,50 @@ int Scheduler::last_created_fd_for_testing() const {
 size_t Scheduler::size() const {
     KPBR_LOCK_GUARD(entries_mutex_);
     return entries_.size();
+}
+
+std::vector<ScheduledTaskSnapshot> Scheduler::snapshot_next_runs(
+    const std::vector<ScheduledTaskFamily>& families) const {
+    std::vector<ScheduledTaskSnapshot> result;
+    result.reserve(families.size());
+    KPBR_LOCK_GUARD(entries_mutex_);
+    for (const auto& family : families) {
+        ScheduledTaskSnapshot snapshot;
+        snapshot.label = family.label;
+        snapshot.state = ScheduledTaskState::NotScheduled;
+        for (const auto& entry : entries_) {
+            if (std::find(family.timer_labels.begin(), family.timer_labels.end(),
+                          entry.label) == family.timer_labels.end()) {
+                continue;
+            }
+            itimerspec remaining{};
+            pollfd readiness{entry.timer_fd, POLLIN, 0};
+            if (timerfd_gettime(entry.timer_fd, &remaining) < 0 ||
+                poll(&readiness, 1, 0) < 0 ||
+                (readiness.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+                snapshot.state = ScheduledTaskState::Unknown;
+                snapshot.remaining_ms.reset();
+                break;
+            }
+            const auto delay = remaining_timespec_ms(remaining.it_value);
+            if (!delay) {
+                snapshot.state = ScheduledTaskState::Unknown;
+                snapshot.remaining_ms.reset();
+                break;
+            }
+            // A repeating timer may have both an unread expiration and a
+            // future next tick. The pending callback is the earlier run.
+            const bool pending = (readiness.revents & POLLIN) != 0;
+            if (!pending && *delay == 0) continue;
+            const auto next_ms = pending ? std::uint64_t{0} : *delay;
+            if (!snapshot.remaining_ms || next_ms < *snapshot.remaining_ms) {
+                snapshot.remaining_ms = next_ms;
+            }
+            snapshot.state = ScheduledTaskState::Scheduled;
+        }
+        result.push_back(std::move(snapshot));
+    }
+    return result;
 }
 
 } // namespace keen_pbr3

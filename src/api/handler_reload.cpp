@@ -2,6 +2,7 @@
 
 #include "handler_reload.hpp"
 #include "generated/api_types.hpp"
+#include "../util/safe_exec.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -77,7 +78,26 @@ std::string run_lifecycle(ApiContext& ctx,
 
 } // namespace
 
-void register_reload_handler(ApiServer& server, ApiContext& ctx) {
+std::string request_service_process_restart(const ServiceProcessRestartExecutor& execute) {
+    if (!execute || execute({"/opt/etc/init.d/S80keen-pbr", "restart-stack-background"}) != 0)
+        throw ApiError("Could not schedule the service restart", 500);
+    // The helper exits before its detached worker stops this HTTP server.
+    // This response acknowledges scheduling, not a completed restart.
+    return success_response("Service process restart scheduled");
+}
+
+void register_reload_handler(ApiServer& server, ApiContext& ctx,
+                             ServiceProcessRestartExecutor execute_process_restart) {
+    if (!execute_process_restart) {
+        execute_process_restart = [](const std::vector<std::string>& args) {
+            SafeExecTimeouts timeouts;
+            timeouts.timeout = std::chrono::seconds(3);
+            return safe_exec_with_timeouts(args, true, timeouts);
+        };
+    }
+    server.post("/api/service/restart-processes", [execute_process_restart]() {
+        return request_service_process_restart(execute_process_restart);
+    });
     server.post("/api/service/start", [&ctx]() -> std::string {
         return run_lifecycle(
             ctx, LifecycleOperationType::Start,

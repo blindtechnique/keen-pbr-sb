@@ -44,6 +44,9 @@ struct UrltestState {
     std::string selected_outbound;
     int scheduler_task_id{-1};
     bool probe_inflight{false};
+    // The existing probe remains single-flight while its accepted firewall
+    // selection is pending. Only that operation's terminal releases it.
+    bool selection_pending{false};
     std::uint64_t generation{0};
     // Interface-health transitions are stronger than manual/status refreshes:
     // one probe admitted after the transition must observe them. Serials let a
@@ -184,6 +187,16 @@ public:
         std::uint64_t expected_generation,
         const std::string& selected_outbound);
 
+    // Called by the controller after asynchronous handoff, while on_change
+    // still owns this exact probe. Synchronous callbacks keep their old path.
+    bool defer_selection_completion(const std::string& urltest_tag,
+                                    std::uint64_t expected_generation);
+    // Recovery/shutdown can release the probe without launching pending work;
+    // the existing recovery wake later consumes the retained health request.
+    void complete_selection(const std::string& urltest_tag,
+                            std::uint64_t expected_generation,
+                            bool resume_pending = true) noexcept;
+
     // Cancel all scheduled tasks and unregister all outbounds.
     void clear();
     // Retire every registered selector and advance to one exact immutable
@@ -239,6 +252,9 @@ private:
         UrltestState& state,
         bool controller_admitted) noexcept;
     void cancel_scheduler_task(int task_id) noexcept;
+    void dispatch_external_health_resolution(
+        const std::string& tag,
+        const ExternalHealthResolution& resolution) noexcept;
 
     // Periodic test entry point (called by the scheduler).
     // Runs tests and invokes on_change_ if the selection changes.

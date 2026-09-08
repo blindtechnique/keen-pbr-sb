@@ -1,7 +1,26 @@
 import type { Outbound } from "@/api/generated/model/outbound"
+import i18n from "@/i18n"
+
+export function isSystemDefaultOutbound(outbound: Outbound): boolean {
+  return (
+    (outbound.tag === "wan" &&
+      outbound.type === "table" &&
+      outbound.table === 254) ||
+    (outbound.tag === "block" && outbound.type === "blackhole")
+  )
+}
+
+function systemDisplayName(outbound: Outbound): string | undefined {
+  if (!isSystemDefaultOutbound(outbound)) return undefined
+  return outbound.tag === "wan"
+    ? i18n.t("common.systemOutbounds.wan", { defaultValue: outbound.tag })
+    : i18n.t("common.systemOutbounds.block", { defaultValue: outbound.tag })
+}
 
 export function getOutboundDisplayName(outbound: Outbound): string {
-  return outbound.display_name?.trim() || outbound.tag
+  return (
+    outbound.display_name?.trim() || systemDisplayName(outbound) || outbound.tag
+  )
 }
 
 export function getOutboundReferenceLabel(outbound: Outbound): string {
@@ -31,7 +50,7 @@ export function getOutboundSelectDisplayName(
     }
   }
 
-  return outbound.tag
+  return systemDisplayName(outbound) || outbound.tag
 }
 
 export function getOutboundSelectReferenceLabel(

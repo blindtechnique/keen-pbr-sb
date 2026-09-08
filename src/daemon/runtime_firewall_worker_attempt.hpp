@@ -436,13 +436,17 @@ execute_runtime_firewall_worker_attempt_with_route_preparation(
 RuntimeFirewallWorkerAttemptResult execute_runtime_firewall_worker_attempt(
     const RuntimeFirewallWorkerAttemptInput& input,
     Firewall& firewall,
-    MetaUdp443ActivationBackendServices& meta_services);
+    MetaUdp443ActivationBackendServices& meta_services,
+    const RouteFailureHealthSnapshot* failure_health = nullptr,
+    const OutboundFamilyReachabilitySnapshot* family_reachability = nullptr);
 
 RuntimeFirewallWorkerAttemptResult execute_runtime_firewall_worker_attempt(
     const RuntimeFirewallWorkerAttemptInput& input,
     Firewall& firewall,
     MetaUdp443ActivationBackendServices& meta_services,
-    ConntrackManager& conntrack_manager);
+    ConntrackManager& conntrack_manager,
+    const RouteFailureHealthSnapshot* failure_health = nullptr,
+    const OutboundFamilyReachabilitySnapshot* family_reachability = nullptr);
 
 // Production adapter. Both FastNAT observations use the same SystemMeta
 // service instance; the post-COMMIT verification remains distinct from the
@@ -451,7 +455,9 @@ RuntimeFirewallWorkerAttemptResult execute_runtime_firewall_worker_attempt(
     const RuntimeFirewallWorkerAttemptInput& input,
     Firewall& firewall,
     ConntrackManager& conntrack_manager,
-    NetlinkManager& netlink);
+    NetlinkManager& netlink,
+    const RouteFailureHealthSnapshot* failure_health = nullptr,
+    const OutboundFamilyReachabilitySnapshot* family_reachability = nullptr);
 
 // Allocate and fully initialize the mailbox-owned holder before the backend
 // callback may enter COMMIT. A normal typed result is move-constructed into

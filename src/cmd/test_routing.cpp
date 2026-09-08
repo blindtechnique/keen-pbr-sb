@@ -491,14 +491,19 @@ std::optional<std::string> query_dns_record_with_resolver(
 std::vector<std::string> resolve_domain_with_system_resolver(const Config& config,
                                                              const std::string& domain,
                                                              std::vector<std::string>& warnings,
+                                                             std::string& dns_source,
+                                                             std::optional<std::string>& dns_server,
                                                              std::optional<RoutingTestDeadline> deadline) {
     enforce_routing_test_deadline(deadline);
     std::vector<std::string> ips;
 
     const DnsConfig dns_config = config.dns.value_or(DnsConfig{});
     std::optional<DnsServerConfig> resolver;
+    dns_source = "system_resolver";
+    dns_server.reset();
     if (dns_config.system_resolver.has_value() &&
         !dns_config.system_resolver->address.empty()) {
+        dns_source = "configured_resolver";
         try {
             resolver = parse_dns_server("system_resolver",
                                         dns_config.system_resolver->address,
@@ -509,6 +514,7 @@ std::vector<std::string> resolve_domain_with_system_resolver(const Config& confi
                                                  e.what()));
             return ips;
         }
+        dns_server = resolver->address;
     }
 
     std::optional<std::string> a_error =
@@ -662,6 +668,7 @@ struct OutboundEvaluation {
     std::vector<std::string> unknown_conditions;
     std::optional<std::uint32_t> realized_fwmark;
     bool fib_lookup_applicable{true};
+    std::optional<std::size_t> rule_index;
 };
 
 OutboundEvaluation find_expected_outbound(
@@ -671,7 +678,8 @@ OutboundEvaluation find_expected_outbound(
     const std::vector<std::string>& domain_cands,
     bool inbound_is_restricted,
     const std::optional<RoutingTestDeadline>& deadline) {
-    for (const auto& rule : route_rules) {
+    for (std::size_t index = 0; index < route_rules.size(); ++index) {
+        const auto& rule = route_rules[index];
         enforce_routing_test_deadline(deadline);
         auto evaluation = evaluate_rule_from_config(
             rule, lookups, ip, domain_cands, inbound_is_restricted);
@@ -687,12 +695,14 @@ OutboundEvaluation find_expected_outbound(
                 std::move(evaluation.unknown_conditions),
             };
         }
-        return OutboundEvaluation{
+        auto result = OutboundEvaluation{
             rule.outbound,
             std::move(evaluation.list_match),
             RoutingMatchEvaluation::Matched,
             {},
         };
+        result.rule_index = index;
+        return result;
     }
     return {};
 }
@@ -853,6 +863,7 @@ RuleTargetEvaluation evaluate_rule_from_live_state(
 OutboundEvaluation find_actual_outbound(
     const std::vector<RouteRule>& route_rules,
     const std::vector<const RuleState*>& rule_states_by_index,
+    const OutboundMarkMap& outbound_marks,
     const std::vector<RuleIpDiagnostic>& rule_ip_diagnostics,
     const std::string& ip,
     bool inbound_is_restricted,
@@ -886,7 +897,10 @@ OutboundEvaluation find_actual_outbound(
             return result;
         }
         auto result = OutboundEvaluation{
-            state != nullptr ? state->outbound_tag : "(unknown)",
+            state != nullptr
+                ? (state->effective_outbound_tag.empty()
+                       ? state->outbound_tag : state->effective_outbound_tag)
+                : "(unknown)",
             std::nullopt,
             RoutingMatchEvaluation::Matched,
             {},
@@ -898,8 +912,22 @@ OutboundEvaluation find_actual_outbound(
         result.fib_lookup_applicable =
             state != nullptr && state->action_type != RuleActionType::Drop;
         if (state != nullptr && state->action_type == RuleActionType::Mark) {
-            result.realized_fwmark = state->fwmark;
+            const auto family = is_ipv4_address(ip) ? AF_INET : AF_INET6;
+            result.realized_fwmark = state->mark_for_family(family);
+            if (family == AF_INET6 && state->fwmark_ipv6.has_value()) {
+                // The published family leaf can differ from the group's IPv4
+                // selection. Report that exact marked path, not a fresh
+                // configuration-based selection that could hide live drift.
+                const auto marked = std::find_if(
+                    outbound_marks.begin(), outbound_marks.end(),
+                    [&](const auto& outbound) {
+                        return outbound.second == *result.realized_fwmark;
+                    });
+                result.outbound = marked != outbound_marks.end()
+                    ? marked->first : "(unknown)";
+            }
         }
+        if (result.outbound != "(unknown)") result.rule_index = idx;
         return result;
     }
     return {};
@@ -1025,7 +1053,8 @@ TestRoutingResult compute_test_routing(const Config& config,
     if (result.is_domain) {
         domain_cands = domain_candidates(lowercase_copy(target));
         ips = resolve_domain_with_system_resolver(
-            config, target, result.warnings, deadline);
+            config, target, result.warnings,
+            result.dns_source, result.dns_server, deadline);
         if (ips.empty() && !result.warnings.empty()) {
             result.dns_error = result.warnings.front();
         }
@@ -1035,6 +1064,7 @@ TestRoutingResult compute_test_routing(const Config& config,
     }
 
     enforce_routing_test_deadline(deadline);
+    result.fwmark_mask = fwmark_mask_value(config.fwmark.value_or(FwmarkConfig{}));
     const auto marks = allocate_outbound_marks(
         config.fwmark.value_or(FwmarkConfig{}),
         config.outbounds.value_or(std::vector<Outbound>{}));
@@ -1083,6 +1113,7 @@ TestRoutingResult compute_test_routing(const Config& config,
             inbound_is_restricted,
             deadline);
         entry.expected_outbound = expected.outbound;
+        entry.expected_rule_index = expected.rule_index;
         entry.list_match = std::move(expected.list_match);
         entry.actual_outbound = "(unknown)";
         entry.ok = false;
@@ -1121,6 +1152,7 @@ TestRoutingResult compute_test_routing(const Config& config,
             inbound_is_restricted,
             deadline);
         per_ip.entry.expected_outbound = expected.outbound;
+        per_ip.entry.expected_rule_index = expected.rule_index;
         per_ip.entry.list_match = std::move(expected.list_match);
         per_ip.entry.evaluation = expected.evaluation;
         per_ip.entry.unknown_conditions = expected.unknown_conditions;
@@ -1161,11 +1193,13 @@ TestRoutingResult compute_test_routing(const Config& config,
             auto actual = find_actual_outbound(
                 route_rules,
                 rule_states_by_index,
+                marks,
                 per_ip.rule_ip_diagnostics,
                 ip,
                 inbound_is_restricted,
                 deadline);
             per_ip.entry.actual_outbound = actual.outbound;
+            per_ip.entry.actual_rule_index = actual.rule_index;
             if (actual.evaluation ==
                 RoutingMatchEvaluation::InsufficientContext) {
                 per_ip.entry.evaluation =

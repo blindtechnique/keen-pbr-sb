@@ -2,34 +2,12 @@ import { useQuery } from "@tanstack/react-query"
 import { useTranslation } from "react-i18next"
 
 import { Skeleton } from "@/components/ui/skeleton"
-
-type RouterInfo = {
-  available?: boolean
-  model?: string
-  vendor?: string
-  hw_id?: string
-  region?: string
-  arch?: string
-  firmware_title?: string
-  firmware_release?: string
-  firmware_channel?: string
-  firmware_date?: string
-  cpu_model?: string
-  cpu_load_percent?: number
-  cpu_temperature_c?: number
-  memory_total_mb?: number
-  memory_used_mb?: number
-  memory_used_percent?: number
-  disk_total_mb?: number
-  disk_used_mb?: number
-  disk_used_percent?: number
-  uptime_seconds?: number
-  load_average?: number[]
-  internet?: boolean
-  wan_address?: string
-  clients_active?: number
-  clients_total?: number
-}
+import {
+  routerInfoView,
+  routerMetadataQueryOptions,
+  routerMetricsQueryOptions,
+  type RouterInfoView,
+} from "./router-info-model"
 
 /**
  * Hardware and firmware facts about the router itself. Everything here is
@@ -39,22 +17,15 @@ type RouterInfo = {
 export function RouterInfoPanel() {
   const { t } = useTranslation()
 
-  const query = useQuery<RouterInfo>({
-    queryKey: ["system-router"],
-    queryFn: async () => {
-      const response = await fetch("/api/system/router")
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      return response.json()
-    },
-    refetchInterval: 15_000,
-    refetchIntervalInBackground: false,
-  })
-
-  const info = query.data
+  const metadataQuery = useQuery(routerMetadataQueryOptions())
+  const metricsQuery = useQuery(routerMetricsQueryOptions())
+  const info = routerInfoView(metadataQuery.data, metricsQuery.data)
+  const isLoading =
+    !info.available && (metadataQuery.isLoading || metricsQuery.isLoading)
 
   return (
     <div>
-      {query.isLoading ? (
+      {isLoading ? (
         <div className="space-y-2">
           <Skeleton className="h-6 w-2/3" />
           <Skeleton className="h-4 w-full" />
@@ -63,13 +34,13 @@ export function RouterInfoPanel() {
         </div>
       ) : null}
 
-      {!query.isLoading && !info?.available ? (
+      {!isLoading && !info.available ? (
         <p className="text-sm text-muted-foreground">
           {t("overview.router.unavailable")}
         </p>
       ) : null}
 
-      {info?.available ? (
+      {info.available ? (
         <div className="space-y-3">
           {/* Строка в две строки текста: справа архитектура и процессор,
               имя роутера отцентрировано по вертикали относительно них
@@ -159,7 +130,7 @@ function Metric({
   )
 }
 
-function formatCpuSummary(info: RouterInfo): string {
+function formatCpuSummary(info: RouterInfoView): string {
   const parts: string[] = []
   if (typeof info.cpu_load_percent === "number") {
     parts.push(`${info.cpu_load_percent}%`)
@@ -171,7 +142,7 @@ function formatCpuSummary(info: RouterInfo): string {
 }
 
 function formatMemory(
-  info: RouterInfo,
+  info: RouterInfoView,
   t: (key: string, options?: Record<string, unknown>) => string
 ): string {
   if (typeof info.memory_total_mb !== "number") {
@@ -188,7 +159,7 @@ function formatMemory(
 }
 
 function formatDisk(
-  info: RouterInfo,
+  info: RouterInfoView,
   t: (key: string, options?: Record<string, unknown>) => string
 ): string {
   return t("overview.router.diskValueCompact", {

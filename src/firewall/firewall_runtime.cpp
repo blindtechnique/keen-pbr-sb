@@ -64,6 +64,39 @@ const Outbound* find_outbound_by_tag(const std::vector<Outbound>& outbounds,
     return nullptr;
 }
 
+// Selection-independent closure: a group's backup must be usable as soon as
+// routing selects it, not after a second firewall apply. Visit each tag once
+// so shared subgroups and malformed cycles cannot duplicate/explode the walk.
+std::vector<const Outbound*> reachable_tunnel_outbounds(
+    const std::vector<Outbound>& outbounds,
+    const Outbound& root) {
+    std::vector<const Outbound*> result;
+    std::vector<const Outbound*> pending{&root};
+    std::set<std::string> visited;
+    while (!pending.empty()) {
+        const auto* outbound = pending.back();
+        pending.pop_back();
+        if (!visited.insert(outbound->tag).second ||
+            (outbound->type != OutboundType::INTERFACE &&
+             outbound->type != OutboundType::URLTEST)) {
+            continue;
+        }
+        result.push_back(outbound);
+        if (outbound->type != OutboundType::URLTEST ||
+            !outbound->outbound_groups) {
+            continue;
+        }
+        for (const auto& group : *outbound->outbound_groups) {
+            for (const auto& tag : group.outbounds) {
+                if (const auto* child = find_outbound_by_tag(outbounds, tag)) {
+                    pending.push_back(child);
+                }
+            }
+        }
+    }
+    return result;
+}
+
 // Under RulesOnly a list's usage comes from the last committed transaction
 // rather than from reading the list. Before trusting it, the realized rule
 // state is checked to still describe this rule and list: a reuse planned from
@@ -205,6 +238,72 @@ PpeDeoffloadDesired observe_ppe_deoffload_desired(const Config& config) {
         config, observe_nfqws_ppe_runtime_contract());
 }
 
+std::vector<FirewallNativeForwardSelector>
+select_openconnect_forward_selectors(
+    const Config& config,
+    const OutboundMarkMap& outbound_marks,
+    const std::vector<InternalVpnRuntimeTarget>& internal_vpn_targets,
+    bool ipv6_enabled) {
+    if (!config.outbounds || !config.route || !config.route->rules) {
+        return {};
+    }
+    const auto& outbounds = *config.outbounds;
+    std::set<std::string> referenced_tags;
+    const auto add_referenced_path = [&](const std::string& tag) {
+        const auto* root = find_outbound_by_tag(outbounds, tag);
+        if (!root) return;
+        for (const auto* outbound : reachable_tunnel_outbounds(outbounds, *root)) {
+            referenced_tags.insert(outbound->tag);
+        }
+    };
+    for (const auto& rule : *config.route->rules) {
+        if (!route_rule_enabled(rule)) continue;
+        add_referenced_path(rule.outbound);
+        if (rule.failure_policy.value_or(api::FailurePolicy::INHERIT) ==
+                api::FailurePolicy::FALLBACK && rule.fallback_outbound) {
+            add_referenced_path(*rule.fallback_outbound);
+        }
+    }
+
+    const auto mask = fwmark_mask_value(config.fwmark.value_or(FwmarkConfig{}));
+    std::set<std::pair<uint32_t, std::string>> marked_egresses;
+    for (const auto& tag : referenced_tags) {
+        const auto mark = outbound_marks.find(tag);
+        if (mark == outbound_marks.end() || (mark->second & mask) == 0) continue;
+        const auto* root = find_outbound_by_tag(outbounds, tag);
+        if (!root) continue;
+        for (const auto* leaf : reachable_tunnel_outbounds(outbounds, *root)) {
+            if (leaf->type == OutboundType::INTERFACE && leaf->interface &&
+                !leaf->interface->empty()) {
+                marked_egresses.emplace(mark->second & mask, *leaf->interface);
+            }
+        }
+    }
+
+    std::set<FirewallNativeForwardSelector> result;
+    for (const auto& target : internal_vpn_targets) {
+        if (!internal_vpn_target_is_openconnect(target) ||
+            !target.process_clients) continue;
+        for (const auto& ingress : target.verified_ingress_interfaces) {
+            if (ingress.empty()) continue;
+            for (const auto& marked_egress : marked_egresses) {
+                if (ingress == marked_egress.second) continue;
+                const auto append_sources = [&](const auto& sources) {
+                    for (const auto& cidr : sources) {
+                        if (!cidr.empty()) {
+                            result.insert({ingress, cidr, marked_egress.second,
+                                           marked_egress.first});
+                        }
+                    }
+                };
+                append_sources(target.source_cidrs_v4);
+                if (ipv6_enabled) append_sources(target.source_cidrs_v6);
+            }
+        }
+    }
+    return {result.begin(), result.end()};
+}
+
 std::vector<FirewallSourceEgressSnatSelector>
 select_native_vpn_direct_egress_snat_selectors(
     const std::vector<InternalVpnRuntimeTarget>& internal_vpn_targets,
@@ -283,7 +382,9 @@ static StagedRuntimeFirewall stage_runtime_firewall_with_streamer(
     bool udp_call_affinity_ipset_available,
     const std::optional<KeeneticDnsSnapshot>& keenetic_dns_snapshot,
     bool force_clear_dynamic_sets,
-    const PreviousRuntimeFirewall& previous) {
+    const PreviousRuntimeFirewall& previous,
+    const RouteFailureHealthSnapshot* failure_health,
+    const OutboundFamilyReachabilitySnapshot* family_reachability) {
     // Resolve and validate the complete DNS registry before preparing the
     // backend transaction.  In particular, a Keenetic DNS server without a
     // prepared snapshot must fail before any firewall state is touched.
@@ -308,7 +409,8 @@ static StagedRuntimeFirewall stage_runtime_firewall_with_streamer(
         throw std::invalid_argument(
             "runtime firewall staging needs a list streamer");
     }
-    auto rule_states = build_fw_rule_states(config, outbound_marks, &urltest_selections);
+    auto rule_states = build_fw_rule_states(
+        config, outbound_marks, &urltest_selections, failure_health, family_reachability);
     const RouteConfig route_config = config.route.value_or(RouteConfig{});
     const Ipv6SupportDecision ipv6_decision = resolve_ipv6_support(config);
     log_ipv6_support_decision_once(ipv6_decision);
@@ -331,6 +433,7 @@ static StagedRuntimeFirewall stage_runtime_firewall_with_streamer(
         config.daemon.value_or(DaemonConfig{}).ttl_bypass_enabled.value_or(true));
     firewall.set_ppe_deoffload_desired(
         observe_ppe_deoffload_desired(config));
+    const auto& all_outbounds = config.outbounds.value_or(std::vector<Outbound>{});
     auto prefilter = effective_internal_vpn_targets != nullptr
         ? build_firewall_global_prefilter_for_runtime_targets(
               config, *effective_internal_vpn_targets)
@@ -341,12 +444,20 @@ static StagedRuntimeFirewall stage_runtime_firewall_with_streamer(
     prefilter.restore_conntrack_mark = true;
     prefilter.conntrack_mark_mask =
         fwmark_mask_value(config.fwmark.value_or(FwmarkConfig{}));
+    for (const auto& outbound : all_outbounds) {
+        if (outbound.type != OutboundType::INTERFACE &&
+            outbound.type != OutboundType::TABLE &&
+            outbound.type != OutboundType::URLTEST) continue;
+        const auto mark = outbound_marks.find(outbound.tag);
+        if (mark != outbound_marks.end()) {
+            prefilter.configured_outbound_marks.push_back(mark->second);
+        }
+    }
     firewall.set_global_prefilter(std::move(prefilter));
     firewall.set_fwmark_mask(
         fwmark_mask_value(config.fwmark.value_or(FwmarkConfig{})));
     firewall.prepare_apply(mode);
 
-    const auto& all_outbounds = config.outbounds.value_or(std::vector<Outbound>{});
     static const std::map<std::string, ListConfig> empty_lists;
     const auto& lists_map = config.lists ? *config.lists : empty_lists;
     const auto& route_rules = route_config.rules.value_or(std::vector<RouteRule>{});
@@ -373,7 +484,8 @@ static StagedRuntimeFirewall stage_runtime_firewall_with_streamer(
         FirewallRuleCriteria criteria = build_firewall_rule_criteria(rule);
         rule_state.criteria = criteria;
 
-        auto apply_rule = [&](const std::optional<std::string>& dst_set_name) {
+        auto apply_rule = [&](const std::optional<std::string>& dst_set_name,
+                              int family = AF_UNSPEC) {
             FirewallRuleCriteria rule_criteria = criteria;
             rule_criteria.dst_set_name = dst_set_name;
 
@@ -381,15 +493,14 @@ static StagedRuntimeFirewall stage_runtime_firewall_with_streamer(
                 firewall.create_drop_rule(rule_criteria);
             } else if (is_pass) {
                 firewall.create_pass_rule(rule_criteria);
-            } else if (rule_state.fwmark != 0) {
-                firewall.create_mark_rule(rule_state.fwmark, rule_criteria);
+            } else if (rule_state.mark_for_family(family) != 0) {
+                rule_criteria.family = family;
+                firewall.create_mark_rule(rule_state.mark_for_family(family), rule_criteria);
             }
         };
 
         const auto& list_names = route_rule_lists(rule);
         if (!list_names.empty()) {
-            bool emitted_rule = false;
-
             for (const auto& list_name : list_names) {
                 auto list_cfg_it = lists_map.find(list_name);
                 if (list_cfg_it == lists_map.end()) {
@@ -516,26 +627,28 @@ static StagedRuntimeFirewall stage_runtime_firewall_with_streamer(
                 }
 
                 if (usage.has_static_entries) {
-                    apply_rule(set4);
+                    apply_rule(set4, AF_INET);
                     if (ipv6_decision.enabled) {
-                        apply_rule(set6);
+                        apply_rule(set6, AF_INET6);
                     }
-                    emitted_rule = true;
                 }
                 if (usage.has_domain_entries) {
-                    apply_rule(set4d);
+                    apply_rule(set4d, AF_INET);
                     if (ipv6_decision.enabled) {
-                        apply_rule(set6d);
+                        apply_rule(set6d, AF_INET6);
                     }
-                    emitted_rule = true;
                 }
             }
-
-            if (!emitted_rule && criteria.has_rule_selector()) {
+            // Named lists constrain destinations even when they are empty or
+            // unavailable. No entries means no matches, not a selector-only
+            // rule that routes/drops/passes every destination for this client.
+        } else if (criteria.has_rule_selector()) {
+            if (rule_state.fwmark_ipv6.has_value()) {
+                apply_rule(std::nullopt, AF_INET);
+                if (ipv6_decision.enabled) apply_rule(std::nullopt, AF_INET6);
+            } else {
                 apply_rule(std::nullopt);
             }
-        } else if (criteria.has_rule_selector()) {
-            apply_rule(std::nullopt);
         }
     }
 
@@ -552,28 +665,19 @@ static StagedRuntimeFirewall stage_runtime_firewall_with_streamer(
                 continue;
             }
 
-            std::string effective_tag = detour_outbound->tag;
-            if (detour_outbound->type == OutboundType::URLTEST) {
-                auto selection_it = urltest_selections.find(effective_tag);
-                if (selection_it != urltest_selections.end() && !selection_it->second.empty()) {
-                    const Outbound* child =
-                        find_outbound_by_tag(all_outbounds, selection_it->second);
-                    if (child) {
-                        effective_tag = child->tag;
-                    }
-                }
-            }
-
-            auto mark_it = outbound_marks.find(effective_tag);
-            if (mark_it == outbound_marks.end()) {
-                continue;
-            }
-
             const auto resolved_servers =
                 dns_registry->detour_servers(server.tag);
 
             for (const DnsServerConfig* resolved_server : resolved_servers) {
+                const int family = resolved_server->resolved_ip.find(':') != std::string::npos
+                    ? AF_INET6 : AF_INET;
+                const auto* leaf = resolve_effective_outbound_for_family(
+                    all_outbounds, *detour_outbound, &urltest_selections,
+                    family, family_reachability);
+                const auto mark_it = outbound_marks.find(leaf->tag);
+                if (mark_it == outbound_marks.end()) continue;
                 FirewallRuleCriteria criteria;
+                criteria.family = family;
                 criteria.proto = L4Proto::TcpUdp;
                 criteria.dst_port = std::to_string(resolved_server->port);
                 criteria.dst_addr = {resolved_server->resolved_ip};
@@ -617,6 +721,17 @@ static StagedRuntimeFirewall stage_runtime_firewall_with_streamer(
             tunnel_interfaces.push_back(*outbound.interface);
         }
         firewall.create_tunnel_snat_rules(tunnel_interfaces);
+    }
+    // Keenetic's legacy filter/FORWARD needs an explicit allow for imported
+    // VPN egress. Do not claim the same fix for an independent nft base chain:
+    // its ACCEPT cannot override another table's firmware DROP policy.
+    if (firewall.backend() == FirewallBackend::iptables) {
+        firewall.create_native_vpn_forward_rules(
+            effective_internal_vpn_targets
+                ? select_openconnect_forward_selectors(
+                      config, outbound_marks, *effective_internal_vpn_targets,
+                      ipv6_decision.enabled)
+                : std::vector<FirewallNativeForwardSelector>{});
     }
     if (native_vpn_direct_egress_snat_selectors != nullptr) {
         firewall.create_source_egress_snat_rules(
@@ -736,7 +851,9 @@ StagedRuntimeFirewall stage_runtime_firewall(
     const std::optional<KeeneticDnsSnapshot>& keenetic_dns_snapshot,
     std::shared_ptr<const ListCacheGenerationSnapshot> list_cache_snapshot,
     bool force_clear_dynamic_sets,
-    const PreviousRuntimeFirewall& previous) {
+    const PreviousRuntimeFirewall& previous,
+    const RouteFailureHealthSnapshot* failure_health,
+    const OutboundFamilyReachabilitySnapshot* family_reachability) {
     std::unique_ptr<ListStreamer> list_streamer;
     if (mode != FirewallApplyMode::RulesOnly) {
         list_streamer = list_cache_snapshot
@@ -757,7 +874,8 @@ StagedRuntimeFirewall stage_runtime_firewall(
         udp_call_affinity_ipset_available,
         keenetic_dns_snapshot,
         force_clear_dynamic_sets,
-        previous);
+        previous,
+        failure_health, family_reachability);
 }
 
 StagedRuntimeFirewall stage_runtime_firewall_from_snapshot(
@@ -776,7 +894,9 @@ StagedRuntimeFirewall stage_runtime_firewall_from_snapshot(
     bool udp_call_affinity_ipset_available,
     const std::optional<KeeneticDnsSnapshot>& keenetic_dns_snapshot,
     bool force_clear_dynamic_sets,
-    const PreviousRuntimeFirewall& previous) {
+    const PreviousRuntimeFirewall& previous,
+    const RouteFailureHealthSnapshot* failure_health,
+    const OutboundFamilyReachabilitySnapshot* family_reachability) {
     std::unique_ptr<ListStreamer> list_streamer;
     if (mode != FirewallApplyMode::RulesOnly) {
         list_streamer = std::make_unique<ListStreamer>(
@@ -795,7 +915,8 @@ StagedRuntimeFirewall stage_runtime_firewall_from_snapshot(
         udp_call_affinity_ipset_available,
         keenetic_dns_snapshot,
         force_clear_dynamic_sets,
-        previous);
+        previous,
+        failure_health, family_reachability);
 }
 
 void commit_runtime_firewall(Firewall& firewall,

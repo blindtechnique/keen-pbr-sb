@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import re
 import shlex
 import subprocess
@@ -180,7 +181,7 @@ def parse_checksum_manifest(path: Path, label: str) -> dict[str, str]:
 
 
 def check_generated_profile_parity() -> None:
-    """The generator is the byte-for-byte source of the three new profiles."""
+    """Three whole profiles and the ten reviewed legacy pool assignments."""
     if not GENERATOR.is_file():
         fail(f"нет генератора {GENERATOR.relative_to(REPO_ROOT)}")
         return
@@ -213,6 +214,26 @@ def check_generated_profile_parity() -> None:
                         f"{profile}/{filename}: checked-in bytes расходятся с "
                         f"{GENERATOR.name}"
                     )
+
+    result = subprocess.run(
+        [sys.executable, str(GENERATOR), "--legacy-pools"],
+        check=False, capture_output=True, text=True, encoding="utf-8",
+    )
+    try:
+        pools = json.loads(result.stdout) if result.returncode == 0 else None
+        if not isinstance(pools, dict):
+            raise ValueError("legacy pool generation failed")
+        for profile, assignments in pools.items():
+            path = STRATEGIES / profile / "nfqws2.conf"
+            values = parse_shell_assignments(path.read_text(encoding="utf-8"))
+            for variable, expected in assignments.items():
+                if values.get(variable, "").split() != expected.split():
+                    fail(
+                        f"{profile}/{variable}: legacy pool расходится с "
+                        f"{GENERATOR.name}"
+                    )
+    except (OSError, ValueError, TypeError) as error:
+        fail(f"не удалось сверить legacy pools: {error}")
 
 
 def issue_key(kind: str, *parts: str) -> str:

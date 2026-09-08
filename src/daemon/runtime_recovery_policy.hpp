@@ -129,7 +129,8 @@ private:
 inline bool firewall_criteria_equal(
     const FirewallRuleCriteria& left,
     const FirewallRuleCriteria& right) noexcept {
-    return left.dst_set_name == right.dst_set_name &&
+    return left.family == right.family &&
+           left.dst_set_name == right.dst_set_name &&
            left.src_udp_peer_set_name == right.src_udp_peer_set_name &&
            left.dscp == right.dscp &&
            left.proto == right.proto &&
@@ -154,6 +155,7 @@ inline bool firewall_rule_states_equal(const RuleState& left,
            left.outbound_tag == right.outbound_tag &&
            left.action_type == right.action_type &&
            left.fwmark == right.fwmark &&
+           left.fwmark_ipv6 == right.fwmark_ipv6 &&
            firewall_criteria_equal(left.criteria, right.criteria);
 }
 
@@ -212,7 +214,8 @@ active_destination_only_reconnect_list_names(
 
     for (const auto& rule : committed_rules) {
         if (rule.action_type != RuleActionType::Mark ||
-            rule.fwmark == 0U ||
+            (rule.mark_for_family(AF_INET) == 0U &&
+             rule.mark_for_family(AF_INET6) == 0U) ||
             !runtime_recovery_detail::
                 destination_only_conntrack_cleanup_eligible(rule)) {
             continue;
@@ -749,6 +752,7 @@ inline OwnedConntrackCleanupSnapshot make_owned_conntrack_cleanup_snapshot(
     for (const auto& rule : rules) {
         if (rule.action_type == RuleActionType::Mark) {
             add_mark(rule.fwmark, /*priority=*/true);
+            add_mark(rule.mark_for_family(AF_INET6), /*priority=*/true);
         }
     }
 

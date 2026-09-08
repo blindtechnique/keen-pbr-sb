@@ -114,3 +114,50 @@ TEST_CASE("subscription corrupt storage is not overwritten with an empty list") 
     std::string content; input >> content;
     CHECK(content == "broken");
 }
+
+TEST_CASE("subscription confirmed transport detach preserves sources and is an exact idempotent unlink") {
+    SubscriptionDirectory directory;
+    const auto path = (directory.path / "subscriptions.json").string();
+    SubscriptionStore store(path);
+    using json = nlohmann::json;
+    const auto first = store.save("https://provider.example/sub", "My provider",
+        {{"checked_at", 100}, {"total_bytes", 1000}, {"expires_at", 2000000000},
+         {"_inventory", json::array({{{"key", "removed-key"}}, {{"key", "kept-key"}}})}},
+        {"vpn1", "vpn10"}, json::array({
+            {{"tag", "vpn1"}, {"key", "removed-key"}, {"fingerprint", "old"}, {"stable", true}},
+            {{"tag", "vpn10"}, {"key", "kept-key"}, {"fingerprint", "kept"}, {"stable", true}}}));
+    const auto second = store.save("https://second.example/sub", "Second provider",
+        {{"checked_at", 200}}, {"vpn1"});
+    const auto first_id = first.at("id").get<std::string>();
+    const auto second_id = second.at("id").get<std::string>();
+    store.set_refresh_interval(first_id, 3600);
+    auto expected_first = store.find(first_id);
+    auto expected_second = store.find(second_id);
+    expected_first["transport_tags"] = json::array({"vpn10"});
+    expected_first["_bindings"].erase(expected_first["_bindings"].begin());
+    expected_second["transport_tags"] = json::array();
+
+    CHECK(store.detach_transport("vpn1"));
+    CHECK(store.find(first_id) == expected_first);
+    CHECK(store.find(second_id) == expected_second);
+    CHECK(store.list().size() == 2);
+    struct stat before{}, after{};
+    REQUIRE(::stat(path.c_str(), &before) == 0);
+    CHECK_FALSE(store.detach_transport("vpn1"));
+    CHECK_FALSE(store.detach_transport("unknown"));
+    CHECK_FALSE(store.detach_transport(""));
+    REQUIRE(::stat(path.c_str(), &after) == 0);
+    CHECK(after.st_ino == before.st_ino); // No redundant atomic rewrite.
+    CHECK(store.find(first_id) == expected_first);
+    SubscriptionStore reopened(path);
+    CHECK(reopened.find(first_id) == expected_first);
+    CHECK(reopened.find(second_id) == expected_second);
+}
+
+TEST_CASE("subscription detach of an unrelated VPN does not create metadata storage") {
+    SubscriptionDirectory directory;
+    const auto path = directory.path / "subscriptions.json";
+    SubscriptionStore store(path.string());
+    CHECK_FALSE(store.detach_transport("unrelated_vpn"));
+    CHECK_FALSE(std::filesystem::exists(path));
+}

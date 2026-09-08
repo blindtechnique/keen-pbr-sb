@@ -22,7 +22,9 @@ import {
 import { ListIdentityLabel } from "@/components/shared/list-identity-label"
 import { MultiSelectList } from "@/components/shared/multi-select-list"
 import { OutboundSelect } from "@/components/shared/outbound-select"
+import { RouteFailurePolicyFields } from "@/components/shared/route-failure-policy-fields"
 import { ServerValidationAlert } from "@/components/shared/server-validation-alert"
+import { getFirstFieldError, getFormErrorMessage } from "@/lib/form-field-error"
 import {
   UpsertPage,
   type UpsertPagePresentation,
@@ -39,6 +41,8 @@ import {
   clearFormServerErrors,
   setFormServerErrors,
   splitFormApiErrors,
+  getUnmappedFormErrors,
+  isServerOperationError,
 } from "@/lib/form-api-errors"
 import { getListSearchText, sortListIdsByDisplayName } from "@/lib/list-display"
 import { sortOutboundsByDisplayName } from "@/lib/outbound-display"
@@ -55,7 +59,6 @@ import {
 } from "@/components/ui/select"
 import {
   createRouteRuleDraft,
-  getFirstFieldError,
   getRouteRuleDisplayName,
   normalizeRouteRuleDraft,
   protoOptions,
@@ -64,6 +67,10 @@ import {
 import { isSemanticallyDirty } from "@/lib/semantic-dirty"
 import { semanticJsonEqual } from "@/lib/semantic-json"
 import { getTagNameValidationError } from "@/lib/tag-name-validation"
+import {
+  getRouteFailurePolicyPrimaryValidationMessage,
+  getRouteFailurePolicyValidationMessage,
+} from "@/lib/route-failure-policy"
 
 const ROUTING_RULE_FIELD_NAMES = {
   id: "id",
@@ -77,6 +84,8 @@ const ROUTING_RULE_FIELD_NAMES = {
   srcAddr: "src_addr",
   destAddr: "dest_addr",
   outbound: "outbound",
+  failurePolicy: "failurePolicy",
+  fallbackOutbound: "fallbackOutbound",
 } as const
 
 type RoutingRuleFieldName =
@@ -352,6 +361,31 @@ function RoutingRuleForm({
           }
         }
 
+        const policyError = getRouteFailurePolicyPrimaryValidationMessage(
+          valueToPersist.failurePolicy,
+          valueToPersist.outbound,
+          outbounds,
+          t
+        )
+        if (policyError) {
+          return {
+            fields: { [ROUTING_RULE_FIELD_NAMES.failurePolicy]: policyError },
+          }
+        }
+        const fallbackError = getRouteFailurePolicyValidationMessage(
+          valueToPersist.failurePolicy,
+          valueToPersist.fallbackOutbound,
+          valueToPersist.outbound,
+          outbounds,
+          t
+        )
+        if (fallbackError) {
+          return {
+            fields: {
+              [ROUTING_RULE_FIELD_NAMES.fallbackOutbound]: fallbackError,
+            },
+          }
+        }
         const nextRule = normalizeRouteRuleDraft(valueToPersist)
         const hasRuleCondition =
           (nextRule.list ?? []).length > 0 ||
@@ -410,25 +444,23 @@ function RoutingRuleForm({
       },
     },
   })
-  const submitErrorMessage = useStore(form.store, (state) => {
+  const submitError = useStore(form.store, (state) => {
     const onSubmitError = state.errorMap.onSubmit
-    if (typeof onSubmitError === "string") {
+    if (
+      typeof onSubmitError === "string" ||
+      isServerOperationError(onSubmitError)
+    ) {
       return onSubmitError
     }
 
     const firstError = state.errors[0]
-    return typeof firstError === "string" ? firstError : null
+    return typeof firstError === "string" || isServerOperationError(firstError)
+      ? firstError
+      : null
   })
-  const unmappedServerErrors = useStore(
-    form.store,
-    (state) =>
-      (
-        state.errorMap.onServer as
-          | {
-              unmapped?: { path: string; message: string }[]
-            }
-          | undefined
-      )?.unmapped ?? []
+  const submitErrorMessage = getFormErrorMessage(submitError)
+  const unmappedServerErrors = useStore(form.store, (state) =>
+    getUnmappedFormErrors(state.errorMap.onServer)
   )
   const isDirty = useStore(form.store, (state) =>
     isSemanticallyDirty(state.values, initialDraft, {
@@ -874,6 +906,57 @@ function RoutingRuleForm({
             )
           }}
         </form.Field>
+        <form.Field
+          name={ROUTING_RULE_FIELD_NAMES.failurePolicy}
+          validators={{
+            onChangeListenTo: ["outbound"],
+            onChange: ({ value, fieldApi }) =>
+              getRouteFailurePolicyPrimaryValidationMessage(
+                value,
+                fieldApi.form.getFieldValue("outbound"),
+                outbounds,
+                t
+              ),
+          }}
+        >
+          {(policyField) => (
+            <form.Field
+              name={ROUTING_RULE_FIELD_NAMES.fallbackOutbound}
+              validators={{
+                onChangeListenTo: ["failurePolicy", "outbound"],
+                onChange: ({ value, fieldApi }) =>
+                  getRouteFailurePolicyValidationMessage(
+                    fieldApi.form.getFieldValue("failurePolicy"),
+                    value,
+                    fieldApi.form.getFieldValue("outbound"),
+                    outbounds,
+                    t
+                  ),
+              }}
+            >
+              {(fallbackField) => (
+                <form.Subscribe selector={(state) => state.values.outbound}>
+                  {(primaryOutbound) => (
+                    <RouteFailurePolicyFields
+                      fallbackError={getFirstFieldError(
+                        fallbackField.state.meta.errors
+                      )}
+                      fallbackOutbound={fallbackField.state.value}
+                      onFallbackChange={fallbackField.handleChange}
+                      onPolicyChange={policyField.handleChange}
+                      outbounds={outbounds}
+                      policy={policyField.state.value}
+                      policyError={getFirstFieldError(
+                        policyField.state.meta.errors
+                      )}
+                      primaryOutbound={primaryOutbound}
+                    />
+                  )}
+                </form.Subscribe>
+              )}
+            </form.Field>
+          )}
+        </form.Field>
       </FieldGroup>
       <ServerValidationAlert
         errors={unmappedServerErrors}
@@ -938,6 +1021,14 @@ function resolveRoutingRuleFieldPath(
 
   if (/^route\.rules(?:\[\d+\]|\.\d+)?\.outbound$/.test(path)) {
     return ROUTING_RULE_FIELD_NAMES.outbound
+  }
+
+  if (/^route\.rules(?:\[\d+\]|\.\d+)?\.failure_policy$/.test(path)) {
+    return ROUTING_RULE_FIELD_NAMES.failurePolicy
+  }
+
+  if (/^route\.rules(?:\[\d+\]|\.\d+)?\.fallback_outbound$/.test(path)) {
+    return ROUTING_RULE_FIELD_NAMES.fallbackOutbound
   }
 
   if (/^route\.rules(?:\[\d+\]|\.\d+)?\.proto$/.test(path)) {

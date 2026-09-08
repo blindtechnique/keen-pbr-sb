@@ -145,7 +145,9 @@ export function UpsertPage({
                     aria-label={t("common.openAdvancedEditor")}
                     disabled={dirty || mutationPending}
                     onClick={() =>
-                      navigate(buildAdvancedEditorHref(location, search))
+                      navigate(buildAdvancedEditorHref(location, search), {
+                        state: window.history.state,
+                      })
                     }
                     size={isMobile ? "icon-sm" : "sm"}
                     title={

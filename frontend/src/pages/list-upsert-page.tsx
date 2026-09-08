@@ -25,7 +25,7 @@ import {
 import { getListDeleteImpactItems } from "@/components/delete-impact/list-items"
 import { ListDeleteReplacementPicker } from "@/components/lists/list-delete-replacement-picker"
 import { UpsertDeleteAction } from "@/components/shared/upsert-delete-action"
-import { getApiErrorMessage } from "@/lib/api-errors"
+import { OperationErrorMessage } from "@/components/shared/operation-error-message"
 import { getDnsRuleDisplayName } from "@/lib/dns-display"
 import { getListReferenceLabel } from "@/lib/list-display"
 import {
@@ -41,7 +41,15 @@ import {
   type DnsPresetSelection,
 } from "@/components/dns/dns-preset-selection"
 import { OutboundSelect } from "@/components/shared/outbound-select"
+import { RouteFailurePolicyFields } from "@/components/shared/route-failure-policy-fields"
 import { ListRefreshRouteFields } from "@/components/lists/list-refresh-route-fields"
+import { ListSourcePreview } from "@/components/lists/list-source-preview"
+import { ListIpCidrsField } from "@/components/lists/list-ip-cidrs-field"
+import {
+  ListContentImport,
+  ListSourceFormatField,
+} from "@/components/lists/list-content-import"
+import { appendListContentImport } from "@/components/lists/list-content-import-model"
 import {
   Field,
   FieldContent,
@@ -50,8 +58,14 @@ import {
   FieldLabel,
 } from "@/components/shared/field"
 import { CodeEditor } from "@/components/shared/code-editor"
+import type { CodeEditorSelection } from "@/components/shared/code-editor-selection"
+import {
+  isListIpCidrsPath,
+  presentListIpCidrError,
+} from "@/lib/list-ip-cidr-errors"
 import { TemplatePicker } from "@/components/lists/template-picker"
 import { ServerValidationAlert } from "@/components/shared/server-validation-alert"
+import { getFirstFieldError, getFormErrorMessage } from "@/lib/form-field-error"
 import {
   UpsertPage,
   type UpsertPagePresentation,
@@ -74,6 +88,7 @@ import {
   clearFormServerErrors,
   setFormServerErrors,
   splitFormApiErrors,
+  getUnmappedFormErrors,
 } from "@/lib/form-api-errors"
 import { cn } from "@/lib/utils"
 import { getTagNameValidationError } from "@/lib/tag-name-validation"
@@ -85,6 +100,14 @@ import {
   getListRefreshCapableOutbounds,
 } from "@/lib/list-refresh-route"
 import { getOutboundDisplayName } from "@/lib/outbound-display"
+import {
+  getListShrinkPreviousError,
+  getListShrinkRetainedError,
+} from "@/lib/list-refresh-controls"
+import {
+  getRouteFailurePolicyPrimaryValidationMessage,
+  getRouteFailurePolicyValidationMessage,
+} from "@/lib/route-failure-policy"
 import { useIsMobile } from "@/hooks/use-mobile"
 import {
   NO_DNS_RULE,
@@ -113,6 +136,9 @@ const LIST_FIELD_NAMES = {
   name: "name",
   ttlMs: "ttlMs",
   refreshDetourMode: "refreshDetourMode",
+  sourceFormat: "sourceFormat",
+  shrinkMinPreviousEntries: "shrinkMinPreviousEntries",
+  shrinkMinRetainedPercent: "shrinkMinRetainedPercent",
   detour: "detour",
   fallbackDetours: "fallbackDetours",
   domains: "domains",
@@ -131,6 +157,8 @@ const sampleNewList: ListDraft = {
   name: "",
   ttlMs: "7200000",
   refreshDetourMode: "inherit",
+  shrinkMinPreviousEntries: "",
+  shrinkMinRetainedPercent: "",
   detour: "",
   fallbackDetours: [],
   domains: "",
@@ -285,9 +313,8 @@ function ListForm({
     () => getActiveSourceGroupsFromDraft(draft),
     [draft]
   )
-  const [activeSourceGroups, setActiveSourceGroups] = useState<
-    ListSourceGroup[]
-  >(initialSourceGroups)
+  const [activeSourceGroups, setActiveSourceGroups] =
+    useState<ListSourceGroup[]>(initialSourceGroups)
   const postConfigMutation = usePostConfigMutation()
   const postRecommendedListSetupMutation = usePostRecommendedListSetupMutation()
   const isMobile = useIsMobile()
@@ -324,12 +351,17 @@ function ListForm({
   const [initialQuickSetup] = useState<QuickSetup>(() => ({
     createRouteRule: recommendedSetup,
     routeOutbound: recommendedSetup ? (recommendedPair?.outbound ?? "") : "",
+    routeFailurePolicy: "inherit",
+    routeFallbackOutbound: "",
     createDnsRule: recommendedSetup,
     dnsServer: recommendedSetup
       ? (recommendedPair?.dnsServer ?? "")
       : (dnsServerTags[0] ?? ""),
   }))
   const [quickSetup, setQuickSetup] = useState<QuickSetup>(initialQuickSetup)
+  const [quickSetupFallbackError, setQuickSetupFallbackError] =
+    useState<string>()
+  const [quickSetupPolicyError, setQuickSetupPolicyError] = useState<string>()
   const [initialRecommendedDnsPreset] =
     useState<DnsPresetSelection>("cloudflare")
   const [recommendedDnsPreset, setRecommendedDnsPreset] =
@@ -384,7 +416,9 @@ function ListForm({
           deleteStageMutation.reset()
           return
         }
-        toast.error(getApiErrorMessage(error), { richColors: true })
+        toast.error(<OperationErrorMessage error={error} />, {
+          richColors: true,
+        })
       },
     },
   })
@@ -397,11 +431,14 @@ function ListForm({
         )
       : null
   const [templatePickerOpen, setTemplatePickerOpen] = useState(false)
+  const [ipCidrSelection, setIpCidrSelection] =
+    useState<CodeEditorSelection | null>(null)
   const form = useForm({
     defaultValues: baselineDraft,
     validators: {
       onSubmitAsync: async ({ value }) => {
         clearFormServerErrors(form)
+        setIpCidrSelection(null)
         const displayNameError = getDisplayNameError(value.displayName, t)
         if (displayNameError) {
           setFormServerErrors(form, {
@@ -481,6 +518,33 @@ function ListForm({
           })
           return { fields: { [LIST_FIELD_NAMES.detour]: message } }
         }
+        if (valueToPersist.url.trim()) {
+          const previousError = getListShrinkPreviousError(
+            valueToPersist.shrinkMinPreviousEntries,
+            t
+          )
+          const retainedError = getListShrinkRetainedError(
+            valueToPersist.shrinkMinRetainedPercent,
+            t
+          )
+          if (previousError || retainedError) {
+            const fields = {
+              ...(previousError
+                ? { [LIST_FIELD_NAMES.shrinkMinPreviousEntries]: previousError }
+                : {}),
+              ...(retainedError
+                ? { [LIST_FIELD_NAMES.shrinkMinRetainedPercent]: retainedError }
+                : {}),
+            }
+            setFormServerErrors(form, { fields })
+            document
+              .getElementById(
+                previousError ? "list-shrink-previous" : "list-shrink-retained"
+              )
+              ?.focus()
+            return { fields }
+          }
+        }
         if (
           mode === "create" &&
           (recommendedSetup || quickSetup.createRouteRule) &&
@@ -501,6 +565,25 @@ function ListForm({
             richColors: true,
           })
           return undefined
+        }
+        if (mode === "create" && quickSetup.createRouteRule) {
+          const policyError = getRouteFailurePolicyPrimaryValidationMessage(
+            quickSetup.routeFailurePolicy,
+            quickSetup.routeOutbound,
+            outbounds,
+            t
+          )
+          setQuickSetupPolicyError(policyError)
+          if (policyError) return undefined
+          const fallbackError = getRouteFailurePolicyValidationMessage(
+            quickSetup.routeFailurePolicy,
+            quickSetup.routeFallbackOutbound,
+            quickSetup.routeOutbound,
+            outbounds,
+            t
+          )
+          setQuickSetupFallbackError(fallbackError)
+          if (fallbackError) return undefined
         }
         // Asked once, here, where the loss actually happens - and asked about
         // what is being lost by name. The old prompt fired on every switch,
@@ -606,6 +689,18 @@ function ListForm({
               ),
           })
 
+          const ipError = result.fieldErrors[LIST_FIELD_NAMES.ipCidrs]
+          if (ipError) {
+            const presented = presentListIpCidrError(
+              ipError,
+              valueToPersist.name || baselineDraft.name,
+              valueToPersist.ipCidrs
+            )
+            result.fieldErrors[LIST_FIELD_NAMES.ipCidrs] = presented.error
+            if (form.state.values.ipCidrs === valueToPersist.ipCidrs) {
+              setIpCidrSelection(presented.selection)
+            }
+          }
           setFormServerErrors(form, {
             form: result.formError ?? undefined,
             fields: result.fieldErrors,
@@ -613,7 +708,9 @@ function ListForm({
           })
 
           if (result.formError) {
-            toast.error(result.formError, { richColors: true })
+            toast.error(<OperationErrorMessage error={apiError} />, {
+              richColors: true,
+            })
           }
 
           return {
@@ -625,21 +722,13 @@ function ListForm({
     },
   })
 
-  const apiErrorMessage = useStore(
+  const serverFormError = useStore(
     form.store,
-    (state) =>
-      (state.errorMap.onServer as { form?: string } | undefined)?.form ?? null
+    (state) => state.errorMap.onServer
   )
-  const unmappedServerErrors = useStore(
-    form.store,
-    (state) =>
-      (
-        state.errorMap.onServer as
-          | {
-              unmapped?: { path: string; message: string }[]
-            }
-          | undefined
-      )?.unmapped ?? []
+  const apiErrorMessage = getFormErrorMessage(serverFormError)
+  const unmappedServerErrors = useStore(form.store, (state) =>
+    getUnmappedFormErrors(state.errorMap.onServer)
   )
   const formIsDirty = useStore(form.store, (state) =>
     isSemanticallyDirty(state.values, baselineDraft, {
@@ -691,6 +780,22 @@ function ListForm({
     }
     setActiveSourceGroups([group])
     clearFormServerErrors(form)
+    if (group === "inline") {
+      form.setFieldMeta(LIST_FIELD_NAMES.sourceFormat, (meta) => ({
+        ...meta,
+        errorMap: {},
+      }))
+    }
+    if (group !== "url") {
+      // Hidden source settings remain in the draft, but their validation must
+      // not block saving a list that no longer uses that source.
+      for (const name of [
+        LIST_FIELD_NAMES.shrinkMinPreviousEntries,
+        LIST_FIELD_NAMES.shrinkMinRetainedPercent,
+      ]) {
+        form.setFieldMeta(name, (meta) => ({ ...meta, errorMap: {} }))
+      }
+    }
   }
 
   return (
@@ -894,6 +999,20 @@ function ListForm({
         </div>
       </section>
 
+      {activeSourceGroups.includes("url") ||
+      activeSourceGroups.includes("file") ? (
+        <form.Field name={LIST_FIELD_NAMES.sourceFormat}>
+          {(field) => (
+            <ListSourceFormatField
+              source
+              value={field.state.value ?? "text"}
+              onChange={field.handleChange}
+              error={getFirstFieldError(field.state.meta.errors)}
+            />
+          )}
+        </form.Field>
+      ) : null}
+
       {activeSourceGroups.includes("url") ? (
         <section className="space-y-4">
           <div className="flex items-start justify-between gap-3">
@@ -1088,6 +1207,111 @@ function ListForm({
                   )
                 }
               </form.Subscribe>
+              <form.Subscribe
+                selector={(state) => ({
+                  url: state.values.url,
+                  format: state.values.sourceFormat ?? "text",
+                  refresh_detour_mode: state.values.refreshDetourMode,
+                  detour: state.values.detour,
+                  fallback_detours: state.values.fallbackDetours,
+                })}
+              >
+                {(request) => (
+                  <ListSourcePreview
+                    key={loadedConfigRevision}
+                    request={request}
+                  />
+                )}
+              </form.Subscribe>
+              {presentation === "page" ? (
+                <div className="space-y-4 border-t pt-4">
+                  <SectionHeading
+                    title={t("pages.listUpsert.shrinkPolicy.title")}
+                    description={t("pages.listUpsert.shrinkPolicy.description")}
+                  />
+                  <form.Field
+                    name={LIST_FIELD_NAMES.shrinkMinPreviousEntries}
+                    validators={{
+                      onChange: ({ value }) =>
+                        getListShrinkPreviousError(value, t),
+                    }}
+                  >
+                    {(field) => {
+                      const error = getFirstFieldError(field.state.meta.errors)
+                      return (
+                        <Field invalid={Boolean(error)} width="short">
+                          <FieldLabel htmlFor="list-shrink-previous">
+                            {t("pages.listUpsert.shrinkPolicy.previousLabel")}
+                          </FieldLabel>
+                          <FieldContent>
+                            <Input
+                              id="list-shrink-previous"
+                              type="number"
+                              inputMode="numeric"
+                              min={0}
+                              step={1}
+                              placeholder="50"
+                              value={field.state.value ?? ""}
+                              aria-invalid={Boolean(error)}
+                              onBlur={field.handleBlur}
+                              onChange={(event) =>
+                                field.handleChange(event.target.value)
+                              }
+                            />
+                            <FieldHint
+                              description={t(
+                                "pages.listUpsert.shrinkPolicy.previousHint"
+                              )}
+                              error={error ?? null}
+                            />
+                          </FieldContent>
+                        </Field>
+                      )
+                    }}
+                  </form.Field>
+                  <form.Field
+                    name={LIST_FIELD_NAMES.shrinkMinRetainedPercent}
+                    validators={{
+                      onChange: ({ value }) =>
+                        getListShrinkRetainedError(value, t),
+                    }}
+                  >
+                    {(field) => {
+                      const error = getFirstFieldError(field.state.meta.errors)
+                      return (
+                        <Field invalid={Boolean(error)} width="short">
+                          <FieldLabel htmlFor="list-shrink-retained">
+                            {t("pages.listUpsert.shrinkPolicy.retainedLabel")}
+                          </FieldLabel>
+                          <FieldContent>
+                            <Input
+                              id="list-shrink-retained"
+                              type="number"
+                              inputMode="decimal"
+                              min={0}
+                              max={100}
+                              step="any"
+                              placeholder="50"
+                              value={field.state.value ?? ""}
+                              aria-invalid={Boolean(error)}
+                              onBlur={field.handleBlur}
+                              onChange={(event) =>
+                                field.handleChange(event.target.value)
+                              }
+                            />
+                            <FieldHint
+                              description={t(
+                                "pages.listUpsert.shrinkPolicy.retainedHint"
+                              )}
+                              error={error ?? null}
+                            />
+                          </FieldContent>
+                        </Field>
+                      )
+                    }}
+                  </form.Field>
+                </div>
+              ) : null}
             </FieldGroup>
           </div>
         </section>
@@ -1134,6 +1358,29 @@ function ListForm({
             description={t("pages.listUpsert.sourceGroups.inline.description")}
             title={t("pages.listUpsert.sourceGroups.inline.title")}
           />
+          <ListContentImport
+            onAdd={(result) => {
+              const merged = appendListContentImport(
+                {
+                  domains: form.getFieldValue(LIST_FIELD_NAMES.domains),
+                  ipCidrs: form.getFieldValue(LIST_FIELD_NAMES.ipCidrs),
+                },
+                result
+              )
+              if (!merged) return { domains: 0, ipCidrs: 0, duplicates: 0 }
+              form.setFieldValue(
+                LIST_FIELD_NAMES.domains,
+                merged.fields.domains
+              )
+              form.setFieldValue(
+                LIST_FIELD_NAMES.ipCidrs,
+                merged.fields.ipCidrs
+              )
+              clearFormServerErrors(form)
+              setIpCidrSelection(null)
+              return merged.added
+            }}
+          />
           <div>
             <FieldGroup>
               <form.Field name={LIST_FIELD_NAMES.domains}>
@@ -1160,24 +1407,13 @@ function ListForm({
               </form.Field>
               <form.Field name={LIST_FIELD_NAMES.ipCidrs}>
                 {(field) => (
-                  <Field>
-                    <FieldLabel htmlFor="list-ip-cidrs">
-                      {t("pages.listUpsert.fields.ipCidrs")}
-                    </FieldLabel>
-                    <FieldContent>
-                      <CodeEditor
-                        className="min-h-24"
-                        id="list-ip-cidrs"
-                        onBlur={field.handleBlur}
-                        onChange={(next) => field.handleChange(next)}
-                        syntax="list"
-                        value={field.state.value}
-                      />
-                      <FieldHint
-                        description={t("pages.listUpsert.fields.ipCidrsHint")}
-                      />
-                    </FieldContent>
-                  </Field>
+                  <ListIpCidrsField
+                    errors={field.state.meta.errors}
+                    onBlur={field.handleBlur}
+                    onChange={(next) => field.handleChange(next)}
+                    selection={ipCidrSelection}
+                    value={field.state.value}
+                  />
                 )}
               </form.Field>
             </FieldGroup>
@@ -1280,6 +1516,7 @@ function ListForm({
         onOpenChange={setTemplatePickerOpen}
         onSelect={(template) => {
           form.setFieldValue(LIST_FIELD_NAMES.url, template.url)
+          form.setFieldValue(LIST_FIELD_NAMES.sourceFormat, "text")
           if (
             isCreate &&
             !form.getFieldValue(LIST_FIELD_NAMES.displayName).trim()
@@ -1368,21 +1605,51 @@ function ListForm({
                 </FieldLabel>
               </div>
               {quickSetup.createRouteRule ? (
-                <OutboundSelect
-                  onValueChange={(value) =>
-                    setQuickSetup((current) => ({
-                      ...current,
-                      routeOutbound: value,
-                      dnsServer: recommendedSetup
-                        ? (dnsServers.find((server) => server.detour === value)
-                            ?.tag ?? "")
-                        : current.dnsServer,
-                    }))
-                  }
-                  outbounds={outbounds}
-                  placeholder={t("pages.listUpsert.quickSetup.selectOutbound")}
-                  value={quickSetup.routeOutbound}
-                />
+                <>
+                  <OutboundSelect
+                    onValueChange={(value) => {
+                      setQuickSetupFallbackError(undefined)
+                      setQuickSetupPolicyError(undefined)
+                      setQuickSetup((current) => ({
+                        ...current,
+                        routeOutbound: value,
+                        dnsServer: recommendedSetup
+                          ? (dnsServers.find(
+                              (server) => server.detour === value
+                            )?.tag ?? "")
+                          : current.dnsServer,
+                      }))
+                    }}
+                    outbounds={outbounds}
+                    placeholder={t(
+                      "pages.listUpsert.quickSetup.selectOutbound"
+                    )}
+                    value={quickSetup.routeOutbound}
+                  />
+                  <RouteFailurePolicyFields
+                    fallbackError={quickSetupFallbackError}
+                    fallbackOutbound={quickSetup.routeFallbackOutbound ?? ""}
+                    onFallbackChange={(value) => {
+                      setQuickSetupFallbackError(undefined)
+                      setQuickSetup((current) => ({
+                        ...current,
+                        routeFallbackOutbound: value,
+                      }))
+                    }}
+                    onPolicyChange={(value) => {
+                      setQuickSetupFallbackError(undefined)
+                      setQuickSetupPolicyError(undefined)
+                      setQuickSetup((current) => ({
+                        ...current,
+                        routeFailurePolicy: value,
+                      }))
+                    }}
+                    outbounds={outbounds}
+                    policy={quickSetup.routeFailurePolicy ?? "inherit"}
+                    policyError={quickSetupPolicyError}
+                    primaryOutbound={quickSetup.routeOutbound}
+                  />
+                </>
               ) : null}
             </div>
 
@@ -1556,11 +1823,6 @@ function ListForm({
   )
 }
 
-function getFirstFieldError(errors: unknown[]) {
-  const firstError = errors[0]
-  return typeof firstError === "string" ? firstError : null
-}
-
 function getDisplayNameError(value: string, t: (key: string) => string) {
   const normalized = value.trim()
   if (!normalized) {
@@ -1612,6 +1874,10 @@ function resolveListFieldPath(
 ): ListFieldName | undefined {
   const normalizedName = name.trim()
 
+  if (normalizedName && path === "lists." + normalizedName + ".source_format") {
+    return LIST_FIELD_NAMES.sourceFormat
+  }
+
   if (path === "lists") {
     return LIST_FIELD_NAMES.name
   }
@@ -1624,6 +1890,19 @@ function resolveListFieldPath(
     return LIST_FIELD_NAMES.ttlMs
   }
 
+  if (
+    normalizedName &&
+    path === `lists.${normalizedName}.shrink_policy.min_previous_entries`
+  ) {
+    return LIST_FIELD_NAMES.shrinkMinPreviousEntries
+  }
+  if (
+    normalizedName &&
+    path === `lists.${normalizedName}.shrink_policy.min_retained_fraction`
+  ) {
+    return LIST_FIELD_NAMES.shrinkMinRetainedPercent
+  }
+
   if (normalizedName && path === `lists.${normalizedName}.display_name`) {
     return LIST_FIELD_NAMES.displayName
   }
@@ -1632,7 +1911,7 @@ function resolveListFieldPath(
     return LIST_FIELD_NAMES.domains
   }
 
-  if (normalizedName && path === `lists.${normalizedName}.ip_cidrs`) {
+  if (isListIpCidrsPath(path, normalizedName)) {
     return LIST_FIELD_NAMES.ipCidrs
   }
 

@@ -152,6 +152,9 @@ server=10.100.100.100
 ipset=/google.com/www.google.com/.../kpbr4d_google,kpbr6d_google
 ```
 
+The canary directive above is enabled by default. Set `dns.firefox_doh_canary`
+to false to omit it; the resolver config hash reflects the setting.
+
 Print the resolver config hash:
 
 ```bash {filename="bash"}

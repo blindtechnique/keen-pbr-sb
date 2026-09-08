@@ -27,9 +27,16 @@
   {
     "id": "category-ai",
     "name": "Все AI сервисы",
+    "name_i18n": {
+      "ru": "Все AI сервисы",
+      "en": "All AI services"
+    },
     "iconSlug": "lucide-sparkles",
     "category": "ai",
     "notice": "ChatGPT, Claude, Gemini, Perplexity и другие (кроме китайских)",
+    "notice_i18n": {
+      "en": "ChatGPT, Claude, Gemini, Perplexity and other AI services, excluding Chinese services"
+    },
     "covers": [
       "anthropic",
       "copilot",
@@ -322,9 +329,16 @@
   {
     "id": "ads",
     "name": "Реклама и трекеры",
+    "name_i18n": {
+      "ru": "Реклама и трекеры",
+      "en": "Ads and trackers"
+    },
     "iconSlug": "lucide-circle-slash",
     "category": "block",
     "notice": "Блокирует рекламу и трекеры через action:reject — выбор outbound не требуется",
+    "notice_i18n": {
+      "en": "Blocks ads and trackers with action:reject. No outbound selection is required."
+    },
     "origin": "",
     "engines": {
       "singbox": {
@@ -341,9 +355,16 @@
   {
     "id": "all-blocked",
     "name": "Заблокировано в РФ (itdoginfo/allow-domains)",
+    "name_i18n": {
+      "ru": "Заблокировано в РФ (itdoginfo/allow-domains)",
+      "en": "Blocked in Russia (itdoginfo/allow-domains)"
+    },
     "iconSlug": "lucide-globe-lock",
     "category": "block",
     "notice": "Каталог заблокированных доменов из itdoginfo/allow-domains, может содержать домены из других стран",
+    "notice_i18n": {
+      "en": "Domains blocked in Russia from itdoginfo/allow-domains. May also include domains blocked in other countries."
+    },
     "origin": "",
     "engines": {
       "dns": {
@@ -354,9 +375,16 @@
   {
     "id": "porn",
     "name": "Adult content (18+)",
+    "name_i18n": {
+      "ru": "Контент для взрослых (18+)",
+      "en": "Adult content (18+)"
+    },
     "iconSlug": "lucide-lock",
     "category": "block",
     "notice": "Контент 18+ через VPN",
+    "notice_i18n": {
+      "en": "Adult content (18+) through VPN"
+    },
     "sensitive": true,
     "origin": "",
     "engines": {
@@ -374,9 +402,16 @@
   {
     "id": "rkn",
     "name": "Заблокировано в РФ",
+    "name_i18n": {
+      "ru": "Заблокировано в РФ",
+      "en": "Blocked in Russia"
+    },
     "iconSlug": "rkn",
     "category": "block",
     "notice": "Содержит более 90 000 доменов, заблокированных в РФ. Источник — hoaxisr/rulesets",
+    "notice_i18n": {
+      "en": "Over 90,000 domains blocked in Russia. Source: hoaxisr/rulesets"
+    },
     "origin": "",
     "engines": {
       "singbox": {
@@ -393,9 +428,16 @@
   {
     "id": "russian-services",
     "name": "Российские сервисы",
+    "name_i18n": {
+      "ru": "Российские сервисы",
+      "en": "Russian services"
+    },
     "iconSlug": "rkn",
     "category": "block",
     "notice": "Всегда напрямую, мимо туннеля. Основной источник — itdoginfo/allow-domains (Russia outside-raw). Дополнительно включены домены банков, госуслуг, Yandex/VK, WB/Ozon и другие",
+    "notice_i18n": {
+      "en": "Always routes directly, bypassing the tunnel. Main source: itdoginfo/allow-domains (Russia outside-raw). Also includes domains for banks, government services, Yandex/VK, WB/Ozon and others."
+    },
     "origin": "",
     "engines": {
       "dns": {
@@ -517,6 +559,10 @@
   {
     "id": "unavailable-in-russia",
     "name": "Недоступно из РФ (hoaxisr/rulesets)",
+    "name_i18n": {
+      "ru": "Недоступно из РФ (hoaxisr/rulesets)",
+      "en": "Unavailable from Russia (hoaxisr/rulesets)"
+    },
     "iconSlug": "lucide-globe-lock",
     "category": "block",
     "origin": "",
@@ -818,6 +864,9 @@
     "iconSlug": "cloudflare",
     "category": "cdn",
     "notice": "Список покрывает сайты и сервисы на инфраструктуре Cloudflare (CDN, reverse proxy, Workers). Выбирая его, вы буквально заворачиваете в правило огромную часть интернета — используйте осознанно.",
+    "notice_i18n": {
+      "en": "Covers websites and services on Cloudflare infrastructure (CDN, reverse proxy, Workers). This rule can affect a large part of the internet. Enable it with care."
+    },
     "warnings": [
       {
         "code": "broad_traffic_scope",
@@ -918,6 +967,10 @@
   {
     "id": "cloudflare-ips",
     "name": "Cloudflare IPs",
+    "name_i18n": {
+      "ru": "IP-адреса Cloudflare",
+      "en": "Cloudflare IP addresses"
+    },
     "iconSlug": "cloudflare",
     "category": "cdn",
     "warnings": [
@@ -962,6 +1015,9 @@
     "iconSlug": "fastly",
     "category": "cdn",
     "notice": "Fastly раздаёт сайты, API и медиа множества сервисов. Как и у любого CDN, за одним именем стоит большая часть чужого трафика — включайте осознанно.",
+    "notice_i18n": {
+      "en": "Fastly delivers websites, APIs and media for many services. Like other CDNs, it carries traffic for many unrelated sites. Enable it with care."
+    },
     "origin": "",
     "engines": {
       "singbox": {
@@ -981,6 +1037,9 @@
     "iconSlug": "jsdelivr",
     "category": "cdn",
     "notice": "Открытый CDN для библиотек и пакетов: сайты подтягивают с него скрипты и стили. Без него страницы часто выглядят сломанными.",
+    "notice_i18n": {
+      "en": "A public CDN for libraries and packages. Websites load scripts and styles from it; pages may look broken if it is unavailable."
+    },
     "origin": "",
     "engines": {
       "singbox": {
@@ -1072,6 +1131,9 @@
     "iconSlug": "lucide-server",
     "category": "hosting",
     "notice": "Сети хостинга, где стоят чужие серверы: сайты, API, панели, self-hosted сервисы. Блокируют такие сети целиком, поэтому список широкий — включайте осознанно.",
+    "notice_i18n": {
+      "en": "Hosting networks used by third-party websites, APIs, panels and self-hosted services. Entire networks may be blocked, so this list has broad coverage. Enable it with care."
+    },
     "origin": "",
     "engines": {
       "singbox": {
@@ -1091,6 +1153,9 @@
     "iconSlug": "digitalocean",
     "category": "hosting",
     "notice": "Сети хостинга, где стоят чужие серверы. Список широкий: за одним именем стоит множество не связанных между собой сайтов.",
+    "notice_i18n": {
+      "en": "Hosting networks used by third-party servers. This list has broad coverage: many unrelated websites share the same provider."
+    },
     "origin": "",
     "engines": {
       "singbox": {
@@ -1110,6 +1175,9 @@
     "iconSlug": "vultr",
     "category": "hosting",
     "notice": "Сети хостинга, где стоят чужие серверы. Список широкий: за одним именем стоит множество не связанных между собой сайтов.",
+    "notice_i18n": {
+      "en": "Hosting networks used by third-party servers. This list has broad coverage: many unrelated websites share the same provider."
+    },
     "origin": "",
     "engines": {
       "singbox": {
@@ -1129,6 +1197,9 @@
     "iconSlug": "oracle",
     "category": "hosting",
     "notice": "Облако Oracle, включая бесплатные виртуальные машины, на которых часто держат личные сервисы.",
+    "notice_i18n": {
+      "en": "Oracle Cloud, including free virtual machines often used for personal services."
+    },
     "origin": "",
     "engines": {
       "singbox": {
@@ -1148,6 +1219,9 @@
     "iconSlug": "microsoftazure",
     "category": "hosting",
     "notice": "Облако Microsoft. Отдельно от списка «Microsoft»: тот про сервисы компании, этот — про чужие приложения, размещённые в Azure.",
+    "notice_i18n": {
+      "en": "Microsoft's cloud platform. Unlike the Microsoft list, which covers the company's own services, this list covers third-party applications hosted on Azure."
+    },
     "origin": "",
     "engines": {
       "singbox": {
@@ -1898,9 +1972,16 @@
   {
     "id": "dev-tools",
     "name": "Dev tools",
+    "name_i18n": {
+      "ru": "Инструменты разработчика",
+      "en": "Dev tools"
+    },
     "iconSlug": "lucide-cpu",
     "category": "developer",
     "notice": "Включает dev-сервисы, package registries и служебные хосты. Здесь есть shared-платформы вроде jsDelivr и Statuspage",
+    "notice_i18n": {
+      "en": "Includes developer services, package registries and supporting hosts, including shared platforms such as jsDelivr and Statuspage."
+    },
     "covers": [
       "docker",
       "github",
@@ -2114,9 +2195,16 @@
   {
     "id": "ip-checkers",
     "name": "IP checkers",
+    "name_i18n": {
+      "ru": "Проверка IP-адреса",
+      "en": "IP checkers"
+    },
     "iconSlug": "lucide-globe",
     "category": "developer",
     "notice": "Каталог сервисов определения IP/DNS/WebRTC утечек — удобно направить одним правилом, чтобы выборочно маршрутизировать некоторые сайты проверок IP в прокси",
+    "notice_i18n": {
+      "en": "Services for checking IP addresses and DNS/WebRTC leaks. Use one rule to route selected IP-checking sites through a proxy."
+    },
     "origin": "",
     "engines": {
       "dns": {
@@ -2505,9 +2593,16 @@
   {
     "id": "category-games",
     "name": "Все игры",
+    "name_i18n": {
+      "ru": "Все игры",
+      "en": "All games"
+    },
     "iconSlug": "lucide-gamepad-2",
     "category": "gaming",
     "notice": "Steam, Epic, PlayStation, Xbox, Nintendo, Blizzard и другие",
+    "notice_i18n": {
+      "en": "Steam, Epic, PlayStation, Xbox, Nintendo, Blizzard and other gaming services"
+    },
     "covers": [
       "blizzard",
       "ea",
@@ -3228,9 +3323,16 @@
   {
     "id": "category-media",
     "name": "Всё медиа",
+    "name_i18n": {
+      "ru": "Всё медиа",
+      "en": "All media"
+    },
     "iconSlug": "lucide-film",
     "category": "media",
     "notice": "Композитный список стриминговых сервисов",
+    "notice_i18n": {
+      "en": "A combined list of streaming services"
+    },
     "covers": [
       "bbc",
       "deezer",
@@ -3621,10 +3723,17 @@
     "iconSlug": "lucide-tv",
     "category": "media",
     "notice": "Kartina.TV: официальный сайт, API, стриминговые домены и 9 собственных IPv4-сетей.",
+    "notice_i18n": {
+      "en": "Kartina.TV: the official website, API, streaming domains and 9 of its own IPv4 networks."
+    },
     "routingCompanions": [
       {
         "id": "kartina_tv_ip",
         "name": "Kartina.TV IP",
+        "name_i18n": {
+          "ru": "IP-адреса Kartina.TV",
+          "en": "Kartina.TV IP addresses"
+        },
         "sourcePresetId": "kartina-tv-ip-source",
         "include": "ip_cidrs",
         "suppressDirectSelection": true
@@ -3648,6 +3757,10 @@
   {
     "id": "kartina-tv-ip-source",
     "name": "Kartina.TV IP (служебный источник)",
+    "name_i18n": {
+      "ru": "IP-адреса Kartina.TV (служебный источник)",
+      "en": "Kartina.TV IP addresses (internal source)"
+    },
     "iconSlug": "lucide-tv",
     "category": "media",
     "hidden": true,
@@ -3674,6 +3787,9 @@
     "iconSlug": "kinopub",
     "category": "media",
     "notice": "Полный сервис, включая тяжёлые видеопотоки CDN. Если видео работает напрямую или через nfqws2, выберите «Kino.pub (без CDN)».",
+    "notice_i18n": {
+      "en": "The full service, including high-bandwidth CDN video streams. If video works directly or through nfqws2, choose the Kino.pub option without CDN."
+    },
     "covers": [
       "kinopub-core"
     ],
@@ -3739,9 +3855,16 @@
   {
     "id": "kinopub-core",
     "name": "Kino.pub (без CDN)",
+    "name_i18n": {
+      "ru": "Kino.pub (без CDN)",
+      "en": "Kino.pub (without CDN)"
+    },
     "iconSlug": "kinopub",
     "category": "media",
     "notice": "Сайт, авторизация, API, зеркала, постеры и служебные зависимости. Исключены только видеопотоки и тяжёлые видео-CDN; CDN постеров, метаданные и служебные API сохранены.",
+    "notice_i18n": {
+      "en": "The website, sign-in, API, mirrors, posters and supporting services. Only video streams and high-bandwidth video CDNs are excluded; poster CDNs, metadata and supporting APIs are kept."
+    },
     "origin": "keen-pbr-sb",
     "engines": {
       "dns": {
@@ -3968,6 +4091,10 @@
   {
     "id": "torrents",
     "name": "Torrents",
+    "name_i18n": {
+      "ru": "Торренты",
+      "en": "Torrents"
+    },
     "iconSlug": "bittorrent",
     "category": "media",
     "origin": "",
@@ -4767,9 +4894,16 @@
   {
     "id": "meta",
     "name": "Meta (все сервисы)",
+    "name_i18n": {
+      "ru": "Meta (все сервисы)",
+      "en": "Meta (all services)"
+    },
     "iconSlug": "meta",
     "category": "social",
     "notice": "Facebook, Instagram, Threads, WhatsApp — sing-box: geosite-meta.",
+    "notice_i18n": {
+      "en": "Facebook, Instagram, Threads, WhatsApp — sing-box: geosite-meta."
+    },
     "covers": [
       "facebook",
       "instagram",
@@ -4780,6 +4914,10 @@
       {
         "id": "meta_whatsapp_ip",
         "name": "Meta / WhatsApp IP",
+        "name_i18n": {
+          "ru": "IP-адреса Meta / WhatsApp",
+          "en": "Meta / WhatsApp IP addresses"
+        },
         "sourcePresetId": "whatsapp-ip-source",
         "include": "ip_cidrs",
         "suppressDirectSelection": true
@@ -4989,6 +5127,10 @@
       {
         "id": "telegram_ip",
         "name": "Telegram IP",
+        "name_i18n": {
+          "ru": "IP-адреса Telegram",
+          "en": "Telegram IP addresses"
+        },
         "url": "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/sing-box/rule-set-geoip/geoip-telegram.srs"
       }
     ]
@@ -5079,6 +5221,10 @@
       {
         "id": "whatsapp_ip",
         "name": "WhatsApp IP",
+        "name_i18n": {
+          "ru": "IP-адреса WhatsApp",
+          "en": "WhatsApp IP addresses"
+        },
         "sourcePresetId": "whatsapp-ip-source",
         "include": "ip_cidrs",
         "catalogIdentityId": "meta#routing-companion:meta_whatsapp_ip",
@@ -5089,6 +5235,10 @@
   {
     "id": "whatsapp-ip-source",
     "name": "WhatsApp IP (служебный источник)",
+    "name_i18n": {
+      "ru": "IP-адреса WhatsApp (служебный источник)",
+      "en": "WhatsApp IP addresses (internal source)"
+    },
     "iconSlug": "whatsapp",
     "category": "social",
     "hidden": true,

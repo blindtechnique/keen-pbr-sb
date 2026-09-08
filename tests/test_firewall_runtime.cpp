@@ -16,6 +16,7 @@
 #include <iterator>
 #include <memory>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <sys/stat.h>
@@ -37,9 +38,14 @@ public:
     std::vector<std::string> events;
     std::vector<std::string> marked_destinations;
     std::vector<std::string> loaded_entries;
+    std::vector<FirewallRuleCriteria> route_criteria;
+    std::vector<std::pair<uint32_t, FirewallRuleCriteria>> marks;
+    std::vector<std::pair<uint32_t, FirewallRuleCriteria>> output_marks;
     std::function<void()> before_first_ipset;
     std::optional<FirewallApplyMode> refuse_apply_mode;
     bool refusal_is_external_repair{false};
+    std::vector<std::vector<FirewallNativeForwardSelector>>
+        native_forward_requests;
 
     void create_ipset(const std::string&, int, uint32_t) override {
         if (before_first_ipset) {
@@ -59,7 +65,9 @@ public:
         return {true, true, false, false};
     }
     void create_mark_rule(
-        uint32_t, const FirewallRuleCriteria& criteria) override {
+        uint32_t mark, const FirewallRuleCriteria& criteria) override {
+        marks.emplace_back(mark, criteria);
+        route_criteria.push_back(criteria);
         marked_destinations.insert(
             marked_destinations.end(),
             criteria.dst_addr.begin(),
@@ -76,11 +84,13 @@ public:
         }
     }
     void create_output_mark_rule(
-        uint32_t, const FirewallRuleCriteria& criteria) override {
+        uint32_t mark, const FirewallRuleCriteria& criteria) override {
+        output_marks.emplace_back(mark, criteria);
         events.push_back(
             "output-mark:" + criteria.dst_port.to_config_string());
     }
     void create_drop_rule(const FirewallRuleCriteria& criteria) override {
+        route_criteria.push_back(criteria);
         events.push_back(
             "drop:" + criteria.dst_port.to_config_string());
     }
@@ -99,6 +109,10 @@ public:
         const std::vector<std::string>&) override {}
     void create_source_egress_snat_rules(
         const std::vector<FirewallSourceEgressSnatSelector>&) override {}
+    void create_native_vpn_forward_rules(
+        const std::vector<FirewallNativeForwardSelector>& selectors) override {
+        native_forward_requests.push_back(selectors);
+    }
     OwnedSnatState inspect_owned_snat_state() const override {
         return OwnedSnatState::healthy;
     }
@@ -106,7 +120,8 @@ public:
     inspect_forward_udp_reject_state() const override {
         return OwnedForwardUdpRejectState::healthy;
     }
-    void create_pass_rule(const FirewallRuleCriteria&) override {
+    void create_pass_rule(const FirewallRuleCriteria& criteria) override {
+        route_criteria.push_back(criteria);
         events.push_back("pass");
     }
     std::unique_ptr<ListEntryVisitor> create_batch_loader(
@@ -772,6 +787,159 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "OpenConnect forwarding includes every enabled VPN and nested group "
+    "fallback with its own and ancestor marks") {
+    const auto config = parse_config(R"json({
+      "outbounds": [
+        {"tag":"a","type":"interface","interface":"nwg7"},
+        {"tag":"b","type":"interface","interface":"nwg8"},
+        {"tag":"c","type":"interface","interface":"nwg9"},
+        {"tag":"d","type":"interface","interface":"nwg10"},
+        {"tag":"disabled","type":"interface","interface":"nwg11"},
+        {"tag":"unreferenced","type":"interface","interface":"nwg12"},
+        {"tag":"fixed","type":"table","table":220},
+        {"tag":"direct","type":"ignore"},
+        {"tag":"inner","type":"urltest","url":"https://example.org",
+         "outbound_groups":[{"outbounds":["a","b"]}]},
+        {"tag":"outer","type":"urltest","url":"https://example.org",
+         "outbound_groups":[{"outbounds":["inner"]},{"outbounds":["c"]}]}
+      ],
+      "route":{"rules":[
+        {"outbound":"outer","dest_addr":"198.51.100.0/24"},
+        {"outbound":"d","dest_addr":"203.0.113.0/24"},
+        {"outbound":"a","dest_addr":"192.0.2.0/24"},
+        {"outbound":"disabled","dest_addr":"192.0.2.0/24","enabled":false},
+        {"outbound":"fixed","dest_addr":"192.0.2.0/24"},
+        {"outbound":"direct","dest_addr":"192.0.2.0/24"}
+      ]}
+    })json");
+    const OutboundMarkMap marks{
+        {"a", 0x00010000U}, {"b", 0x00020000U},
+        {"inner", 0x00030000U}, {"outer", 0x00040000U},
+        {"c", 0x00050000U}, {"d", 0x00060000U},
+        {"disabled", 0x00070000U}, {"unreferenced", 0x00080000U},
+        {"fixed", 0x00090000U}, {"direct", 0x000A0000U},
+    };
+    auto openconnect = service_target(
+        "ndms-service:oc-server", true,
+        {"172.29.9.0/24", "172.29.9.0/24", ""});
+    openconnect.verified_ingress_interfaces = {"oc17", "oc17", ""};
+    std::vector<FirewallNativeForwardSelector> expected{
+        {"oc17", "172.29.9.0/24", "nwg7", 0x00010000U},
+        {"oc17", "172.29.9.0/24", "nwg8", 0x00020000U},
+        {"oc17", "172.29.9.0/24", "nwg7", 0x00030000U},
+        {"oc17", "172.29.9.0/24", "nwg8", 0x00030000U},
+        {"oc17", "172.29.9.0/24", "nwg7", 0x00040000U},
+        {"oc17", "172.29.9.0/24", "nwg8", 0x00040000U},
+        {"oc17", "172.29.9.0/24", "nwg9", 0x00040000U},
+        {"oc17", "172.29.9.0/24", "nwg9", 0x00050000U},
+        {"oc17", "172.29.9.0/24", "nwg10", 0x00060000U},
+    };
+    std::sort(expected.begin(), expected.end());
+    CHECK(select_openconnect_forward_selectors(
+              config, marks, {openconnect}, false) == expected);
+}
+
+TEST_CASE(
+    "OpenConnect forwarding grants routed VPNs only with processing enabled "
+    "and never widens other native services") {
+    const auto config = staged_transaction_config();
+    const OutboundMarkMap marks{{"vpn", 0x00070000U}};
+    for (const bool process_clients : {true, false}) {
+        for (const bool ipv6_enabled : {true, false}) {
+            CAPTURE(process_clients);
+            CAPTURE(ipv6_enabled);
+            auto openconnect = service_target(
+                "ndms-service:oc-server", process_clients,
+                {"172.29.9.0/24", "172.30.8.16/28"},
+                {"2001:db8:29::/64"});
+            openconnect.verified_ingress_interfaces = {"oc21"};
+            std::vector<InternalVpnRuntimeTarget> targets{openconnect};
+            for (const auto* id : {
+                     "ndms-crypto-map:ikev2:frozen",
+                     "ndms-crypto-map:ikev1:remote",
+                     "ndms-crypto-map:l2tp:remote",
+                     "ndms-service:sstp-server",
+                     "ndms-interface:Wireguard0",
+                     "ndms-service:oc-server-backup"}) {
+                auto foreign = openconnect;
+                foreign.stable_id = id;
+                foreign.verified_ingress_interfaces = {"foreign0"};
+                targets.push_back(std::move(foreign));
+            }
+            auto interface_target = openconnect;
+            interface_target.match_kind = InternalVpnRuntimeMatchKind::interface;
+            interface_target.verified_ingress_interfaces = {"interface0"};
+            targets.push_back(std::move(interface_target));
+            auto idle = openconnect;
+            idle.verified_ingress_interfaces.clear();
+            targets.push_back(std::move(idle));
+            auto same_ingress_and_egress = openconnect;
+            same_ingress_and_egress.verified_ingress_interfaces = {"nwg0"};
+            targets.push_back(std::move(same_ingress_and_egress));
+            std::vector<FirewallNativeForwardSelector> expected{
+                {"oc21", "172.29.9.0/24", "nwg0", 0x00070000U},
+                {"oc21", "172.30.8.16/28", "nwg0", 0x00070000U},
+            };
+            if (!process_clients) {
+                expected.clear();
+            } else if (ipv6_enabled) {
+                expected.push_back(
+                    {"oc21", "2001:db8:29::/64", "nwg0", 0x00070000U});
+            }
+            std::sort(expected.begin(), expected.end());
+            CHECK(select_openconnect_forward_selectors(
+                      config, marks, targets, ipv6_enabled) == expected);
+        }
+    }
+}
+
+TEST_CASE(
+    "Native forwarding staging clears disabled and removed selectors on iptables "
+    "and never dispatches an independent nft accept") {
+    const auto config = staged_transaction_config();
+    const OutboundMarkMap marks{{"vpn", 0x00070000U}};
+    CacheManager cache{"/nonexistent/keen-pbr-test-cache"};
+    auto openconnect = service_target(
+        "ndms-service:oc-server", true, {"172.29.9.0/24"});
+    openconnect.verified_ingress_interfaces = {"oc21"};
+    const std::vector<InternalVpnRuntimeTarget> targets{openconnect};
+    openconnect.process_clients = false;
+    const std::vector<InternalVpnRuntimeTarget> bypass_targets{openconnect};
+    const std::vector<InternalVpnRuntimeTarget> empty_targets;
+    const std::vector<FirewallSourceEgressSnatSelector> no_direct_snat;
+    for (const auto backend : {
+             FirewallBackend::iptables, FirewallBackend::nftables}) {
+        CAPTURE(backend);
+        RecordingFirewall firewall{backend};
+        (void)stage_runtime_firewall(
+            config, marks, {}, cache, firewall, FirewallApplyMode::PreserveSets,
+            nullptr, &targets, &no_direct_snat);
+        (void)stage_runtime_firewall(
+            config, marks, {}, cache, firewall, FirewallApplyMode::PreserveSets,
+            nullptr, &bypass_targets, &no_direct_snat);
+        (void)stage_runtime_firewall(
+            config, marks, {}, cache, firewall, FirewallApplyMode::PreserveSets,
+            nullptr, &empty_targets, &no_direct_snat);
+        (void)stage_runtime_firewall(
+            config, marks, {}, cache, firewall, FirewallApplyMode::PreserveSets,
+            nullptr, nullptr, &no_direct_snat);
+        CHECK(firewall.applied_modes.empty());
+        if (backend == FirewallBackend::iptables) {
+            REQUIRE(firewall.native_forward_requests.size() == 4U);
+            CHECK(firewall.native_forward_requests[0] ==
+                  std::vector<FirewallNativeForwardSelector>{
+                      {"oc21", "172.29.9.0/24", "nwg0", 0x00070000U}});
+            CHECK(firewall.native_forward_requests[1].empty());
+            CHECK(firewall.native_forward_requests[2].empty());
+            CHECK(firewall.native_forward_requests[3].empty());
+        } else {
+            CHECK(firewall.native_forward_requests.empty());
+        }
+    }
+}
+
+TEST_CASE(
     "Native VPN direct egress covers SSTP OpenConnect L2TP and IKEv1 in both "
     "modes") {
     const auto disabled = service_target(
@@ -1344,7 +1512,290 @@ Config staged_transaction_config() {
     })json");
 }
 
+Config selector_list_config(OutboundType outbound_type) {
+    Config config;
+    config.daemon = DaemonConfig{};
+    config.daemon->ipv6_enabled = false;
+    Outbound outbound;
+    outbound.tag = "target";
+    outbound.type = outbound_type;
+    if (outbound_type == OutboundType::INTERFACE) outbound.interface = "nwg5";
+    config.outbounds = std::vector<Outbound>{outbound};
+    RouteRule rule;
+    rule.list = std::vector<std::string>{"selected"};
+    rule.src_addr = "192.0.2.10";
+    rule.dest_port = "443";
+    rule.outbound = "target";
+    config.route = RouteConfig{};
+    config.route->rules = std::vector<RouteRule>{rule};
+    config.lists = std::map<std::string, ListConfig>{{"selected", ListConfig{}}};
+    return config;
+}
+
 }  // namespace
+
+TEST_CASE("named empty or missing lists never broaden runtime source and port selectors") {
+    FirewallTempDirectory directory;
+    CacheManager cache{(directory.path() / "cache").string()};
+    for (const auto backend : {FirewallBackend::iptables, FirewallBackend::nftables}) {
+        for (const auto action : {OutboundType::INTERFACE, OutboundType::BLACKHOLE, OutboundType::IGNORE}) {
+            for (const auto source : {"empty", "comments", "missing-definition", "missing-cache", "missing-file"}) {
+                CAPTURE(static_cast<int>(backend));
+                CAPTURE(static_cast<int>(action));
+                CAPTURE(source);
+                auto config = selector_list_config(action);
+                auto& list = config.lists->at("selected");
+                const std::string source_kind{source};
+                const auto list_path = directory.path() / (source_kind + ".txt");
+                if (source_kind == "missing-definition") {
+                    config.lists->clear();
+                } else if (source_kind == "missing-cache") {
+                    list.url = "https://example.invalid/not-fetched";
+                } else {
+                    list.file = list_path.string();
+                    if (source_kind != "missing-file") {
+                        std::ofstream output(list_path);
+                        REQUIRE(output.good());
+                        if (source_kind == "comments") output << "# comment only\n\n# no destinations\n";
+                    }
+                }
+                RecordingFirewall firewall{backend};
+                if (source_kind == "missing-file") {
+                    CHECK_THROWS_AS(stage_runtime_firewall(
+                        config, {{"target", 0x00070000U}}, {}, cache, firewall,
+                        FirewallApplyMode::PreserveSets), std::runtime_error);
+                } else {
+                    const auto staged = stage_runtime_firewall(
+                        config, {{"target", 0x00070000U}}, {}, cache, firewall,
+                        FirewallApplyMode::PreserveSets);
+                    REQUIRE(staged.rule_states.size() == 1);
+                    CHECK(staged.rule_states.front().set_names.empty());
+                    PreviousRuntimeFirewall previous;
+                    previous.rule_states = &staged.rule_states;
+                    previous.list_usage = &staged.list_usage;
+                    previous.list_content_state = &staged.list_content_state;
+                    RecordingFirewall reused{backend};
+                    (void)stage_runtime_firewall(
+                        config, {{"target", 0x00070000U}}, {}, cache, reused,
+                        FirewallApplyMode::RulesOnly, nullptr, nullptr, nullptr,
+                        true, std::nullopt, nullptr, false, previous);
+                    CHECK(reused.route_criteria.empty());
+                }
+                CHECK(firewall.route_criteria.empty());
+                CHECK(firewall.applied_modes.empty());
+            }
+        }
+    }
+}
+
+TEST_CASE("replacement URL cache becomes usable without broadening selectors while absent") {
+    constexpr const char* old_url = "https://example.test/old.txt";
+    constexpr const char* new_url = "https://example.test/new.txt";
+    constexpr const char* body = "198.51.100.0/24\n";
+    FirewallTempDirectory directory;
+    auto transport = std::make_shared<FirewallSequenceHttpTransport>();
+    CacheManager cache{directory.path() / "cache", 1024, transport};
+    transport->enqueue(body);
+    REQUIRE(cache.download("selected", old_url).updated());
+    const auto old_snapshot = cache.capture_generation({"selected"});
+    const auto old_fingerprints = old_snapshot->fingerprints();
+    auto config = selector_list_config(OutboundType::INTERFACE);
+    config.lists->at("selected").url = new_url;
+
+    for (const auto backend : {FirewallBackend::iptables, FirewallBackend::nftables}) {
+        CAPTURE(static_cast<int>(backend));
+        RecordingFirewall ignored{backend};
+        const auto staged = stage_runtime_firewall_from_snapshot(
+            config, {{"target", 0x00070000U}}, {}, cache.max_file_size(),
+            old_snapshot, ignored, FirewallApplyMode::PreserveSets);
+        CHECK(ignored.route_criteria.empty());
+        REQUIRE(staged.rule_states.size() == 1);
+        CHECK(staged.rule_states.front().set_names.empty());
+    }
+
+    transport->enqueue(body);
+    REQUIRE(cache.download("selected", new_url).updated());
+    const auto new_snapshot = cache.capture_generation({"selected"});
+    // The runtime backend uses this comparison to replace RulesOnly with a
+    // full staging pass even though the downloaded list bytes are identical.
+    CHECK(new_snapshot->fingerprints() != old_fingerprints);
+    CHECK(old_snapshot->fingerprints() == old_fingerprints);
+    for (const auto backend : {FirewallBackend::iptables, FirewallBackend::nftables}) {
+        CAPTURE(static_cast<int>(backend));
+        RecordingFirewall current{backend};
+        (void)stage_runtime_firewall_from_snapshot(
+            config, {{"target", 0x00070000U}}, {}, cache.max_file_size(),
+            new_snapshot, current, FirewallApplyMode::PreserveSets);
+        REQUIRE(current.route_criteria.size() == 1);
+        CHECK(current.route_criteria.front().dst_set_name ==
+              current.static_set_name("selected", AF_INET));
+        CHECK(current.loaded_entries == std::vector<std::string>{"198.51.100.0/24"});
+    }
+}
+
+TEST_CASE("populated runtime lists retain their destination condition beside selectors") {
+    FirewallTempDirectory directory;
+    CacheManager cache{(directory.path() / "cache").string()};
+    for (const auto backend : {FirewallBackend::iptables, FirewallBackend::nftables}) {
+        for (const auto action : {OutboundType::INTERFACE, OutboundType::BLACKHOLE, OutboundType::IGNORE}) {
+            for (const bool domains : {false, true}) {
+                CAPTURE(static_cast<int>(backend));
+                CAPTURE(static_cast<int>(action));
+                CAPTURE(domains);
+                auto config = selector_list_config(action);
+                auto& list = config.lists->at("selected");
+                if (domains) list.domains = std::vector<std::string>{"example.test"};
+                else list.ip_cidrs = std::vector<std::string>{"198.51.100.0/24"};
+                config.lists->emplace("empty", ListConfig{});
+                config.route->rules->front().list = std::vector<std::string>{"empty", "selected", "absent"};
+                RecordingFirewall firewall{backend};
+                const auto staged = stage_runtime_firewall(
+                    config, {{"target", 0x00070000U}}, {}, cache, firewall,
+                    FirewallApplyMode::PreserveSets);
+                REQUIRE(firewall.route_criteria.size() == 1);
+                CHECK(firewall.route_criteria.front().dst_set_name ==
+                      (domains ? firewall.dynamic_set_name("selected", AF_INET)
+                               : firewall.static_set_name("selected", AF_INET)));
+                CHECK(firewall.route_criteria.front().src_addr == std::vector<std::string>{"192.0.2.10"});
+                CHECK(firewall.route_criteria.front().dst_port.to_config_string() == "443");
+                REQUIRE(staged.rule_states.size() == 1);
+                CHECK(staged.rule_states.front().set_names.size() == 1);
+            }
+        }
+    }
+}
+
+TEST_CASE("runtime source and port selectors still work without a named list") {
+    FirewallTempDirectory directory;
+    CacheManager cache{(directory.path() / "cache").string()};
+    for (const auto backend : {FirewallBackend::iptables, FirewallBackend::nftables}) {
+        for (const auto action : {OutboundType::INTERFACE, OutboundType::BLACKHOLE, OutboundType::IGNORE}) {
+            for (const bool explicit_empty : {false, true}) {
+                CAPTURE(static_cast<int>(backend));
+                CAPTURE(static_cast<int>(action));
+                CAPTURE(explicit_empty);
+                auto config = selector_list_config(action);
+                auto& rule = config.route->rules->front();
+                if (explicit_empty) rule.list = std::vector<std::string>{};
+                else rule.list.reset();
+                config.lists.reset();
+                RecordingFirewall firewall{backend};
+                (void)stage_runtime_firewall(
+                    config, {{"target", 0x00070000U}}, {}, cache, firewall,
+                    FirewallApplyMode::PreserveSets);
+                REQUIRE(firewall.route_criteria.size() == 1);
+                CHECK_FALSE(firewall.route_criteria.front().dst_set_name.has_value());
+                CHECK(firewall.route_criteria.front().src_addr == std::vector<std::string>{"192.0.2.10"});
+                CHECK(firewall.route_criteria.front().dst_port.to_config_string() == "443");
+            }
+        }
+    }
+}
+
+TEST_CASE("C1 runtime list selector and DNS marks share the family egress snapshot") {
+    auto config = parse_config(R"({
+      "daemon":{"ipv6_enabled":true},
+      "outbounds":[
+        {"tag":"a","type":"interface","interface":"nwg0","gateway":"10.8.0.1","gateway6":"2001:db8::1"},
+        {"tag":"b","type":"interface","interface":"nwg1","gateway":"10.9.0.1","gateway6":"2001:db9::1"},
+        {"tag":"inner","type":"urltest","url":"https://example.com","outbound_groups":[{"outbounds":["a","b"]}]},
+        {"tag":"group","type":"urltest","url":"https://example.com","outbound_groups":[{"outbounds":["inner"]}]}
+      ],
+      "lists":{"mixed":{"ip_cidrs":["198.51.100.0/24","2001:db8:123::/48"]}},
+      "route":{"rules":[{"list":["mixed"],"outbound":"group"},{"dest_port":"443","outbound":"group"}]},
+      "dns":{"servers":[
+        {"tag":"v4","address":"1.1.1.1:53","detour":"group"},
+        {"tag":"v6","address":"[2606:4700:4700::1111]:53","detour":"group"}
+      ]}
+    })");
+    const OutboundMarkMap marks{{"a",0x10000},{"b",0x20000},{"inner",0x30000},{"group",0x40000}};
+    const std::map<std::string, std::string> selected{{"group","inner"},{"inner","a"}};
+    const OutboundFamilyReachabilitySnapshot families{{"a",{true,false}},{"b",{false,true}}};
+    bool ipv6 = true;
+    SUBCASE("dual stack") {}
+    SUBCASE("IPv6 disabled") { ipv6 = false; config.daemon->ipv6_enabled = false; }
+    CacheManager cache{"/nonexistent/keen-pbr-test-cache"};
+    RecordingFirewall firewall;
+    const auto staged = stage_runtime_firewall(config, marks, selected, cache, firewall,
+        FirewallApplyMode::PreserveSets, nullptr, nullptr, nullptr, true, std::nullopt,
+        nullptr, false, {}, nullptr, &families);
+    REQUIRE(staged.rule_states.size() == 2U);
+    CHECK(staged.rule_states[0].fwmark == marks.at("a"));
+    CHECK(staged.rule_states[0].mark_for_family(AF_INET6) == marks.at("b"));
+    // DNS family marks are produced from the actual upstream address; the
+    // backend drops disabled IPv6. Lists and selector-only rules are gated here.
+    CHECK(firewall.marks.size() == (ipv6 ? 6U : 4U));
+    REQUIRE(firewall.output_marks.size() == 2U);
+    for (const auto& item : firewall.marks) {
+        CHECK(item.first == marks.at(item.second.family == AF_INET6 ? "b" : "a"));
+        CHECK(item.second.persist_conntrack_mark);
+    }
+    for (const auto& item : firewall.output_marks) {
+        CHECK(item.first == marks.at(item.second.family == AF_INET6 ? "b" : "a"));
+    }
+}
+
+TEST_CASE("C1 IPv4 WhatsApp overlay retains the IPv4 leaf when IPv6 has a different leaf") {
+    const auto config = parse_config(R"({
+      "daemon":{"ipv6_enabled":false},
+      "outbounds":[
+        {"tag":"a","type":"interface","interface":"nwg0","gateway":"10.8.0.1"},
+        {"tag":"b","type":"interface","interface":"nwg1","gateway6":"2001:db9::1"},
+        {"tag":"group","type":"urltest","url":"https://example.com","outbound_groups":[{"outbounds":["a","b"]}]}
+      ],
+      "lists":{"wa":{"catalog_identity":"0475c85d06ea258343fdda22ee85bfd0a3e1fb2fa88751ab39ee0ffb64efedbe",
+                       "ip_cidrs":["31.13.64.0/18"]}},
+      "route":{"rules":[{"list":["wa"],"outbound":"group"}]}
+    })");
+    CacheManager cache{"/nonexistent/keen-pbr-test-cache"};
+    RecordingFirewall firewall;
+    const auto staged = stage_runtime_firewall(config,
+        {{"a",0x10000},{"b",0x20000},{"group",0x30000}}, {{"group","a"}},
+        cache, firewall, FirewallApplyMode::PreserveSets);
+    REQUIRE(staged.rule_states.size() == 1U);
+    CHECK(staged.rule_states[0].mark_for_family(AF_INET6) == 0x20000U);
+    const auto affinity = std::find_if(firewall.marks.begin(), firewall.marks.end(),
+        [](const auto& mark) { return mark.second.src_udp_peer_set_name.has_value(); });
+    REQUIRE(affinity != firewall.marks.end());
+    CHECK(affinity->first == 0x10000U);
+}
+
+TEST_CASE("C5 runtime restore hints contain only current configured routable outbounds") {
+    auto config = parse_config(R"({
+      "daemon":{"ipv6_enabled":false},
+      "outbounds":[
+        {"tag":"a","type":"interface","interface":"nwg0"},
+        {"tag":"b","type":"interface","interface":"nwg1"},
+        {"tag":"missing","type":"interface","interface":"nwg2"},
+        {"tag":"table","type":"table","table":177},
+        {"tag":"stop","type":"blackhole"},
+        {"tag":"bypass","type":"ignore"},
+        {"tag":"group","type":"urltest","url":"https://example.com",
+         "outbound_groups":[{"outbounds":["a","b"]}]}
+      ],
+      "route":{"rules":[{"dest_port":"443","outbound":"group"}]}
+    })");
+    const OutboundMarkMap marks{{"a",0x10000U},{"b",0x20000U},{"group",0x30000U},
+        {"table",0x40000U},{"stop",0x50000U},{"bypass",0x60000U},{"orphan",0x70000U}};
+    CacheManager cache{"/nonexistent/keen-pbr-test-cache"};
+    RecordingFirewall firewall;
+    const auto hints = [&]() {
+        const auto& values = firewall.global_prefilter().configured_outbound_marks;
+        return std::set<uint32_t>(values.begin(), values.end());
+    };
+    for (const auto* selected : {"a", "b"}) {
+        (void)stage_runtime_firewall(config, marks, {{"group",selected}}, cache,
+            firewall, FirewallApplyMode::PreserveSets);
+        CHECK(hints() == std::set<uint32_t>{0x10000U,0x20000U,0x30000U,0x40000U});
+    }
+    config.outbounds->erase(config.outbounds->begin());
+    config.outbounds->back().outbound_groups->front().outbounds = {"b"};
+    // Reusing the supplied mark map must not resurrect A after its config
+    // entry was removed, even on the same firewall instance.
+    (void)stage_runtime_firewall(config, marks, {{"group","b"}}, cache,
+        firewall, FirewallApplyMode::PreserveSets);
+    CHECK(hints() == std::set<uint32_t>{0x20000U,0x30000U,0x40000U});
+}
 
 TEST_CASE("staging builds the whole transaction without committing it") {
     const auto config = staged_transaction_config();

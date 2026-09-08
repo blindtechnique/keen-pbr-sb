@@ -98,6 +98,17 @@ static std::string run_generate(DnsmasqGenerator& gen) {
     return oss.str();
 }
 
+static std::vector<std::string> lines_with_prefix(
+    const std::string& output, const std::string& prefix) {
+    std::vector<std::string> result;
+    std::istringstream input(output);
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.rfind(prefix, 0) == 0) result.push_back(line);
+    }
+    return result;
+}
+
 // Extract the hash from the txt-record line in generate() output.
 static std::string extract_txt_hash(const std::string& output) {
     const std::string prefix = "txt-record=config-hash.keen.pbr,";
@@ -384,6 +395,142 @@ TEST_CASE("generate-resolver-config includes fallback server directives in confi
     CHECK(primary_pos < backup_pos);
 }
 
+TEST_CASE("direct fallback metadata contains only direct global DNS without changing active rules") {
+    CacheManager cache("/nonexistent/cache");
+    ListStreamer streamer(cache);
+    RouteConfig route;
+    const std::map<std::string, ListConfig> lists;
+    DnsServer direct;
+    direct.tag = "direct";
+    direct.address = "77.88.8.8";
+    DnsServer vpn;
+    vpn.tag = "vpn-dns";
+    vpn.address = "10.20.30.53";
+    vpn.detour = "vpn";
+    DnsServer scoped;
+    scoped.tag = "scoped";
+    scoped.address = "192.0.2.53";
+    scoped.domains = std::vector<std::string>{"only.example"};
+    DnsConfig dns;
+    dns.servers = std::vector<DnsServer>{direct, vpn, scoped};
+    dns.fallback = std::vector<std::string>{"direct", "vpn-dns"};
+    DnsServerRegistry registry(dns);
+    DnsmasqGenerator generator(registry, streamer, route, dns, lists);
+    const auto output = run_generate(generator);
+
+    CHECK(lines_with_prefix(output, "# keen-pbr direct-fallback server=") ==
+          std::vector<std::string>{"# keen-pbr direct-fallback server=77.88.8.8"});
+    CHECK(lines_with_prefix(output, "server=") == std::vector<std::string>{
+        "server=77.88.8.8", "server=10.20.30.53", "server=/only.example/192.0.2.53"});
+    CHECK(generator.compute_config_hash() == extract_txt_hash(output));
+}
+
+TEST_CASE("direct fallback metadata preserves custom ports and excludes self DNS and disabled IPv6") {
+    CacheManager cache("/nonexistent/cache");
+    ListStreamer streamer(cache);
+    RouteConfig route;
+    const std::map<std::string, ListConfig> lists;
+    DnsConfig dns;
+    dns.servers = std::vector<DnsServer>{};
+    dns.fallback = std::vector<std::string>{};
+    const std::vector<std::string> addresses{
+        "127.0.0.1", "127.1.2.3:53", "[::1]:53",
+        "127.0.0.1:40508", "9.9.9.9:5353", "[2001:db8::53]:5353"};
+    for (size_t index = 0; index < addresses.size(); ++index) {
+        DnsServer server;
+        server.tag = "dns" + std::to_string(index);
+        server.address = addresses[index];
+        dns.servers->push_back(server);
+        dns.fallback->push_back(server.tag);
+    }
+    DnsServerRegistry registry(dns);
+    for (const auto policy : {ResolverIpv6Policy::supported(),
+                              ResolverIpv6Policy::unsupported(),
+                              ResolverIpv6Policy::explicitly_disabled()}) {
+        CAPTURE(policy.targets_enabled);
+        CAPTURE(policy.suppress_aaaa);
+        DnsmasqGenerator generator(
+            registry, streamer, route, dns, lists, ResolverType::DNSMASQ_IPSET,
+            "test-version", policy);
+        const auto output = run_generate(generator);
+        std::vector<std::string> expected{
+            "# keen-pbr direct-fallback server=127.0.0.1#40508",
+            "# keen-pbr direct-fallback server=9.9.9.9#5353"};
+        if (!policy.suppress_aaaa) {
+            expected.push_back("# keen-pbr direct-fallback server=2001:db8::53#5353");
+        }
+        CHECK(lines_with_prefix(output, "# keen-pbr direct-fallback server=") == expected);
+        CHECK(lines_with_prefix(output, "server=") == std::vector<std::string>{
+            "server=127.0.0.1", "server=127.1.2.3", "server=::1",
+            "server=127.0.0.1#40508", "server=9.9.9.9#5353", "server=2001:db8::53#5353"});
+        CHECK(generator.compute_config_hash() == extract_txt_hash(output));
+    }
+}
+
+TEST_CASE("direct fallback metadata uses the prepared Keenetic address order without fetching again") {
+    KeeneticDnsTestStateGuard guard;
+    const auto snapshot = prepare_keenetic_dns_snapshot(R"({"proxy-status":[{
+        "proxy-name":"System",
+        "proxy-config":"dns_server = 198.51.100.10 .\ndns_server = 127.0.0.1:40508 . # https://resolver.example/dns-query@dnsm\ndns_server = 127.0.0.1:40500 . # tls://resolver.example\ndns_server = 192.0.2.53 only.example\n"
+    }]})");
+    int fetch_count = 0;
+    set_keenetic_dns_fetcher_for_tests([&fetch_count]() -> std::string {
+        ++fetch_count;
+        throw KeeneticDnsError("unexpected hidden RCI fetch for direct fallback");
+    });
+    CacheManager cache("/nonexistent/cache");
+    ListStreamer streamer(cache);
+    RouteConfig route;
+    const std::map<std::string, ListConfig> lists;
+    DnsServer server;
+    server.tag = "keenetic";
+    server.type = api::DnsServerType::KEENETIC;
+    DnsConfig dns;
+    dns.servers = std::vector<DnsServer>{server};
+    dns.fallback = std::vector<std::string>{"keenetic"};
+    DnsServerRegistry registry(dns, snapshot);
+    DnsmasqGenerator generator(registry, streamer, route, dns, lists);
+    const auto output = run_generate(generator);
+
+    CHECK(lines_with_prefix(output, "# keen-pbr direct-fallback server=") ==
+          std::vector<std::string>{
+              "# keen-pbr direct-fallback server=127.0.0.1#40508",
+              "# keen-pbr direct-fallback server=127.0.0.1#40500"});
+    CHECK(lines_with_prefix(output, "server=") == std::vector<std::string>{
+        "server=127.0.0.1#40508", "server=127.0.0.1#40500", "server=/only.example/192.0.2.53"});
+    CHECK(generator.compute_config_hash() == extract_txt_hash(output));
+    CHECK(fetch_count == 0);
+}
+
+TEST_CASE("direct fallback eligibility changes resolver hash when a DNS detour is toggled") {
+    CacheManager cache("/nonexistent/cache");
+    ListStreamer direct_streamer(cache);
+    ListStreamer detoured_streamer(cache);
+    RouteConfig route;
+    const std::map<std::string, ListConfig> lists;
+    auto direct_dns = make_empty_dns_cfg();
+    direct_dns.servers->front().address = "9.9.9.9";
+    auto detoured_dns = direct_dns;
+    detoured_dns.servers->front().detour = "vpn";
+    DnsServerRegistry direct_registry(direct_dns);
+    DnsServerRegistry detoured_registry(detoured_dns);
+    DnsmasqGenerator direct_generator(
+        direct_registry, direct_streamer, route, direct_dns, lists);
+    DnsmasqGenerator detoured_generator(
+        detoured_registry, detoured_streamer, route, detoured_dns, lists);
+    const auto direct_output = run_generate(direct_generator);
+    const auto detoured_output = run_generate(detoured_generator);
+
+    CHECK(lines_with_prefix(direct_output, "server=") ==
+          lines_with_prefix(detoured_output, "server="));
+    CHECK(lines_with_prefix(direct_output, "# keen-pbr direct-fallback server=").size() == 1);
+    CHECK(lines_with_prefix(detoured_output, "# keen-pbr direct-fallback server=").empty());
+    CHECK(detoured_output.find("# keen-pbr direct-fallback v1\n") != std::string::npos);
+    CHECK(direct_generator.compute_config_hash() != detoured_generator.compute_config_hash());
+    CHECK(direct_generator.compute_config_hash() == extract_txt_hash(direct_output));
+    CHECK(detoured_generator.compute_config_hash() == extract_txt_hash(detoured_output));
+}
+
 TEST_CASE("hash changes when fallback list order changes") {
     CacheManager cache("/nonexistent/cache");
     ListStreamer streamer1(cache);
@@ -447,6 +594,86 @@ TEST_CASE("generate-resolver-config blocks firefox doh canary domain") {
     const std::string output = run_generate(gen);
 
     CHECK(output.find("address=/use-application-dns.net/\n") != std::string::npos);
+}
+
+TEST_CASE("Firefox canary effective boolean controls only its directive and resolver hash") {
+    const std::string canary = "address=/use-application-dns.net/\n\n";
+    for (const auto type : {ResolverType::DNSMASQ_IPSET, ResolverType::DNSMASQ_NFTSET}) {
+        CAPTURE(static_cast<int>(type));
+        CacheManager cache("/nonexistent/cache");
+        ListStreamer streamer(cache);
+        const auto route_cfg = make_route_cfg("mylist");
+        const auto dns_cfg = make_dns_cfg("mylist", "upstream", "192.0.2.53");
+        const auto lists = std::map<std::string, ListConfig>{
+            {"mylist", make_list_cfg({"example.com"})}};
+        const auto generated = [&](const DnsConfig& config) {
+            DnsServerRegistry registry(config);
+            DnsmasqGenerator generator(registry, streamer, route_cfg, config, lists, type);
+            const auto hash = generator.compute_config_hash();
+            const auto output = run_generate(generator);
+            CHECK(hash == extract_txt_hash(output));
+            const auto receipt = output.rfind("txt-record=config-hash.keen.pbr,");
+            REQUIRE(receipt != std::string::npos);
+            // Exclude only the receipt's wall-clock timestamp from exact
+            // output comparison; compare the canonical hash separately.
+            return std::make_pair(output.substr(0, receipt), hash);
+        };
+
+        const auto omitted = generated(dns_cfg);
+        REQUIRE(omitted.first.find(canary) != std::string::npos);
+        CHECK(omitted.first.find("example.com") != std::string::npos);
+        CHECK_FALSE(lines_with_prefix(omitted.first, "server=").empty());
+        CHECK_FALSE(lines_with_prefix(omitted.first,
+            type == ResolverType::DNSMASQ_IPSET ? "ipset=" : "nftset=").empty());
+
+        nlohmann::json null_document = dns_cfg;
+        null_document["firefox_doh_canary"] = nullptr;
+        const auto null_config = null_document.get<DnsConfig>();
+        CHECK_FALSE(null_config.firefox_doh_canary.has_value());
+        CHECK(generated(null_config) == omitted);
+
+        auto toggled = dns_cfg;
+        toggled.firefox_doh_canary = true;
+        CHECK(generated(toggled) == omitted);
+        toggled.firefox_doh_canary = false;
+        const auto disabled = generated(toggled);
+        CHECK(disabled.first.find("use-application-dns.net") == std::string::npos);
+        CHECK(disabled.second != omitted.second);
+        auto expected_without_canary = omitted.first;
+        expected_without_canary.erase(expected_without_canary.find(canary), canary.size());
+        CHECK(disabled.first == expected_without_canary);
+
+        toggled.firefox_doh_canary = true;
+        CHECK(generated(toggled) == omitted);
+    }
+}
+
+TEST_CASE("Firefox canary optional config field survives generated JSON persistence") {
+    for (const bool enabled : {false, true}) {
+        CAPTURE(enabled);
+        const nlohmann::json document = {
+            {"firefox_doh_canary", enabled}, {"future_dns_field", "preserved"}};
+        const auto config = document.get<DnsConfig>();
+        CHECK(config.firefox_doh_canary == enabled);
+        CHECK_FALSE(config._config_unknown_fields.contains("firefox_doh_canary"));
+        nlohmann::json persisted = config;
+        (void)api::prune_config_json_for_persistence(persisted, config);
+        CHECK(persisted.at("firefox_doh_canary") == enabled);
+        CHECK(persisted.at("future_dns_field") == "preserved");
+        const auto reloaded = nlohmann::json::parse(persisted.dump()).get<DnsConfig>();
+        CHECK(reloaded.firefox_doh_canary == enabled);
+    }
+    for (const bool explicit_null : {false, true}) {
+        CAPTURE(explicit_null);
+        nlohmann::json dns = { {"future_dns_field", "preserved"} };
+        if (explicit_null) dns["firefox_doh_canary"] = nullptr;
+        const auto config = dns.get<DnsConfig>();
+        CHECK_FALSE(config.firefox_doh_canary.has_value());
+        CHECK(config.firefox_doh_canary.value_or(true));
+        nlohmann::json persisted = config;
+        (void)api::prune_config_json_for_persistence(persisted, config);
+        CHECK_FALSE(persisted.contains("firefox_doh_canary"));
+    }
 }
 
 TEST_CASE("generate-resolver-config omits dns probe server directive when disabled") {
@@ -643,6 +870,117 @@ TEST_CASE("generate-resolver-config does not publish scoped Keenetic policy outs
     CHECK(output.find(
               "server=/example.com/127.0.0.1#40500\n") !=
           std::string::npos);
+}
+
+TEST_CASE("direct DNS bindings work without lists and retain fallback") {
+    CacheManager cache("/nonexistent/cache");
+    ListStreamer streamer(cache);
+    RouteConfig route;
+    std::map<std::string, ListConfig> lists;
+    auto dns = make_empty_dns_cfg();
+    DnsServer pinned;
+    pinned.tag = "pinned";
+    pinned.address = "192.0.2.53:5353";
+    pinned.domains = std::vector<std::string>{"*.YouTube.com.", "youtube.com"};
+    DnsServer backup = pinned;
+    backup.tag = "backup";
+    backup.address = "[2001:db8::53]:5353";
+    DnsServer specific = pinned;
+    specific.tag = "specific";
+    specific.address = "192.0.2.54";
+    specific.domains = std::vector<std::string>{"m.youtube.com"};
+    dns.servers->insert(dns.servers->end(), {pinned, backup, specific});
+    DnsServerRegistry registry(dns);
+    DnsmasqGenerator gen(registry, streamer, route, dns, lists);
+    const auto output = run_generate(gen);
+    CHECK(output.find("server=127.0.0.1\n") != std::string::npos);
+    const std::string pinned_record = "server=/youtube.com/192.0.2.53#5353\n";
+    const auto pin_pos = output.find(pinned_record);
+    REQUIRE(pin_pos != std::string::npos);
+    CHECK(output.find(pinned_record, pin_pos + 1) == std::string::npos);
+    CHECK(output.find("server=/youtube.com/2001:db8::53#5353\n") != std::string::npos);
+    CHECK(output.find("server=/m.youtube.com/192.0.2.54\n") != std::string::npos);
+    CHECK(output.find("ipset=") == std::string::npos);
+    CHECK(gen.compute_config_hash() == extract_txt_hash(output));
+}
+
+TEST_CASE("direct DNS bindings override list DNS without changing routing sets") {
+    CacheManager cache("/nonexistent/cache");
+    ListStreamer streamer(cache);
+    auto route = make_route_cfg("services");
+    auto dns = make_dns_cfg("services", "list_dns", "192.0.2.53", true);
+    DnsServer pinned;
+    pinned.tag = "pinned";
+    pinned.address = "192.0.2.54";
+    pinned.domains = std::vector<std::string>{"example.com"};
+    dns.servers->push_back(pinned);
+    std::map<std::string, ListConfig> lists{{
+        "services", make_list_cfg({"example.com", "api.example.com", "notexample.com"})}};
+    DnsServerRegistry registry(dns);
+    DnsmasqGenerator gen(registry, streamer, route, dns, lists);
+    const auto output = run_generate(gen);
+    CHECK(output.find("server=/example.com/192.0.2.54\n") != std::string::npos);
+    CHECK(output.find("server=/notexample.com/192.0.2.53\n") != std::string::npos);
+    CHECK(output.find("server=/example.com/api.example.com") == std::string::npos);
+    CHECK(output.find("ipset=/example.com/api.example.com/notexample.com/") != std::string::npos);
+    CHECK(output.find("rebind-domain-ok=/example.com/api.example.com/notexample.com/\n") != std::string::npos);
+
+    DnsmasqGenerator nftgen(registry, streamer, route, dns, lists, ResolverType::DNSMASQ_NFTSET);
+    const auto nftoutput = run_generate(nftgen);
+    CHECK(nftoutput.find("nftset=/example.com/api.example.com/notexample.com/") != std::string::npos);
+    CHECK(nftoutput.find("server=/example.com/192.0.2.54\n") != std::string::npos);
+}
+
+TEST_CASE("direct DNS bindings override inherited child policy and preserve its parents") {
+    auto dns = make_empty_dns_cfg();
+    dns.servers->front().type = api::DnsServerType::KEENETIC;
+    dns.servers->front().address.reset();
+    DnsServer pinned;
+    pinned.tag = "pinned";
+    pinned.address = "192.0.2.53";
+    pinned.domains = std::vector<std::string>{"example.com"};
+    dns.servers->push_back(pinned);
+    const auto snapshot = extract_keenetic_dns_snapshot_from_rci(R"({
+        "proxy-status": [{"proxy-name":"System", "proxy-config":
+          "dns_server = 127.0.0.1:40500 . # tls://resolver.example\ndns_server = 127.0.0.1:40501 api.example.com # tls://api.example\ndns_server = 127.0.0.1:40502 com # tls://parent.example\n"
+        }]
+    })");
+    CacheManager cache("/nonexistent/cache");
+    ListStreamer streamer(cache);
+    RouteConfig route;
+    std::map<std::string, ListConfig> lists;
+    DnsServerRegistry registry(dns, snapshot);
+    DnsmasqGenerator gen(registry, streamer, route, dns, lists);
+    const auto output = run_generate(gen);
+    CHECK(output.find("server=/example.com/192.0.2.53\n") != std::string::npos);
+    CHECK(output.find("server=/api.example.com/") == std::string::npos);
+    CHECK(output.find("server=/com/127.0.0.1#40502\n") != std::string::npos);
+    CHECK(output.find("server=127.0.0.1#40500\n") != std::string::npos);
+}
+
+TEST_CASE("direct DNS binding hash follows effective pins not spelling or order") {
+    CacheManager cache("/nonexistent/cache");
+    ListStreamer streamer(cache);
+    RouteConfig route;
+    std::map<std::string, ListConfig> lists;
+    auto dns = make_empty_dns_cfg();
+    const auto hash_for = [&](const DnsConfig& config) {
+        DnsServerRegistry registry(config);
+        DnsmasqGenerator gen(registry, streamer, route, config, lists);
+        return gen.compute_config_hash();
+    };
+    const auto legacy_hash = hash_for(dns);
+    dns.servers->front().domains = std::vector<std::string>{};
+    CHECK(hash_for(dns) == legacy_hash);
+    dns.servers->front().domains = std::vector<std::string>{"example.com", "video.example"};
+    const auto pinned_hash = hash_for(dns);
+    CHECK(pinned_hash != legacy_hash);
+    dns.servers->front().domains = std::vector<std::string>{"*.VIDEO.example.", "EXAMPLE.com.", "example.com"};
+    CHECK(hash_for(dns) == pinned_hash);
+    dns.servers->front().domains = std::vector<std::string>{"example.com"};
+    CHECK(hash_for(dns) != pinned_hash);
+    dns.servers->front().domains.reset();
+    CHECK(hash_for(dns) == legacy_hash);
 }
 
 TEST_CASE("managed DNS rules override overlapping scoped Keenetic policy") {
@@ -1532,7 +1870,7 @@ TEST_CASE("generate-resolver-config ignores domains longer than 255 chars") {
     CHECK(output.find(invalid) == std::string::npos);
 }
 
-TEST_CASE("generate-resolver-config merges cached content with file and inline entries") {
+TEST_CASE("generate-resolver-config uses only the current URL cache with local and inline entries") {
     const auto temp_root =
         std::filesystem::temp_directory_path() / "keen-pbr-test-dnsmasq-cache-merged";
     std::filesystem::remove_all(temp_root);
@@ -1562,22 +1900,44 @@ TEST_CASE("generate-resolver-config merges cached content with file and inline e
         list_cfg.url = "https://example.com/list.txt";
         list_cfg.file = local_file;
         list_cfg.domains = std::vector<std::string>{"from-inline.example"};
+        CacheMetadata metadata;
+        metadata.url = list_cfg.url;
+        cache.save_metadata("mylist", metadata);
 
         const std::string list_name = "mylist";
         auto route_cfg = make_route_cfg(list_name);
-        auto dns_cfg = make_empty_dns_cfg();
-        auto lists = std::map<std::string, ListConfig>{{list_name, list_cfg}};
-
-        ListStreamer streamer(cache);
-        DnsServerRegistry reg(dns_cfg);
-        DnsmasqGenerator gen(reg, streamer, route_cfg, dns_cfg, lists);
-        const std::string output = run_generate(gen);
-
-        // The cached URL content is used in place of a re-download, but the
-        // list's local file and inline domains must never be dropped.
-        CHECK(output.find("from-cache.example") != std::string::npos);
-        CHECK(output.find("from-file.example") != std::string::npos);
-        CHECK(output.find("from-inline.example") != std::string::npos);
+        auto dns_cfg = make_dns_cfg(list_name, "resolver", "9.9.9.9");
+        ListStreamer live(cache);
+        ListStreamer pinned(cache, cache.capture_generation({list_name}));
+        const std::vector<std::optional<std::string>> sources{
+            metadata.url, std::nullopt, "https://example.com/replacement.txt"};
+        for (const auto& source : sources) {
+            list_cfg.url = source;
+            auto lists = std::map<std::string, ListConfig>{{list_name, list_cfg}};
+            for (auto* streamer : {&live, &pinned}) {
+                DnsServerRegistry reg(dns_cfg);
+                DnsmasqGenerator gen(reg, *streamer, route_cfg, dns_cfg, lists);
+                const std::string output = run_generate(gen);
+                // DNS and route set directives use the same source decision:
+                // offline cache survives only for its still-configured URL.
+                const bool current_source = source == metadata.url;
+                CHECK((output.find("from-cache.example") != std::string::npos) ==
+                      current_source);
+                // Dnsmasq batches all domains with the same destination in
+                // one directive, rather than emitting one line per source.
+                const std::string domain_path =
+                    std::string(current_source ? "/from-cache.example" : "") +
+                    "/from-file.example/from-inline.example";
+                CHECK(output.find("ipset=" + domain_path +
+                                  "/kpbr4d_mylist,kpbr6d_mylist\n") !=
+                      std::string::npos);
+                CHECK(output.find("server=" + domain_path + "/9.9.9.9\n") !=
+                      std::string::npos);
+                CHECK(output.find("from-inline.example") != std::string::npos);
+                CHECK(gen.compute_config_hash() == extract_txt_hash(output));
+            }
+        }
+        CHECK(cache.has_cache(list_name));
 
         cleanup();
     } catch (...) {

@@ -156,7 +156,7 @@ func (f *fakeSharedRuntime) hooks() sharedRuntimeHooks {
 			}
 			return &net.Interface{Name: name}, nil
 		},
-		ensureRules: func([]TransportSpec) error {
+		ensureRules: func(context.Context, []TransportSpec) error {
 			f.mu.Lock()
 			defer f.mu.Unlock()
 			f.ensureCalls++
@@ -173,7 +173,7 @@ func (f *fakeSharedRuntime) hooks() sharedRuntimeHooks {
 			f.mu.Unlock()
 			return nil
 		},
-		removeCrashRules: func(map[string]bool, map[string]TransportSpec) {
+		removeCrashRules: func(context.Context, map[string]bool, map[string]TransportSpec) {
 			f.mu.Lock()
 			f.crashRemoveCalls++
 			callback := f.onCrashRemove
@@ -837,7 +837,7 @@ func TestSharedRuntimeCloseHonorsDeadlineWhileOperationIsBusy(t *testing.T) {
 	locked = false
 }
 
-func TestSupervisorSharedHealthIncludesPerProxyRoutingVerdict(t *testing.T) {
+func TestSharedMemberStatusIncludesPerProxyRoutingVerdict(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"outbounds":[{"interfaces":[` +
 			`{"interface_name":"vless1","status":"failed","detail":"probe failed"}` +
@@ -871,12 +871,15 @@ func TestSupervisorSharedHealthIncludesPerProxyRoutingVerdict(t *testing.T) {
 		t.Fatal(err)
 	}
 	for attempt := 1; attempt <= 3; attempt++ {
-		healthy := supervisor.groupMembersHealthy(context.Background(), group.Key())
-		if attempt < 3 && !healthy {
+		status, err := supervisor.Status(context.Background(), spec.Tag)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if attempt < 3 && status.State != StateUp {
 			t.Fatalf("routing health degraded before the existing threshold at attempt %d", attempt)
 		}
-		if attempt == 3 && healthy {
-			t.Fatal("shared supervisor ignored a repeatedly failed per-proxy routing verdict")
+		if attempt == 3 && status.State != StateDegraded {
+			t.Fatal("member status ignored a repeatedly failed per-proxy routing verdict")
 		}
 	}
 }

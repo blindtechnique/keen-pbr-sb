@@ -1639,6 +1639,99 @@ TEST_CASE("nft modern mark merge uses numeric direction and preserves foreign bi
   CHECK(cmds[4]["add"]["rule"]["chain"] == "output");
 }
 
+TEST_CASE("C5 legacy nft retains configured old leaf before new classifiers in both scopes") {
+  constexpr uint32_t old_mark = 0x00120000U;
+  constexpr uint32_t new_mark = 0x00340000U;
+  constexpr uint32_t mask = 0x00ff0000U;
+  int family = AF_INET;
+  SUBCASE("IPv4") {}
+  SUBCASE("IPv6") { family = AF_INET6; }
+  FirewallGlobalPrefilter prefilter;
+  prefilter.restore_conntrack_mark = true;
+  prefilter.conntrack_mark_mask = mask;
+  prefilter.configured_outbound_marks = {old_mark, new_mark};
+  FirewallRuleCriteria criteria;
+  criteria.family = family;
+  auto forwarded = mark_rule("new_leaf", family, new_mark, criteria);
+  auto output = mark_rule("", family, new_mark | kRouterOriginMark, criteria);
+  output.output = true;
+  // A remains configured but is no longer used by any current classifier.
+  const auto commands = T::build_rule_add_commands(
+      prefilter, {forwarded, output}, /*register_merge=*/false);
+  REQUIRE(commands.size() == 6U);
+  for (const std::size_t offset : {0U, 3U}) {
+    const auto& restored = commands[offset]["add"]["rule"];
+    CHECK(restored["chain"] == (offset == 0U ? "prerouting" : "output"));
+    const auto& expr = restored["expr"];
+    CHECK(expr[0]["match"]["left"]["ct"]["key"] == "direction");
+    CHECK(expr[0]["match"]["right"] == 0);
+    CHECK(expr[1]["match"]["left"]["&"][1] == mask);
+    CHECK(expr[1]["match"]["right"] == old_mark);
+    const auto& restored_value = expr[2]["mangle"]["value"]["|"];
+    CHECK(restored_value[0]["&"][0]["meta"]["key"] == "mark");
+    CHECK(restored_value[0]["&"][1] == ~mask);
+    CHECK(restored_value[1] == old_mark);
+    CHECK(expr[4].contains("accept"));
+    // Constant restoration changes only owned bits, including outgoing
+    // router-originated DNS whose packet mark includes the router bit.
+    constexpr uint32_t incoming_mark = 0xa5000003U;
+    const auto preserved = (incoming_mark & restored_value[0]["&"][1].get<uint32_t>()) |
+        restored_value[1].get<uint32_t>();
+    CHECK((preserved & ~mask) == incoming_mark);
+    CHECK((preserved & mask) == old_mark);
+    CHECK(commands[offset + 1]["add"]["rule"]["expr"][1]["match"]["right"] == new_mark);
+    CHECK(commands[offset + 2]["add"]["rule"]["chain"] == restored["chain"]);
+    CHECK(commands[offset + 2]["add"]["rule"]["expr"].dump().find("nfproto") != std::string::npos);
+  }
+}
+
+TEST_CASE("C5 legacy nft normalizes configured marks without retaining removed history") {
+  constexpr uint32_t old_mark = 0x00120000U;
+  constexpr uint32_t new_mark = 0x00340000U;
+  FirewallGlobalPrefilter prefilter;
+  prefilter.restore_conntrack_mark = true;
+  prefilter.conntrack_mark_mask = 0x00ff0000U;
+  prefilter.configured_outbound_marks = {
+      old_mark, old_mark | 0xa1000003U, new_mark, new_mark, 0U, 0xa1000003U};
+  const auto current = mark_rule("new_leaf", AF_INET6, new_mark);
+  const auto commands = T::build_rule_add_commands(prefilter, {current}, false);
+  // Two unique normalized marks in both scopes and one pending classifier.
+  REQUIRE(commands.size() == 5U);
+  CHECK(commands[0]["add"]["rule"]["expr"][1]["match"]["right"] == old_mark);
+  CHECK(commands[1]["add"]["rule"]["expr"][1]["match"]["right"] == new_mark);
+  CHECK(commands[3]["add"]["rule"]["expr"][1]["match"]["right"] == old_mark);
+  CHECK(commands[4]["add"]["rule"]["expr"][1]["match"]["right"] == new_mark);
+  prefilter.configured_outbound_marks = {new_mark, 0U, 0xa1000003U};
+  const auto after_removal = T::build_rule_add_commands(prefilter, {current}, false);
+  REQUIRE(after_removal.size() == 3U);
+  CHECK(after_removal[0]["add"]["rule"]["expr"][1]["match"]["right"] == new_mark);
+  CHECK(after_removal[2]["add"]["rule"]["expr"][1]["match"]["right"] == new_mark);
+  // Hints supplement, not replace, marks required by a current classifier.
+  prefilter.configured_outbound_marks = {old_mark};
+  const auto pending_union = T::build_rule_add_commands(prefilter, {current}, false);
+  REQUIRE(pending_union.size() == 4U);
+  CHECK(pending_union[0]["add"]["rule"]["expr"][1]["match"]["right"] == old_mark);
+  CHECK(pending_union[1]["add"]["rule"]["expr"][1]["match"]["right"] == new_mark);
+  CHECK(pending_union[3]["add"]["rule"]["chain"] == "output");
+  CHECK(pending_union[3]["add"]["rule"]["expr"][1]["match"]["right"] == old_mark);
+}
+
+TEST_CASE("C5 configured marks do not alter modern or disabled conntrack restoration") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.restore_conntrack_mark = true;
+  prefilter.conntrack_mark_mask = 0x00ff0000U;
+  bool register_merge = false;
+  SUBCASE("modern register merge") { register_merge = true; }
+  SUBCASE("restoration disabled") { prefilter.restore_conntrack_mark = false; }
+  SUBCASE("owned mask disabled") { prefilter.conntrack_mark_mask = 0U; }
+  auto output = mark_rule("", AF_INET6, 0x00340000U | kRouterOriginMark);
+  output.output = true;
+  const std::vector<Rule> rules{mark_rule("current", AF_INET, 0x00340000U), output};
+  const auto baseline = T::build_rule_add_commands(prefilter, rules, register_merge);
+  prefilter.configured_outbound_marks = {0x00120000U, 0x00340000U, 0U};
+  CHECK(T::build_rule_add_commands(prefilter, rules, register_merge) == baseline);
+}
+
 TEST_CASE("nft legacy mark merge uses constants and deduplicates restore marks") {
   FirewallGlobalPrefilter prefilter;
   prefilter.restore_conntrack_mark = true;
@@ -1823,6 +1916,33 @@ TEST_CASE("build_rule_add_commands: config-derived prefilter inserts interface g
   CHECK(cmds[2]["add"]["rule"]["expr"][0]["match"]["right"] == "br0");
   CHECK(cmds[3]["add"]["rule"]["expr"][0]["match"]["right"] == "@myset");
   CHECK(cmds[4]["add"]["rule"]["chain"] == "output");
+}
+
+TEST_CASE("C1 nft selector-only family marks retain conntrack leaf identity") {
+  FirewallRuleCriteria criteria;
+  criteria.family = AF_INET6;
+  criteria.proto = L4Proto::Tcp;
+  criteria.dst_port = "443";
+  FirewallGlobalPrefilter prefilter;
+  prefilter.restore_conntrack_mark = true;
+  prefilter.conntrack_mark_mask = 0x00ff0000U;
+  const auto commands = T::build_rule_add_commands_via_create_mark_rule(
+      0x20000, criteria, 0x00ff0000U, prefilter);
+  unsigned family_rules = 0;
+  for (const auto& command : commands) {
+    const auto body = command.dump();
+    if (body.find("nfproto") == std::string::npos) continue;
+    ++family_rules;
+    CHECK(body.find("ipv6") != std::string::npos);
+    CHECK(body.find("ipv4") == std::string::npos);
+    CHECK(body.find("131072") != std::string::npos);
+    CHECK(body.find("\"ct\":{\"key\":\"mark\"}") != std::string::npos);
+  }
+  CHECK(family_rules == 1U);
+  FirewallRuleCriteria family_only;
+  family_only.family = AF_INET6;
+  CHECK_FALSE(family_only.has_rule_selector());
+  CHECK(family_only.empty());
 }
 
 TEST_CASE("create_mark_rule: port-only tcp/udp rule emits one tcp and one udp entry") {

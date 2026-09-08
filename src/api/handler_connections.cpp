@@ -8,12 +8,14 @@
 #include "../util/ndmc.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <deque>
 #include <fstream>
 #include <iterator>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <stdexcept>
@@ -24,17 +26,12 @@ namespace keen_pbr3 {
 namespace {
 
 using Clock = std::chrono::system_clock;
-struct Connection {
-    std::string protocol, state, source, destination, route;
-    uint16_t source_port{0}, destination_port{0};
-    uint32_t mark{0};
-    std::int64_t first_seen{0}, last_seen{0};
-    bool active{true};
-};
+using Connection = connection_detail::HistoryEntry;
 
 std::mutex connections_mutex;
 std::map<std::string, Connection> history;
 constexpr size_t maximum_history_entries = 1500;
+constexpr size_t reserved_closed_entries = 300;
 constexpr size_t maximum_dns_addresses = 3000;
 constexpr size_t maximum_domains_per_address = 4;
 constexpr auto snapshot_ttl = std::chrono::seconds(2);
@@ -42,6 +39,8 @@ constexpr auto device_names_ttl = std::chrono::seconds(60);
 std::map<std::string, std::deque<std::string>> domains_by_address;
 std::streamoff dns_log_offset{0};
 std::chrono::steady_clock::time_point snapshot_updated_at{};
+std::chrono::steady_clock::time_point dns_log_updated_at{};
+connection_detail::SnapshotObservation latest_observation;
 std::chrono::steady_clock::time_point device_names_updated_at{};
 std::map<std::string, std::string> cached_devices;
 
@@ -118,6 +117,17 @@ void read_dns_query_log() {
 
 }
 
+using RoutingAddress = std::pair<int, std::array<unsigned char, 16>>;
+
+std::optional<RoutingAddress> routing_address(const std::string& value) {
+    if (value.empty() || value.find('\0') != std::string::npos) return std::nullopt;
+    RoutingAddress address{AF_INET, {}};
+    if (inet_pton(AF_INET, value.c_str(), address.second.data()) == 1) return address;
+    address.first = AF_INET6;
+    if (inet_pton(AF_INET6, value.c_str(), address.second.data()) == 1) return address;
+    return std::nullopt;
+}
+
 std::map<uint32_t, std::string> routes(const Config& config) {
     std::map<uint32_t, std::string> result;
     if (!config.outbounds) return result;
@@ -160,19 +170,81 @@ const std::map<std::string, std::string>& device_names() {
     return cached_devices;
 }
 
-void read_conntrack(const Config& config) {
-    std::ifstream input("/proc/net/nf_conntrack");
-    if (!input) input.open("/proc/net/ip_conntrack");
-    const auto timestamp = now_seconds();
-    for (auto& [_, connection] : history) connection.active = false;
+bool is_active_conntrack_state(const Connection& connection) {
+    if (connection.protocol != "tcp") return true;
+    // Conntrack retains terminating TCP sessions until its timeout expires;
+    // their presence in /proc alone does not mean the connection is active.
+    return connection.state != "FIN_WAIT" && connection.state != "CLOSE_WAIT" &&
+           connection.state != "LAST_ACK" && connection.state != "TIME_WAIT" &&
+           connection.state != "CLOSE" && connection.state != "CLOSED" &&
+           connection.state != "CLOSING";
+}
+
+bool trim_connection_history(connection_detail::History& entries) {
+    if (entries.size() <= maximum_history_entries) return false;
+    bool omitted_observed_row = false;
+    std::vector<std::pair<std::int64_t, std::string>> active, closed;
+    for (const auto& [key, connection] : entries) {
+        (connection.active ? active : closed).emplace_back(connection.last_seen, key);
+    }
+    const auto active_limit = maximum_history_entries -
+        std::min(reserved_closed_entries, closed.size());
+    const auto remove_active = active.size() > active_limit
+        ? active.size() - active_limit : 0;
+    std::partial_sort(active.begin(), active.begin() + remove_active, active.end());
+    for (size_t index = 0; index < remove_active; ++index) {
+        omitted_observed_row |= entries.at(active[index].second).observed_in_snapshot;
+        entries.erase(active[index].second);
+    }
+    const auto remove_closed = entries.size() > maximum_history_entries
+        ? entries.size() - maximum_history_entries : 0;
+    std::partial_sort(closed.begin(), closed.begin() + remove_closed, closed.end());
+    for (size_t index = 0; index < remove_closed; ++index) {
+        omitted_observed_row |= entries.at(closed[index].second).observed_in_snapshot;
+        entries.erase(closed[index].second);
+    }
+    return omitted_observed_row;
+}
+
+void update_connection_history(connection_detail::History& entries,
+                               std::istream& input,
+                               const std::map<uint32_t, std::string>& route_names,
+                               uint32_t mark_mask, std::int64_t timestamp,
+                               connection_detail::SnapshotObservation* observation) {
+    if (observation) *observation = {false, timestamp, false};
+    // A failed read is not evidence that every observed connection closed.
     if (!input) return;
-    const auto route_names = routes(config);
+    // Keep the previous bounded snapshot separate until the stream tells us
+    // which entries really disappeared. Otherwise early pruning would mistake
+    // not-yet-read live sessions for history and evict genuinely closed ones.
+    auto previous = std::move(entries);
+    entries.clear();
+    for (auto& [_, connection] : previous) {
+        connection.active = false;
+        connection.state = "CLOSED";
+        connection.observed_in_snapshot = false;
+    }
+    bool snapshot_truncated = false;
+    const auto trim_batch = [&entries, &snapshot_truncated] {
+        // Stream even a large kernel table with at most 1564 current records,
+        // plus the previous snapshot (at most 1500), never an unbounded map.
+        if (entries.size() >= maximum_history_entries + 64) {
+            snapshot_truncated |= trim_connection_history(entries);
+        }
+    };
     std::string line;
     while (std::getline(input, line)) {
         std::istringstream stream(line);
         Connection current;
         std::string family, layer3, layer4, timeout, token;
-        if (!(stream >> family >> layer3 >> current.protocol >> layer4 >> timeout >> token)) continue;
+        if (!(stream >> family)) continue;
+        if (family == "ipv4" || family == "ipv6") {
+            if (!(stream >> layer3 >> current.protocol >> layer4 >> timeout >> token)) continue;
+        } else {
+            // The legacy ip_conntrack fallback omits the layer-3 prefix.
+            current.protocol = family;
+            if (!(stream >> layer4 >> timeout >> token)) continue;
+        }
         if (token.find('=') == std::string::npos) {
             current.state = token;
             if (!(stream >> token)) continue;
@@ -187,44 +259,65 @@ void read_conntrack(const Config& config) {
             if (const auto mark = value_after(token, "mark="); !mark.empty()) current.mark = number(mark);
         } while (stream >> token);
         if (current.source.empty() || current.destination.empty()) continue;
+        current.observed_in_snapshot = true;
         current.route = "direct";
-        const auto masked_mark = current.mark & fwmark_mask_value(config.fwmark.value_or(FwmarkConfig{}));
+        const auto masked_mark = current.mark & mark_mask;
         if (const auto found = route_names.find(masked_mark); found != route_names.end()) current.route = found->second;
         const auto key = current.protocol + '|' + current.source + '|' + std::to_string(current.source_port) + '|' + current.destination + '|' + std::to_string(current.destination_port);
-        auto& saved = history[key];
-        if (saved.first_seen == 0) saved.first_seen = timestamp;
-        current.first_seen = saved.first_seen;
-        current.last_seen = timestamp;
-        current.active = true;
-        saved = std::move(current);
+        const auto old = previous.find(key);
+        const auto duplicate = entries.find(key);
+        const auto* saved = old != previous.end() ? &old->second :
+            (duplicate != entries.end() ? &duplicate->second : nullptr);
+        current.first_seen = saved && saved->first_seen != 0
+            ? saved->first_seen : timestamp;
+        current.active = is_active_conntrack_state(current);
+        // Keep the last live observation stable while a terminating TCP entry
+        // lingers in conntrack; do not make its age restart every snapshot.
+        current.last_seen = current.active || !saved || saved->last_seen == 0
+            ? timestamp : saved->last_seen;
+        // Even an observed row omitted by the display cap must not return as
+        // falsely closed when the remaining old rows are merged below.
+        previous.erase(key);
+        entries.insert_or_assign(key, std::move(current));
+        trim_batch();
     }
-    for (auto it = history.begin(); it != history.end();) {
-        if (!it->second.active) it->second.state = "CLOSED";
-        ++it;
+    for (auto& [key, connection] : previous) {
+        entries.emplace(key, std::move(connection));
+        trim_batch();
     }
-    if (history.size() > maximum_history_entries) {
-        std::vector<std::pair<std::int64_t, std::string>> by_age;
-        by_age.reserve(history.size());
-        for (const auto& [key, connection] : history) {
-            by_age.emplace_back(connection.last_seen, key);
-        }
-        const auto remove_count = history.size() - maximum_history_entries;
-        std::partial_sort(by_age.begin(), by_age.begin() + remove_count, by_age.end());
-        for (size_t index = 0; index < remove_count; ++index) {
-            history.erase(by_age[index].second);
-        }
+    snapshot_truncated |= trim_connection_history(entries);
+    if (observation) {
+        observation->available = input.eof() && !input.bad();
+        observation->truncated = snapshot_truncated;
     }
 }
 
-void refresh_snapshot(const Config& config) {
+void read_conntrack(const Config& config) {
+    std::ifstream input("/proc/net/nf_conntrack");
+    if (!input) input.open("/proc/net/ip_conntrack");
+    update_connection_history(history, input, routes(config),
+        fwmark_mask_value(config.fwmark.value_or(FwmarkConfig{})), now_seconds(),
+        &latest_observation);
+}
+
+void refresh_conntrack_snapshot(const Config& config) {
     const auto now = std::chrono::steady_clock::now();
     if (snapshot_updated_at.time_since_epoch().count() != 0 &&
         now - snapshot_updated_at < snapshot_ttl) {
         return;
     }
-    read_dns_query_log();
     read_conntrack(config);
     snapshot_updated_at = now;
+}
+
+void refresh_snapshot(const Config& config) {
+    const auto now = std::chrono::steady_clock::now();
+    if (dns_log_updated_at.time_since_epoch().count() == 0 ||
+        now - dns_log_updated_at >= snapshot_ttl) {
+        read_dns_query_log();
+        dns_log_updated_at = now;
+    }
+    refresh_conntrack_snapshot(config);
 }
 
 api::ConnectionRecord connection_record(
@@ -429,9 +522,69 @@ std::string serialize_connections(const ApiContext& ctx, bool active_only) {
 
 } // namespace
 
+void connection_detail::update_history(
+    History& entries, std::istream& input,
+    const std::map<uint32_t, std::string>& route_names,
+    uint32_t mark_mask, std::int64_t timestamp,
+    SnapshotObservation* observation) {
+    update_connection_history(entries, input, route_names, mark_mask, timestamp, observation);
+}
+
+RoutingConnectionsSnapshot connection_detail::select_routing_connections(
+    const History& entries, const SnapshotObservation& observation,
+    const std::vector<std::string>& destination_ips) {
+    RoutingConnectionsSnapshot result;
+    result.snapshot_available = observation.available;
+    result.snapshot_at = observation.snapshot_at;
+    if (!observation.available) return result;
+    result.truncated = observation.truncated;
+
+    std::vector<RoutingAddress> destinations;
+    destinations.reserve(destination_ips.size());
+    for (const auto& value : destination_ips) {
+        if (const auto address = routing_address(value)) destinations.push_back(*address);
+    }
+    std::sort(destinations.begin(), destinations.end());
+    destinations.erase(std::unique(destinations.begin(), destinations.end()), destinations.end());
+    if (destinations.empty()) return result;
+
+    constexpr std::size_t maximum_routing_rows = 64;
+    for (const auto& [_, entry] : entries) {
+        if (!entry.observed_in_snapshot) continue;
+        const auto address = routing_address(entry.destination);
+        if (!address || !std::binary_search(destinations.begin(), destinations.end(), *address)) continue;
+        ++result.total;
+        if (result.rows.size() < maximum_routing_rows) {
+            auto row = entry;
+            // History keeps last-active age stable for closing TCP states;
+            // this projection reports when the kernel row was actually read.
+            row.last_seen = observation.snapshot_at;
+            result.rows.push_back(std::move(row));
+        } else {
+            result.truncated = true;
+        }
+    }
+    return result;
+}
+
+RoutingConnectionsSnapshot get_routing_connections(
+    const Config& config, const std::vector<std::string>& destination_ips) {
+    // Connections-page enrichment can hold this mutex during an NDMS read.
+    // Optional evidence must not delay an already completed DNS/FIB check.
+    std::unique_lock lock(connections_mutex, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        RoutingConnectionsSnapshot unavailable;
+        unavailable.snapshot_at = now_seconds();
+        return unavailable;
+    }
+    refresh_conntrack_snapshot(config);
+    return connection_detail::select_routing_connections(history, latest_observation, destination_ips);
+}
+
 void invalidate_connections_snapshot() {
     std::lock_guard lock(connections_mutex);
     snapshot_updated_at = {};
+    dns_log_updated_at = {};
 }
 
 void register_connections_handler(ApiServer& server, ApiContext& ctx) {

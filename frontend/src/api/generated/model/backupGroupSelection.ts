@@ -12,6 +12,7 @@
  */
 export interface BackupGroupSelection {
   general?: boolean;
+  /** Includes transport definitions and subscription sources, schedules and VPN bindings. */
   transports?: boolean;
   outbounds?: boolean;
   dns?: boolean;

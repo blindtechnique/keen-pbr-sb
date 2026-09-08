@@ -221,7 +221,7 @@ std::vector<ExpectedIptablesRule> expand_expected_rule_states(
                 const auto ipv6 = ipv6_from_set_name(set_name).value_or(false);
                 targets.push_back({set_name, ipv6});
             }
-        } else if (rs.criteria.has_rule_selector()) {
+        } else if (rs.list_names.empty() && rs.criteria.has_rule_selector()) {
             targets.push_back({"", false});
             targets.push_back({"", true});
         } else {
@@ -229,6 +229,8 @@ std::vector<ExpectedIptablesRule> expand_expected_rule_states(
         }
 
         for (const auto& [set_name, ipv6] : targets) {
+            if (rs.criteria.family != AF_UNSPEC &&
+                rs.criteria.family != (ipv6 ? AF_INET6 : AF_INET)) continue;
             const auto filtered_src = rs.criteria.src_addr.empty()
                 ? any_addr
                 : filter_addrs_by_family(rs.criteria.src_addr, ipv6);
@@ -248,7 +250,7 @@ std::vector<ExpectedIptablesRule> expand_expected_rule_states(
                         exp.set_name = set_name;
                         exp.ipv6 = ipv6;
                         exp.action_type = rs.action_type;
-                        exp.fwmark = rs.fwmark;
+                        exp.fwmark = rs.mark_for_family(ipv6 ? AF_INET6 : AF_INET);
                         exp.criteria = rs.criteria;
                         exp.criteria.proto = proto;
                         exp.criteria.src_addr = src.empty()
@@ -468,6 +470,31 @@ ParsedIptablesState parse_iptables_s_for_family(const std::string& output,
 
 ParsedIptablesState parse_iptables_s(const std::string& output) {
     return parse_iptables_s_for_family(output, false, "KeenPbrTable");
+}
+
+std::vector<std::vector<std::size_t>> match_iptables_counter_rules(
+    const std::vector<ParsedIptablesRule>& actual,
+    const std::vector<RuleState>& expected, std::uint32_t fwmark_mask,
+    std::chrono::steady_clock::time_point deadline) {
+    std::vector<std::pair<std::size_t, ExpectedIptablesRule>> expanded;
+    for (const auto& state : expected) {
+        for (auto& item : expand_expected_rule_states({state})) {
+            expanded.emplace_back(state.rule_index, std::move(item));
+        }
+    }
+    std::vector<std::vector<std::size_t>> matches(actual.size());
+    for (std::size_t index = 0; index < actual.size(); ++index) {
+        for (const auto& item : expanded) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                throw std::runtime_error("counter identity deadline");
+            }
+            if (rule_matches(actual[index], item.second, fwmark_mask) &&
+                std::find(matches[index].begin(), matches[index].end(), item.first) == matches[index].end()) {
+                matches[index].push_back(item.first);
+            }
+        }
+    }
+    return matches;
 }
 
 IptablesFirewallVerifier::IptablesFirewallVerifier(

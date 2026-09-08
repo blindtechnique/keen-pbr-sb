@@ -1,5 +1,10 @@
 import type { ConfigObject } from "@/api/generated/model/configObject"
 import type { Outbound } from "@/api/generated/model/outbound"
+import { configKnownFields } from "@/lib/config-known-fields.generated"
+import {
+  toConfigUnknownFieldsDraft,
+  type ConfigUnknownFieldsDraft,
+} from "@/lib/config-unknown-fields"
 
 export type StrictEnforcementOption = "default" | "enabled" | "disabled"
 export type UrltestSelectionMode = NonNullable<Outbound["selection_mode"]>
@@ -42,12 +47,14 @@ export type OutboundDraftValidationIssue = {
   maximum?: number
 }
 
-export type OutboundGroupDraft = {
+export type OutboundGroupDraft = ConfigUnknownFieldsDraft & {
   outbounds: string[]
   weight: string
 }
 
-export type OutboundDraft = {
+export type OutboundDraft = ConfigUnknownFieldsDraft & {
+  retryUnknownFields?: Record<string, unknown>
+  circuitBreakerUnknownFields?: Record<string, unknown>
   displayName: string
   tag: string
   type: Outbound["type"]
@@ -99,8 +106,21 @@ export function createDefaultOutboundDraft(): OutboundDraft {
 
 export function mapOutboundToDraft(outbound: Outbound): OutboundDraft {
   const defaults = createDefaultOutboundDraft()
+  const retry = toConfigUnknownFieldsDraft(
+    outbound.retry,
+    configKnownFields.RetryConfig
+  )
+  const circuitBreaker = toConfigUnknownFieldsDraft(
+    outbound.circuit_breaker,
+    configKnownFields.CircuitBreakerConfig
+  )
 
   return {
+    ...toConfigUnknownFieldsDraft(outbound, configKnownFields.Outbound),
+    ...(retry.unknownFields ? { retryUnknownFields: retry.unknownFields } : {}),
+    ...(circuitBreaker.unknownFields
+      ? { circuitBreakerUnknownFields: circuitBreaker.unknownFields }
+      : {}),
     displayName: outbound.display_name ?? "",
     tag: outbound.tag,
     type: outbound.type,
@@ -110,6 +130,7 @@ export function mapOutboundToDraft(outbound: Outbound): OutboundDraft {
     table: outbound.table?.toString() ?? "",
     outboundGroups:
       outbound.outbound_groups?.map((group) => ({
+        ...toConfigUnknownFieldsDraft(group, configKnownFields.OutboundGroup),
         outbounds: [...group.outbounds],
         weight: group.weight?.toString() ?? "",
       })) ?? defaults.outboundGroups,
@@ -157,6 +178,7 @@ export function normalizeOutboundDraftForPersistence(
 
   if (draft.type === "interface") {
     return {
+      ...draft.unknownFields,
       type: "interface",
       tag,
       ...(displayName ? { display_name: displayName } : {}),
@@ -171,6 +193,7 @@ export function normalizeOutboundDraftForPersistence(
 
   if (draft.type === "table") {
     return {
+      ...draft.unknownFields,
       type: "table",
       tag,
       ...(displayName ? { display_name: displayName } : {}),
@@ -180,6 +203,7 @@ export function normalizeOutboundDraftForPersistence(
 
   if (draft.type === "urltest") {
     return {
+      ...draft.unknownFields,
       type: "urltest",
       tag,
       ...(displayName ? { display_name: displayName } : {}),
@@ -195,15 +219,18 @@ export function normalizeOutboundDraftForPersistence(
           : draft.conntrackOnSwitch,
       outbound_groups: normalizeOutboundGroups(draft.outboundGroups).map(
         (group) => ({
+          ...group.unknownFields,
           outbounds: group.outbounds,
           weight: parseNumber(group.weight),
         })
       ),
       retry: {
+        ...draft.retryUnknownFields,
         attempts: parseNumber(draft.retryAttempts),
         interval_ms: parseNumber(draft.retryInterval),
       },
       circuit_breaker: {
+        ...draft.circuitBreakerUnknownFields,
         failure_threshold: parseNumber(draft.circuitBreakerFailures),
         success_threshold: parseNumber(draft.circuitBreakerSuccesses),
         timeout_ms: parseNumber(draft.circuitBreakerTimeout),
@@ -213,6 +240,7 @@ export function normalizeOutboundDraftForPersistence(
   }
 
   return {
+    ...draft.unknownFields,
     type: draft.type,
     tag,
     ...(displayName ? { display_name: displayName } : {}),
@@ -227,6 +255,7 @@ export function normalizeOutboundGroups(
   }
 
   return groups.map((group) => ({
+    ...group,
     outbounds: group.outbounds.map((value) => value.trim()).filter(Boolean),
     weight: group.weight.trim(),
   }))
@@ -517,7 +546,12 @@ function validateConntrackMode(
   }
 
   const directlyRouted = new Set(
-    (config.route?.rules ?? []).map((rule) => rule.outbound)
+    (config.route?.rules ?? []).flatMap((rule) => [
+      rule.outbound,
+      ...(rule.failure_policy === "fallback" && rule.fallback_outbound
+        ? [rule.fallback_outbound]
+        : []),
+    ])
   )
   const routed = uniqueChildren.find((child) => directlyRouted.has(child))
   if (routed) {

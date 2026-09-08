@@ -114,10 +114,10 @@ type sharedRuntimeHooks struct {
 	checkConfig      func(context.Context, string, string) error
 	startProcess     func(string, string, string) (sharedProcess, error)
 	interfaceByName  func(string) (*net.Interface, error)
-	ensureRules      func([]TransportSpec) error
+	ensureRules      func(context.Context, []TransportSpec) error
 	rulesPresent     func([]TransportSpec) bool
 	removeRules      func(context.Context, map[string]bool, map[string]TransportSpec) error
-	removeCrashRules func(map[string]bool, map[string]TransportSpec)
+	removeCrashRules func(context.Context, map[string]bool, map[string]TransportSpec)
 	now              func() time.Time
 	startupGrace     time.Duration
 }
@@ -157,6 +157,10 @@ type SharedSingBoxGroup struct {
 	opMu sync.Mutex
 	mu   sync.RWMutex
 
+	lifetime          context.Context
+	cancelLifetime    context.CancelFunc
+	cleanupInterfaces map[string]bool
+
 	binary         string
 	runtimeDir     string
 	healthEndpoint RoutingHealthEndpoint
@@ -167,6 +171,7 @@ type SharedSingBoxGroup struct {
 	activeTags    map[string]bool
 	activeData    []byte
 	process       sharedProcess
+	candidate     sharedProcess
 	state         State
 	lastErr       string
 	updated       time.Time
@@ -198,13 +203,17 @@ func newSharedSingBoxGroup(
 		return nil, errors.New("shared sing-box runtime hooks must be complete")
 	}
 	now := hooks.now()
+	lifetime, cancelLifetime := context.WithCancel(context.Background())
 	group := &SharedSingBoxGroup{
-		binary: binary, runtimeDir: runtimeDir, healthEndpoint: health, hooks: hooks,
+		lifetime: lifetime, cancelLifetime: cancelLifetime,
+		cleanupInterfaces: make(map[string]bool),
+		binary:            binary, runtimeDir: runtimeDir, healthEndpoint: health, hooks: hooks,
 		specs: make(map[string]TransportSpec), desired: make(map[string]bool),
 		activeTags: make(map[string]bool), state: StateDown, updated: now,
 		memberUpdated: make(map[string]time.Time),
 	}
 	if err := group.setInitialInventory(specs); err != nil {
+		cancelLifetime()
 		return nil, err
 	}
 	return group, nil
@@ -284,6 +293,11 @@ func desiredSpecs(specs map[string]TransportSpec, desired map[string]bool) []Tra
 }
 
 func (g *SharedSingBoxGroup) ValidateInventory(ctx context.Context, specs []TransportSpec) error {
+	ctx, cancel := g.operationContext(ctx)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	managed := make([]TransportSpec, 0, len(specs))
 	for _, spec := range specs {
 		if isManagedSingBoxSpec(spec) {
@@ -305,6 +319,9 @@ func (g *SharedSingBoxGroup) ValidateInventory(ctx context.Context, specs []Tran
 }
 
 func (g *SharedSingBoxGroup) checkData(ctx context.Context, data []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(g.runtimeDir, 0700); err != nil {
 		return err
 	}
@@ -337,7 +354,11 @@ func (g *SharedSingBoxGroup) checkData(ctx context.Context, data []byte) error {
 // newly created transport inherits auto_start. Failure leaves both inventory
 // and the previously running process untouched.
 func (g *SharedSingBoxGroup) ApplyInventory(ctx context.Context, all []TransportSpec) error {
-	g.opMu.Lock()
+	ctx, cancel := g.operationContext(ctx)
+	defer cancel()
+	if err := lockMutexContext(ctx, &g.opMu); err != nil {
+		return err
+	}
 	defer g.opMu.Unlock()
 
 	if err := g.ValidateInventory(ctx, all); err != nil {
@@ -366,7 +387,11 @@ func (g *SharedSingBoxGroup) ApplyInventory(ctx context.Context, all []Transport
 }
 
 func (g *SharedSingBoxGroup) setDesired(ctx context.Context, tag string, desired bool) error {
-	g.opMu.Lock()
+	ctx, cancel := g.operationContext(ctx)
+	defer cancel()
+	if err := lockMutexContext(ctx, &g.opMu); err != nil {
+		return err
+	}
 	defer g.opMu.Unlock()
 	g.mu.RLock()
 	if _, exists := g.specs[tag]; !exists {
@@ -381,7 +406,11 @@ func (g *SharedSingBoxGroup) setDesired(ctx context.Context, tag string, desired
 }
 
 func (g *SharedSingBoxGroup) Restart(ctx context.Context) error {
-	g.opMu.Lock()
+	ctx, cancel := g.operationContext(ctx)
+	defer cancel()
+	if err := lockMutexContext(ctx, &g.opMu); err != nil {
+		return err
+	}
 	defer g.opMu.Unlock()
 	g.mu.RLock()
 	nextSpecs := cloneSpecMap(g.specs)
@@ -391,7 +420,11 @@ func (g *SharedSingBoxGroup) Restart(ctx context.Context) error {
 }
 
 func (g *SharedSingBoxGroup) RestartTag(ctx context.Context, tag string) error {
-	g.opMu.Lock()
+	ctx, cancel := g.operationContext(ctx)
+	defer cancel()
+	if err := lockMutexContext(ctx, &g.opMu); err != nil {
+		return err
+	}
 	defer g.opMu.Unlock()
 	g.mu.RLock()
 	if _, exists := g.specs[tag]; !exists {
@@ -406,13 +439,32 @@ func (g *SharedSingBoxGroup) RestartTag(ctx context.Context, tag string) error {
 }
 
 func (g *SharedSingBoxGroup) Reconcile(ctx context.Context) error {
-	g.opMu.Lock()
+	ctx, cancel := g.operationContext(ctx)
+	defer cancel()
+	if err := lockMutexContext(ctx, &g.opMu); err != nil {
+		return err
+	}
 	defer g.opMu.Unlock()
 	g.mu.RLock()
 	nextSpecs := cloneSpecMap(g.specs)
 	nextDesired := cloneBoolMap(g.desired)
 	g.mu.RUnlock()
 	return g.transitionLocked(ctx, nextSpecs, nextDesired, false)
+}
+
+// Before replacing the running process, either the caller or manager shutdown
+// may cancel an operation. Once replacement starts only the group lifetime
+// cancels it: a disconnected browser must not interrupt commit or rollback.
+func (g *SharedSingBoxGroup) operationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	opCtx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(g.lifetime, cancel)
+	if g.lifetime.Err() != nil {
+		cancel()
+	}
+	return opCtx, func() {
+		stop()
+		cancel()
+	}
 }
 
 func cloneSpecMap(values map[string]TransportSpec) map[string]TransportSpec {
@@ -437,13 +489,16 @@ func (g *SharedSingBoxGroup) transitionLocked(
 	nextDesired map[string]bool,
 	force bool,
 ) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	wanted := desiredSpecs(nextSpecs, nextDesired)
 	if len(wanted) == 0 {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		lifecycleCtx, cancelLifecycle := context.WithTimeout(
-			context.Background(),
+			g.lifetime,
 			sharedSingBoxTransitionTimeout,
 		)
 		defer cancelLifecycle()
@@ -467,7 +522,7 @@ func (g *SharedSingBoxGroup) transitionLocked(
 				return fmt.Errorf("stop shared sing-box: %w", err)
 			}
 		}
-		g.removeRulesForActive()
+		g.removeRulesForActive(lifecycleCtx)
 		g.commitState(nextSpecs, nextDesired, nil, nil, map[string]bool{}, StateDown, "")
 		return nil
 	}
@@ -490,7 +545,7 @@ func (g *SharedSingBoxGroup) transitionLocked(
 	currentActiveTags := cloneBoolMap(g.activeTags)
 	g.mu.RUnlock()
 	if !force && sameConfig && currentHealthy {
-		if err := g.ensureRulesFor(wanted); err != nil {
+		if err := g.ensureRulesFor(ctx, wanted); err != nil {
 			return err
 		}
 		g.commitState(
@@ -525,9 +580,10 @@ func (g *SharedSingBoxGroup) transitionLocked(
 
 	// Once the previous process is signalled, request cancellation must not
 	// leave the runtime between generations. Finish the bounded transition (or
-	// rollback) independently from the HTTP request lifecycle.
+	// rollback) independently from the HTTP request lifecycle, but not after
+	// the manager has begun shutting down.
 	lifecycleCtx, cancelLifecycle := context.WithTimeout(
-		context.Background(),
+		g.lifetime,
 		sharedSingBoxTransitionTimeout,
 	)
 	defer cancelLifecycle()
@@ -563,7 +619,7 @@ func (g *SharedSingBoxGroup) transitionLocked(
 			// the already validated candidate rather than leaving no runtime.
 		}
 	}
-	g.removeRulesForTags(oldTags, oldSpecs)
+	g.removeRulesForTags(lifecycleCtx, oldTags, oldSpecs)
 
 	process, err := g.startCandidate(lifecycleCtx, data, wanted)
 	if err == nil {
@@ -571,9 +627,9 @@ func (g *SharedSingBoxGroup) transitionLocked(
 		for _, spec := range wanted {
 			tags[spec.Tag] = true
 		}
-		if ruleErr := g.ensureRulesFor(wanted); ruleErr != nil {
+		if ruleErr := g.ensureRulesFor(lifecycleCtx, wanted); ruleErr != nil {
 			_ = process.Stop(lifecycleCtx)
-			g.removeRulesForTags(tags, nextSpecs)
+			g.removeRulesForTags(lifecycleCtx, tags, nextSpecs)
 			err = ruleErr
 		} else {
 			g.commitState(nextSpecs, nextDesired, process, data, tags, StateUp, "")
@@ -583,7 +639,7 @@ func (g *SharedSingBoxGroup) transitionLocked(
 	}
 
 	applyErr := err
-	if len(oldData) == 0 || len(oldTags) == 0 {
+	if lifecycleCtx.Err() != nil || len(oldData) == 0 || len(oldTags) == 0 {
 		_ = os.Remove(filepath.Join(g.runtimeDir, "shared.json"))
 		g.commitState(oldSpecs, oldDesired, nil, oldData, oldTags, StateDegraded, applyErr.Error())
 		return applyErr
@@ -598,7 +654,7 @@ func (g *SharedSingBoxGroup) transitionLocked(
 		g.commitState(oldSpecs, oldDesired, nil, oldData, oldTags, StateDegraded, joined.Error())
 		return joined
 	}
-	if rollbackRuleErr := g.ensureRulesFor(oldWanted); rollbackRuleErr != nil {
+	if rollbackRuleErr := g.ensureRulesFor(lifecycleCtx, oldWanted); rollbackRuleErr != nil {
 		joined := errors.Join(
 			applyErr,
 			fmt.Errorf("restore previous shared sing-box forwarding rules: %w", rollbackRuleErr),
@@ -625,11 +681,28 @@ func (g *SharedSingBoxGroup) startCandidate(
 	data []byte,
 	specs []TransportSpec,
 ) (sharedProcess, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// A cancelled Stop can kill the child before its wait goroutine has reaped
+	// it. Keep that exact child reachable until it exits; never replace a still
+	// live candidate with a second process using the same TUN interfaces.
+	g.mu.RLock()
+	previous := g.candidate
+	g.mu.RUnlock()
+	if previous != nil && previous.Alive() {
+		if err := previous.Stop(ctx); err != nil && previous.Alive() {
+			return nil, fmt.Errorf("stop previous shared candidate: %w", err)
+		}
+	}
 	if err := os.MkdirAll(g.runtimeDir, 0700); err != nil {
 		return nil, err
 	}
 	path := filepath.Join(g.runtimeDir, "shared.json")
 	if err := writeFileAtomic(path, data, 0600); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	process, err := g.hooks.startProcess(
@@ -640,12 +713,19 @@ func (g *SharedSingBoxGroup) startCandidate(
 	if err != nil {
 		return nil, err
 	}
+	g.mu.Lock()
+	g.candidate = process
+	g.mu.Unlock()
 	deadline := time.NewTimer(10 * time.Second)
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer deadline.Stop()
 	defer ticker.Stop()
 	var readySince time.Time
 	for {
+		if err := ctx.Err(); err != nil {
+			_ = process.Stop(ctx)
+			return nil, err
+		}
 		if g.interfacesPresent(specs) && process.Alive() {
 			if readySince.IsZero() {
 				readySince = time.Now()
@@ -659,10 +739,10 @@ func (g *SharedSingBoxGroup) startCandidate(
 		}
 		select {
 		case <-ctx.Done():
-			_ = process.Stop(context.Background())
+			_ = process.Stop(ctx)
 			return nil, ctx.Err()
 		case <-deadline.C:
-			_ = process.Stop(context.Background())
+			_ = process.Stop(ctx)
 			return nil, fmt.Errorf("shared sing-box interfaces did not appear")
 		case <-process.Done():
 			err := process.Err()
@@ -719,19 +799,34 @@ func (g *SharedSingBoxGroup) interfacesPresent(specs []TransportSpec) bool {
 	return true
 }
 
-func (g *SharedSingBoxGroup) ensureRulesFor(specs []TransportSpec) error {
-	return g.hooks.ensureRules(specs)
+func (g *SharedSingBoxGroup) ensureRulesFor(ctx context.Context, specs []TransportSpec) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	g.mu.Lock()
+	for _, spec := range specs {
+		g.cleanupInterfaces[spec.Interface] = true
+	}
+	g.mu.Unlock()
+	if err := g.hooks.ensureRules(ctx, specs); err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 
-func ensureForwardingRulesForSpecs(specs []TransportSpec) error {
+func ensureForwardingRulesForSpecs(ctx context.Context, specs []TransportSpec) error {
 	interfaces := make([]string, 0, len(specs))
 	for _, spec := range specs {
 		interfaces = append(interfaces, spec.Interface)
 	}
-	return systemForwardingRules.ensureInterfaces(interfaces)
+	return systemForwardingRules.ensureInterfacesContext(ctx, interfaces)
 }
 
 func (g *SharedSingBoxGroup) EnsureRuntimeRules() error {
+	if err := lockMutexContext(g.lifetime, &g.opMu); err != nil {
+		return err
+	}
+	defer g.opMu.Unlock()
 	g.mu.RLock()
 	specs := desiredSpecs(g.specs, g.desired)
 	process := g.process
@@ -739,23 +834,41 @@ func (g *SharedSingBoxGroup) EnsureRuntimeRules() error {
 	if process == nil || !process.Alive() {
 		return nil
 	}
-	if err := g.ensureRulesFor(specs); err != nil {
+	if err := g.ensureRulesFor(g.lifetime, specs); err != nil {
 		return err
 	}
 	truncateRuntimeLogFile(filepath.Join(g.runtimeDir, "shared.log"))
 	return nil
 }
 
-func (g *SharedSingBoxGroup) removeRulesForActive() {
+func (g *SharedSingBoxGroup) removeRulesForActive(ctx context.Context) {
 	g.mu.RLock()
 	tags := cloneBoolMap(g.activeTags)
 	specs := cloneSpecMap(g.specs)
 	g.mu.RUnlock()
-	g.removeRulesForTags(tags, specs)
+	g.removeRulesForTags(ctx, tags, specs)
 }
 
-func (g *SharedSingBoxGroup) removeRulesForTags(tags map[string]bool, specs map[string]TransportSpec) {
-	_ = g.hooks.removeRules(context.Background(), tags, specs)
+func (g *SharedSingBoxGroup) removeRulesForTags(ctx context.Context, tags map[string]bool, specs map[string]TransportSpec) {
+	// Keep only concrete rule targets until cleanup succeeds. A cancelled
+	// replacement may have changed a tag's interface without committing it.
+	g.mu.Lock()
+	for tag := range tags {
+		if spec, exists := specs[tag]; exists {
+			g.cleanupInterfaces[spec.Interface] = true
+		}
+	}
+	g.mu.Unlock()
+	if err := g.hooks.removeRules(ctx, tags, specs); err != nil {
+		return
+	}
+	g.mu.Lock()
+	for tag := range tags {
+		if spec, exists := specs[tag]; exists {
+			delete(g.cleanupInterfaces, spec.Interface)
+		}
+	}
+	g.mu.Unlock()
 }
 
 func removeForwardingRulesForTags(ctx context.Context, tags map[string]bool, specs map[string]TransportSpec) error {
@@ -768,12 +881,14 @@ func removeForwardingRulesForTags(ctx context.Context, tags map[string]bool, spe
 	return systemForwardingRules.cleanupInterfacesContext(ctx, interfaces, true)
 }
 
-func removeOwnedForwardingRulesForTags(tags map[string]bool, specs map[string]TransportSpec) {
+func removeOwnedForwardingRulesForTags(ctx context.Context, tags map[string]bool, specs map[string]TransportSpec) {
+	interfaces := make([]string, 0, len(tags))
 	for tag := range tags {
 		if spec, exists := specs[tag]; exists {
-			removeForwardingRules(spec.Interface, false)
+			interfaces = append(interfaces, spec.Interface)
 		}
 	}
+	_ = systemForwardingRules.cleanupInterfacesContext(ctx, interfaces, false)
 }
 
 func (g *SharedSingBoxGroup) commitState(
@@ -787,6 +902,7 @@ func (g *SharedSingBoxGroup) commitState(
 ) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	processChanged := g.process != process
 	now := g.hooks.now()
 	for tag := range unionSpecTags(g.specs, specs) {
 		oldSpec, oldExists := g.specs[tag]
@@ -811,12 +927,24 @@ func (g *SharedSingBoxGroup) commitState(
 	g.specs = specs
 	g.desired = desired
 	g.process = process
+	if g.candidate == process || (g.candidate != nil && !g.candidate.Alive()) {
+		g.candidate = nil
+	}
 	g.activeData = append([]byte(nil), data...)
 	g.activeTags = activeTags
+	for tag := range activeTags {
+		if spec, exists := specs[tag]; exists {
+			delete(g.cleanupInterfaces, spec.Interface)
+		}
+	}
 	g.state = state
 	g.lastErr = lastErr
 	g.updated = now
-	g.generation++
+	// A live process keeps its watcher across metadata-only commits and
+	// idempotent Up. Invalidate watchers only when their process is replaced.
+	if processChanged {
+		g.generation++
+	}
 }
 
 func unionSpecTags(left, right map[string]TransportSpec) map[string]struct{} {
@@ -853,7 +981,9 @@ func (g *SharedSingBoxGroup) watch(process sharedProcess) {
 	g.mu.RUnlock()
 	go func() {
 		<-process.Done()
-		g.opMu.Lock()
+		if err := lockMutexContext(g.lifetime, &g.opMu); err != nil {
+			return
+		}
 		defer g.opMu.Unlock()
 		g.mu.Lock()
 		if g.process != process || g.generation != generation {
@@ -875,7 +1005,7 @@ func (g *SharedSingBoxGroup) watch(process sharedProcess) {
 			g.memberUpdated[tag] = now
 		}
 		g.mu.Unlock()
-		g.hooks.removeCrashRules(tags, specs)
+		g.hooks.removeCrashRules(g.lifetime, tags, specs)
 	}()
 }
 
@@ -924,60 +1054,57 @@ func (g *SharedSingBoxGroup) HasDesiredLocked() bool {
 	return false
 }
 
-func lockMutexContext(ctx context.Context, mutex *sync.Mutex) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if mutex.TryLock() {
-		return nil
-	}
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-			if mutex.TryLock() {
-				return nil
-			}
-		}
-	}
-}
-
 func (g *SharedSingBoxGroup) Close(ctx context.Context) error {
+	// Terminal group shutdown cancels detached transitions and queued
+	// reconciliation before waiting for the existing operation mutex.
+	g.cancelLifetime()
 	// Shutdown is bounded by the manager's eight-second grace period. A config
 	// transition may still own opMu while the init script asks the manager to
 	// stop; an unconditional Lock here can outlive that grace period and make a
 	// service restart stop the old manager without ever starting its replacement.
-	if err := lockMutexContext(ctx, &g.opMu); err != nil {
-		return fmt.Errorf("wait for shared sing-box operation before shutdown: %w", err)
+	if !g.opMu.TryLock() {
+		if err := lockMutexContext(ctx, &g.opMu); err != nil {
+			return fmt.Errorf("wait for shared sing-box operation before shutdown: %w", err)
+		}
 	}
 	defer g.opMu.Unlock()
-	g.mu.RLock()
+	g.mu.Lock()
 	process := g.process
-	g.mu.RUnlock()
-	if process != nil {
-		g.mu.Lock()
-		if g.process == process {
-			g.process = nil
-			g.generation++
-		}
-		g.mu.Unlock()
-		if err := process.Stop(ctx); err != nil {
-			return err
+	candidate := g.candidate
+	g.generation++
+	tags := cloneBoolMap(g.cleanupInterfaces)
+	for tag := range g.activeTags {
+		if spec, exists := g.specs[tag]; exists {
+			tags[spec.Interface] = true
 		}
 	}
-	g.mu.RLock()
-	tags := cloneBoolMap(g.activeTags)
-	specs := cloneSpecMap(g.specs)
-	g.mu.RUnlock()
+	specs := make(map[string]TransportSpec, len(tags))
+	for iface := range tags {
+		specs[iface] = TransportSpec{Interface: iface}
+	}
+	g.mu.Unlock()
+	var stopErr error
+	if process != nil {
+		stopErr = process.Stop(ctx)
+	}
+	if candidate != nil && candidate != process {
+		stopErr = errors.Join(stopErr, candidate.Stop(ctx))
+	}
 	// The init script's stop budget covers firewall cleanup as well as the
 	// process and opMu. A fresh timeout per rule can otherwise strand restart
 	// after the old manager eventually exits.
 	cleanupErr := g.hooks.removeRules(ctx, tags, specs)
 	g.mu.Lock()
-	g.process = nil
+	if process != nil && !process.Alive() {
+		g.process = nil
+	}
+	if candidate != nil && !candidate.Alive() {
+		g.candidate = nil
+	}
+	if cleanupErr == nil {
+		clear(g.cleanupInterfaces)
+		g.activeTags = make(map[string]bool)
+	}
 	g.state = StateDown
 	now := g.hooks.now()
 	g.updated = now
@@ -985,7 +1112,7 @@ func (g *SharedSingBoxGroup) Close(ctx context.Context) error {
 		g.memberUpdated[tag] = now
 	}
 	g.mu.Unlock()
-	return cleanupErr
+	return errors.Join(stopErr, cleanupErr)
 }
 
 type SharedSingBoxMember struct {
@@ -1114,7 +1241,7 @@ func (m *SharedSingBoxMember) applyRoutingHealth(ctx context.Context, status *St
 		return
 	}
 	status.State = StateDegraded
-	status.Error = "keen-pbr routing health: " + verdict
+	status.Error = routingHealthFailurePrefix + verdict
 	if detail != "" {
 		status.Error += ": " + detail
 	}

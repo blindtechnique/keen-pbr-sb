@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <arpa/inet.h>
+#include <charconv>
 #include <exception>
 #include <set>
 #include <tuple>
@@ -128,7 +129,8 @@ bool parse_ip(const std::string& ip, int family, void* out) {
 
 
 bool ipv4_prefix_contains(const in_addr& network, const in_addr& candidate, int prefix_len) {
-    if (prefix_len <= 0) return true;
+    if (prefix_len < 0 || prefix_len > 32) return false;
+    if (prefix_len == 0) return true;
     const uint32_t network_bits = ntohl(network.s_addr);
     const uint32_t candidate_bits = ntohl(candidate.s_addr);
     const uint32_t mask = (prefix_len >= 32) ? 0xFFFFFFFFu : (~0u << (32 - prefix_len));
@@ -136,7 +138,8 @@ bool ipv4_prefix_contains(const in_addr& network, const in_addr& candidate, int 
 }
 
 bool ipv6_prefix_contains(const in6_addr& network, const in6_addr& candidate, int prefix_len) {
-    if (prefix_len <= 0) return true;
+    if (prefix_len < 0 || prefix_len > 128) return false;
+    if (prefix_len == 0) return true;
     const int full_bytes = prefix_len / 8;
     const int extra_bits = prefix_len % 8;
 
@@ -151,6 +154,8 @@ bool ipv6_prefix_contains(const in6_addr& network, const in6_addr& candidate, in
 }
 
 bool route_contains_ip(const DumpedRoute& route, const std::string& ip) {
+    const int family = (ip.find(':') != std::string::npos) ? AF_INET6 : AF_INET;
+    if (route.family != family) return false;
     if (route.destination == "default") {
         return true;
     }
@@ -161,8 +166,12 @@ bool route_contains_ip(const DumpedRoute& route, const std::string& ip) {
     }
 
     const std::string network = route.destination.substr(0, slash);
-    const int prefix_len = std::stoi(route.destination.substr(slash + 1));
-    const int family = (ip.find(':') != std::string::npos) ? AF_INET6 : AF_INET;
+    const std::string prefix = route.destination.substr(slash + 1);
+    int prefix_len = -1;
+    const auto converted = std::from_chars(
+        prefix.data(), prefix.data() + prefix.size(), prefix_len);
+    if (converted.ec != std::errc{} ||
+        converted.ptr != prefix.data() + prefix.size()) return false;
     const int network_family = (network.find(':') != std::string::npos) ? AF_INET6 : AF_INET;
     if (family != network_family) {
         return false;
@@ -187,7 +196,7 @@ bool interface_has_gateway_route(const std::vector<DumpedRoute>& routes,
                                  const std::string& iface,
                                  const std::string& gateway) {
     for (const auto& route : routes) {
-        if (route.blackhole || route.unreachable) continue;
+        if (route.table != 254U || route.blackhole || route.unreachable) continue;
         if (!route.interface || *route.interface != iface) continue;
         if (route_contains_ip(route, gateway)) {
             return true;
@@ -472,10 +481,11 @@ PlannedRoutingState build_planned_routing_state(
     // Reachability is a point-in-time input to one routing transaction. Cache
     // it per interface so a flapping link cannot produce a table assembled
     // from mutually inconsistent checks of the same child.
-    std::map<std::string, bool> reachability_snapshot;
-    auto is_reachable = [&](const Outbound& outbound) {
+    OutboundFamilyReachabilitySnapshot reachability_snapshot;
+    auto reachability_for = [&](const Outbound& outbound)
+        -> const OutboundFamilyReachability& {
         const auto [it, inserted] =
-            reachability_snapshot.try_emplace(outbound.tag, true);
+            reachability_snapshot.try_emplace(outbound.tag);
         if (inserted) {
             it->second = reachability_check(outbound);
         }
@@ -491,11 +501,12 @@ PlannedRoutingState build_planned_routing_state(
             uint32_t table_id = safe_table_id(table_start, table_offset);
             ++table_offset;
 
+            const auto first_route = plan.routes.size();
             const bool strict = strict_enforcement_enabled(cfg, ob);
-            const bool reachable = is_reachable(ob);
-            if (reachable) {
+            const auto& reachable = reachability_for(ob);
+            if (reachable.any(ipv6_enabled)) {
                 for (const auto& route : make_default_routes(table_id, ob)) {
-                    add_route_if_enabled(route);
+                    if (reachable.for_family(route.family)) add_route_if_enabled(route);
                 }
                 for (const auto& route : make_family_closure_routes(table_id, ob)) {
                     add_route_if_enabled(route);
@@ -507,13 +518,24 @@ PlannedRoutingState build_planned_routing_state(
                 }
             }
 
+            bool has_ipv4_route = false;
+            bool has_ipv6_route = false;
+            for (auto index = first_route; index < plan.routes.size(); ++index) {
+                has_ipv4_route |= plan.routes[index].family == AF_INET;
+                has_ipv6_route |= plan.routes[index].family == AF_INET6;
+            }
+            // A permissive, unavailable interface has no owned table anchor.
+            // Omitting its lookup preserves fall-through without publishing an
+            // orphan rule that would reject the other interfaces' transaction.
+            if (!has_ipv4_route && !has_ipv6_route) continue;
+
             RuleSpec ip_rule;
             ip_rule.fwmark = mark_it->second;
             ip_rule.fwmask = fwmark_mask;
             ip_rule.table = table_id;
             ip_rule.priority = table_id;
-            if (!ipv6_enabled) {
-                ip_rule.family = AF_INET;
+            if (!has_ipv4_route || !has_ipv6_route) {
+                ip_rule.family = has_ipv4_route ? AF_INET : AF_INET6;
             }
             plan.rules.push_back(ip_rule);
         } else if (ob.type == OutboundType::TABLE) {
@@ -549,9 +571,10 @@ PlannedRoutingState build_planned_routing_state(
                 const Outbound* selected =
                     resolve_selected_interface(outbounds, ob, urltest_selections);
                 bool selected_primary_planned = false;
-                if (selected && is_reachable(*selected)) {
+                if (selected && reachability_for(*selected).any(ipv6_enabled)) {
+                    const auto& reachable = reachability_for(*selected);
                     for (const auto& route : make_default_routes(table_id, *selected)) {
-                        if (add_route_if_enabled(route)) {
+                        if (reachable.for_family(route.family) && add_route_if_enabled(route)) {
                             selected_primary_planned = true;
                         }
                     }
@@ -571,14 +594,15 @@ PlannedRoutingState build_planned_routing_state(
                         selected && child->tag == selected->tag) {
                         continue;
                     }
-                    if (!is_reachable(*child)) {
+                    const auto& reachable = reachability_for(*child);
+                    if (!reachable.any(ipv6_enabled)) {
                         continue;
                     }
 
                     bool usable_default_planned = false;
                     for (auto route : make_default_routes(table_id, *child)) {
                         route.metric = metric;
-                        if (add_route_if_enabled(route)) {
+                        if (reachable.for_family(route.family) && add_route_if_enabled(route)) {
                             usable_default_planned = true;
                         }
                     }
@@ -631,13 +655,19 @@ PlannedRoutingState plan_routing_state(
     const OutboundMarkMap& marks,
     const OutboundReachabilitySnapshot& reachability_snapshot,
     const std::map<std::string, std::string>* urltest_selections,
-    bool ipv6_enabled) {
+    bool ipv6_enabled,
+    const OutboundFamilyReachabilitySnapshot* family_reachability) {
     return build_planned_routing_state(
         cfg,
         marks,
-        [&reachability_snapshot](const Outbound& outbound) {
+        [&reachability_snapshot, family_reachability](const Outbound& outbound) {
+            if (family_reachability) {
+                const auto family = family_reachability->find(outbound.tag);
+                if (family != family_reachability->end()) return family->second;
+            }
             const auto it = reachability_snapshot.find(outbound.tag);
-            return it == reachability_snapshot.end() || it->second;
+            const bool reachable = it == reachability_snapshot.end() || it->second;
+            return OutboundFamilyReachability{reachable, reachable};
         },
         urltest_selections,
         ipv6_enabled);
@@ -649,14 +679,20 @@ void populate_routing_state(const Config& cfg,
                             PolicyRuleManager& rules,
                             OutboundReachabilityFn reachability_check,
                             const std::map<std::string, std::string>* urltest_selections,
-                            bool ipv6_enabled) {
+                            bool ipv6_enabled,
+                            const OutboundFamilyReachabilitySnapshot* family_reachability) {
     const auto prior_generated_route_tables =
         routes.live_generated_route_tables();
     auto plan = build_planned_routing_state(
         cfg,
         marks,
-        [&reachability_check](const Outbound& outbound) {
-            return !reachability_check || reachability_check(outbound);
+        [&reachability_check, family_reachability](const Outbound& outbound) {
+            if (family_reachability) {
+                const auto family = family_reachability->find(outbound.tag);
+                if (family != family_reachability->end()) return family->second;
+            }
+            const bool reachable = !reachability_check || reachability_check(outbound);
+            return OutboundFamilyReachability{reachable, reachable};
         },
         urltest_selections,
         ipv6_enabled);
@@ -751,26 +787,37 @@ bool is_interface_outbound_reachable(const Outbound& outbound, NetlinkManager& n
 bool is_interface_outbound_reachable(
     const Outbound& outbound,
     const std::vector<DumpedRoute>& main_table_routes) {
+    return interface_outbound_family_reachability(outbound, main_table_routes).any();
+}
+
+bool OutboundFamilyReachability::for_family(int family) const noexcept {
+    return family == AF_INET ? ipv4 : family == AF_INET6 && ipv6;
+}
+
+OutboundFamilyReachability interface_outbound_family_reachability(
+    const Outbound& outbound,
+    const std::vector<DumpedRoute>& main_table_routes) {
+    if (outbound.type != OutboundType::INTERFACE) return {true, true};
+    return interface_outbound_family_reachability(
+        outbound, main_table_routes,
+        netlink_detail::query_interface_admin_state(outbound.interface.value_or("")) ==
+            netlink_detail::InterfaceAdminState::Up);
+}
+
+OutboundFamilyReachability interface_outbound_family_reachability(
+    const Outbound& outbound,
+    const std::vector<DumpedRoute>& main_table_routes,
+    bool interface_admin_up) {
     if (outbound.type != OutboundType::INTERFACE) {
-        return true;
+        return {true, true};
     }
 
     const auto iface = outbound.interface.value_or("");
-    if (netlink_detail::query_interface_admin_state(iface) !=
-        netlink_detail::InterfaceAdminState::Up) {
-        return false;
-    }
-
-    if (outbound.gateway.has_value() &&
-        !interface_has_gateway_route(main_table_routes, iface, *outbound.gateway)) {
-        return false;
-    }
-    if (outbound.gateway6.has_value() &&
-        !interface_has_gateway_route(main_table_routes, iface, *outbound.gateway6)) {
-        return false;
-    }
-
-    return true;
+    if (iface.empty() || !interface_admin_up) return {};
+    if (!outbound.gateway && !outbound.gateway6) return {true, true};
+    return {
+        outbound.gateway && interface_has_gateway_route(main_table_routes, iface, *outbound.gateway),
+        outbound.gateway6 && interface_has_gateway_route(main_table_routes, iface, *outbound.gateway6)};
 }
 
 FirewallGlobalPrefilter build_firewall_global_prefilter(
@@ -832,24 +879,6 @@ FirewallGlobalPrefilter build_firewall_global_prefilter_for_runtime_targets(
             include_sources_v6.insert(
                 target.source_cidrs_v6.begin(),
                 target.source_cidrs_v6.end());
-            if (!target.process_clients) {
-                // OpenConnect OFF keeps the same destination-based PBR as a
-                // LAN client, but it must not force client DNS through the
-                // global REDIRECT. Bind that DNS-only bypass to the exact
-                // live ocN ingress and authoritative service pool.
-                for (const auto& interface :
-                     target.verified_ingress_interfaces) {
-                    for (const auto& cidr : target.source_cidrs_v4) {
-                        dns_redirect_bypass_sources_v4.emplace(
-                            interface, cidr);
-                    }
-                    for (const auto& cidr : target.source_cidrs_v6) {
-                        dns_redirect_bypass_sources_v6.emplace(
-                            interface, cidr);
-                    }
-                }
-                continue;
-            }
             for (const auto& interface :
                  target.dns_redirect_bypass_ingress_v4) {
                 for (const auto& cidr : target.source_cidrs_v4) {
@@ -1061,10 +1090,49 @@ std::optional<std::string> infer_urltest_selection_from_routes(
     return selected_tag;
 }
 
+const Outbound* resolve_effective_outbound_for_family(
+    const std::vector<Outbound>& outbounds,
+    const Outbound& outbound,
+    const std::map<std::string, std::string>* selections,
+    int family,
+    const OutboundFamilyReachabilitySnapshot* family_reachability) {
+    if (outbound.type != OutboundType::URLTEST) return &outbound;
+    // Until a selection is available the planner publishes only the group's
+    // terminal closure. Do not activate a child ahead of that routing plan.
+    if (resolve_urltest_selection(selections, outbound.tag).empty()) return &outbound;
+    const auto usable = [&](const Outbound& child) {
+        const bool has_gateways = child.gateway.has_value() || child.gateway6.has_value();
+        if (has_gateways && !(family == AF_INET6 ? child.gateway6.has_value()
+                                               : child.gateway.has_value())) return false;
+        if (family_reachability) {
+            const auto it = family_reachability->find(child.tag);
+            if (it != family_reachability->end()) return it->second.for_family(family);
+        }
+        return true;
+    };
+    const auto* selected = resolve_effective_outbound(outbounds, outbound, selections);
+    if (selected && (selected->type != OutboundType::INTERFACE || usable(*selected))) {
+        // Preserve explicit table and blackhole selections too.
+        return selected;
+    }
+    // This is the same ordered interface flattening used for group-table
+    // fallback defaults. Return that interface's own mark, not the mutable
+    // group mark, so existing connections retain their original egress.
+    std::vector<const Outbound*> children;
+    std::set<std::string> visited;
+    collect_urltest_leaf_interfaces(outbounds, outbound, children, visited);
+    for (const auto* child : children) {
+        if (usable(*child)) return child;
+    }
+    return &outbound; // No usable family: the existing group closure applies.
+}
+
 std::vector<RuleState> build_fw_rule_states(
     const Config& cfg,
     const OutboundMarkMap& marks,
-    const std::map<std::string, std::string>* urltest_selections) {
+    const std::map<std::string, std::string>* urltest_selections,
+    const RouteFailureHealthSnapshot* failure_health,
+    const OutboundFamilyReachabilitySnapshot* family_reachability) {
     std::vector<RuleState> rule_states;
 
     const auto& all_outbounds = cfg.outbounds.value_or(std::vector<Outbound>{});
@@ -1086,7 +1154,13 @@ std::vector<RuleState> build_fw_rule_states(
             continue;
         }
 
-        auto decision = resolve_route_action(rule.outbound, all_outbounds);
+        const auto failure_target = select_route_failure_target(
+            rule, all_outbounds, urltest_selections, failure_health);
+        // Keep the original outbound while constructing a failure DROP so the
+        // same selectors/list sets are retained without a synthetic outbound.
+        auto decision = resolve_route_action(
+            failure_target.drop ? rule.outbound : failure_target.outbound_tag,
+            all_outbounds);
 
         if (decision.is_skip) {
             RuleState rs;
@@ -1116,6 +1190,9 @@ std::vector<RuleState> build_fw_rule_states(
             rs.list_names = route_rule_lists(rule);
             rs.outbound_tag = rule.outbound;
             rs.action_type = RuleActionType::Pass;
+            if (failure_target.outbound_tag != rule.outbound) {
+                rs.effective_outbound_tag = ob->tag;
+            }
 
             for (const auto& list_name : route_rule_lists(rule)) {
                 auto list_cfg_it = lists_map.find(list_name);
@@ -1143,7 +1220,8 @@ std::vector<RuleState> build_fw_rule_states(
             // Nested groups resolve down to whatever ends the chain, so a
             // blackhole still becomes a drop and an interface lends its mark.
             const Outbound* leaf =
-                resolve_effective_outbound(all_outbounds, *ob, urltest_selections);
+                resolve_effective_outbound_for_family(
+                    all_outbounds, *ob, urltest_selections, AF_INET, family_reachability);
             if (leaf) {
                 effective_ob = leaf;
                 effective_tag = leaf->tag;
@@ -1157,13 +1235,25 @@ std::vector<RuleState> build_fw_rule_states(
         rs.list_names = route_rule_lists(rule);
         rs.outbound_tag = rule.outbound;
 
-        if (is_blackhole) {
+        if (is_blackhole || failure_target.drop) {
             rs.action_type = RuleActionType::Drop;
+            if (failure_target.drop) rs.effective_outbound_tag = "(blocked)";
         } else {
             rs.action_type = RuleActionType::Mark;
+            if (failure_target.outbound_tag != rule.outbound) {
+                rs.effective_outbound_tag = effective_tag;
+            }
             auto mark_it = marks.find(effective_tag);
             if (mark_it != marks.end()) {
                 rs.fwmark = mark_it->second;
+            }
+            if (ob->type == OutboundType::URLTEST) {
+                const auto* ipv6_leaf = resolve_effective_outbound_for_family(
+                    all_outbounds, *ob, urltest_selections, AF_INET6, family_reachability);
+                const auto ipv6_mark = marks.find(ipv6_leaf->tag);
+                if (ipv6_mark != marks.end() && ipv6_mark->second != rs.fwmark) {
+                    rs.fwmark_ipv6 = ipv6_mark->second;
+                }
             }
         }
 

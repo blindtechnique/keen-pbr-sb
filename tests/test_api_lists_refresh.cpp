@@ -52,8 +52,8 @@ public:
 TEST_CASE("list refresh endpoint preserves the structured operation result") {
     std::vector<std::optional<std::string>> requests;
     ListsRefreshApiFixture fixture(test_support::isolated_api_port(4));
-    fixture.context.refresh_lists_fn = [&](std::optional<std::string> name) {
-        requests.push_back(std::move(name));
+    fixture.context.refresh_lists_fn = [&](const api::ListRefreshRequest& request) {
+        requests.push_back(request.name);
         return ListRefreshOperationResult{
             {"one", "two"},
             {"two"},
@@ -85,8 +85,8 @@ TEST_CASE("list refresh endpoint preserves the structured operation result") {
 TEST_CASE("list refresh endpoint treats absent name as refresh all") {
     std::vector<std::optional<std::string>> requests;
     ListsRefreshApiFixture fixture(test_support::isolated_api_port(5));
-    fixture.context.refresh_lists_fn = [&](std::optional<std::string> name) {
-        requests.push_back(std::move(name));
+    fixture.context.refresh_lists_fn = [&](const api::ListRefreshRequest& request) {
+        requests.push_back(request.name);
         return ListRefreshOperationResult{};
     };
 
@@ -107,7 +107,7 @@ TEST_CASE("list refresh endpoint treats absent name as refresh all") {
 TEST_CASE("list refresh endpoint rejects malformed request bodies") {
     std::size_t calls = 0;
     ListsRefreshApiFixture fixture(test_support::isolated_api_port(6));
-    fixture.context.refresh_lists_fn = [&](std::optional<std::string>) {
+    fixture.context.refresh_lists_fn = [&](const api::ListRefreshRequest&) {
         ++calls;
         return ListRefreshOperationResult{};
     };
@@ -116,6 +116,10 @@ TEST_CASE("list refresh endpoint rejects malformed request bodies") {
         "{",
         "[]",
         R"({"name":42})",
+        R"({"name":"one","force_refresh":"yes"})",
+        R"({"name":"one","accept_shrink":true})",
+        R"({"name":"one","accept_shrink":{}})",
+        R"({"accept_shrink":{"previous_sha256":"a","candidate_sha256":"b"}})",
     };
     for (const auto& body : bodies) {
         const auto response = fixture.client->Post(
@@ -124,6 +128,45 @@ TEST_CASE("list refresh endpoint rejects malformed request bodies") {
         CHECK(response->status == 400);
     }
     CHECK(calls == 0);
+}
+
+TEST_CASE("list refresh endpoint carries force and exact one-list acceptance") {
+    std::vector<api::ListRefreshRequest> requests;
+    ListsRefreshApiFixture fixture(test_support::isolated_api_port(7));
+    fixture.context.refresh_lists_fn = [&](const api::ListRefreshRequest& request) {
+        requests.push_back(request);
+        return ListRefreshOperationResult{};
+    };
+    const auto force = fixture.client->Post("/api/lists/refresh",
+        R"({"name":"one","force_refresh":true})", "application/json");
+    REQUIRE(force != nullptr);
+    CHECK(force->status == 200);
+    REQUIRE(requests.size() == 1);
+    CHECK(requests.back().force_refresh.value_or(false));
+    CHECK_FALSE(requests.back().accept_shrink.has_value());
+
+    nlohmann::json body = {{"name", "one"}, {"accept_shrink", {
+        {"previous_sha256", std::string(64, 'a')},
+        {"candidate_sha256", std::string(64, 'b')}}}};
+    const auto accept = fixture.client->Post("/api/lists/refresh", body.dump(), "application/json");
+    REQUIRE(accept != nullptr);
+    CHECK(accept->status == 200);
+    REQUIRE(requests.size() == 2);
+    CHECK(requests.back().force_refresh.value_or(false));
+    REQUIRE(requests.back().accept_shrink.has_value());
+    CHECK(requests.back().accept_shrink->previous_sha256 == std::string(64, 'a'));
+    CHECK(requests.back().accept_shrink->candidate_sha256 == std::string(64, 'b'));
+
+    body.erase("name");
+    const auto all = fixture.client->Post("/api/lists/refresh", body.dump(), "application/json");
+    REQUIRE(all != nullptr);
+    CHECK(all->status == 400);
+    body["name"] = "one";
+    body["accept_shrink"]["candidate_sha256"] = std::string(64, 'G');
+    const auto malformed = fixture.client->Post("/api/lists/refresh", body.dump(), "application/json");
+    REQUIRE(malformed != nullptr);
+    CHECK(malformed->status == 400);
+    CHECK(requests.size() == 2);
 }
 
 } // namespace keen_pbr3

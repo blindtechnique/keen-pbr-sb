@@ -135,6 +135,9 @@ server=10.100.100.100
 ipset=/google.com/www.google.com/.../kpbr4d_google,kpbr6d_google
 ```
 
+Строка canary выше включена по умолчанию. Значение `dns.firefox_doh_canary: false`
+убирает её; настройка учитывается в хеше конфигурации резолвера.
+
 Вывести хеш конфигурации резолвера:
 
 ```bash {filename="bash"}

@@ -1,5 +1,7 @@
 import { useState } from "react"
+import { useLocation } from "wouter"
 import {
+  BookOpenIcon,
   BugIcon,
   CheckIcon,
   ChevronDownIcon,
@@ -8,6 +10,7 @@ import {
   LogOutIcon,
   MoreHorizontalIcon,
   PaletteIcon,
+  WandSparklesIcon,
 } from "lucide-react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
@@ -18,6 +21,7 @@ import { TOP_BAR_CONTROL_CLASS } from "@/components/layout/top-bar-control-style
 import { useLanguage } from "@/components/language-provider"
 import { useTheme } from "@/components/theme-provider"
 import { Button } from "@/components/ui/button"
+import { useSidebar } from "@/components/ui/sidebar-context"
 import {
   Popover,
   PopoverContent,
@@ -84,9 +88,10 @@ export function TopBarControls() {
 
 /** Те же строки внизу мобильной шторки, без обёртки-меню. */
 export function MobileMenuControls() {
+  const { setOpenMobile } = useSidebar()
   return (
     <div className="flex w-full flex-col py-1">
-      <SystemControlRows />
+      <SystemControlRows onAfterAction={() => setOpenMobile(false)} />
     </div>
   )
 }
@@ -98,12 +103,15 @@ function SystemControlRows({
   onAfterAction?: () => void
 }) {
   const { t } = useTranslation()
+  const [, navigate] = useLocation()
   const { theme, setTheme } = useTheme()
   const { language, setLanguage } = useLanguage()
   // Варианты раскрываются прямо в списке, а не вторым всплывающим слоем.
   // Popover внутри Popover — лишний повод для промаха по «мимо меню», а выбор
   // из двух-трёх пунктов того не стоит.
-  const [expanded, setExpanded] = useState<"language" | "theme" | null>(null)
+  const [expanded, setExpanded] = useState<
+    "language" | "theme" | "help" | null
+  >(null)
   const [signingOut, setSigningOut] = useState(false)
 
   const handleSignOut = async () => {
@@ -125,11 +133,32 @@ function SystemControlRows({
     language
   const themeOption = THEME_OPTIONS.find((option) => option.value === theme)
 
-  const toggle = (section: "language" | "theme") =>
+  const toggle = (section: "language" | "theme" | "help") =>
     setExpanded((current) => (current === section ? null : section))
 
   return (
     <div className="flex flex-col">
+      <ExpandableRow
+        expanded={expanded === "help"}
+        icon={<BookOpenIcon />}
+        label={t("common.help.title")}
+        onToggle={() => toggle("help")}
+        contentRole="group"
+      >
+        <Button
+          className={CONTROL_ROW_CLASS}
+          onClick={() => {
+            navigate("/setup")
+            setExpanded(null)
+            onAfterAction?.()
+          }}
+          variant="ghost"
+        >
+          <WandSparklesIcon />
+          {t("pages.setupWizard.title")}
+        </Button>
+      </ExpandableRow>
+
       <Button
         className={CONTROL_ROW_CLASS}
         render={
@@ -211,6 +240,7 @@ function ExpandableRow({
   label,
   onToggle,
   value,
+  contentRole = "radiogroup",
 }: {
   children: React.ReactNode
   expanded: boolean
@@ -219,6 +249,7 @@ function ExpandableRow({
   onToggle: () => void
   /** Текущее значение справа: иначе язык и тему видно только после раскрытия. */
   value?: string
+  contentRole?: "radiogroup" | "group"
 }) {
   return (
     <>
@@ -240,7 +271,7 @@ function ExpandableRow({
         />
       </Button>
       {expanded ? (
-        <div aria-label={label} role="radiogroup">
+        <div aria-label={label} role={contentRole}>
           {children}
         </div>
       ) : null}

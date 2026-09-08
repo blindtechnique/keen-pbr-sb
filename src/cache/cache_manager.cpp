@@ -3,6 +3,7 @@
 #include "../config/list_parser.hpp"
 #include "../crypto/sha256.hpp"
 #include "../lists/list_shrink_guard.hpp"
+#include "../lists/list_source_decoder.hpp"
 #include "../lists/srs_decoder.hpp"
 
 #include <algorithm>
@@ -153,6 +154,23 @@ bool is_srs_rule_set_url(const std::string& url) {
     std::transform(path.begin(), path.end(), path.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return path.size() >= 4 && path.compare(path.size() - 4, 4, ".srs") == 0;
+}
+
+bool source_format_matches(const std::string& captured_format,
+                           const std::optional<std::int64_t>& captured_revision,
+                           const std::string& source_format) {
+    return valid_list_source_format(source_format) &&
+           captured_format == source_format &&
+           (source_format == "text" ||
+            (captured_revision && *captured_revision == kListSourceDecoderRevision));
+}
+
+bool cache_source_matches(const CacheMetadata& metadata,
+                          const std::string& url,
+                          const std::string& source_format) {
+    return metadata.url && *metadata.url == url &&
+           source_format_matches(metadata.source_format.value_or("text"),
+                                 metadata.source_decoder_revision, source_format);
 }
 
 std::size_t saturating_multiply(std::size_t value, std::size_t multiplier) {
@@ -754,10 +772,22 @@ void CacheGenerationPinState::release(
 CacheGenerationHandle::CacheGenerationHandle(
     std::filesystem::path path,
     api::CacheGeneration generation,
+    std::optional<std::string> source_url,
+    std::string source_format,
+    std::optional<std::int64_t> source_decoder_revision,
     std::shared_ptr<const void> lease)
     : path_(std::move(path))
     , generation_(std::move(generation))
+    , source_url_(std::move(source_url))
+    , source_format_(std::move(source_format))
+    , source_decoder_revision_(std::move(source_decoder_revision))
     , lease_(std::move(lease)) {}
+
+bool CacheGenerationHandle::matches_source(
+    const std::string& url, const std::string& source_format) const {
+    return source_url_ && *source_url_ == url &&
+           source_format_matches(source_format_, source_decoder_revision_, source_format);
+}
 
 bool ListCacheGenerationSnapshot::contains(const std::string& name) const {
     return entries_.find(name) != entries_.end();
@@ -776,9 +806,25 @@ std::map<std::string, std::string>
 ListCacheGenerationSnapshot::fingerprints() const {
     std::map<std::string, std::string> result;
     for (const auto& [name, handle] : entries_) {
-        result.emplace(
-            name, handle.has_value() ? handle->generation().sha256
-                                     : std::string{});
+        if (!handle) {
+            result.emplace(name, std::string{});
+            continue;
+        }
+        // SHA-256 body verification stays separate and unchanged. Reuse also
+        // needs the captured source: identical bytes fetched for a new URL
+        // must populate sets that ignored the previous URL's cached body.
+        Sha256 fingerprint;
+        fingerprint.update(handle->generation().sha256);
+        const unsigned char source_present = handle->source_url() ? 1U : 0U;
+        fingerprint.update(&source_present, sizeof(source_present));
+        if (handle->source_url()) {
+            fingerprint.update(std::to_string(handle->source_url()->size()) + ":");
+            fingerprint.update(*handle->source_url());
+        }
+        fingerprint.update(std::to_string(handle->source_format().size()) + ":");
+        fingerprint.update(handle->source_format());
+        fingerprint.update(":" + std::to_string(handle->source_decoder_revision().value_or(0)));
+        result.emplace(name, fingerprint.hex_digest());
     }
     return result;
 }
@@ -828,34 +874,38 @@ void CacheManager::record_refresh_failure(
     const std::string& name,
     const std::string& url,
     const std::string& error_message,
-    const std::optional<std::string>& detour) {
+    const std::optional<std::string>& detour,
+    const std::optional<CacheShrinkRejection>& shrink_rejection) {
     CacheMetadata metadata = load_metadata(name);
     metadata.last_refresh_attempt = current_time_iso();
     metadata.last_refresh_error = error_message;
     metadata.last_refresh_url = url;
     metadata.last_refresh_detour = detour;
+    metadata.last_refresh_shrink_rejection = shrink_rejection;
     save_metadata(name, metadata);
 }
 
 CacheDownloadResult CacheManager::download(const std::string& name,
                                            const std::string& url,
-                                           const CacheDownloadOptions& options) {
+                                           const CacheDownloadOptions& options,
+                                           const std::string& source_format) {
     if (cancellation_requested(options)) {
         return download_cancelled();
     }
-    const bool srs = is_srs_rule_set_url(url);
+    const bool structured = source_format != "text";
+    const bool srs = !structured && is_srs_rule_set_url(url);
     const CacheMetadataDocument existing_document =
         read_metadata_document(meta_path(name));
     CacheMetadata existing = existing_document.metadata;
     const auto existing_body = resolve_cache_body(
         cache_dir_, name, max_file_size_bytes_, existing_document);
-    const bool same_source =
-        existing.url.has_value() && *existing.url == url;
+    const bool same_source = cache_source_matches(existing, url, source_format);
     const bool current_srs_revision =
         !srs ||
         (existing.srs_decoder_revision.has_value() &&
          *existing.srs_decoder_revision == kSrsDecoderRevision);
     const bool use_conditionals =
+        !options.force_refresh && !options.accept_shrink &&
         same_source && current_srs_revision && existing_body.has_value() &&
         existing_body->kind != CacheBodyKind::Previous;
     const auto save_download_metadata =
@@ -875,13 +925,15 @@ CacheDownloadResult CacheManager::download(const std::string& name,
         [this, &name, &url, &options](
             std::string message,
             std::optional<long> http_status_code = std::nullopt,
-            bool retryable = false) {
+            bool retryable = false,
+            const std::optional<CacheShrinkRejection>& shrink_rejection = std::nullopt) {
             if (cancellation_requested(options)) {
                 return download_cancelled();
             }
             auto result =
                 download_failed(
                     std::move(message), http_status_code, retryable);
+            result.shrink_rejection = shrink_rejection;
             try {
 #ifdef KEEN_PBR3_TESTING
                 if (options.before_failure_metadata_persist) {
@@ -889,7 +941,7 @@ CacheDownloadResult CacheManager::download(const std::string& name,
                 }
 #endif
                 record_refresh_failure(
-                    name, url, result.error_message, options.detour);
+                    name, url, result.error_message, options.detour, shrink_rejection);
             } catch (const std::exception& metadata_error) {
                 result.error_message +=
                     "; failed to persist refresh metadata: ";
@@ -898,8 +950,18 @@ CacheDownloadResult CacheManager::download(const std::string& name,
             return result;
         };
 
+    if (!valid_list_source_format(source_format)) {
+        return failed_attempt("unsupported list source format");
+    }
+
     ConditionalDownloadResult result;
     try {
+        // Bound structured input while it is downloaded, not only when the
+        // decoder runs. Reset per request so a later text/SRS list retains
+        // the configured legacy limit, including after a failed decode.
+        http_client_.set_max_response_size(
+            structured ? std::min(max_file_size_bytes_, kListSourceMaxBytes)
+                       : max_file_size_bytes_);
         result = http_client_.download_conditional(
             url,
             use_conditionals ? existing.etag.value_or("") : "",
@@ -934,15 +996,29 @@ CacheDownloadResult CacheManager::download(const std::string& name,
         existing.download_time = successful_at;
         existing.last_refresh_attempt = successful_at;
         existing.last_refresh_error.reset();
+        existing.last_refresh_shrink_rejection.reset();
         existing.last_refresh_url = url;
         existing.last_refresh_detour = options.detour;
         try {
-            save_download_metadata(existing);
+            commit_cache_files(options, [&]() {
+                if (cancellation_requested(options)) {
+                    throw HttpRequestCancelled("download cancelled");
+                }
+                save_download_metadata(existing);
+            });
         } catch (const std::exception& error) {
+            // A foreground operation may cancel this refresh while its
+            // metadata commit waits for the resolver snapshot lock. Even an
+            // identical same-second timestamp is not evidence of a commit.
+            if (cancellation_requested(options)) {
+                return download_cancelled();
+            }
             const auto visible = read_metadata_document(meta_path(name));
             if (visible.parsed &&
                 visible.metadata.download_time == existing.download_time &&
-                visible.metadata.url == existing.url) {
+                visible.metadata.url == existing.url &&
+                visible.metadata.source_format == existing.source_format &&
+                visible.metadata.source_decoder_revision == existing.source_decoder_revision) {
                 CacheDownloadResult not_modified;
                 not_modified.status = CacheDownloadStatus::NotModified;
                 not_modified.warning_message =
@@ -965,7 +1041,22 @@ CacheDownloadResult CacheManager::download(const std::string& name,
     std::string conversion_diagnostic;
     api::CacheGeneration generation;
     try {
-        if (srs) {
+        if (structured) {
+            const auto decoded = decode_list_source(result.body, source_format);
+            if (!decoded.complete) {
+                std::string message = "structured list source could not be decoded";
+                if (!decoded.errors.empty()) {
+                    message += ": " + decoded.errors.front().code +
+                        " at line " + std::to_string(decoded.errors.front().line);
+                } else if (!decoded.limit_reason.empty()) {
+                    message += ": " + decoded.limit_reason;
+                }
+                throw std::runtime_error(message);
+            }
+            generation = write_cache_generation(
+                cache_dir_, name, max_file_size_bytes_,
+                [&](const CacheChunkWriter& write_chunk) { write_chunk(decoded.text); });
+        } else if (srs) {
             StringViewInputBuffer input_buffer(result.body);
             std::istream compressed(&input_buffer);
             generation = write_cache_generation(
@@ -1023,27 +1114,44 @@ CacheDownloadResult CacheManager::download(const std::string& name,
     // everything it carried, and the download itself succeeded, so nothing
     // else would say a word.
     //
-    // Only compared against the same URL: counts from a different source
-    // answer a different question.
-    if (same_source) {
+    // Only compared against the same URL, format and decoder revision: counts
+    // from a different interpretation of the source answer a different question.
+    if (same_source && existing_body) {
         ListEntryCounts previous_counts;
         previous_counts.domains = existing.domains.value_or(0);
         previous_counts.cidrs = existing.cidrs.value_or(0);
         previous_counts.ips = existing.ips.value_or(0);
+        if (existing_body->kind != CacheBodyKind::Current) {
+            // A recovered previous/legacy body can differ from the counts of
+            // an unavailable current generation. Compare what readers use.
+            std::ifstream previous_body(existing_body->path, std::ios::binary);
+            if (previous_body.is_open()) {
+                previous_counts = count_list_entries(previous_body);
+            }
+        }
 
         const auto shrink =
-            decide_list_shrink(previous_counts, candidate_counts);
-        if (shrink.verdict == ListShrinkVerdict::refuse) {
-            // The body is dropped and the metadata is left untouched, which
-            // matters more than it looks: keeping the old ETag is what makes
-            // the next refresh fetch the source again instead of being told
-            // it is already up to date.
+            decide_list_shrink(previous_counts, candidate_counts, options.shrink_policy);
+        const bool accepted_exact_shrink = options.accept_shrink &&
+            options.accept_shrink->previous_sha256 == existing_body->generation.sha256 &&
+            options.accept_shrink->candidate_sha256 == generation.sha256;
+        if (shrink.verdict == ListShrinkVerdict::refuse && !accepted_exact_shrink) {
+            CacheShrinkRejection rejection;
+            rejection.previous_entries = previous_counts.total();
+            rejection.candidate_entries = candidate_counts.total();
+            rejection.previous_sha256 = existing_body->generation.sha256;
+            rejection.candidate_sha256 = generation.sha256;
+            rejection.min_previous_entries = options.shrink_policy.min_previous_entries;
+            rejection.min_retained_fraction = options.shrink_policy.min_retained_fraction;
+            // Only the small observation is retained. The old generation,
+            // validators and successful-download timestamp remain current;
+            // the rejected body is removed before recording the attempt.
             std::error_code remove_error;
             std::filesystem::remove(
                 cache_dir_ / generation.filename, remove_error);
             garbage_collect_generations(
                 cache_dir_, name, generation_pin_state_);
-            return failed_attempt(shrink.reason);
+            return failed_attempt(shrink.reason, std::nullopt, false, rejection);
         }
     }
 
@@ -1055,6 +1163,8 @@ CacheDownloadResult CacheManager::download(const std::string& name,
     meta.etag = result.etag;
     meta.last_modified = result.last_modified;
     meta.url = url;
+    meta.source_format = source_format;
+    if (structured) meta.source_decoder_revision = kListSourceDecoderRevision;
     meta.download_time = successful_at;
     meta.last_refresh_attempt = successful_at;
     meta.last_refresh_url = url;
@@ -1161,10 +1271,11 @@ bool CacheManager::has_cache(const std::string& name) const {
 }
 
 bool CacheManager::has_current_cache(const std::string& name,
-                                     const std::string& url) const {
+                                     const std::string& url,
+                                     const std::string& source_format) const {
     const auto document = read_metadata_document(meta_path(name));
     const CacheMetadata& metadata = document.metadata;
-    if (!metadata.url.has_value() || *metadata.url != url) {
+    if (!cache_source_matches(metadata, url, source_format)) {
         return false;
     }
 
@@ -1174,17 +1285,18 @@ bool CacheManager::has_current_cache(const std::string& name,
         return false;
     }
 
-    return !is_srs_rule_set_url(url) ||
+    return source_format != "text" || !is_srs_rule_set_url(url) ||
            (metadata.srs_decoder_revision.has_value() &&
             *metadata.srs_decoder_revision == kSrsDecoderRevision);
 }
 
 bool CacheManager::has_usable_same_source_cache(
     const std::string& name,
-    const std::string& url) const {
+    const std::string& url,
+    const std::string& source_format) const {
     const auto document = read_metadata_document(meta_path(name));
     const CacheMetadata& metadata = document.metadata;
-    if (!metadata.url.has_value() || *metadata.url != url) {
+    if (!cache_source_matches(metadata, url, source_format)) {
         return false;
     }
     const auto body = resolve_cache_body(
@@ -1209,6 +1321,9 @@ CacheManager::capture_generation(
     struct Reservation {
         std::string name;
         ResolvedCacheBody body;
+        std::optional<std::string> source_url;
+        std::string source_format;
+        std::optional<std::int64_t> source_decoder_revision;
         bool pin_owned{false};
     };
     std::vector<Reservation> reservations;
@@ -1235,7 +1350,9 @@ CacheManager::capture_generation(
                 }
 
                 reservations.push_back(
-                    Reservation{name, std::move(*body), false});
+                    Reservation{name, std::move(*body), document.metadata.url,
+                                document.metadata.source_format.value_or("text"),
+                                document.metadata.source_decoder_revision, false});
                 auto& reservation = reservations.back();
                 ++generation_pin_state_->pin_counts[
                     reservation.body.generation.filename];
@@ -1265,6 +1382,9 @@ CacheManager::capture_generation(
             CacheGenerationHandle handle(
                 std::move(reservation.body.path),
                 std::move(reservation.body.generation),
+                std::move(reservation.source_url),
+                std::move(reservation.source_format),
+                std::move(reservation.source_decoder_revision),
                 std::move(lease));
             snapshot->entries_.at(reservation.name).emplace(
                 std::move(handle));

@@ -33,7 +33,9 @@ RuntimeFirewallBackendTransactionResult
 execute_runtime_firewall_backend_transaction(
     const RuntimeFirewallBackendTransactionInput& input,
     Firewall& firewall,
-    MetaUdp443ActivationBackendServices& meta_services) {
+    MetaUdp443ActivationBackendServices& meta_services,
+    const RouteFailureHealthSnapshot* failure_health,
+    const OutboundFamilyReachabilitySnapshot* family_reachability) {
     RuntimeFirewallBackendTransactionResult result;
     result.operation_serial = input.operation_serial;
     result.runtime_generation = input.runtime_generation;
@@ -71,7 +73,9 @@ execute_runtime_firewall_backend_transaction(
             input.udp_call_affinity_ipset_available,
             input.keenetic_dns_snapshot,
             input.force_clear_dynamic_sets,
-            previous);
+            previous,
+            failure_health ? failure_health : &input.failure_health,
+            family_reachability);
     };
     const auto meta_preflight = [
         &input, &meta_services, &phase](

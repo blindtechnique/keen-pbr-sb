@@ -4,14 +4,13 @@
 #include "generated/api_types.hpp"
 
 #include <nlohmann/json.hpp>
+#include <algorithm>
 
 namespace keen_pbr3 {
 
-namespace {
-
-std::optional<std::string> parse_requested_list_name(const std::string& body) {
+api::ListRefreshRequest parse_list_refresh_request(const std::string& body) {
     if (body.empty()) {
-        return std::nullopt;
+        return {};
     }
 
     nlohmann::json payload;
@@ -21,29 +20,58 @@ std::optional<std::string> parse_requested_list_name(const std::string& body) {
         throw ApiError("Invalid request body", 400);
     }
     if (payload.is_null()) {
-        return std::nullopt;
+        return {};
     }
     if (!payload.is_object()) {
         throw ApiError("Invalid request body", 400);
     }
 
-    const auto it = payload.find("name");
-    if (it == payload.end() || it->is_null()) {
-        return std::nullopt;
+    api::ListRefreshRequest request;
+    const auto name = payload.find("name");
+    if (name != payload.end() && !name->is_null()) {
+        if (!name->is_string()) {
+            throw ApiError("Field 'name' must be a string", 400);
+        }
+        request.name = name->get<std::string>();
     }
-    if (!it->is_string()) {
-        throw ApiError("Field 'name' must be a string", 400);
+    const auto force = payload.find("force_refresh");
+    if (force != payload.end()) {
+        if (!force->is_boolean()) {
+            throw ApiError("Field 'force_refresh' must be a boolean", 400);
+        }
+        request.force_refresh = force->get<bool>();
     }
-
-    return it->get<std::string>();
+    const auto acceptance = payload.find("accept_shrink");
+    if (acceptance != payload.end()) {
+        if (!acceptance->is_object() || !request.name || request.name->empty()) {
+            throw ApiError("Accepting a smaller list requires one named list", 400);
+        }
+        const auto digest = [&acceptance](const char* field) {
+            const auto value = acceptance->find(field);
+            if (value == acceptance->end() || !value->is_string()) {
+                throw ApiError("Shrink acceptance requires both list digests", 400);
+            }
+            const auto text = value->get<std::string>();
+            if (text.size() != 64 || !std::all_of(text.begin(), text.end(), [](char ch) {
+                    return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
+                })) {
+                throw ApiError("Shrink acceptance contains an invalid digest", 400);
+            }
+            return text;
+        };
+        api::AcceptShrink accepted;
+        accepted.previous_sha256 = digest("previous_sha256");
+        accepted.candidate_sha256 = digest("candidate_sha256");
+        request.accept_shrink = std::move(accepted);
+        request.force_refresh = true;
+    }
+    return request;
 }
-
-} // namespace
 
 void register_lists_refresh_handler(ApiServer& server, ApiContext& ctx) {
     server.post("/api/lists/refresh", [&ctx](const std::string& body) -> std::string {
-        const auto requested_name = parse_requested_list_name(body);
-        const auto result = ctx.refresh_lists(requested_name);
+        const auto request = parse_list_refresh_request(body);
+        const auto result = ctx.refresh_lists(request);
 
         api::ListRefreshResponse response;
         response.status = api::ConfigUpdateResponseStatus::OK;

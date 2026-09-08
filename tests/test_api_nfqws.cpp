@@ -670,6 +670,34 @@ TEST_CASE("nfqws opkg upgrade refuses a target the feed index does not vouch for
     CHECK_FALSE(result.previous_exact);
 }
 
+TEST_CASE("nfqws upgrade prepared-hook refusal preserves process uncertainty") {
+    NfqwsPackageFixture fixture;
+    fixture.serve("1.2.5", "bytes of 1.2.5");
+    bool install_ran = false;
+    bool prepared_ran = false;
+    const auto result = run_nfqws_bounded_opkg_for_testing(
+        fixture.executor([&] {
+            install_ran = true;
+            return ExecCaptureResult{};
+        }),
+        "1.2.4", fixture.store_root(), fixture.feed_list(),
+        fixture.scripted_paths(), {}, [&](bool& termination_uncertain) {
+            prepared_ran = true;
+            termination_uncertain = true;
+            return false;
+        });
+
+    CHECK(prepared_ran);
+    CHECK(result.termination_uncertain);
+    CHECK_FALSE(install_ran);
+    CHECK_FALSE(result.upgrade_started);
+    CHECK(result.status != 0);
+    CHECK(fixture.commands.size() == 2U);
+    CHECK(fixture.script_runs.empty());
+    CHECK_FALSE(should_clear_nfqws_upgrade_journal_for_testing(
+        false, result.upgrade_started, false, result.termination_uncertain));
+}
+
 TEST_CASE("nfqws opkg upgrade retains the installed ipk while the feed still serves it") {
     NfqwsPackageFixture fixture;
     fixture.serve("1.2.4", "bytes of 1.2.4");
@@ -721,7 +749,7 @@ TEST_CASE("exact previous package reinstall is proven by opkg naming the version
         CHECK(fixture.script_runs ==
               std::vector<std::string>{"preinst upgrade",
                                        "postinst configure"});
-        CHECK(output.find("opkg metadata restored") != std::string::npos);
+        CHECK(output.find("reported version matches") != std::string::npos);
     }
     SUBCASE("a failed postinst is a failed reinstall") {
         fixture.postinst_exit = 1;
@@ -1537,6 +1565,14 @@ TEST_CASE("exact previous package: reinstall plan runs, candidate dropped, journ
     fixture.version = "1.2.5";
     fixture.step.rolled_back = true;
     fixture.step.package_metadata_restored = true;
+
+    SUBCASE("package version changed before the interruption") {
+        CHECK(fixture.version != fixture.journal.record->previous_version);
+    }
+    SUBCASE("binary and version still match but the interrupted unpack needs metadata repair") {
+        fixture.version = fixture.journal.record->previous_version;
+        fixture.binary_sha = fixture.journal.record->binary_sha256;
+    }
 
     const auto result =
         run_nfqws_boot_recovery_for_testing(fixture.hooks());

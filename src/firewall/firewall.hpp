@@ -60,6 +60,9 @@ struct FirewallRuleCriteria {
     bool negate_dst_port = false;      // if true, match packets NOT to dst_port
     bool negate_src_addr = false;      // if true, match packets NOT from src_addr
     bool negate_dst_addr = false;      // if true, match packets NOT to dst_addr
+    // Internal runtime family restriction, not a user selector. In particular
+    // this alone must never turn an empty named list into an all-traffic rule.
+    int family = AF_UNSPEC;
     bool empty() const {
         return !dst_set_name.has_value() && !src_udp_peer_set_name.has_value()
             && !dscp.has_value()
@@ -127,6 +130,32 @@ struct FirewallSourceEgressSnatSelector {
     }
 };
 
+struct FirewallNativeForwardSelector {
+    // Exact OpenConnect ingress/source and a policy-routed egress. The mark
+    // is matched only within the configured keen-pbr mask, never rewritten.
+    std::string ingress_interface;
+    std::string source_cidr;
+    std::string egress_interface;
+    uint32_t fwmark{0};
+
+    bool operator==(const FirewallNativeForwardSelector& other) const {
+        return ingress_interface == other.ingress_interface &&
+               source_cidr == other.source_cidr &&
+               egress_interface == other.egress_interface &&
+               fwmark == other.fwmark;
+    }
+
+    bool operator<(const FirewallNativeForwardSelector& other) const {
+        if (ingress_interface != other.ingress_interface)
+            return ingress_interface < other.ingress_interface;
+        if (source_cidr != other.source_cidr)
+            return source_cidr < other.source_cidr;
+        if (egress_interface != other.egress_interface)
+            return egress_interface < other.egress_interface;
+        return fwmark < other.fwmark;
+    }
+};
+
 struct FirewallGlobalPrefilter {
     std::optional<std::vector<std::string>> inbound_interfaces;
     // Explicit ingress interfaces that must bypass keen-pbr before conntrack
@@ -170,6 +199,11 @@ struct FirewallGlobalPrefilter {
     // it runs before conntrack; mangle PREROUTING/OUTPUT and IPv6 can use it.
     bool restore_conntrack_mark{false};
     uint32_t conntrack_mark_mask{0};
+    // Still-configured outbound identities, independent of today's selected
+    // classifiers. Legacy nft needs constants for restore, including the old
+    // leaf of a healthy group switch. Replaced with each candidate config;
+    // never accumulate marks from previous generations here.
+    std::vector<uint32_t> configured_outbound_marks;
 
     bool has_inbound_interfaces() const {
         return inbound_interfaces.has_value() && !inbound_interfaces->empty();
@@ -517,6 +551,11 @@ public:
     // retain ordinary Internet access too.
     virtual void create_source_egress_snat_rules(
         const std::vector<FirewallSourceEgressSnatSelector>& selectors) = 0;
+    // Keenetic's iptables FORWARD completion for native OpenConnect clients.
+    // Other platforms/backends do not publish an independent ACCEPT hook:
+    // notably, an nft base-chain ACCEPT cannot override a later firmware DROP.
+    virtual void create_native_vpn_forward_rules(
+        const std::vector<FirewallNativeForwardSelector>&) {}
     virtual OwnedSnatState inspect_owned_snat_state() const = 0;
     virtual OwnedForwardUdpRejectState
     inspect_forward_udp_reject_state() const = 0;

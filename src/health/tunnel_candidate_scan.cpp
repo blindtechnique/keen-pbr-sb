@@ -46,6 +46,20 @@ std::vector<ProbeCandidate> TunnelCandidateScan::queue() const {
 }
 
 TunnelScanReport TunnelCandidateScan::run_pass(const ProbeFn& probe) {
+    return run_pass(probe, config_.max_probes_per_pass);
+}
+
+void TunnelCandidateScan::update_coverage(CoverageIndex coverage) {
+    coverage_ = std::move(coverage);
+    for (const auto& candidate : queue_.ranked()) {
+        if (coverage_excludes_candidate(classify_coverage(coverage_, candidate.host))) {
+            queue_.forget(candidate.host);
+        }
+    }
+}
+
+TunnelScanReport TunnelCandidateScan::run_pass(const ProbeFn& probe,
+                                             std::size_t pass_budget) {
     TunnelScanReport report;
     if (!probe) {
         report.remaining = queue_.size();
@@ -53,7 +67,8 @@ TunnelScanReport TunnelCandidateScan::run_pass(const ProbeFn& probe) {
     }
 
     const auto ranked = queue_.ranked();
-    const auto limit = std::min(ranked.size(), config_.max_probes_per_pass);
+    const auto limit = std::min(ranked.size(),
+                                std::min(config_.max_probes_per_pass, pass_budget));
 
     for (std::size_t index = 0; index < limit; ++index) {
         const auto& candidate = ranked[index];

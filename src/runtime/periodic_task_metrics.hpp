@@ -40,6 +40,9 @@ struct PeriodicTaskMetricsSnapshot {
     std::optional<std::int64_t> last_event_at_unix_ms;
     std::optional<PeriodicTaskOutcome> last_outcome;
     std::string last_error;
+    // Terminal publication order, including runs beyond aggregate saturation.
+    // Skipped/abandoned attempts are not evidence of recovery.
+    std::uint64_t consecutive_failures{0};
 };
 
 struct PeriodicTaskMetricsClocks {

@@ -107,6 +107,9 @@ case "$answer" in
 esac
 
 echo ""
+if [ -x /opt/usr/lib/keen-pbr/dnsmasq-package.sh ]; then
+    /opt/usr/lib/keen-pbr/dnsmasq-package.sh restore || exit 1
+fi
 if ! KEEN_PBR_PACKAGE_POSTINST=1 \
      /opt/etc/init.d/S80keen-pbr start; then
     echo "Failed to start keen-pbr service" >&2

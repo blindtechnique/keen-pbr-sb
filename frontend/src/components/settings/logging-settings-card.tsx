@@ -7,8 +7,26 @@ import {
 } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
+import type { LogSettingsRequest } from "@/api/generated/model"
+import {
+  DEFAULT_LOG_FILE_BYTES,
+  DEFAULT_LOG_MAX_AGE_DAYS,
+  LOG_SETTINGS_QUERY_KEY,
+  loadLogSettings,
+  logFileSizeChoices,
+  logAgeChoices,
+  logSizeUnit,
+  saveLogSettings,
+  updateLogSettingsDraft,
+} from "@/lib/log-settings"
 
 import { LogDiagnosticsTools } from "@/components/settings/log-diagnostics-tools"
+import {
+  Field,
+  FieldContent,
+  FieldHint,
+  FieldLabel,
+} from "@/components/shared/field"
 import {
   Card,
   CardContent,
@@ -26,17 +44,13 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
+import { Checkbox } from "@/components/ui/checkbox"
 import type {
   SettingsSectionController,
   SettingsSectionState,
 } from "@/components/settings/settings-section-control"
 
-type LogSettings = {
-  file_enabled: boolean
-  level: string
-}
-
-type LogSettingsDraft = Partial<LogSettings>
+type LogSettingsDraft = LogSettingsRequest
 
 const LEVELS = ["error", "warn", "info", "verbose", "debug"] as const
 
@@ -58,43 +72,49 @@ function LoggingSettingsCardInner(
   const { t } = useTranslation()
   const queryClient = useQueryClient()
 
-  const query = useQuery<LogSettings>({
-    queryKey: ["log-settings"],
-    queryFn: async () => {
-      const response = await fetch("/api/logs/settings")
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      return response.json()
-    },
+  const query = useQuery({
+    queryKey: LOG_SETTINGS_QUERY_KEY,
+    queryFn: loadLogSettings,
   })
 
   const [draft, setDraft] = useState<LogSettingsDraft>({})
   const fileEnabled = draft.file_enabled ?? query.data?.file_enabled ?? true
   const level = draft.level ?? query.data?.level ?? "info"
+  const maximumBytes =
+    draft.max_file_bytes ?? query.data?.max_file_bytes ?? DEFAULT_LOG_FILE_BYTES
+  const sizeEnabled =
+    draft.size_limit_enabled ?? query.data?.size_limit_enabled ?? true
+  const ageEnabled =
+    draft.age_limit_enabled ?? query.data?.age_limit_enabled ?? false
+  const maximumAge =
+    draft.max_age_days ?? query.data?.max_age_days ?? DEFAULT_LOG_MAX_AGE_DAYS
+  const sizeLabel = (bytes: number) => {
+    const unit = logSizeUnit(bytes)
+    return unit.key === "pages.settings.logging.sizeKiB"
+      ? t("pages.settings.logging.sizeKiB", { size: unit.size })
+      : t("pages.settings.logging.sizeMiB", { size: unit.size })
+  }
   const getSectionState = (nextDraft = draft): SettingsSectionState => ({
     dirty: Object.keys(nextDraft).length > 0,
     valid: true,
   })
   const updateDraft = (patch: LogSettingsDraft) => {
-    const nextDraft = { ...draft, ...patch }
+    const nextDraft = updateLogSettingsDraft(draft, patch, {
+      file_enabled: query.data?.file_enabled ?? true,
+      level: query.data?.level ?? "info",
+      max_file_bytes: query.data?.max_file_bytes ?? DEFAULT_LOG_FILE_BYTES,
+      size_limit_enabled: query.data?.size_limit_enabled ?? true,
+      age_limit_enabled: query.data?.age_limit_enabled ?? false,
+      max_age_days: query.data?.max_age_days ?? DEFAULT_LOG_MAX_AGE_DAYS,
+    })
     setDraft(nextDraft)
     onStateChange(getSectionState(nextDraft))
   }
 
   const saveMutation = useMutation({
-    mutationFn: async () => {
-      const response = await fetch("/api/logs/settings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ file_enabled: fileEnabled, level }),
-      })
-      const data = await response.json().catch(() => ({}))
-      if (!response.ok || data.error) {
-        throw new Error(data.error || `HTTP ${response.status}`)
-      }
-      return data
-    },
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["log-settings"] })
+    mutationFn: () => saveLogSettings(draft),
+    onSuccess: (settings) => {
+      queryClient.setQueryData(LOG_SETTINGS_QUERY_KEY, settings)
       setDraft({})
       onStateChange({ dirty: false, valid: true })
       toast.success(t("pages.settings.logging.saved"))
@@ -116,10 +136,10 @@ function LoggingSettingsCardInner(
   }))
 
   return (
-    <Card size="sm">
+    <Card className="w-full min-w-0" size="sm">
       <CardHeader>
         <CardTitle>{t("pages.settings.logging.title")}</CardTitle>
-        <CardDescription className="max-w-[480px]">
+        <CardDescription>
           {t("pages.settings.logging.description")}
         </CardDescription>
       </CardHeader>
@@ -127,6 +147,7 @@ function LoggingSettingsCardInner(
         <div className="flex items-center gap-3">
           <Switch
             checked={fileEnabled}
+            disabled={saveMutation.isPending}
             id="logging-enabled"
             onCheckedChange={(nextEnabled) =>
               updateDraft({ file_enabled: nextEnabled })
@@ -137,36 +158,133 @@ function LoggingSettingsCardInner(
           </Label>
         </div>
 
-        <div className="grid gap-1.5 sm:max-w-xs">
-          <Label>{t("pages.settings.logging.level")}</Label>
-          <Select
-            disabled={!fileEnabled}
-            onValueChange={(value) => updateDraft({ level: value ?? "info" })}
-            value={level}
-          >
-            <SelectTrigger>
-              <SelectValue>
-                {(selected) =>
-                  t(`pages.settings.logging.levels.${String(selected)}`)
-                }
-              </SelectValue>
-            </SelectTrigger>
-            <SelectContent>
-              <SelectGroup>
-                {LEVELS.map((value) => (
-                  <SelectItem key={value} value={value}>
-                    {t(`pages.settings.logging.levels.${value}`)}
+        <Field width="short">
+          <FieldLabel htmlFor="logging-level">
+            {t("pages.settings.logging.level")}
+          </FieldLabel>
+          <FieldContent>
+            <Select
+              disabled={!fileEnabled || saveMutation.isPending}
+              onValueChange={(value) =>
+                updateDraft({
+                  level: (value ?? "info") as (typeof LEVELS)[number],
+                })
+              }
+              value={level}
+            >
+              <SelectTrigger id="logging-level">
+                <SelectValue>
+                  {(selected) =>
+                    t(`pages.settings.logging.levels.${String(selected)}`)
+                  }
+                </SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {LEVELS.map((value) => (
+                    <SelectItem key={value} value={value}>
+                      {t(`pages.settings.logging.levels.${value}`)}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+            <FieldHint description={t("pages.settings.logging.levelHint")} />
+          </FieldContent>
+        </Field>
+
+        <div className="flex items-center gap-3">
+          <Checkbox
+            id="logging-size-enabled"
+            checked={sizeEnabled}
+            disabled={saveMutation.isPending}
+            onCheckedChange={(checked) =>
+              updateDraft({ size_limit_enabled: checked === true })
+            }
+          />
+          <Label htmlFor="logging-size-enabled">
+            {t("pages.settings.logging.sizeLimitEnabled")}
+          </Label>
+        </div>
+        <Field width="short">
+          <FieldLabel htmlFor="logging-max-bytes">
+            {t("pages.settings.logging.maxFileBytes")}
+          </FieldLabel>
+          <FieldContent>
+            <Select
+              disabled={!sizeEnabled || saveMutation.isPending}
+              onValueChange={(value) => {
+                if (value !== null)
+                  updateDraft({ max_file_bytes: Number(value) })
+              }}
+              value={String(maximumBytes)}
+            >
+              <SelectTrigger id="logging-max-bytes">
+                <SelectValue>{() => sizeLabel(maximumBytes)}</SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                {logFileSizeChoices(maximumBytes).map((value) => (
+                  <SelectItem key={value} value={String(value)}>
+                    {sizeLabel(value)}
                   </SelectItem>
                 ))}
-              </SelectGroup>
-            </SelectContent>
-          </Select>
-          <p className="text-xs text-muted-foreground">
-            {t("pages.settings.logging.levelHint")}
-          </p>
-        </div>
+              </SelectContent>
+            </Select>
+            <FieldHint
+              description={t("pages.settings.logging.maxFileBytesHint", {
+                size: sizeLabel(maximumBytes),
+                total: sizeLabel(maximumBytes * 2),
+              })}
+            />
+          </FieldContent>
+        </Field>
 
-        <p className="max-w-[480px] text-xs text-muted-foreground">
+        <div className="flex items-center gap-3">
+          <Checkbox
+            id="logging-age-enabled"
+            checked={ageEnabled}
+            disabled={saveMutation.isPending}
+            onCheckedChange={(checked) =>
+              updateDraft({ age_limit_enabled: checked === true })
+            }
+          />
+          <Label htmlFor="logging-age-enabled">
+            {t("pages.settings.logging.ageLimitEnabled")}
+          </Label>
+        </div>
+        <Field width="short">
+          <FieldLabel htmlFor="logging-max-age">
+            {t("pages.settings.logging.maxAgeDays")}
+          </FieldLabel>
+          <FieldContent>
+            <Select
+              disabled={!ageEnabled || saveMutation.isPending}
+              value={String(maximumAge)}
+              onValueChange={(value) => {
+                if (value !== null) updateDraft({ max_age_days: Number(value) })
+              }}
+            >
+              <SelectTrigger id="logging-max-age">
+                <SelectValue>{() => String(maximumAge)}</SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                {logAgeChoices(maximumAge).map((days) => (
+                  <SelectItem key={days} value={String(days)}>
+                    {days}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <FieldHint description={t("pages.settings.logging.ageHint")} />
+          </FieldContent>
+        </Field>
+        {!sizeEnabled && !ageEnabled ? (
+          <p className="text-xs text-muted-foreground">
+            {t("pages.settings.logging.retentionDisabled")}
+          </p>
+        ) : null}
+
+        <p className="text-xs text-muted-foreground">
           {t("pages.settings.logging.pathHint")}
         </p>
         <LogDiagnosticsTools

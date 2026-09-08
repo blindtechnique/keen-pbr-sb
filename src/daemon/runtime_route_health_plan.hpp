@@ -65,6 +65,7 @@ struct RuntimeRouteHealthPlan final {
     std::vector<DumpedRoute> routes_snapshot;
     std::vector<DumpedInterface> interfaces_snapshot;
     OutboundReachabilitySnapshot reachability;
+    OutboundFamilyReachabilitySnapshot family_reachability;
     PlannedRoutingState routing;
 };
 

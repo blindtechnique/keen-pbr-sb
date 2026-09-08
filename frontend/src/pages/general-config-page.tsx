@@ -1,5 +1,6 @@
 import { useTranslation } from "react-i18next"
-import { useMemo, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
+import { useSearch } from "wouter"
 
 import { useForm } from "@tanstack/react-form"
 import { useQueryClient } from "@tanstack/react-query"
@@ -38,6 +39,7 @@ import { TunnelProbeHosts } from "@/components/shared/tunnel-probe-hosts"
 import { ListIdentityLabel } from "@/components/shared/list-identity-label"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { MultiSelectList } from "@/components/shared/multi-select-list"
+import { OperationErrorMessage } from "@/components/shared/operation-error-message"
 import { PageHeader } from "@/components/shared/page-header"
 import { SchedulePicker } from "@/components/shared/schedule-picker"
 import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
@@ -48,6 +50,7 @@ import {
 } from "@/components/settings/internal-vpn-servers-field"
 import { InternalVpnServicesField } from "@/components/settings/internal-vpn-services-field"
 import { LoggingSettingsCard } from "@/components/settings/logging-settings-card"
+import { FirefoxDohCanaryField } from "@/components/settings/firefox-doh-canary-field"
 import {
   BackupAndRestoreCard,
   SoftwareUpdateCard,
@@ -59,6 +62,7 @@ import {
   type SettingsSectionState,
 } from "@/components/settings/settings-section-control"
 import { ServerValidationAlert } from "@/components/shared/server-validation-alert"
+import { getFirstFieldError } from "@/lib/form-field-error"
 import { Button } from "@/components/ui/button"
 import {
   Card,
@@ -80,6 +84,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton"
 import {
   clearFormServerErrors,
+  getUnmappedFormErrors,
   setFormServerErrors,
   splitFormApiErrors,
 } from "@/lib/form-api-errors"
@@ -98,9 +103,18 @@ import {
   getGlobalListRefreshRouteChain,
   getListRefreshDetourMode,
   normalizeListRefreshRouteChain,
+  buildListRefreshConfig,
 } from "@/lib/list-refresh-route"
 import { mapNativeInterfaces } from "@/lib/native-interfaces"
-import { getGeneralConfigActionState } from "@/pages/general-config-form-state"
+import {
+  getGeneralConfigActionState,
+  rebaseSettingsDraft,
+} from "@/pages/general-config-form-state"
+import { semanticJsonEqual } from "@/lib/semantic-json"
+import {
+  getFirefoxDohCanaryEnabled,
+  withFirefoxDohCanary,
+} from "@/lib/firefox-doh-canary"
 import {
   resolveNdmsInterfaceLabel,
   useInterfaceNames,
@@ -134,6 +148,7 @@ type SettingsDraft = {
   ipsetHashsize: string
   ipsetMaxelem: string
   clientDnsEnforcement: boolean
+  firefoxDohCanary: boolean
   inboundInterfaces: string[]
   internalVpnServers?: InternalVpnServer[]
   internalVpnServices?: InternalVpnService[]
@@ -163,6 +178,7 @@ const fallbackDraft: SettingsDraft = {
   ipsetHashsize: "",
   ipsetMaxelem: "",
   clientDnsEnforcement: false,
+  firefoxDohCanary: true,
   inboundInterfaces: [],
   listsAutoupdateEnabled: false,
   cron: "0 4 * * 0",
@@ -194,6 +210,7 @@ const SETTINGS_FIELD_NAMES = {
   ipsetHashsize: "ipsetHashsize",
   ipsetMaxelem: "ipsetMaxelem",
   clientDnsEnforcement: "clientDnsEnforcement",
+  firefoxDohCanary: "firefoxDohCanary",
   inboundInterfaces: "inboundInterfaces",
   internalVpnServers: "internalVpnServers",
   internalVpnServices: "internalVpnServices",
@@ -372,6 +389,20 @@ function LoadedGeneralConfigPage({
     SETTINGS_TAB_VALUES,
     "general"
   )
+  const search = useSearch()
+  useEffect(() => {
+    if (new URLSearchParams(search).get("focus") !== "client-dns-enforcement")
+      return
+    // Navigate to the existing setting; only an explicit user change/save
+    // can alter DNS policy. Wait for the route's scroll reset to finish.
+    setActiveTab("general")
+    const frame = window.requestAnimationFrame(() => {
+      const field = document.getElementById("client-dns-enforcement")
+      field?.scrollIntoView({ block: "center" })
+      field?.focus({ preventScroll: true })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [search, setActiveTab])
   const settingsTabs: SectionTab<SettingsTab>[] = [
     {
       value: "general",
@@ -437,7 +468,9 @@ function LoadedGeneralConfigPage({
           })
 
           if (result.formError) {
-            toast.error(result.formError, { richColors: true })
+            toast.error(<OperationErrorMessage error={error} />, {
+              richColors: true,
+            })
           }
 
           return {
@@ -449,15 +482,31 @@ function LoadedGeneralConfigPage({
     },
   })
 
-  const unmappedServerErrors = useStore(
-    form.store,
-    (state) =>
-      (
-        state.errorMap.onServer as
-          | { unmapped?: { path: string; message: string }[] }
-          | undefined
-      )?.unmapped ?? []
+  const unmappedServerErrors = useStore(form.store, (state) =>
+    getUnmappedFormErrors(state.errorMap.onServer)
   )
+
+  const baselineConfigRef = useRef(loadedConfig)
+  useEffect(() => {
+    const previousConfig = baselineConfigRef.current
+    baselineConfigRef.current = loadedConfig
+    if (previousConfig !== loadedConfig) {
+      const nextBaseline = getDraftFromConfig(loadedConfig)
+      const rebased = rebaseSettingsDraft(
+        getDraftFromConfig(previousConfig),
+        form.state.values,
+        nextBaseline
+      )
+      // Untouched fields follow the restored configuration. Retain only actual
+      // local edits and keep the server values as the new dirty-state baseline.
+      form.reset(nextBaseline)
+      for (const key of Object.keys(rebased) as (keyof SettingsDraft)[]) {
+        if (!semanticJsonEqual(rebased[key], nextBaseline[key])) {
+          form.setFieldValue(key, rebased[key])
+        }
+      }
+    }
+  }, [form, loadedConfig])
 
   const isPending = postConfigMutation.isPending || deferredSavePending
   const inheritedUrlListCount = Object.values(loadedConfig.lists ?? {}).filter(
@@ -898,6 +947,17 @@ function LoadedGeneralConfigPage({
                       />
                     </FieldContent>
                   </Field>
+                )}
+              </form.Field>
+
+              <form.Field name={SETTINGS_FIELD_NAMES.firefoxDohCanary}>
+                {(field) => (
+                  <FirefoxDohCanaryField
+                    className={activeTab === "general" ? undefined : "hidden"}
+                    value={field.state.value}
+                    onChange={(enabled) => field.handleChange(enabled)}
+                    error={getFirstFieldError(field.state.meta.errors)}
+                  />
                 )}
               </form.Field>
 
@@ -1519,6 +1579,7 @@ function LoadedGeneralConfigPage({
                   >
                     {(fallbackField) => (
                       <ListRefreshRouteFields
+                        addControlSize="default"
                         fieldWidth="short"
                         chain={{
                           detour: detourField.state.value,
@@ -1576,7 +1637,7 @@ function LoadedGeneralConfigPage({
 
       <div
         aria-hidden={activeTab !== "logging"}
-        className="settings-sections"
+        className="settings-sections w-full min-w-0"
         hidden={activeTab !== "logging"}
         role="tabpanel"
       >
@@ -2318,11 +2379,6 @@ function GeneralConfigPageSkeleton() {
   )
 }
 
-function getFirstFieldError(errors: unknown[]) {
-  const firstError = errors[0]
-  return typeof firstError === "string" ? firstError : null
-}
-
 function getDraftFromConfig(config: ConfigObject): SettingsDraft {
   const ppeDeoffloadMode =
     config.daemon?.ppe_deoffload_mode ?? fallbackDraft.ppeDeoffloadMode
@@ -2359,6 +2415,7 @@ function getDraftFromConfig(config: ConfigObject): SettingsDraft {
     clientDnsEnforcement:
       config.dns?.client_dns_enforcement?.enabled ??
       fallbackDraft.clientDnsEnforcement,
+    firefoxDohCanary: getFirefoxDohCanaryEnabled(config.dns),
     inboundInterfaces: normalizeInternalVpnServerInterfaceNames(
       config.route?.inbound_interfaces ?? fallbackDraft.inboundInterfaces
     ),
@@ -2434,7 +2491,7 @@ function buildUpdatedConfig(
       internal_vpn_services: draft.internalVpnServices,
     },
     dns: {
-      ...config.dns,
+      ...withFirefoxDohCanary(config.dns, draft.firefoxDohCanary),
       client_dns_enforcement: {
         ...config.dns?.client_dns_enforcement,
         enabled: draft.clientDnsEnforcement,
@@ -2456,11 +2513,12 @@ function buildUpdatedConfig(
     },
   }
 
-  if (listRefreshRoute.detour) {
-    updatedConfig.list_refresh = {
-      detour: listRefreshRoute.detour,
-      fallback_detours: listRefreshRoute.fallbackDetours,
-    }
+  const listRefreshConfig = buildListRefreshConfig(
+    config.list_refresh,
+    listRefreshRoute
+  )
+  if (listRefreshConfig) {
+    updatedConfig.list_refresh = listRefreshConfig
   } else {
     delete updatedConfig.list_refresh
   }
@@ -2596,6 +2654,8 @@ function resolveSettingsFieldPath(path: string): SettingsFieldName | undefined {
       return SETTINGS_FIELD_NAMES.ipsetMaxelem
     case "dns.client_dns_enforcement.enabled":
       return SETTINGS_FIELD_NAMES.clientDnsEnforcement
+    case "dns.firefox_doh_canary":
+      return SETTINGS_FIELD_NAMES.firefoxDohCanary
     case "lists_autoupdate.enabled":
       return SETTINGS_FIELD_NAMES.listsAutoupdateEnabled
     case "lists_autoupdate.cron":

@@ -10,6 +10,12 @@ namespace keen_pbr3 {
 class DnsError : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
+
+    DnsError(std::string message, std::string code);
+    const std::string& code() const noexcept { return code_; }
+
+private:
+    std::string code_;
 };
 
 struct ParsedDnsAddress {

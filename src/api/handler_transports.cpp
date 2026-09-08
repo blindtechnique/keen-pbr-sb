@@ -3,10 +3,14 @@
 #include "handler_transports.hpp"
 #include "handler_config.hpp"
 #include "maintenance_api.hpp"
+#include "operation_error.hpp"
 #include "status_stream.hpp"
 #include "transport_manager_endpoint.hpp"
 
 #include "../config/config_writer.hpp"
+#include "../config/outbound_delete.hpp"
+#include "../config/subscription_refresh.hpp"
+#include "../config/subscription_store.hpp"
 #include "../crypto/sha256.hpp"
 #include "../keenetic/ndms_wireguard_identity.hpp"
 #include "../util/display_name.hpp"
@@ -128,9 +132,15 @@ bool transport_action(const TransportManagerEndpoint& endpoint,
         httplib::Client client(endpoint.host, endpoint.port);
         client.set_connection_timeout(1, 0);
         client.set_read_timeout(20, 0);
-        const httplib::Headers headers{
+        httplib::Headers headers{
             {"Authorization", "Bearer " + endpoint.api_key},
         };
+        if (std::string(action) == "down") {
+            // Only this install helper requests a temporary stop. The manager
+            // restores it after a late/error terminal if this HTTP request
+            // disconnects or its shorter server deadline expires.
+            headers.emplace("X-KeenPbr-Temporary-Stop", "1");
+        }
         const auto response = client.Post(
             "/v1/transports/" + tag + "/" + action, headers, "",
             "application/json");
@@ -492,8 +502,9 @@ public:
         client.set_read_timeout(0, 300000);
         const auto response = client.Get("/healthz");
         if (!response) {
-            throw ApiError(
-                "transport manager is unavailable", 503);
+            throw operation_error(
+                "transport manager is unavailable", 503,
+                "service_unavailable");
         }
         const auto body = parse_json_response(
             *response, "health response");
@@ -517,6 +528,37 @@ public:
                 502);
         }
         return revision;
+    }
+
+    nlohmann::json configuration() const {
+        httplib::Client client(endpoint_.host, endpoint_.port);
+        client.set_connection_timeout(1, 0);
+        client.set_read_timeout(3, 0);
+        const auto response = client.Get("/v1/config/transports",
+            httplib::Headers{{"Authorization", "Bearer " + endpoint_.api_key}});
+        if (!response) {
+            throw operation_error("transport manager is unavailable", 503,
+                                  "service_unavailable");
+        }
+        if (response->status != 200) {
+            throw ApiError("transport manager could not read its configuration", 502);
+        }
+        auto body = parse_json_response(*response, "configuration inventory");
+        if (!body.is_array()) {
+            throw ApiError("transport manager returned an invalid configuration inventory", 502);
+        }
+        return body;
+    }
+
+    std::string remove(const std::string& tag,
+                       const std::string& expected_revision) const {
+        httplib::Client client(endpoint_.host, endpoint_.port);
+        client.set_connection_timeout(1, 0);
+        client.set_read_timeout(30, 0);
+        const auto response = client.Delete("/v1/config/transports/" + tag,
+            httplib::Headers{{"Authorization", "Bearer " + endpoint_.api_key},
+                             {"If-Match", "\"" + expected_revision + "\""}});
+        return parse_revision_response(response, expected_revision, "delete");
     }
 
     void validate_create(
@@ -560,7 +602,8 @@ public:
             nlohmann::json{{"transports", transports}},
             expected_revision);
         if (!response) {
-            throw ApiError("transport manager is unavailable", 503);
+            throw operation_error("transport manager is unavailable", 503,
+                                  "service_unavailable");
         }
         if (response->status == 412) {
             throw ConfigCommitNoMutationConflict(
@@ -685,7 +728,8 @@ public:
             nlohmann::json{{"tags", tags}}.dump(),
             "application/json");
         if (!response) {
-            throw ApiError("transport manager is unavailable", 503);
+            throw operation_error("transport manager is unavailable", 503,
+                                  "service_unavailable");
         }
         if (response->status < 200 || response->status >= 300) {
             throw ApiError(
@@ -833,8 +877,9 @@ private:
             body.dump(),
             "application/json");
         if (!response) {
-            throw ApiError(
-                "transport manager is unavailable", 503);
+            throw operation_error(
+                "transport manager is unavailable", 503,
+                "service_unavailable");
         }
         return response;
     }
@@ -858,8 +903,9 @@ private:
         const std::string& expected_revision,
         const char* operation) {
         if (!response) {
-            throw ApiError(
-                "transport manager is unavailable", 503);
+            throw operation_error(
+                "transport manager is unavailable", 503,
+                "service_unavailable");
         }
         if (response->status == 412) {
             throw ConfigCommitNoMutationConflict(
@@ -919,8 +965,9 @@ private:
         const std::string& expected_revision,
         const char* operation) {
         if (!response) {
-            throw ApiError(
-                "transport manager is unavailable", 503);
+            throw operation_error(
+                "transport manager is unavailable", 503,
+                "service_unavailable");
         }
         if (response->status == 412) {
             throw ConfigCommitNoMutationConflict(
@@ -1066,10 +1113,10 @@ PreparedConfigCommit prepare_linked_transport_creates(
             "at least one linked transport is required", 400);
     }
     if (ctx.config_is_draft()) {
-        throw ApiError(
+        throw operation_error(
             "Save or discard the current configuration draft before "
             "creating a linked transport",
-            409);
+            409, "draft_pending");
     }
 
     auto candidate = ctx.get_visible_config();
@@ -1179,6 +1226,76 @@ PreparedConfigCommit prepare_linked_transport_creates(
             restart_transport_manager_and_wait(
                 ctx, revision, &maintenance);
         },
+    };
+    return prepared;
+}
+
+PreparedConfigCommit prepare_linked_transport_delete(
+    ApiContext& ctx, const std::string& tag) {
+    const auto endpoint = load_endpoint(ctx.config_path);
+    TransportManagerClient client(endpoint);
+    const auto expected_revision = client.current_revision();
+    const auto inventory = client.configuration();
+    std::optional<std::string> interface_name;
+    for (const auto& item : inventory) {
+        if (!item.is_object() || !item.contains("tag") || !item.at("tag").is_string()) {
+            throw ApiError("transport manager returned an invalid configuration inventory", 502);
+        }
+        if (item.at("tag").get<std::string>() != tag) continue;
+        if (!item.contains("interface") || !item.at("interface").is_string() ||
+            item.at("interface").get_ref<const std::string&>().empty()) {
+            throw ApiError("transport manager omitted the linked interface", 502);
+        }
+        interface_name = item.at("interface").get<std::string>();
+    }
+    if (!interface_name) throw ApiError("Transport no longer exists", 404);
+
+    // The manager revision protects the inventory read as well as DELETE.
+    if (client.current_revision() != expected_revision) {
+        throw ConfigCommitNoMutationConflict("Transport configuration changed", 409);
+    }
+    if (!ctx.get_active_config_fn) {
+        throw ApiError("Active configuration is unavailable", 503);
+    }
+    const auto remove_links = [&interface_name](const Config& config) {
+        std::set<std::string> tags;
+        if (config.outbounds) {
+            for (const auto& outbound : *config.outbounds) {
+                if (outbound.type == OutboundType::INTERFACE &&
+                    outbound.interface == interface_name) tags.insert(outbound.tag);
+            }
+        }
+        return remove_outbound_dependencies(config, tags);
+    };
+    PreparedConfigCommit prepared;
+    prepared.config = remove_links(ctx.get_active_config_fn());
+    prepared.serialized = serialize_config_for_persistence(prepared.config);
+    if (auto draft = ctx.get_staged_config_cas_snapshot()) {
+        auto rebased = remove_links(draft->config);
+        auto serialized = serialize_config_for_persistence(rebased);
+        prepared.draft_rebase = ConfigDraftRebase{
+            std::move(*draft), std::move(rebased), std::move(serialized)};
+    }
+    prepared.success_status = "deleted";
+    prepared.success_message = "Transport and linked outgoing routes deleted";
+    prepared.transport = ConfigCommitTransportEffect{
+        (std::filesystem::path(ctx.config_path).parent_path() / "transports.json").string(),
+        expected_revision,
+        [endpoint, tag, expected_revision]() {
+            return TransportManagerClient(endpoint).remove(tag, expected_revision);
+        },
+        [endpoint](const std::string& revision) {
+            TransportManagerClient(endpoint).wait_for_revision(revision);
+        },
+        [&ctx](const std::string& revision, MaintenanceLease& maintenance) {
+            restart_transport_manager_and_wait(ctx, revision, &maintenance);
+        }};
+    const auto subscriptions = ctx.subscription_refresh_service
+        ? ctx.subscription_refresh_service->store()
+        : std::make_shared<SubscriptionStore>(
+              (std::filesystem::path(ctx.config_path).parent_path() / "subscriptions.json").string());
+    prepared.success_finalize = [subscriptions, tag](MaintenanceLease&) {
+        subscriptions->detach_transport(tag);
     };
     return prepared;
 }
@@ -1308,6 +1425,13 @@ static void register_transports_handler_impl(
                         // Something is still running on the binary about to be
                         // replaced. The pause destructor restarts whatever it
                         // did stop.
+                        pause->resume();
+                        if (!pause->left_down().empty()) {
+                            Logger::instance().warn(
+                                "sing-box install refused; resume was not "
+                                "confirmed for {} transport(s)",
+                                pause->left_down().size());
+                        }
                         refuse(policy);
                     }
                     // Re-measured with the transports actually down, rather
@@ -1929,6 +2053,53 @@ static void register_transports_handler_impl(
         }
     });
 
+    server.post("/api/transports/geo", [&ctx](const std::string& request_body) -> std::string {
+        // The companion validates this narrow request and merges only country
+        // metadata under its config mutex. Never read and replay a full spec:
+        // a delayed GeoIP response must preserve a newer alias/manual choice.
+        try {
+            const auto request = nlohmann::json::parse(request_body);
+            if (!request.is_object()) {
+                throw ApiError("invalid transport country metadata", 400);
+            }
+            auto maintenance = ctx.acquire_maintenance_lease("transport-geo-update");
+            (void)maintenance->reserve(maintenance->base_generation());
+            const auto endpoint = load_endpoint(ctx.config_path);
+            httplib::Client client(endpoint.host, endpoint.port);
+            client.set_connection_timeout(1, 0);
+            client.set_read_timeout(15, 0);
+            const httplib::Headers headers{
+                {"Authorization", "Bearer " + endpoint.api_key},
+            };
+            const auto response = client.Post(
+                "/v1/config/transports/geo", headers, request.dump(), "application/json");
+            if (!response) {
+                throw operation_error("transport manager is unavailable", 503, "service_unavailable");
+            }
+            if (response->status < 200 || response->status >= 300) {
+                throw ApiError("transport manager returned HTTP " + std::to_string(response->status),
+                               response->status == 400 ? 400 : 502, response->body);
+            }
+            nlohmann::json result;
+            try {
+                result = nlohmann::json::parse(response->body);
+            } catch (const nlohmann::json::exception&) {
+                throw ApiError("transport manager returned malformed JSON", 502);
+            }
+            if (!result.is_object() || !result.contains("updated") ||
+                !result["updated"].is_boolean() || !result.contains("config_revision") ||
+                !result["config_revision"].is_string()) {
+                throw ApiError("transport manager returned invalid country metadata response", 502);
+            }
+            maintenance->verify_held();
+            return result.dump();
+        } catch (const nlohmann::json::exception&) {
+            throw ApiError("invalid transport country metadata JSON", 400);
+        } catch (const MaintenanceLockError& error) {
+            throw_maintenance_api_error(error);
+        }
+    });
+
     server.get("/api/transports/config/export", [&ctx]() -> std::string {
         const auto endpoint = load_endpoint(ctx.config_path);
         httplib::Client client(endpoint.host, endpoint.port);
@@ -1971,7 +2142,7 @@ static void register_transports_handler_impl(
     server.post(
         "/api/transports/config/apply",
         [&ctx,
-         commit_config = std::move(commit_config)](
+         commit_config](
             const std::string& request_body)
             -> std::string {
             nlohmann::json request;
@@ -2096,7 +2267,7 @@ static void register_transports_handler_impl(
                 });
         });
 
-    server.post("/api/transports/config", [&ctx](const std::string& request_body) -> std::string {
+    server.post("/api/transports/config", [&ctx, commit_config](const std::string& request_body) -> std::string {
         nlohmann::json request;
         try {
             request = nlohmann::json::parse(request_body);
@@ -2134,6 +2305,15 @@ static void register_transports_handler_impl(
             throw ApiError("unsupported transport config operation", 400);
         }
 
+        if (operation == "delete") {
+            auto response = nlohmann::json::parse(commit_config(
+                ctx, "transport-linked-delete", [&ctx, tag]() {
+                    return prepare_linked_transport_delete(ctx, tag);
+                }));
+            response["tag"] = tag;
+            return response.dump();
+        }
+
         try {
             auto maintenance =
                 ctx.acquire_maintenance_lease(
@@ -2155,9 +2335,9 @@ static void register_transports_handler_impl(
                 [](const auto& response)
                     -> std::string {
                 if (!response) {
-                    throw ApiError(
+                    throw operation_error(
                         "transport manager is unavailable",
-                        503);
+                        503, "service_unavailable");
                 }
                 if (response->status < 200 ||
                     response->status >= 300) {
@@ -2192,16 +2372,12 @@ static void register_transports_handler_impl(
                     headers,
                     request["transport"].dump(),
                     "application/json"));
-            } else if (operation == "update") {
+            } else {
                 result = parse_response(client.Put(
                     "/v1/config/transports/" + tag,
                     headers,
                     request["transport"].dump(),
                     "application/json"));
-            } else {
-                result = parse_response(client.Delete(
-                    "/v1/config/transports/" + tag,
-                    headers));
             }
             maintenance->verify_held();
             return result;

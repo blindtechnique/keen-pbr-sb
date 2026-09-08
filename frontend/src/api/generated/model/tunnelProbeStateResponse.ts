@@ -31,7 +31,7 @@ export interface TunnelProbeStateResponse {
      * @minimum 0
      */
   remaining?: number;
-  /** Hosts that pass added to the list, and so moved into the tunnel. Not reversible in practice: nfqws2's rules are bound to the provider interface, so a routed host stops producing the evidence that put it there.
+  /** Hosts that pass added to the list, and so moved into the tunnel. Existing entries are rechecked separately with both probe legs bound to devices. Removing an entry always requires a user action.
    */
   routed?: string[];
   /** Hosts a tunnel would fix that the registry check did not confirm. The probe proves the connection failed here and worked through the tunnel; it cannot tell deliberate blocking from a host that refuses this network for its own reasons. These are the ones worth a person deciding about.

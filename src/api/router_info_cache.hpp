@@ -27,9 +27,17 @@ public:
     RouterInfoCache(FetchFn fetch,
                     Clock::duration ttl,
                     Clock::duration failure_retry,
-                    NowFn now = {});
+                    NowFn now = {},
+                    Clock::duration event_min_refresh = Clock::duration::zero());
 
     nlohmann::json get();
+
+    // Mark the observation dirty without I/O or dropping last-good data.
+    // Events coalesce until get() can refresh, subject to failure_retry and
+    // the event cooldown after the last completed attempt. An event arriving
+    // during a fetch remains pending after that fetch publishes its result.
+    // Ordinary TTL expiration is not delayed by the event cooldown.
+    void invalidate();
 
 private:
     nlohmann::json response_locked() const;
@@ -38,6 +46,7 @@ private:
     Clock::duration ttl_;
     Clock::duration failure_retry_;
     NowFn now_;
+    Clock::duration event_min_refresh_;
 
     mutable std::mutex mutex_;
     std::condition_variable refresh_finished_;
@@ -45,6 +54,8 @@ private:
     std::optional<nlohmann::json> last_failed_;
     Clock::time_point refresh_after_{Clock::time_point::min()};
     Clock::time_point retry_after_{Clock::time_point::min()};
+    Clock::time_point event_refresh_after_{Clock::time_point::min()};
+    bool dirty_{false};
     bool refreshing_{false};
 };
 

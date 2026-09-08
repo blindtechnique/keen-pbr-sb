@@ -1,5 +1,4 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import type { TFunction } from "i18next"
 import { useMemo, useRef, useState } from "react"
 import {
   AlertTriangleIcon,
@@ -16,9 +15,14 @@ import type { ListRefreshState } from "@/api/generated/model/listRefreshState"
 import { useConfigMutationPending } from "@/api/mutations"
 import { queryKeys } from "@/api/query-keys"
 import { useGetConfig } from "@/api/queries"
-import { selectConfig, selectListRefreshState } from "@/api/selectors"
+import {
+  selectConfig,
+  selectConfigRevision,
+  selectListRefreshState,
+} from "@/api/selectors"
 import { BottomActionBar } from "@/components/shared/bottom-action-bar"
-import { ExpandableText } from "@/components/shared/expandable-text"
+import { HelpHint } from "@/components/shared/help-hint"
+import { CatalogSourcePreviews } from "@/components/lists/list-source-preview"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { PageHeader } from "@/components/shared/page-header"
 import { TableSkeleton } from "@/components/shared/table-skeleton"
@@ -45,13 +49,17 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Skeleton } from "@/components/ui/skeleton"
 import { useSectionTab } from "@/hooks/use-section-tab"
-import { getApiErrorMessage } from "@/lib/api-errors"
+import { useCatalogNavigation } from "@/hooks/use-catalog-navigation"
+import { catalogNavigationOptions } from "@/lib/catalog-navigation"
+import { OperationErrorMessage } from "@/components/shared/operation-error-message"
 import { formatCatalogRefreshTimestamp } from "@/lib/catalog-refresh-timestamp"
 import { createOutboundDisplayNameMap } from "@/lib/outbound-display"
 import { cn } from "@/lib/utils"
 import {
   applyCatalogSelectionToggle,
   canSelectCatalogPreset,
+  getCatalogPresetName,
+  getCatalogPresetNotice,
   getCatalogPresetSourceSummary,
   getCatalogRoutingCompanionSourceSummaries,
   getCatalogSelectionMode,
@@ -69,7 +77,10 @@ import {
   previewCatalogSetup,
   type CatalogSetupPreview,
 } from "@/pages/catalog-setup-api"
-import { getCatalogSetupWarningMessage } from "@/pages/catalog-setup-warning"
+import {
+  getCatalogSetupRepairTarget,
+  getCatalogSetupWarningMessage,
+} from "@/pages/catalog-setup-warning"
 import {
   createCatalogSetupIntent,
   resolveCatalogDestination,
@@ -155,15 +166,17 @@ function CatalogListRefreshSummary({
         </span>
       ) : null}
       {state?.last_error ? (
-        // Та же ошибка демона, что и в списках, и та же беда: в строке
-        // заготовки каталога она вытесняет всё остальное.
-        <ExpandableText
-          className="text-destructive"
-          lines={2}
-          text={t("pages.catalog.refreshState.error", {
-            message: state.last_error,
-          })}
-        />
+        <span className="flex items-center gap-1 text-destructive">
+          {t("pages.catalog.refreshState.failed")}
+          <HelpHint
+            label={t("operationErrors.details")}
+            text={
+              <pre className="max-h-48 overflow-auto font-mono text-xs [overflow-wrap:anywhere] whitespace-pre-wrap">
+                {state.last_error}
+              </pre>
+            }
+          />
+        </span>
       ) : null}
     </span>
   )
@@ -189,22 +202,35 @@ function formatRefreshTimestamp(value: string | undefined, fallback: string) {
   }).format(parsed)
 }
 
-function catalogWarningMessage(warning: CatalogWarning, t: TFunction): string {
-  switch (warning.code) {
-    case "broad_traffic_scope":
-      return t("pages.catalog.risks.broadTrafficScope")
-    default:
-      return (
-        warning.message ??
-        t("pages.catalog.risks.unknown", { code: warning.code })
-      )
+export function CatalogWarningText({ warning }: { warning: CatalogWarning }) {
+  const { t } = useTranslation()
+  if (warning.code === "broad_traffic_scope") {
+    return <>{t("pages.catalog.risks.broadTrafficScope")}</>
   }
+  return (
+    <span>
+      {t("pages.catalog.risks.unknownSummary")}
+      <HelpHint
+        label={t("operationErrors.details")}
+        text={
+          <pre className="max-h-48 overflow-auto font-mono text-xs [overflow-wrap:anywhere] whitespace-pre-wrap">
+            {warning.code}
+            {warning.message ? `\n${warning.message}` : ""}
+          </pre>
+        }
+      />
+    </span>
+  )
 }
 
 export function CatalogPage() {
   const { i18n, t } = useTranslation()
+  const language = i18n.resolvedLanguage ?? i18n.language
   const [, navigate] = useLocation()
   const queryClient = useQueryClient()
+  const catalogNavigation = useCatalogNavigation()
+  const [restoredSelection] = useState(() => catalogNavigation.selection)
+  const destinationRef = useRef<HTMLButtonElement>(null)
 
   const configQuery = useGetConfig()
   const config = selectConfig(configQuery.data)
@@ -222,11 +248,20 @@ export function CatalogPage() {
   })
 
   const [search, setSearch] = useState(
-    () => new URLSearchParams(window.location.search).get("search") ?? ""
+    () =>
+      restoredSelection?.search ??
+      new URLSearchParams(window.location.search).get("search") ??
+      ""
   )
-  const [selected, setSelected] = useState<Set<string>>(new Set())
-  const [destination, setDestination] = useState("")
-  const [sourceDetour, setSourceDetour] = useState<string | null>(null)
+  const [selected, setSelected] = useState(
+    () => new Set(restoredSelection?.selectedIds ?? [])
+  )
+  const [destination, setDestination] = useState(
+    restoredSelection?.destination ?? ""
+  )
+  const [sourceDetour, setSourceDetour] = useState<string | null>(
+    restoredSelection?.sourceDetour ?? null
+  )
   const [setupIntent, setSetupIntent] = useState<CatalogSetupIntent | null>(
     null
   )
@@ -285,7 +320,10 @@ export function CatalogPage() {
           : t("pages.catalog.refreshFailed")
       )
     },
-    onError: (error: Error) => toast.error(error.message, { richColors: true }),
+    onError: (error: Error) =>
+      toast.error(<OperationErrorMessage error={error} />, {
+        richColors: true,
+      }),
   })
 
   const previewMutation = useMutation({
@@ -300,8 +338,17 @@ export function CatalogPage() {
       setSetupPreview(preview)
       setAcceptWarnings(false)
     },
-    onError: (error: ApiError) =>
-      toast.error(getApiErrorMessage(error), { richColors: true }),
+    onError: (error: ApiError) => {
+      const repairTarget = getCatalogSetupRepairTarget(error)
+      if (repairTarget === "route") {
+        void queryClient.invalidateQueries({ queryKey: queryKeys.config() })
+      }
+      if (!repairTarget) {
+        toast.error(<OperationErrorMessage error={error} />, {
+          richColors: true,
+        })
+      }
+    },
   })
 
   const applyMutation = useMutation({
@@ -321,6 +368,7 @@ export function CatalogPage() {
       }),
     onSuccess: async () => {
       setSelected(new Set())
+      window.history.replaceState(null, "", window.location.href)
       setupIntentRef.current = null
       setSetupIntent(null)
       setSetupPreview(null)
@@ -343,11 +391,19 @@ export function CatalogPage() {
     onError: (error: ApiError) => {
       // A conflict means the authoritative config or catalogue changed after
       // preview. Never retry with a stale candidate identity.
-      if (error.status === 409) {
+      const repairTarget = getCatalogSetupRepairTarget(error)
+      if (error.status === 409 || repairTarget) {
         setSetupPreview(null)
         setAcceptWarnings(false)
       }
-      toast.error(getApiErrorMessage(error), { richColors: true })
+      if (repairTarget === "route") {
+        void queryClient.invalidateQueries({ queryKey: queryKeys.config() })
+      }
+      if (!repairTarget) {
+        toast.error(<OperationErrorMessage error={error} />, {
+          richColors: true,
+        })
+      }
     },
   })
 
@@ -392,12 +448,12 @@ export function CatalogPage() {
         }
         return (preset.warnings ?? []).map((warning) => ({
           key: `${preset.id}:${warning.code}`,
-          presetName: preset.name,
-          message: catalogWarningMessage(warning, t),
+          presetName: getCatalogPresetName(preset, language),
+          warning,
           requiresAcceptance: warning.requiresAcceptance ?? false,
         }))
       }),
-    [presets, selected, t]
+    [presets, selected, language]
   )
 
   const categories = useMemo(() => {
@@ -435,14 +491,28 @@ export function CatalogPage() {
     return displayPresets.filter(
       (preset) =>
         (category === "all" || preset.category === category) &&
-        matchesCatalogSearch(preset, search)
+        matchesCatalogSearch(preset, search, language)
     )
-  }, [displayPresets, category, search])
+  }, [displayPresets, category, search, language])
 
   const toggle = (id: string) => {
     setSelected((previous) =>
       applyCatalogSelectionToggle(presets, previous, id)
     )
+  }
+
+  const navigateWithSelection = (path: string) => {
+    const options = catalogNavigationOptions({
+      selectedIds: [...selected],
+      search,
+      category,
+      destination: destination || effectiveDestination,
+      sourceDetour,
+    })
+    // Preserve the source entry too, so the browser's Back button restores
+    // the same selection as the explicit return action.
+    window.history.replaceState(options.state, "", window.location.href)
+    navigate(path, options)
   }
 
   const openAddDialog = () => {
@@ -470,6 +540,7 @@ export function CatalogPage() {
       return
     }
     setupIntentRef.current = intent
+    applyMutation.reset()
     setSetupIntent(intent)
     setSetupPreview(null)
     setAcceptWarnings(false)
@@ -482,6 +553,7 @@ export function CatalogPage() {
     }
 
     if (!setupPreview) {
+      applyMutation.reset()
       previewMutation.mutate(setupIntent)
       return
     }
@@ -508,11 +580,15 @@ export function CatalogPage() {
   const setupInstallState = setupPreview
     ? getCatalogSetupInstallState(setupPreview)
     : null
+  const setupRepairTarget = getCatalogSetupRepairTarget(
+    (previewMutation.error ?? applyMutation.error) as ApiError | null
+  )
   const setupCompanions = resolveSelectedCatalogRoutingCompanions(
     presets,
     new Set(
       setupIntent?.selections.map((selection) => selection.preset_id) ?? []
-    )
+    ),
+    language
   )
   const setupRouteRuleCount = setupPreview
     ? (setupPreview.summary.route_rules?.length ??
@@ -632,10 +708,12 @@ export function CatalogPage() {
           так прибита к низу экрана, листать обратно не нужно. */}
       <div className="divide-y border-y sm:max-h-[55vh] sm:overflow-y-auto">
         {visible.map((preset) => {
+          const notice = getCatalogPresetNotice(preset, language)
           const sourceSummary = getCatalogPresetSourceSummary(preset)
           const companionSummaries = getCatalogRoutingCompanionSourceSummaries(
             preset,
-            presets
+            presets,
+            language
           )
           const presetAction = preset.engines?.singbox?.action
           const blocks = presetAction === "reject"
@@ -650,9 +728,6 @@ export function CatalogPage() {
           const selectionUnavailable = !canSelectCatalogPreset(
             installState,
             selectedAncestor
-          )
-          const warningMessages = (preset.warnings ?? []).map((warning) =>
-            catalogWarningMessage(warning, t)
           )
           const refreshState = installedListId
             ? listRefreshState[installedListId]
@@ -691,7 +766,7 @@ export function CatalogPage() {
                 <span className="min-w-0 flex-1">
                   <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
                     <span className="min-w-0 break-words sm:truncate">
-                      {preset.name}
+                      {getCatalogPresetName(preset, language)}
                     </span>
                     {exactlyInstalled ? (
                       <span className="shrink-0 text-xs font-medium text-success">
@@ -705,20 +780,26 @@ export function CatalogPage() {
                       installState.coveredBy ? (
                       <span className="shrink-0 text-xs font-medium text-primary">
                         {t("pages.catalog.coveredByInstalled", {
-                          name: installState.coveredBy.name,
+                          name: getCatalogPresetName(
+                            installState.coveredBy,
+                            language
+                          ),
                         })}
                       </span>
                     ) : selectedAncestor ? (
                       <span className="shrink-0 text-xs font-medium text-primary">
                         {t("pages.catalog.coveredBySelection", {
-                          name: selectedAncestor.name,
+                          name: getCatalogPresetName(
+                            selectedAncestor,
+                            language
+                          ),
                         })}
                       </span>
                     ) : null}
                   </span>
-                  {preset.notice ? (
+                  {notice ? (
                     <span className="mt-1 block text-xs text-muted-foreground">
-                      {preset.notice}
+                      {notice}
                     </span>
                   ) : null}
                   {companionSummaries.length > 0 ? (
@@ -741,10 +822,16 @@ export function CatalogPage() {
                       ))}
                     </span>
                   ) : null}
-                  {warningMessages.length > 0 ? (
+                  {(preset.warnings?.length ?? 0) > 0 ? (
                     <span className="mt-1 flex items-start gap-1.5 text-xs text-warning-foreground">
                       <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
-                      <span>{warningMessages.join(" ")}</span>
+                      <span>
+                        {preset.warnings?.map((warning) => (
+                          <span className="block" key={warning.code}>
+                            <CatalogWarningText warning={warning} />
+                          </span>
+                        ))}
+                      </span>
                     </span>
                   ) : null}
                   {installedList?.url ? (
@@ -810,6 +897,15 @@ export function CatalogPage() {
         })}
       </div>
 
+      {!setupIntent ? (
+        <CatalogSourcePreviews
+          key={selectConfigRevision(configQuery.data)}
+          presets={presets}
+          selected={selected}
+          detour={effectiveSourceDetour}
+        />
+      ) : null}
+
       {selectedCatalogWarnings.length > 0 ? (
         <Alert variant="warning">
           <AlertTriangleIcon className="size-4" />
@@ -819,7 +915,7 @@ export function CatalogPage() {
               {selectedCatalogWarnings.map((notice) => (
                 <li key={notice.key}>
                   <span className="font-medium">{notice.presetName}:</span>{" "}
-                  {notice.message}
+                  <CatalogWarningText warning={notice.warning} />
                   {notice.requiresAcceptance
                     ? ` ${t("pages.catalog.risks.requiresAcceptance")}`
                     : null}
@@ -854,15 +950,22 @@ export function CatalogPage() {
                     value: tag,
                     label: outboundDisplayNames.get(tag) ?? tag,
                   })),
-                  { value: DIRECT, label: t("pages.catalog.directly") },
+                  {
+                    value: DIRECT,
+                    label: t("pages.catalog.continue.listsOnly"),
+                  },
                 ]}
-                onValueChange={(value) =>
-                  setDestination(String(value ?? DIRECT))
-                }
-                value={effectiveDestination}
+                onValueChange={(value) => setDestination(String(value ?? ""))}
+                value={effectiveDestination || null}
               >
-                <SelectTrigger className="w-auto min-w-56" size="sm">
-                  <SelectValue />
+                <SelectTrigger
+                  ref={destinationRef}
+                  className="w-auto min-w-56"
+                  size="sm"
+                >
+                  <SelectValue
+                    placeholder={t("pages.catalog.continue.selectRoute")}
+                  />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectGroup>
@@ -872,17 +975,23 @@ export function CatalogPage() {
                       </SelectItem>
                     ))}
                     <SelectItem value={DIRECT}>
-                      {t("pages.catalog.directly")}
+                      {t("pages.catalog.continue.listsOnly")}
                     </SelectItem>
                   </SelectGroup>
                 </SelectContent>
               </Select>
-              {/* Пока туннеля нет, выбирать не из чего: остаётся «напрямую»,
-                  то есть ничего не настроить. Это и есть то место, где новичок
-                  застревает, — отсюда сразу ссылка на создание туннеля. */}
+              {selectedMode === "route" && !effectiveDestination ? (
+                <span
+                  role="status"
+                  className="max-w-80 text-xs text-muted-foreground"
+                >
+                  {t("pages.catalog.continue.chooseRoute")}
+                </span>
+              ) : null}
               {outboundTags.length === 0 ? (
                 <Button
-                  onClick={() => navigate("/transports/create")}
+                  disabled={configMutationPending}
+                  onClick={() => navigateWithSelection("/transports/create")}
                   size="sm"
                   variant="outline"
                 >
@@ -904,6 +1013,7 @@ export function CatalogPage() {
               configMutationPending ||
               previewMutation.isPending ||
               applyMutation.isPending ||
+              (selectedMode === "route" && !effectiveDestination) ||
               selectedMode === "mixed"
             }
             onClick={openAddDialog}
@@ -978,6 +1088,18 @@ export function CatalogPage() {
                   </div>
                 ))}
               </div>
+              <CatalogSourcePreviews
+                key={selectConfigRevision(configQuery.data)}
+                presets={presets}
+                selected={
+                  new Set(
+                    setupIntent.selections.map(
+                      (selection) => selection.preset_id
+                    )
+                  )
+                }
+                detour={effectiveSourceDetour}
+              />
               {setupIntent.mode !== "none" ? (
                 <div className="space-y-1.5 border-t border-border pt-4">
                   <Label htmlFor="catalog-route-rule-name">
@@ -1035,6 +1157,49 @@ export function CatalogPage() {
                   <Skeleton className="h-5 w-48" />
                   <Skeleton className="h-4 w-full" />
                 </div>
+              ) : null}
+
+              {setupRepairTarget ? (
+                <Alert variant="warning">
+                  <AlertTitle>
+                    {t("pages.catalog.continue.setupIncomplete")}
+                  </AlertTitle>
+                  <AlertDescription>
+                    {setupRepairTarget === "dns"
+                      ? t("pages.catalog.continue.configureDns", {
+                          route:
+                            outboundDisplayNames.get(
+                              setupIntent.outbound_tag ?? ""
+                            ) ?? t("pages.catalog.continue.selectedVpn"),
+                        })
+                      : t("pages.catalog.continue.chooseRoute")}
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {setupRepairTarget === "dns" ? (
+                        <Button
+                          variant="outline"
+                          onClick={() => navigateWithSelection("/dns-servers")}
+                        >
+                          {t("pages.catalog.continue.openDns")}
+                        </Button>
+                      ) : (
+                        <Button
+                          variant="outline"
+                          onClick={() => {
+                            setupIntentRef.current = null
+                            setSetupIntent(null)
+                            setSetupPreview(null)
+                            setDestination("")
+                            requestAnimationFrame(() =>
+                              destinationRef.current?.focus()
+                            )
+                          }}
+                        >
+                          {t("pages.catalog.continue.selectRoute")}
+                        </Button>
+                      )}
+                    </div>
+                  </AlertDescription>
+                </Alert>
               ) : null}
 
               {setupPreview ? (

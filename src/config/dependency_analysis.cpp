@@ -193,6 +193,20 @@ DependencyAnalysis analyze_dependencies(
                  "route.rules[" + rule_id + "].outbound",
                  "/routing-rules/" + rule_id + "/edit"});
         }
+        if (rule.failure_policy == api::FailurePolicy::FALLBACK &&
+            rule.fallback_outbound &&
+            removed_outbounds.find(*rule.fallback_outbound) != removed_outbounds.end()) {
+            add_reference(
+                analysis,
+                seen_references,
+                {{DependencyEntityKind::Outbound, *rule.fallback_outbound, false},
+                 DependencyDependentKind::RoutingRule,
+                 rule_id,
+                 DependencyRelation::FallbackTo,
+                 DependencyConsequence::Modify,
+                 "route.rules[" + rule_id + "].fallback_outbound",
+                 "/routing-rules/" + rule_id + "/edit"});
+        }
     }
 
     if (config.dns && config.dns->rules) {

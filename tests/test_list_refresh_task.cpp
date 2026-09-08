@@ -203,6 +203,61 @@ TEST_CASE("read-only list refresh atomically upgrades to one forced reconcile") 
     CHECK_FALSE(admission.active().has_value());
 }
 
+TEST_CASE("list download and reload intent do not retain runtime admission") {
+    ListRefreshTaskCoordinator coordinator;
+    RuntimeMutationAdmission admission;
+    auto registration = admission.try_acquire(
+        "lists-refresh-registration", RuntimeMutationAdmission::Kind::Background);
+    REQUIRE(registration);
+    const auto download = coordinator.begin(2, std::nullopt, true);
+    REQUIRE(download.accepted);
+    registration.reset();
+    REQUIRE(coordinator.mark_running(download.task.id, "example"));
+
+    auto foreground = admission.try_acquire_after_background_for(
+        "save", std::chrono::milliseconds{0});
+    REQUIRE(foreground);
+    CHECK_FALSE(admission.try_acquire(
+        "lists-refresh-registration", RuntimeMutationAdmission::Kind::Background));
+    CHECK(coordinator.take_mutation_lease(download.task.id).status ==
+          ListRefreshMutationLeaseTakeStatus::NoLease);
+    foreground.reset();
+
+    const auto upgrade = coordinator.begin(2, std::nullopt, true);
+    REQUIRE(upgrade.accepted);
+    CHECK(upgrade.coalesced);
+    CHECK(upgrade.task.id == download.task.id);
+    CHECK(coordinator.force_reconcile_requested(download.task.id));
+    CHECK_FALSE(admission.active());
+    const auto repeated = coordinator.begin(2, std::nullopt, true);
+    CHECK(repeated.coalesced);
+    CHECK(repeated.task.id == download.task.id);
+
+    auto publication = admission.try_acquire(
+        "lists-refresh-publication", RuntimeMutationAdmission::Kind::Background);
+    REQUIRE(publication);
+    REQUIRE(coordinator.mark_applying(download.task.id));
+    REQUIRE(coordinator.succeed(download.task.id, {}, true));
+    CHECK(admission.owns(*publication));
+    publication.reset();
+    CHECK_FALSE(admission.active());
+}
+
+TEST_CASE("preempted list download cannot be upgraded by a later reload") {
+    ListRefreshTaskCoordinator coordinator;
+    const auto download = coordinator.begin(1);
+    REQUIRE(download.accepted);
+    REQUIRE(coordinator.mark_running(download.task.id));
+    REQUIRE(coordinator.request_cancel_active());
+    CHECK(download.cancellation.cancellation_requested());
+    CHECK_FALSE(coordinator.begin(1, std::nullopt, true).accepted);
+    REQUIRE(coordinator.finish_cancelled(download.task.id));
+    const auto next = coordinator.begin(1, std::nullopt, true, true);
+    REQUIRE(next.accepted);
+    CHECK(next.task.id != download.task.id);
+    CHECK(coordinator.force_reconcile_requested(next.task.id));
+}
+
 TEST_CASE("deferred reload keeps force after the read-only task terminalizes") {
     ListRefreshTaskCoordinator coordinator;
     const auto read_only = coordinator.begin(1);

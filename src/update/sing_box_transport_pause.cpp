@@ -13,6 +13,7 @@ SingBoxTransportPause::SingBoxTransportPause(
             unstoppable_.push_back(tag);
             continue;
         }
+        resume_.push_back(tag);
         if (action_(tag, "down")) {
             stopped_.push_back(tag);
         } else {
@@ -29,9 +30,10 @@ void SingBoxTransportPause::resume() noexcept {
         stopped_.clear();
         return;
     }
-    for (const auto& tag : stopped_) {
+    for (const auto& tag : resume_) {
         if (!action_(tag, "up")) left_down_.push_back(tag);
     }
+    resume_.clear();
     stopped_.clear();
 }
 

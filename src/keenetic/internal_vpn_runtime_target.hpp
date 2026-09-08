@@ -77,14 +77,13 @@ inline bool internal_vpn_target_is_openconnect(
            internal_vpn_stable_id_is_openconnect(target.stable_id);
 }
 
-// OpenConnect clients must keep ordinary destination-based route policies in
-// both UI modes. With process_clients=false only the forced DNS redirect is
-// bypassed; other native VPN services retain their established full-bypass
-// semantics.
+// OFF returns from keen-pbr's own classification and DNS redirect chains.
+// It does not accept the packet at the shared hook: later firmware/nfqws
+// processing must still run. ON keeps selective destination policies, with
+// unmatched traffic following its ordinary direct path.
 inline bool internal_vpn_target_bypasses_routing(
     const InternalVpnRuntimeTarget& target) noexcept {
-    return !target.process_clients &&
-           !internal_vpn_target_is_openconnect(target);
+    return !target.process_clients;
 }
 
 inline bool internal_vpn_target_uses_destination_policies(

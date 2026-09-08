@@ -48,6 +48,7 @@ import {
 import { isSemanticallyDirty } from "@/lib/semantic-dirty"
 import { semanticJsonEqual } from "@/lib/semantic-json"
 import { cn } from "@/lib/utils"
+import { useCatalogNavigation } from "@/hooks/use-catalog-navigation"
 import { NativeWireGuardImportFields } from "@/components/transports/native-wireguard-import-card"
 import {
   NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID,
@@ -377,6 +378,7 @@ export function TransportConfigForm({
   const { t, i18n } = useTranslation()
   const close = useUpsertPageClose()
   const complete = useUpsertPageComplete()
+  const catalogNavigation = useCatalogNavigation()
   const [baseline] = useState<TransportFormValue>(() =>
     createTransportFormValue(
       initial,
@@ -1314,7 +1316,8 @@ export function TransportConfigForm({
           toast.success(
             t("transports.subscriptionImport.completed", {
               count: results.results.length,
-            })
+            }),
+            { action: catalogNavigation.successAction() }
           )
           complete()
         }}

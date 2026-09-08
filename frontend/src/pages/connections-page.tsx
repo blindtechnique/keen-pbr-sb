@@ -8,6 +8,7 @@ import type { ConnectionRecord } from "@/api/generated/model/connectionRecord"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { PageHeader } from "@/components/shared/page-header"
 import { Badge } from "@/components/ui/badge"
+import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
@@ -133,6 +134,34 @@ export function ConnectionsPage() {
         </div>
       </div>
 
+      {query.isLoading ? <p role="status">{t("common.loading")}</p> : null}
+      {query.isError ? (
+        <Alert variant="destructive">
+          <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
+            <span>
+              {t(
+                query.isFetchNextPageError
+                  ? "connections.loadMoreFailed"
+                  : connections.length > 0
+                    ? "connections.refreshFailed"
+                    : "connections.loadFailed"
+              )}
+            </span>
+            <Button
+              disabled={query.isFetching}
+              onClick={() => {
+                if (query.isFetchNextPageError) void query.fetchNextPage()
+                else void query.refetch()
+              }}
+              size="sm"
+              variant="outline"
+            >
+              {t("common.retry")}
+            </Button>
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
       <div className="divide-y border-y">
         {groups.map((group) => {
           const isOpen = expanded.has(group.key)
@@ -180,10 +209,12 @@ export function ConnectionsPage() {
           )
         })}
 
-        {groups.length === 0 && !query.isLoading ? (
+        {groups.length === 0 && !query.isLoading && !query.isError ? (
           <ListPlaceholder
             description={t("connections.empty")}
-            title={t("connections.emptyTitle")}
+            title={t(
+              activeOnly ? "connections.emptyTitle" : "connections.empty"
+            )}
           />
         ) : null}
       </div>

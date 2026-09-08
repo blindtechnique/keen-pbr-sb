@@ -2,6 +2,12 @@ import { describe, expect, spyOn, test } from "bun:test"
 
 import { classifyNfqwsUpdateNotice, nfqwsAction } from "../src/api/nfqws"
 import { resetStepUpState, setStepUpPrompt } from "../src/lib/step-up"
+import {
+  getApiValidationErrors,
+  getOperationErrorPresentation,
+} from "../src/lib/api-errors"
+import { getServerValidationPresentation } from "../src/lib/server-validation-presentation"
+import type { ApiError } from "../src/api/client"
 
 function jsonResponse(value: unknown, status: number): Response {
   return new Response(JSON.stringify(value), {
@@ -11,6 +17,42 @@ function jsonResponse(value: unknown, status: number): Response {
 }
 
 describe("nfqws API errors", () => {
+  test("preserves structured candidate validation metadata without changing the existing error message", async () => {
+    const entry = {
+      path: "daemon.port",
+      message: "Reworded diagnostic",
+      code: "config.value.integer_range",
+      params: { min: "1", max: "65535" },
+    }
+    const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          error: "Candidate rejected",
+          code: "validation",
+          validation_errors: [entry],
+        },
+        400
+      )
+    )
+    try {
+      const error = await nfqwsAction({ action: "apply_strategy" }).catch(
+        (failure: unknown) => failure
+      )
+      expect(error).toMatchObject({
+        message: "Candidate rejected\n- daemon.port: Reworded diagnostic",
+        details: { validation_errors: [entry] },
+      })
+      const errors = getApiValidationErrors(error as ApiError)
+      expect(errors).toEqual([entry])
+      expect(getServerValidationPresentation(errors[0])).toEqual({
+        key: "serverValidation.integerRange",
+        values: entry.params,
+      })
+      expect(fetchSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      fetchSpy.mockRestore()
+    }
+  })
   test("replays a protected component action after step-up", async () => {
     const urls: string[] = []
     const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
@@ -54,6 +96,7 @@ describe("nfqws API errors", () => {
       jsonResponse(
         {
           error: "The nfqws2 strategy candidate is invalid",
+          code: "validation",
           validation_errors: validationErrors,
           saved: false,
           applied: false,
@@ -75,6 +118,16 @@ describe("nfqws API errors", () => {
       expect(message).not.toContain("--lua-init-5")
       expect(message).not.toContain("--lua-init-6")
       expect(message.length).toBeLessThan(3_000)
+      expect(error).toMatchObject({
+        status: 400,
+        details: { code: "validation" },
+      })
+      const presented = getOperationErrorPresentation(error)
+      expect(presented?.kind).toBe("validation")
+      expect(presented?.details).not.toContain("--lua-init-5")
+      expect(presented?.details).not.toContain("--lua-init-6")
+      expect(presented?.details).not.toContain("x".repeat(480))
+      expect(fetchSpy).toHaveBeenCalledTimes(1)
     } finally {
       fetchSpy.mockRestore()
     }

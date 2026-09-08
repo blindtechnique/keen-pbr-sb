@@ -5,9 +5,13 @@
  * REST API for the keen-pbr policy-based routing daemon.
  * OpenAPI spec version: 3.0.0
  */
+import type { ListShrinkAcceptance } from './listShrinkAcceptance';
 
 export interface ListRefreshRequest {
   /** Optional list name. When omitted, all URL-backed lists from the active config are refreshed.
    */
   name?: string;
+  /** Download without conditional HTTP headers. Does not bypass the shrink policy. */
+  force_refresh?: boolean;
+  accept_shrink?: ListShrinkAcceptance;
 }

@@ -88,6 +88,24 @@ export function getOutboundDeleteImpactItems(
     })
   }
 
+  for (const index of impact.fallbackRuleIndexes) {
+    const rule = config?.route?.rules?.[index]
+    items.push({
+      label: t("pages.outbounds.deleteDialog.items.routingRuleFallback", {
+        name: rule ? getRouteRuleDisplayName(rule, index) : `#${index + 1}`,
+      }),
+      details: [
+        formatDetail(
+          t("routeFailurePolicy.label"),
+          <ChangeValue
+            after={t("routeFailurePolicy.block")}
+            before={t("routeFailurePolicy.fallback")}
+          />
+        ),
+      ],
+    })
+  }
+
   for (const server of impact.dnsServerDetours) {
     const dnsServer = config?.dns?.servers?.find((item) => item.tag === server)
     items.push({

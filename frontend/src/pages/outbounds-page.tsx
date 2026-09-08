@@ -24,6 +24,7 @@ import { selectConfig, selectOutbounds } from "@/api/selectors"
 import { KeenPencilIcon, KeenTrashIcon } from "@/components/shared/keen-icons"
 import { getOutboundDeleteImpactItems } from "@/components/delete-impact/outbound-items"
 import { ActionButtons } from "@/components/shared/action-buttons"
+import { EditDeleteActions } from "@/components/shared/edit-delete-actions"
 import { BulkSelectionToolbar } from "@/components/shared/bulk-selection-toolbar"
 import { ConfigSaveErrorAlert } from "@/components/shared/config-save-error-alert"
 import { ConfigTransferButtons } from "@/components/shared/config-transfer-buttons"
@@ -367,41 +368,58 @@ export function OutboundsPage({
           emptyHint={t("pages.outbounds.usage.none")}
           key={`${item.id}-usage`}
         />,
-        <ActionButtons
-          actions={[
-            // У системных направлений кнопки замера нет: wan и blackhole
-            // демон не пробирует, и кнопка ничего не замеряла — мёртвый
-            // элемент управления хуже отсутствующего (замечание владельца).
-            ...(systemGroupActive
-              ? []
-              : [
-                  {
-                    // Замеряется именно этот выход. Раньше кнопка на строке
-                    // запускала общий раунд по всем сразу — владелец увидел
-                    // это в интерфейсе, и он был прав: раунд действительно
-                    // трогал все.
-                    disabled: probeMutation.pendingTags.has(item.id),
-                    icon: (
-                      <RotateCw
-                        className={cn(
-                          "h-4 w-4",
-                          probeMutation.pendingTags.has(item.id) &&
-                            "animate-spin"
-                        )}
-                      />
-                    ),
-                    label: t("transports.latencyRefresh"),
-                    onClick: () => probeMutation.mutate(item.id),
-                  },
-                ]),
-            {
-              icon: <KeenPencilIcon className="h-4 w-4" />,
-              label: t("common.edit"),
-              onClick: () => navigate(`/outbounds/${item.id}/edit`),
-            },
-          ]}
+        <div
+          className="ml-auto flex w-fit items-center justify-end gap-2"
           key={`${item.id}-actions`}
-        />,
+        >
+          <ActionButtons
+            actions={[
+              // У системных направлений кнопки замера нет: wan и blackhole
+              // демон не пробирует, и кнопка ничего не замеряла — мёртвый
+              // элемент управления хуже отсутствующего (замечание владельца).
+              ...(systemGroupActive
+                ? []
+                : [
+                    {
+                      // Замеряется именно этот выход. Раньше кнопка на строке
+                      // запускала общий раунд по всем сразу — владелец увидел
+                      // это в интерфейсе, и он был прав: раунд действительно
+                      // трогал все.
+                      disabled: probeMutation.pendingTags.has(item.id),
+                      icon: (
+                        <RotateCw
+                          className={cn(
+                            "h-4 w-4",
+                            probeMutation.pendingTags.has(item.id) &&
+                              "animate-spin"
+                          )}
+                        />
+                      ),
+                      label: t("transports.latencyRefresh"),
+                      onClick: () => probeMutation.mutate(item.id),
+                    },
+                  ]),
+              ...(item.type === "urltest"
+                ? []
+                : [
+                    {
+                      icon: <KeenPencilIcon className="h-4 w-4" />,
+                      label: t("common.edit"),
+                      onClick: () => navigate(`/outbounds/${item.id}/edit`),
+                    },
+                  ]),
+            ]}
+          />
+          {item.type === "urltest" ? (
+            <EditDeleteActions
+              deleteDisabled={configMutationPending}
+              deleteTitle={t("common.delete")}
+              editTitle={t("common.edit")}
+              onDelete={() => requestDelete([item.id])}
+              onEdit={() => navigate(`/outbounds/${item.id}/edit`)}
+            />
+          ) : null}
+        </div>,
       ])}
       // Системные маршруты выбирать нечем: удаление здесь — единственная
       // операция над выделением, а удалять их нельзя. Отключённые галочки
@@ -456,15 +474,15 @@ export function OutboundsPage({
     },
   })
 
-  const handleBulkDelete = () => {
-    if (!loadedConfig || outboundSelection.selectedCount === 0) {
+  const requestDelete = (
+    initialTags: Iterable<string>,
+    clearSelectionOnSuccess = false
+  ) => {
+    if (!loadedConfig) {
       return
     }
 
-    const tags = filterDeletableOutboundTags(
-      loadedConfig,
-      outboundSelection.selectedIds
-    )
+    const tags = filterDeletableOutboundTags(loadedConfig, initialTags)
     if (tags.length === 0) {
       return
     }
@@ -472,11 +490,14 @@ export function OutboundsPage({
       tags,
       impact: getOutboundDeleteImpact(loadedConfig, tags),
       config: loadedConfig,
-      clearSelectionOnSuccess: true,
+      clearSelectionOnSuccess,
     }
     setDeletePreview(request)
     setDeleteRequest(request)
   }
+
+  const handleBulkDelete = () =>
+    requestDelete(outboundSelection.selectedIds, true)
 
   const confirmDelete = () => {
     if (!loadedConfig || !deleteRequest) {

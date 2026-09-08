@@ -66,7 +66,12 @@ run_hook iptables mangle reapply-firewall
 run_hook iptables nat reapply-nat
 run_hook ip6tables mangle reapply-firewall
 run_hook ip6tables nat reapply-nat
-run_hook iptables filter ""
+# OpenConnect forwarding lives in filter, which Keenetic can rebuild after
+# the earlier link/address notification. Both families must wake the existing
+# full refresh, not wait for an unrelated mangle/nat change or periodic check.
+run_hook iptables filter reapply-firewall
+run_hook ip6tables filter reapply-firewall
+run_hook iptables raw ""
 run_hook nftables nat ""
 
 # Pre-mutation admission persists the event behind the stop lease. Only the
@@ -80,12 +85,16 @@ printf 'keen-pbr-stopping-v3 admitted %s %s %s %s\n' \
     > "$stopping_marker"
 chmod 0600 "$stopping_marker"
 run_hook iptables mangle reapply-firewall
+run_hook iptables filter reapply-firewall
+run_hook ip6tables filter reapply-firewall
 
 printf 'keen-pbr-stopping-v3 mutating %s %s %s %s\n' \
     "$hook_pid" "$hook_startticks" "$hook_pid" "$hook_startticks" \
     > "$stopping_marker"
 chmod 0600 "$stopping_marker"
 run_hook iptables mangle ""
+run_hook iptables filter ""
+run_hook ip6tables filter ""
 
 # Post-mutation controller death remains fail-closed.
 printf 'keen-pbr-stopping-v3 mutating %s %s 99999999 1\n' \
@@ -1220,6 +1229,7 @@ arm-731-42'
         STOP_KEEN_PBR_SAFE=yes
     }
     cleanup_stale_tcp_rst_firewall() { echo tcp-cleanup >> "$lifecycle"; }
+    cleanup_stale_native_forward_firewall() { echo native-forward-cleanup >> "$lifecycle"; }
     cleanup_stale_ppe_deoffload_firewall() { echo ppe-cleanup >> "$lifecycle"; }
     cleanup_stale_meta_udp443_firewall() { echo meta-cleanup >> "$lifecycle"; }
     restore_hwnat_if_safe() { echo fastnat-restore >> "$lifecycle"; }
@@ -1241,6 +1251,7 @@ lease-check
 prepare
 stop
 tcp-cleanup
+native-forward-cleanup
 ppe-cleanup
 meta-cleanup
 fastnat-restore

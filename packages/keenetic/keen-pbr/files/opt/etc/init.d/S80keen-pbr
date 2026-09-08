@@ -484,17 +484,15 @@ meta_xtables_references_are_owned() {
                     continue
                 }
                 target = $(i + 1)
-                target_owned =
-                    target == "KeenPbrMeta443" ||
+                target_owned = (target == "KeenPbrMeta443" ||
                     target == "KeenPbrMeta443_A" ||
-                    target == "KeenPbrMeta443_B"
+                    target == "KeenPbrMeta443_B")
                 if (!target_owned) {
                     continue
                 }
-                origin_owned =
-                    origin == "KeenPbrMeta443" ||
+                origin_owned = (origin == "KeenPbrMeta443" ||
                     origin == "KeenPbrMeta443_A" ||
-                    origin == "KeenPbrMeta443_B"
+                    origin == "KeenPbrMeta443_B")
                 if (origin_owned) {
                     continue
                 }
@@ -643,6 +641,7 @@ guard_meta_udp443_start_ownership() {
             return 0
         fi
     elif cleanup_stale_tcp_rst_firewall &&
+         cleanup_stale_native_forward_firewall &&
          cleanup_stale_ppe_deoffload_firewall &&
          cleanup_stale_meta_udp443_firewall &&
          record_meta_udp443_possible_backends; then
@@ -789,29 +788,14 @@ cleanup_stale_meta_udp443_firewall() {
     return 0
 }
 
-tcp_rst_xtables_snapshot() {
-    TCP_RST_XTABLES_COMMAND_OUTPUT=""
-    if TCP_RST_XTABLES_COMMAND_OUTPUT=$(
-        iptables_with_wait -t filter -S 2>&1
-    ); then
-        TCP_RST_XTABLES_SNAPSHOT="$TCP_RST_XTABLES_COMMAND_OUTPUT"
-        return 0
-    fi
-    META_XTABLES_COMMAND_OUTPUT="$TCP_RST_XTABLES_COMMAND_OUTPUT"
-    if meta_xtables_filter_is_unavailable; then
-        TCP_RST_XTABLES_SNAPSHOT=""
-        return 0
-    fi
-    return 1
+owned_forward_xtables_snapshot_has_artifacts() {
+    local chain="$1"
+    printf '%s\n' "$META_XTABLES_SNAPSHOT" |
+        grep -Eq -- "(^-N ${chain}$)|([[:space:]](-j|-g|--jump|--goto)[[:space:]]+${chain}([[:space:]]|$))"
 }
 
-tcp_rst_xtables_snapshot_has_artifacts() {
-    printf '%s\n' "$TCP_RST_XTABLES_SNAPSHOT" |
-        grep -Eq -- '(^-N KeenPbrTcpRst$)|([[:space:]](-j|-g|--jump|--goto)[[:space:]]+KeenPbrTcpRst([[:space:]]|$))'
-}
-
-tcp_rst_xtables_references_are_owned() {
-    printf '%s\n' "$TCP_RST_XTABLES_SNAPSHOT" | awk '
+owned_forward_xtables_references_are_owned() {
+    printf '%s\n' "$META_XTABLES_SNAPSHOT" | awk -v chain="$1" '
         $1 == "-A" {
             origin = $2
             for (i = 3; i < NF; ++i) {
@@ -819,7 +803,7 @@ tcp_rst_xtables_references_are_owned() {
                     $i != "--jump" && $i != "--goto") {
                     continue
                 }
-                if ($(i + 1) != "KeenPbrTcpRst") {
+                if ($(i + 1) != chain) {
                     continue
                 }
                 if (origin == "FORWARD" && NF == 4 && $3 == "-j") {
@@ -831,73 +815,77 @@ tcp_rst_xtables_references_are_owned() {
     '
 }
 
-tcp_rst_xtables_chain_exists() {
-    printf '%s\n' "$TCP_RST_XTABLES_SNAPSHOT" |
-        grep -F -x -q -- '-N KeenPbrTcpRst'
-}
-
-cleanup_stale_tcp_rst_firewall() {
+cleanup_stale_owned_forward_family() {
+    local tool="$1"
+    local chain="$2"
     local hooks
     local script
 
-    # This chain is process-owned and has a short daemon-managed lifetime.
-    # Mutating it while the daemon is alive would race its expiry task, so this
-    # recovery helper is deliberately restricted to a verified stopped state.
+    # Reuse the stopped-daemon cleanup for the two exact process-owned chains;
+    # a live daemon remains responsible for replacing its own forwarding state.
     if [ -n "$(pidof "$PROCS" 2>/dev/null || true)" ]; then
-        log_error "Refusing to remove KeenPbrTcpRst while keen-pbr is running"
+        log_error "Refusing to remove $chain while keen-pbr is running"
         return 1
     fi
 
-    # KeenPbrTcpRst is IPv4-only and can only be published by the iptables
-    # backend. A system without the iptables tool cannot have acquired a new
-    # chain during this boot; keep nft-only installations startable.
-    command -v iptables >/dev/null 2>&1 || return 0
-    if ! tcp_rst_xtables_snapshot; then
+    command -v "$tool" >/dev/null 2>&1 || return 0
+    if ! meta_xtables_snapshot "$tool"; then
         STOP_KEEN_PBR_SAFE=no
         : > "$FASTNAT_UNSAFE_STOP_FILE" 2>/dev/null || true
-        log_error "Failed to inspect stale KeenPbrTcpRst artifacts with iptables"
+        log_error "Failed to inspect stale $chain artifacts with $tool"
         return 1
     fi
-    tcp_rst_xtables_snapshot_has_artifacts || return 0
-    if ! tcp_rst_xtables_references_are_owned; then
+    owned_forward_xtables_snapshot_has_artifacts "$chain" || return 0
+    if ! owned_forward_xtables_references_are_owned "$chain"; then
         STOP_KEEN_PBR_SAFE=no
         : > "$FASTNAT_UNSAFE_STOP_FILE" 2>/dev/null || true
-        log_error "Refusing to remove KeenPbrTcpRst referenced by foreign rules"
+        log_error "Refusing to remove $chain referenced by foreign rules"
         return 1
     fi
 
-    hooks=$(printf '%s\n' "$TCP_RST_XTABLES_SNAPSHOT" |
-        grep -F -x -c -- '-A FORWARD -j KeenPbrTcpRst' || true)
+    hooks=$(printf '%s\n' "$META_XTABLES_SNAPSHOT" |
+        grep -F -x -c -- "-A FORWARD -j $chain" || true)
     script='*filter
 '
     while [ "$hooks" -gt 0 ]; do
-        script="${script}-D FORWARD -j KeenPbrTcpRst
+        script="${script}-D FORWARD -j $chain
 "
         hooks=$((hooks - 1))
     done
-    if tcp_rst_xtables_chain_exists; then
-        script="${script}-F KeenPbrTcpRst
--X KeenPbrTcpRst
+    if meta_xtables_chain_exists "$chain"; then
+        script="${script}-F $chain
+-X $chain
 "
     fi
     script="${script}COMMIT
 "
 
-    if ! meta_xtables_restore_transaction iptables "$script" \
+    if ! meta_xtables_restore_transaction "$tool" "$script" \
         >/dev/null 2>&1; then
         STOP_KEEN_PBR_SAFE=no
         : > "$FASTNAT_UNSAFE_STOP_FILE" 2>/dev/null || true
-        log_error "Atomic KeenPbrTcpRst cleanup failed with iptables-restore"
+        log_error "Atomic $chain cleanup failed with ${tool}-restore"
         return 1
     fi
-    if ! tcp_rst_xtables_snapshot ||
-       tcp_rst_xtables_snapshot_has_artifacts; then
+    if ! meta_xtables_snapshot "$tool" ||
+       owned_forward_xtables_snapshot_has_artifacts "$chain"; then
         STOP_KEEN_PBR_SAFE=no
         : > "$FASTNAT_UNSAFE_STOP_FILE" 2>/dev/null || true
-        log_error "Stale KeenPbrTcpRst artifacts remained after cleanup"
+        log_error "Stale $chain artifacts remained after cleanup"
         return 1
     fi
     return 0
+}
+
+cleanup_stale_tcp_rst_firewall() {
+    cleanup_stale_owned_forward_family iptables KeenPbrTcpRst
+}
+
+cleanup_stale_native_forward_firewall() {
+    local failed=no
+    cleanup_stale_owned_forward_family iptables KeenPbrNativeFwd || failed=yes
+    cleanup_stale_owned_forward_family ip6tables KeenPbrNativeFwd || failed=yes
+    [ "$failed" = no ]
 }
 
 ppe_deoffload_load_ownership() {
@@ -4310,6 +4298,8 @@ stop_service_for_action() {
                 result=1
             elif ! cleanup_stale_tcp_rst_firewall; then
                 result=1
+            elif ! cleanup_stale_native_forward_firewall; then
+                result=1
             elif ! cleanup_stale_ppe_deoffload_firewall; then
                 result=1
             elif ! cleanup_stale_meta_udp443_firewall; then
@@ -4445,6 +4435,31 @@ lifecycle_lock_or_fail() {
 
 trap release_lifecycle_lock EXIT
 
+restart_stack_transport_manager() {
+    # Only the manager and its managed sing-box children are included. nfqws
+    # is an independent service and must not be restarted by this action.
+    /opt/etc/init.d/S79transport-manager restart
+}
+
+case "$1" in
+    restart-stack-background)
+        [ -x /opt/etc/init.d/S79transport-manager ] || exit 1
+        # The API waits only for this launcher. The worker must outlive the
+        # daemon being stopped and must not inherit its maintenance ownership.
+        (
+            trap '' HUP
+            unset KEEN_PBR_UPDATE_LOCK_PID KEEN_PBR_UPDATE_LOCK_TOKEN
+            sleep 1
+            exec "$0" restart-stack
+        ) </dev/null >/dev/null 2>&1 &
+        exit 0
+        ;;
+    restart-stack)
+        RESTART_TRANSPORT_MANAGER=yes
+        set -- restart "${2:-}"
+        ;;
+esac
+
 case "$1" in
     drain-pending-delayed)
         if claim_control_drain_token; then
@@ -4529,6 +4544,14 @@ case "$1" in
         # between TERM and the next start can cache the retiring route while
         # the firmware and daemon are rebuilding netfilter state.
         stop_service_for_action stop no || exit 1
+        if [ "${RESTART_TRANSPORT_MANAGER:-no}" = yes ]; then
+            RESTART_STACK_MANAGER_STATUS=0
+            restart_stack_transport_manager || RESTART_STACK_MANAGER_STATUS=$?
+            if [ "$RESTART_STACK_MANAGER_STATUS" -ne 0 ]; then
+                # Bring the panel back even when the companion restart fails.
+                log_error "transport-manager restart failed; starting keen-pbr again"
+            fi
+        fi
         # Re-check only after the API writer is stopped. This closes the race
         # where a save WAL could appear between an early preflight and stop.
         FASTNAT_RESTORE_ON_START_FAILURE=no
@@ -4591,5 +4614,8 @@ if [ "$FASTNAT_DISPATCH_ACTION" = start ] && [ "$status" -ne 0 ]; then
     # disabled until a later verified start followed by a graceful stop.
     : > "$FASTNAT_UNSAFE_STOP_FILE"
     log_error "keen-pbr startup did not complete; FastNAT remains disabled until a verified graceful stop"
+fi
+if [ "$status" -eq 0 ]; then
+    status=${RESTART_STACK_MANAGER_STATUS:-0}
 fi
 exit "$status"

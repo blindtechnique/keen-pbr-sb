@@ -34,13 +34,16 @@ api::LastOutcome api_outcome(PeriodicTaskOutcome outcome) noexcept {
 }
 
 api::PeriodicTaskMetricsEntry api_entry(
-    const PeriodicTaskMetricsSnapshot& snapshot) {
+    const PeriodicTaskMetricsSnapshot& snapshot,
+    const std::vector<ScheduledTaskSnapshot>& schedules,
+    std::int64_t captured_at_unix_ms) {
     api::PeriodicTaskMetricsEntry entry;
     entry.label = snapshot.label;
     entry.runs = api_integer(snapshot.runs);
     entry.success = api_integer(snapshot.success);
     entry.noop = api_integer(snapshot.noop);
     entry.failure = api_integer(snapshot.failure);
+    entry.consecutive_failures = api_integer(snapshot.consecutive_failures);
     entry.skipped = api_integer(snapshot.skipped);
     entry.abandoned = api_integer(snapshot.abandoned);
     entry.in_flight = api_integer(snapshot.in_flight);
@@ -58,20 +61,40 @@ api::PeriodicTaskMetricsEntry api_entry(
     if (!snapshot.last_error.empty()) {
         entry.last_error = snapshot.last_error;
     }
+    entry.scheduling_state = "unknown";
+    const auto scheduled = std::find_if(schedules.begin(), schedules.end(),
+        [&snapshot](const ScheduledTaskSnapshot& candidate) {
+            return candidate.label == snapshot.label;
+        });
+    if (scheduled != schedules.end()) {
+        if (scheduled->state == ScheduledTaskState::NotScheduled) {
+            entry.scheduling_state = "not_scheduled";
+        } else if (scheduled->state == ScheduledTaskState::Scheduled &&
+                   scheduled->remaining_ms.has_value()) {
+            entry.scheduling_state = "scheduled";
+            const auto captured = std::max<std::int64_t>(0, captured_at_unix_ms);
+            const auto remaining = api_integer(*scheduled->remaining_ms);
+            constexpr auto maximum = std::numeric_limits<std::int64_t>::max();
+            entry.next_run_at_unix_ms = remaining > maximum - captured
+                ? maximum : captured + remaining;
+        }
+    }
     return entry;
 }
 
 } // namespace
 
 api::PeriodicTaskMetricsResponse build_diagnostic_tasks_response(
-    const PeriodicTaskMetricsRegistry& registry) {
+    const PeriodicTaskMetricsRegistry& registry,
+    const std::vector<ScheduledTaskSnapshot>& schedules,
+    std::int64_t captured_at_unix_ms) {
     api::PeriodicTaskMetricsResponse response;
     response.capacity = api_integer(registry.capacity());
     response.tracked = api_integer(registry.size());
     const auto snapshot = registry.snapshot();
     response.tasks.reserve(snapshot.size());
     for (const auto& task : snapshot) {
-        response.tasks.push_back(api_entry(task));
+        response.tasks.push_back(api_entry(task, schedules, captured_at_unix_ms));
     }
     return response;
 }

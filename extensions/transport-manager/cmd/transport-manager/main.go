@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -83,16 +84,17 @@ func main() {
 		manager,
 		supervisor,
 	)
-	handler := api.New(supervisor, cfg.APIKey, admin)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	handler := api.NewWithContext(ctx, supervisor, cfg.APIKey, admin)
 	server := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       30 * time.Second,
+		BaseContext:       func(net.Listener) context.Context { return ctx },
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	go supervisor.Run(ctx)
 
 	go func() {
@@ -107,9 +109,24 @@ func main() {
 	// teardown after transports have consumed their bounded shutdown budget.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	if err := supervisor.Close(shutdownCtx); err != nil {
+	if err := shutdown(shutdownCtx, server, supervisor.Close); err != nil {
 		encoded, _ := json.Marshal(map[string]string{"shutdown_error": err.Error()})
 		log.Print(string(encoded))
 	}
-	_ = server.Shutdown(shutdownCtx)
+}
+
+func shutdown(ctx context.Context, server *http.Server, closeTransports func(context.Context) error) error {
+	// Service cancellation has already rejected new API work. Close listeners
+	// and drain HTTP concurrently: a slow request must not consume the budget
+	// before the owned sing-box processes are even asked to stop.
+	httpDone := make(chan error, 1)
+	go func() { httpDone <- server.Shutdown(ctx) }()
+	transportErr := closeTransports(ctx)
+	httpErr := <-httpDone
+	if httpErr != nil {
+		// Context cancellation alone does not interrupt a partial request-body
+		// read. Shutdown leaves these sockets open when its deadline expires.
+		_ = server.Close()
+	}
+	return errors.Join(transportErr, httpErr)
 }

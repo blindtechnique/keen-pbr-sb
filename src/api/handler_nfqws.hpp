@@ -299,7 +299,10 @@ NfqwsBoundedOpkgTestResult run_nfqws_bounded_opkg_for_testing(
     const ScriptedInstallPaths& scripted = {},
     // The service stop the production upgrade hands in, run between the
     // package's preinst and the unpack.
-    ScriptedServiceStop stop_service = {});
+    ScriptedServiceStop stop_service = {},
+    // A prepared-hook refusal must preserve any inventory-process uncertainty
+    // so the caller cannot clear the journal as an ordinary pre-install exit.
+    std::function<bool(bool& termination_uncertain)> on_prepared = {});
 
 struct NfqwsInstallTestResult {
     std::string output;

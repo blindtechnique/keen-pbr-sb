@@ -11,6 +11,7 @@ GCC_BUILD_DIR := cmake-build-gcc
 CLANG_BUILD_DIR := cmake-build-clang
 BUILD_JOBS ?= $(shell nproc)
 TEST_CMAKE_FLAGS ?=
+BUSYBOX ?= busybox
 DIST_DIR := build/dist
 TRANSPORT_MANAGER_DIR := extensions/transport-manager
 TRANSPORT_MANAGER_DIST_DIR := $(DIST_DIR)/transport-manager
@@ -29,7 +30,7 @@ CLANG_FEATURE_CMAKE_FLAGS := -DWITH_API=ON -DUSE_KEENETIC_API=ON
         frontend-build \
         frontend-api-generate \
         transport-manager-test transport-manager-build \
-        test \
+        test test-api-operation-errors test-package-dns \
         firewall-it-images firewall-it \
         clang-build clang-check-production clang-check clang-tidy clang-tidy-curated \
         generate generate-check \
@@ -132,6 +133,7 @@ sanitize: ## Build and run the unit suite under AddressSanitizer + UndefinedBeha
 # keen-pbr-firewall-it (нужны Docker и netns, у неё свой `make firewall-it`).
 # Проверяется тестом build_scripts/tests/test_test_target_coverage.py.
 NARROW_TEST_TARGETS := \
+	keen-pbr-background-task-diagnostics-tests \
 	keen-pbr-cache-generation-tests \
 	keen-pbr-native-tunnel-import-tests \
 	keen-pbr-native-direct-observation-tests \
@@ -142,6 +144,10 @@ NARROW_TEST_TARGETS := \
 	keen-pbr-keenetic-dns-refresh-tests \
 	keen-pbr-dns-query-log-maintenance-tests \
 	keen-pbr-router-info-cache-tests \
+	keen-pbr-ndms-running-config-resource-tests \
+	keen-pbr-ndms-interface-resource-tests \
+	keen-pbr-ndms-http-config-resource-tests \
+	keen-pbr-ndms-version-resource-tests \
 	keen-pbr-resolver-stream-tests \
 	keen-pbr-backup-restore-journal-tests \
 	keen-pbr-maintenance-lock-tests \
@@ -154,8 +160,16 @@ NARROW_TEST_TARGETS := \
 	keen-pbr-ipc-control-service-tests \
 	keen-pbr-urltest-manager-tests \
 	keen-pbr-runtime-routing-exact-tests \
+	keen-pbr-route-failure-policy-tests \
 	keen-pbr-runtime-cold-boot-terminal-policy-tests \
 	keen-pbr-api-runtime-lifecycle-tests \
+	keen-pbr-api-operation-errors-tests \
+	keen-pbr-notifications-tests \
+	keen-pbr-log-retention-tests \
+	keen-pbr-subscription-refresh-tests \
+	keen-pbr-subscription-backup-tests \
+	keen-pbr-connections-history-tests \
+	keen-pbr-tunnel-probe-review-tests \
 	keen-pbr-firewall-cleanup-absence-tests \
 	test_config_store
 
@@ -164,6 +178,7 @@ test: ## Build and run unit tests (doctest)
 	python3 -m unittest build_scripts.tests.test_build_identity -v
 	python3 -m unittest build_scripts.tests.test_test_target_coverage -v
 	python3 -m unittest build_scripts.tests.test_pinned_versions -v
+	$(MAKE) test-package-dns
 	cmake -S . -B $(GCC_BUILD_DIR) $(GCC_CMAKE_FLAGS) -DBUILD_TESTS=ON \
 		-DWITH_API=ON -DUSE_KEENETIC_API=ON $(TEST_CMAKE_FLAGS)
 	cmake --build $(GCC_BUILD_DIR) --parallel $(BUILD_JOBS) --target keen-pbr keen-pbr-tests crash-diagnostics-smoke $(NARROW_TEST_TARGETS)
@@ -175,6 +190,18 @@ test: ## Build and run unit tests (doctest)
 		echo "== $$target =="; \
 		$(GCC_BUILD_DIR)/tests/$$target || exit 1; \
 	done
+
+test-package-dns: ## Run isolated Keenetic DNS and uninstall regressions without compiling
+	python3 -m unittest build_scripts.tests.test_installer_component_preservation -v
+	$(BUSYBOX) sh tests/package_it/run-dnsmasq-helper-timing.sh packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/dnsmasq.sh
+	$(BUSYBOX) sh tests/package_it/run-dnsmasq-direct-fallback.sh packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/dnsmasq.sh
+	$(BUSYBOX) sh tests/package_it/run-installer-dns-rollback.sh install.sh
+	$(BUSYBOX) sh tests/package_it/run-uninstall-cleanup.sh "$(CURDIR)"
+
+test-api-operation-errors: ## Check additive API error codes without rebuilding the daemon
+	cmake -S . -B $(GCC_BUILD_DIR) $(GCC_CMAKE_FLAGS) -DBUILD_TESTS=ON -DWITH_API=ON
+	cmake --build $(GCC_BUILD_DIR) --parallel $(BUILD_JOBS) --target keen-pbr-api-operation-errors-tests
+	$(GCC_BUILD_DIR)/tests/keen-pbr-api-operation-errors-tests
 
 firewall-it-images: ## Build the Docker images for firewall integration tests (also compiles the harness inside Docker)
 	docker build -t keen-pbr-firewall-it:iptables -f tests/firewall_it/docker/Dockerfile.iptables .

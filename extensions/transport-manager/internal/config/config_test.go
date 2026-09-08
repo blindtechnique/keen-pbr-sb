@@ -442,6 +442,68 @@ func TestConditionalCreateAllowsOnlyOneWriterPerRevision(t *testing.T) {
 	}
 }
 
+func TestConditionalDeleteAllowsOnlyOneWriterPerRevision(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transports.json")
+	cfg := Config{APIKey: "secret", RuntimeDir: filepath.Join(t.TempDir(), "runtime")}
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	manager := transport.NewManager()
+	admin := NewAdmin(path, cfg, manager, transport.NewSupervisor(manager))
+	for _, spec := range []transport.TransportSpec{
+		{Tag: "native_one", Type: "native", Interface: "nwg1"},
+		{Tag: "native_two", Type: "native", Interface: "nwg2"},
+	} {
+		if err := admin.Create(context.Background(), spec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	revision := admin.Revision()
+	type result struct {
+		revision string
+		matched  bool
+		err      error
+	}
+	results := make(chan result, 2)
+	start := make(chan struct{})
+	var ready sync.WaitGroup
+	ready.Add(2)
+	for _, tag := range []string{"native_one", "native_two"} {
+		tag := tag
+		go func() {
+			ready.Done()
+			<-start
+			nextRevision, matched, err := admin.DeleteIfRevision(context.Background(), tag, revision)
+			results <- result{nextRevision, matched, err}
+		}()
+	}
+	ready.Wait()
+	close(start)
+	matchedCount := 0
+	for range 2 {
+		outcome := <-results
+		if outcome.err != nil || outcome.revision == revision {
+			t.Fatalf("unexpected delete outcome: %#v", outcome)
+		}
+		if outcome.matched {
+			matchedCount++
+		}
+	}
+	if matchedCount != 1 {
+		t.Fatalf("expected one delete winner, got %d", matchedCount)
+	}
+	stored, storedRevision, err := LoadWithRevision(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Transports) != 1 || len(admin.Specs()) != 1 || storedRevision != admin.Revision() {
+		t.Fatal("conditional deletes committed inconsistent transport inventory")
+	}
+	if _, exists := manager.Get(stored.Transports[0].Tag); !exists {
+		t.Fatal("the losing writer removed the remaining runtime transport")
+	}
+}
+
 func TestConditionalBatchValidateAndCreateAreOneRevisionMutation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "transports.json")
 	cfg := Config{

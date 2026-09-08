@@ -3,6 +3,7 @@
 #include "firewall_verifier.hpp"
 
 #include <cstdint>
+#include <chrono>
 #include <memory>
 #include <optional>
 #include <string>
@@ -34,6 +35,13 @@ struct ParsedNftablesState {
 // Returns the parsed state of KeenPbrTable entries present in the document.
 // On any JSON parse error or invalid input, returns a default (empty) state.
 ParsedNftablesState parse_nft_json(const std::string& json_output);
+
+// Diagnostic-only matching against existing realized expansions. Keeps the
+// verifier's acceptance policy unchanged and does not choose among duplicates.
+std::vector<std::vector<std::size_t>> match_nft_counter_rules(
+    const std::vector<ParsedNftRule>& actual,
+    const std::vector<RuleState>& expected,
+    std::chrono::steady_clock::time_point deadline);
 
 // FirewallVerifier implementation for the nftables backend.
 class NftablesFirewallVerifier : public FirewallVerifier {

@@ -1,6 +1,7 @@
 #ifdef WITH_API
 
 #include "handler_catalog_setup.hpp"
+#include "config_validation_json.hpp"
 
 #include "handler_catalog.hpp"
 #include "../crypto/sha256.hpp"
@@ -166,14 +167,22 @@ nlohmann::json parse_request_body(const std::string& body) {
     try {
         auto request = nlohmann::json::parse(body);
         if (!request.is_object()) {
-            bad_request("Request body must be a JSON object");
+            const std::string message = "Request body must be a JSON object";
+            throw ApiError(message, 400, nlohmann::json{
+                {"error", message}, {"path", "$"},
+                {"validation_errors", serialize_config_validation_issues({
+                    {"$", message, "config.json.object"}})},
+            }.dump());
         }
         return request;
     } catch (const ApiError&) {
         throw;
     } catch (const nlohmann::json::exception& error) {
-        bad_request(
-            std::string("Invalid JSON request: ") + error.what());
+        const std::string message =
+            std::string("Invalid JSON request: ") + error.what();
+        auto payload = serialize_json_validation_error(message, error);
+        payload["path"] = "$";
+        throw ApiError(message, 400, payload.dump());
     }
 }
 
@@ -463,19 +472,12 @@ nlohmann::json preview_json(const CatalogSetupPreview& preview) {
 
 [[noreturn]] void throw_validation_error(
     const ConfigValidationError& error) {
-    nlohmann::json issues = nlohmann::json::array();
-    for (const auto& issue : error.issues()) {
-        issues.push_back({
-            {"path", issue.path},
-            {"message", issue.message},
-        });
-    }
     throw ApiError(
         error.what(),
         400,
         nlohmann::json{
             {"error", error.what()},
-            {"validation_errors", std::move(issues)},
+            {"validation_errors", serialize_config_validation_issues(error.issues())},
         }
             .dump());
 }

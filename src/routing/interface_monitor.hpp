@@ -1,11 +1,15 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
+#include <deque>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 
 namespace keen_pbr3 {
 
@@ -34,8 +38,43 @@ public:
         // A main-table IPv4/IPv6 route changed. This is a revision fence for
         // off-loop reachability plans; it is not an interface/catalog event.
         bool route_changed{false};
+        // A bounded ARP/NDP identity/presence hint, never an authoritative
+        // hotspot count and never a routing/runtime observation.
+        bool neighbor_changed{false};
+        // Additional metadata hint on an existing main-table route event.
+        bool default_route_changed{false};
     };
     using InterfaceStateCallback = std::function<void(const Event&)>;
+
+    struct NeighborObservation {
+        int address_family{0};
+        std::uint32_t interface_index{0};
+        // Exact network-order bytes: four for IPv4, sixteen for IPv6.
+        std::string address;
+        std::string link_address;
+        std::uint16_t state{0};
+        bool present{true};
+    };
+
+    // Pure bounded event classifier. Reachability refreshes retain the same
+    // identity, so REACHABLE/STALE/DELAY/PROBE churn does not emit more hints.
+    // Entries are evicted in insertion order; no inventory/count is exposed.
+    class NeighborHintTracker {
+    public:
+        static constexpr std::size_t max_entries = 2048U;
+        bool observe(const NeighborObservation& observation);
+        void clear() noexcept;
+        std::size_t size() const noexcept { return entries_.size(); }
+
+    private:
+        using Key = std::tuple<int, std::uint32_t, std::string>;
+        struct State {
+            std::string link_address;
+            bool failed{false};
+        };
+        std::map<Key, State> entries_;
+        std::deque<Key> insertion_order_;
+    };
 
     explicit InterfaceMonitor(InterfaceStateCallback callback);
     ~InterfaceMonitor();
@@ -65,7 +104,8 @@ public:
         bool is_up);
     static std::optional<Event> describe_route_transition(
         std::uint32_t table,
-        int address_family);
+        int address_family,
+        bool default_route = false);
 
 private:
     struct Impl;

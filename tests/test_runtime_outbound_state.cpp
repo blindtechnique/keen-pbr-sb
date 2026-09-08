@@ -104,6 +104,41 @@ api::RuntimeOutboundsResponse build_for(
 
 } // namespace
 
+TEST_CASE("interface state keeps reachable IPv4 when its IPv6 gateway has no route") {
+    auto config = config_with_single_interface_outbound("lo");
+    config.outbounds->front().gateway = "192.0.2.1";
+    config.outbounds->front().gateway6 = "2001:db8::1";
+    config.daemon.emplace();
+    SUBCASE("IPv6 disabled") { config.daemon->ipv6_enabled = false; }
+    SUBCASE("IPv6 enabled") { config.daemon->ipv6_enabled = true; }
+    auto connected = default_route_via(254, "lo");
+    connected.destination = "192.0.2.0/24";
+    // No installed outbound default and no probe: the verdict depends on
+    // link reachability rather than an unrelated positive signal.
+    ModelledRoutes routes({connected});
+    const auto response = build_for(config, routes, std::nullopt,
+                                   std::chrono::steady_clock::now());
+    REQUIRE(response.outbounds.size() == 1);
+    CHECK(response.outbounds.front().status == api::ResolverLiveStatus::UNKNOWN);
+    CHECK(response.outbounds.front().interfaces.front().status ==
+          api::RuntimeInterfaceStatusEnum::UNKNOWN);
+}
+
+TEST_CASE("interface state does not treat disabled IPv6 as a usable exit") {
+    auto config = config_with_single_interface_outbound("lo");
+    config.outbounds->front().gateway6 = "2001:db8::1";
+    config.daemon.emplace();
+    config.daemon->ipv6_enabled = false;
+    auto connected = default_route_via(254, "lo");
+    connected.destination = "2001:db8::/64";
+    connected.family = AF_INET6;
+    ModelledRoutes routes({connected});
+    const auto response = build_for(config, routes, std::nullopt,
+                                   std::chrono::steady_clock::now());
+    REQUIRE(response.outbounds.size() == 1);
+    CHECK(response.outbounds.front().status == api::ResolverLiveStatus::UNAVAILABLE);
+}
+
 TEST_CASE("interface probe freshness follows the production rotation cadence") {
     CHECK(runtime_outbound_detail::interface_probe_freshness_limit(2) ==
           std::chrono::seconds{60});

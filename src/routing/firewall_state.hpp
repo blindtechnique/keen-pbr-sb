@@ -26,6 +26,16 @@ struct RuleState {
     RuleActionType action_type;
     uint32_t fwmark{0};                 // Only valid if action_type == Mark
     FirewallRuleCriteria criteria;      // Realized selector criteria for live rules
+    // Explicit per-rule path after failure policy resolution. Empty retains
+    // the legacy configured/group lookup; it is not a second selector state.
+    std::string effective_outbound_tag;
+    // Keep leaf marks in conntrack: a healthy primary switch must not move
+    // established flows. Only new IPv6 flows use this optional family leaf.
+    std::optional<uint32_t> fwmark_ipv6;
+
+    uint32_t mark_for_family(int family) const noexcept {
+        return family == AF_INET6 ? fwmark_ipv6.value_or(fwmark) : fwmark;
+    }
 };
 
 // In-memory state of the firewall configuration.

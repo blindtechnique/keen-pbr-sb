@@ -23,7 +23,9 @@ import {
 } from "@/components/shared/field"
 import { ListIdentityLabel } from "@/components/shared/list-identity-label"
 import { MultiSelectList } from "@/components/shared/multi-select-list"
+import { OperationErrorMessage } from "@/components/shared/operation-error-message"
 import { ServerValidationAlert } from "@/components/shared/server-validation-alert"
+import { getFirstFieldError } from "@/lib/form-field-error"
 import {
   UpsertPage,
   type UpsertPagePresentation,
@@ -41,6 +43,7 @@ import {
 } from "@/lib/dns-display"
 import {
   clearFormServerErrors,
+  getUnmappedFormErrors,
   setFormServerErrors,
   splitFormApiErrors,
 } from "@/lib/form-api-errors"
@@ -394,7 +397,9 @@ function DnsRuleForm({
             unmapped: result.unmappedErrors,
           })
           if (result.formError) {
-            toast.error(result.formError, { richColors: true })
+            toast.error(<OperationErrorMessage error={error} />, {
+              richColors: true,
+            })
           }
 
           return {
@@ -405,16 +410,8 @@ function DnsRuleForm({
       },
     },
   })
-  const unmappedServerErrors = useStore(
-    form.store,
-    (state) =>
-      (
-        state.errorMap.onServer as
-          | {
-              unmapped?: { path: string; message: string }[]
-            }
-          | undefined
-      )?.unmapped ?? []
+  const unmappedServerErrors = useStore(form.store, (state) =>
+    getUnmappedFormErrors(state.errorMap.onServer)
   )
   const isDirty = useStore(form.store, (state) =>
     isSemanticallyDirty(state.values.rule, baselineDraft, {
@@ -719,11 +716,6 @@ function DnsRuleForm({
       </div>
     </form>
   )
-}
-
-function getFirstFieldError(errors: unknown[]) {
-  const firstError = errors[0]
-  return typeof firstError === "string" ? firstError : undefined
 }
 
 function resolveDnsRuleFieldPath(path: string): DnsRuleFieldName | undefined {

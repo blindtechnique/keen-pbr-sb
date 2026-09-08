@@ -36,6 +36,18 @@ On package-based router installs, keen-pbr normally takes care of dnsmasq integr
 | `dns_test_server` | object | Optional built-in DNS probe listener for advanced troubleshooting |
 | `client_dns_enforcement` | object | Force LAN clients to use the router DNS: `{"enabled": true}` transparently redirects plain DNS (port 53) from inbound interfaces to the local resolver and blocks DNS-over-TLS (port 853, disable with `"block_dot": false`). DoH on port 443 cannot be blocked generically. |
 
+## Browser Secure DNS signal
+
+`dns.firefox_doh_canary` controls the Firefox network-DNS signal; omitted/null
+means true, preserving existing configurations. Set false to remove the generated
+`address=/use-application-dns.net/` directive. It is also available beside the
+client-DNS checkbox in General settings and uses normal Save/Apply.
+
+Firefox honors the signal for automatic DoH, not a manually enabled resolver.
+[Mozilla documentation](https://support.mozilla.org/en-US/kb/canary-domain-use-application-dnsnet).
+It does not configure Chrome, Edge or Yandex Browser or block HTTPS DNS providers.
+Router upstream DNS and port 53/853 enforcement are independent.
+
 ## System Resolver
 
 `dns.system_resolver` tells keen-pbr how to check dnsmasq state after configuration changes.

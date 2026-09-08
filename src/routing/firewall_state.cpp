@@ -56,6 +56,9 @@ const std::map<std::string, std::string>& FirewallState::get_urltest_selections(
 }
 
 std::string FirewallState::resolve_effective_outbound(const RuleState& rule) const {
+    if (!rule.effective_outbound_tag.empty()) {
+        return rule.effective_outbound_tag;
+    }
     // Check if the rule's outbound is a urltest with a selected child
     auto it = urltest_selections_.find(rule.outbound_tag);
     if (it != urltest_selections_.end()) {

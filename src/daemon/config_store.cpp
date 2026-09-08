@@ -4,6 +4,7 @@
 #include "../crypto/sha256.hpp"
 
 #include <nlohmann/json.hpp>
+#include <stdexcept>
 
 namespace keen_pbr3 {
 
@@ -106,6 +107,41 @@ PreparedActiveConfigCommit ConfigStore::prepare_active_commit(
             std::move(candidate_config),
             std::move(candidate_outbound_marks)),
         std::move(staged_serialized));
+}
+
+PreparedActiveConfigCommit ConfigStore::prepare_active_commit(
+    ActiveConfigSnapshotHandle base,
+    ActiveConfigSnapshotHandle candidate,
+    ConfigDraftRebase draft_rebase) {
+    if (!base || !candidate ||
+        (draft_rebase.expected &&
+         draft_rebase.expected->active_revision != config_revision(base->config))) {
+        throw std::invalid_argument(
+            "Targeted configuration edit has a different active base");
+    }
+    auto prepared = prepare_active_commit(
+        std::move(base), candidate,
+        draft_rebase.expected
+            ? std::optional<std::string>{draft_rebase.expected->serialized}
+            : std::nullopt);
+    prepared.draft_rebase = std::make_shared<PreparedStagedConfigRebase>();
+    if (draft_rebase.expected) {
+        prepared.draft_rebase->expected_base_revision =
+            draft_rebase.expected->base_revision;
+    }
+    const auto candidate_revision = config_revision(candidate->config);
+    if (config_revision(draft_rebase.config) != candidate_revision) {
+        prepared.draft_rebase->base_revision =
+            draft_rebase.base_revision_override.value_or(
+                !draft_rebase.expected ||
+                        draft_rebase.expected->base_revision ==
+                            draft_rebase.expected->active_revision
+                    ? candidate_revision
+                    : draft_rebase.expected->base_revision);
+        prepared.draft_rebase->config = std::move(draft_rebase.config);
+        prepared.draft_rebase->serialized = std::move(draft_rebase.serialized);
+    }
+    return prepared;
 }
 
 PreparedActiveRuntimeReloadCommit

@@ -7,8 +7,6 @@ import {
   postNdmsNativeDeleteOnce,
   type NdmsNativeDeleteResult,
 } from "@/api/native-mutation"
-import type { ApiError } from "@/api/client"
-import { getApiErrorMessage } from "@/lib/api-errors"
 import type { NativeInterfaceModel } from "@/lib/native-interfaces"
 
 /**
@@ -20,18 +18,13 @@ import type { NativeInterfaceModel } from "@/lib/native-interfaces"
 export function NativeInterfaceDeleteDialog({
   expectedOwnershipRevision,
   nativeInterface,
-  prepareLinkedRouteRemoval,
   onInventoryRefresh,
   onOpenChange,
   onTerminal,
   open,
 }: {
   readonly expectedOwnershipRevision: string
-  readonly linkedRouteName?: string
   readonly nativeInterface?: NativeInterfaceModel
-  readonly prepareLinkedRouteRemoval?: () => Promise<
-    (() => Promise<void>) | undefined
-  >
   readonly onInventoryRefresh: () => Promise<void>
   readonly onOpenChange: (open: boolean) => void
   readonly onTerminal: (result: NdmsNativeDeleteResult) => void
@@ -56,7 +49,6 @@ export function NativeInterfaceDeleteDialog({
       const toastId = toast.loading(
         t("transports.nativeMutation.deleteDialog.deleting")
       )
-      let restoreLinkedRoute: (() => Promise<void>) | undefined
       try {
         if (
           !candidate ||
@@ -65,19 +57,6 @@ export function NativeInterfaceDeleteDialog({
         ) {
           toast.error(
             t("transports.nativeMutation.deleteDialog.refreshAndRetry"),
-            { id: toastId, richColors: true }
-          )
-          return
-        }
-
-        try {
-          restoreLinkedRoute = await prepareLinkedRouteRemoval?.()
-        } catch (error) {
-          toast.error(
-            t(
-              "transports.nativeMutation.deleteDialog.routePreparationFailedDescription",
-              { reason: getApiErrorMessage(error as ApiError) }
-            ),
             { id: toastId, richColors: true }
           )
           return
@@ -105,7 +84,6 @@ export function NativeInterfaceDeleteDialog({
             return
           }
 
-          if (restoreLinkedRoute) await restoreLinkedRoute()
           toast.error(
             t("transports.nativeMutation.deleteDialog.deleteFailed"),
             { id: toastId, richColors: true }
@@ -115,7 +93,6 @@ export function NativeInterfaceDeleteDialog({
             error instanceof NativeMutationTransportError &&
             error.code === "rejected"
           ) {
-            if (restoreLinkedRoute) await restoreLinkedRoute()
             toast.error(
               t("transports.nativeMutation.deleteDialog.deleteFailed"),
               { id: toastId, richColors: true }
@@ -123,9 +100,8 @@ export function NativeInterfaceDeleteDialog({
             return
           }
 
-          // The request may already have reached KeeneticOS. Do not restore a
-          // route onto a possibly deleted interface; the bodyless reconciler
-          // and the refreshed inventory finish the operation automatically.
+          // The backend owns related routes and trackers too. An uncertain
+          // response is reconciled without a browser-side config replay.
           toast.info(t("transports.nativeMutation.deleteDialog.finishing"), {
             id: toastId,
           })
@@ -136,9 +112,9 @@ export function NativeInterfaceDeleteDialog({
           richColors: true,
         })
       } finally {
-        await onInventoryRefresh().catch(() => undefined)
         activeRequest.current = undefined
         onOpenChange(false)
+        void onInventoryRefresh().catch(() => undefined)
       }
     }
 
@@ -153,7 +129,6 @@ export function NativeInterfaceDeleteDialog({
     onOpenChange,
     onTerminal,
     open,
-    prepareLinkedRouteRemoval,
     t,
   ])
 

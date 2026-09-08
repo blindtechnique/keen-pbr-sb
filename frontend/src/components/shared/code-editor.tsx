@@ -1,6 +1,10 @@
 import { useLayoutEffect, useRef, type ReactNode, useMemo } from "react"
 
 import { cn } from "@/lib/utils"
+import {
+  focusCodeEditorSelection,
+  type CodeEditorSelection,
+} from "./code-editor-selection"
 
 export type CodeSyntax = "nfqws" | "list" | "log"
 
@@ -16,6 +20,7 @@ export function CodeEditor({
   className,
   readOnly = false,
   spellCheck = false,
+  selection,
   ...rest
 }: {
   value: string
@@ -24,6 +29,7 @@ export function CodeEditor({
   className?: string
   readOnly?: boolean
   spellCheck?: boolean
+  selection?: CodeEditorSelection | null
 } & Omit<
   React.ComponentProps<"textarea">,
   "value" | "onChange" | "className" | "readOnly"
@@ -35,6 +41,16 @@ export function CodeEditor({
   const highlighted = useMemo(() => highlight(value, syntax), [value, syntax])
 
   const highlightRef = useRef<HTMLPreElement>(null)
+
+  useLayoutEffect(() => {
+    if (selection) {
+      focusCodeEditorSelection(
+        textareaRef.current,
+        highlightRef.current,
+        selection
+      )
+    }
+  }, [selection])
 
   // The two layers must scroll together or the colours drift away from the text.
   useLayoutEffect(() => {
@@ -58,6 +74,9 @@ export function CodeEditor({
     <div
       className={cn(
         "relative min-h-0 overflow-hidden rounded-lg border bg-input/30 focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/50",
+        rest["aria-invalid"] &&
+          rest["aria-invalid"] !== "false" &&
+          "border-destructive focus-within:border-destructive focus-within:ring-destructive/20",
         className
       )}
     >

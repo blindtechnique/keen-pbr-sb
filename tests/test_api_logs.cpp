@@ -7,6 +7,7 @@
 #include "../src/api/handler_logs.hpp"
 #include "../src/api/server.hpp"
 #include "../src/log/file_sink.hpp"
+#include "../src/log/nfqws_log_maintenance.hpp"
 #include "../src/log/logger.hpp"
 #include "../src/util/last_command_failure.hpp"
 
@@ -71,16 +72,31 @@ class LogRuntimeGuard {
 public:
     LogRuntimeGuard()
         : file_enabled_(file_logging_enabled())
-        , level_(Logger::instance().level()) {}
+        , level_(Logger::instance().level())
+        , max_file_bytes_(file_logging_max_bytes())
+        , nfqws_max_file_bytes_(nfqws_log_max_bytes())
+        , size_enabled_(file_log_size_limit_enabled()), age_enabled_(file_log_age_limit_enabled())
+        , days_(file_log_max_age_days()), nfqws_size_enabled_(nfqws_log_size_limit_enabled())
+        , nfqws_age_enabled_(nfqws_log_age_limit_enabled()), nfqws_days_(nfqws_log_max_age_days()) {}
 
     ~LogRuntimeGuard() {
         set_file_logging_enabled(file_enabled_);
         Logger::instance().set_level(level_);
+        set_file_logging_max_bytes(max_file_bytes_);
+        set_nfqws_log_max_bytes(nfqws_max_file_bytes_);
+        set_file_log_retention(size_enabled_, age_enabled_, days_);
+        set_nfqws_log_retention(nfqws_size_enabled_, nfqws_age_enabled_, nfqws_days_);
     }
 
 private:
     bool file_enabled_;
     LogLevel level_;
+    std::size_t max_file_bytes_;
+    std::size_t nfqws_max_file_bytes_;
+    bool size_enabled_, age_enabled_;
+    unsigned days_;
+    bool nfqws_size_enabled_, nfqws_age_enabled_;
+    unsigned nfqws_days_;
 };
 
 class LogSettingsTestHookGuard {
@@ -177,7 +193,7 @@ TEST_CASE("logging settings are atomically persisted with private permissions") 
     httplib::Client client("127.0.0.1", port);
     const auto response = client.Post(
         "/api/logs/settings",
-        R"({"file_enabled":false,"level":"debug"})",
+        R"({"file_enabled":false,"level":"debug","max_file_bytes":65536,"nfqws_max_file_bytes":16777216,"size_limit_enabled":false,"age_limit_enabled":true,"max_age_days":3,"nfqws_size_limit_enabled":true,"nfqws_age_limit_enabled":true,"nfqws_max_age_days":365})",
         "application/json");
     server.stop();
 
@@ -195,6 +211,78 @@ TEST_CASE("logging settings are atomically persisted with private permissions") 
     const auto stored = nlohmann::json::parse(stored_file);
     CHECK_FALSE(stored.at("file_enabled").get<bool>());
     CHECK(stored.at("level") == "debug");
+    CHECK(stored.at("max_file_bytes") == 65536U);
+    CHECK(stored.at("nfqws_max_file_bytes") == 16777216U);
+    CHECK(file_logging_max_bytes() == 65536U);
+    CHECK(nfqws_log_max_bytes() == 16777216U);
+    CHECK_FALSE(file_log_size_limit_enabled());
+    CHECK(file_log_age_limit_enabled());
+    CHECK(file_log_max_age_days() == 3U);
+    CHECK(nfqws_log_age_limit_enabled());
+    CHECK(nfqws_log_max_age_days() == 365U);
+    set_file_logging_max_bytes(FileLogSink::kDefaultMaxBytes);
+    set_nfqws_log_max_bytes(FileLogSink::kDefaultMaxBytes);
+    set_file_log_retention(true, false, 7U);
+    set_nfqws_log_retention(true, false, 7U);
+    apply_stored_log_settings();
+    CHECK(file_logging_max_bytes() == 65536U);
+    CHECK(nfqws_log_max_bytes() == 16777216U);
+    CHECK_FALSE(file_log_size_limit_enabled());
+    CHECK(file_log_age_limit_enabled());
+    CHECK(file_log_max_age_days() == 3U);
+    CHECK(nfqws_log_age_limit_enabled());
+    CHECK(nfqws_log_max_age_days() == 365U);
+}
+
+TEST_CASE("logging size limits reject invalid types and ranges without publishing") {
+    LogApiTempDir directory;
+    LogRuntimeGuard runtime;
+    const auto path = directory.path / "logging.json";
+    EnvironmentVariableGuard settings_file("KEEN_PBR_TEST_LOG_SETTINGS_FILE", path.string());
+    ApiConfig config;
+    const int port = next_logs_api_port.fetch_add(1, std::memory_order_relaxed);
+    config.listen = "127.0.0.1:" + std::to_string(port);
+    ApiServer server(config);
+    register_logs_handler(server);
+    server.start();
+    httplib::Client client("127.0.0.1", port);
+    const auto saved = client.Post("/api/logs/settings",
+        R"({"max_file_bytes":131072,"nfqws_max_file_bytes":262144})", "application/json");
+    REQUIRE(saved != nullptr);
+    REQUIRE(nlohmann::json::parse(saved->body).value("ok", false));
+    for (const auto* invalid : {"null", "-1", "65535", "16777217", "1.5", "\"1048576\"", "true"}) {
+        for (const auto* key : {"max_file_bytes", "nfqws_max_file_bytes"}) {
+            const auto response = client.Post("/api/logs/settings",
+                std::string("{\"") + key + "\":" + invalid + "}", "application/json");
+            REQUIRE(response != nullptr);
+            CHECK(nlohmann::json::parse(response->body).contains("error"));
+            CHECK(file_logging_max_bytes() == 131072U);
+            CHECK(nfqws_log_max_bytes() == 262144U);
+        }
+    }
+    const auto partial = client.Post("/api/logs/settings", R"({"file_enabled":false})", "application/json");
+    server.stop();
+    REQUIRE(partial != nullptr);
+    const auto settings = nlohmann::json::parse(partial->body).at("settings");
+    CHECK(settings.at("max_file_bytes") == 131072U);
+    CHECK(settings.at("nfqws_max_file_bytes") == 262144U);
+}
+
+TEST_CASE("old or malformed logging size preferences retain bounded defaults") {
+    LogApiTempDir directory;
+    LogRuntimeGuard runtime;
+    const auto path = directory.path / "logging.json";
+    EnvironmentVariableGuard settings_file("KEEN_PBR_TEST_LOG_SETTINGS_FILE", path.string());
+    set_file_logging_max_bytes(FileLogSink::kDefaultMaxBytes);
+    set_nfqws_log_max_bytes(FileLogSink::kDefaultMaxBytes);
+    for (const auto* value : {R"({"file_enabled":true,"level":"info"})",
+             R"({"max_file_bytes":null,"nfqws_max_file_bytes":-1})",
+             R"({"max_file_bytes":9999999999,"nfqws_max_file_bytes":0})"}) {
+        { std::ofstream output(path); output << value; }
+        apply_stored_log_settings();
+        CHECK(file_logging_max_bytes() == FileLogSink::kDefaultMaxBytes);
+        CHECK(nfqws_log_max_bytes() == FileLogSink::kDefaultMaxBytes);
+    }
 }
 
 TEST_CASE(

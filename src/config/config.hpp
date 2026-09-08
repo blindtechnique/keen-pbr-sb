@@ -49,6 +49,8 @@ public:
 struct ConfigValidationIssue {
     std::string path;
     std::string message;
+    std::string code{};
+    std::map<std::string, std::string> params{};
 };
 
 class ConfigValidationError : public ConfigError {
@@ -127,6 +129,13 @@ inline bool dns_rule_enabled(const DnsRule& rule) {
 Config parse_config(const std::string& json_str);
 void validate_config(const Config& config);
 Config parse_and_validate_config(const std::string& json_str);
+// Compact persistent JSON: omit absent known fields but retain opaque extension
+// payloads on their current objects, including nulls and empty containers.
+std::string serialize_config_document(const Config& config);
+// Normalize only user-edited/new inline IP/CIDR vectors. Preserve untouched
+// legacy vectors and original array indexes in errors. Candidate is unchanged
+// if any entry is invalid; this does not publish or write configuration.
+void normalize_changed_list_ip_cidrs(Config& candidate, const Config& previous);
 size_t max_file_size_bytes(const Config& config);
 FirewallBackendPreference firewall_backend_preference(const Config& config);
 

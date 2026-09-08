@@ -11,6 +11,7 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <linux/fib_rules.h>
 #include <iterator>
@@ -238,7 +239,8 @@ private:
 
 RawDumpSocket open_raw_dump_socket(
     std::uint16_t message_type,
-    int family) {
+    int family,
+    bool nonblocking_request = false) {
     RawDumpSocket socket_state;
     socket_state.handle = RawNetlinkSocketHandle{
         socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE)};
@@ -294,7 +296,7 @@ RawDumpSocket open_raw_dump_socket(
             socket_state.handle.get(),
             request,
             request_size,
-            0,
+            nonblocking_request ? MSG_DONTWAIT : 0,
             reinterpret_cast<const sockaddr*>(&kernel),
             sizeof(kernel));
         if (sent != static_cast<ssize_t>(request_size) ||
@@ -400,14 +402,41 @@ std::vector<DumpedRoute> dump_raw_routes(int family) {
     }
 }
 
-std::vector<DumpedRule> dump_raw_rules(int family) {
-    auto socket_state = open_raw_dump_socket(RTM_GETRULE, family);
+struct RawRuleDumpLimits {
+    std::size_t maximum_rules{4096U};
+    std::chrono::milliseconds maximum_duration{1000};
+};
+
+std::vector<DumpedRule> dump_raw_rules(
+    int family,
+    std::optional<RawRuleDumpLimits> limits = std::nullopt) {
+    const auto deadline = limits
+        ? std::chrono::steady_clock::now() + limits->maximum_duration
+        : std::chrono::steady_clock::time_point::max();
+    auto socket_state = open_raw_dump_socket(
+        RTM_GETRULE, family, limits.has_value());
     RawRtnetlinkDumpOptions options;
     options.sequence = socket_state.sequence;
     options.port_id = socket_state.port_id;
 
     std::vector<DumpedRule> result;
     for (;;) {
+        if (limits) {
+            const auto remaining = std::chrono::duration_cast<
+                std::chrono::microseconds>(
+                    deadline - std::chrono::steady_clock::now()).count();
+            if (remaining <= 0) {
+                throw NetlinkError("Read-only policy rule dump timed out");
+            }
+            const timeval timeout{
+                static_cast<decltype(timeval::tv_sec)>(remaining / 1000000),
+                static_cast<decltype(timeval::tv_usec)>(remaining % 1000000)};
+            if (setsockopt(socket_state.handle.get(), SOL_SOCKET, SO_RCVTIMEO,
+                           &timeout, sizeof(timeout)) != 0) {
+                throw NetlinkError(
+                    "Failed to configure read-only policy rule dump timeout");
+            }
+        }
         alignas(nlmsghdr) std::array<std::uint8_t, 65536> response{};
         sockaddr_nl sender{};
         iovec vector{response.data(), response.size()};
@@ -431,6 +460,14 @@ std::vector<DumpedRule> dump_raw_rules(int family) {
             block.state != RawRtnetlinkDumpState::done) {
             throw NetlinkError(raw_dump_failure(
                 "rule", block.state, block.kernel_error));
+        }
+        if (limits) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                throw NetlinkError("Read-only policy rule dump timed out");
+            }
+            if (block.rules.size() > limits->maximum_rules - result.size()) {
+                throw NetlinkError("Read-only policy rule dump exceeds row limit");
+            }
         }
         result.insert(
             result.end(),
@@ -517,6 +554,10 @@ RoutePtr build_route(const RouteSpec& spec,
 }
 
 } // anonymous namespace
+
+std::vector<DumpedRule> netlink_detail::dump_policy_rules_read_only(int family) {
+    return dump_raw_rules(family, RawRuleDumpLimits{});
+}
 
 struct NetlinkManager::Impl {
     struct nl_sock* sock{nullptr};

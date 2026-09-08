@@ -555,6 +555,14 @@ nlohmann::json enrich_catalog_with_routing_companions(
             if (owns_notice) {
                 (*upstream_parent)["notice"] =
                     bundled_parent.at("notice");
+                // A translation belongs to its source text. Carry it with
+                // the package-owned notice, or discard the stale remote one.
+                if (bundled_parent.contains("notice_i18n")) {
+                    (*upstream_parent)["notice_i18n"] =
+                        bundled_parent.at("notice_i18n");
+                } else {
+                    upstream_parent->erase("notice_i18n");
+                }
             }
         }
         if (owns_domain_supplements) {

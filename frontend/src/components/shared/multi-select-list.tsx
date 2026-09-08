@@ -55,6 +55,7 @@ export function MultiSelectList({
   renderItem,
   getSearchText,
   fullWidthAdd = false,
+  addControlSize = "sm",
 }: {
   name?: string
   options: string[]
@@ -70,7 +71,7 @@ export function MultiSelectList({
   maxItems?: number
   limitMessage?: string
   usageSubtitle?: (optionName: string) => string | undefined
-  error?: string | null
+  error?: ReactNode
   renderItem?: (item: string) => ReactNode
   getSearchText?: (item: string) => string
   /**
@@ -79,6 +80,8 @@ export function MultiSelectList({
    * правил владелец просил всю ширину, как у остальных полей.
    */
   fullWidthAdd?: boolean
+  /** Match a standard form Select without changing compact list controls. */
+  addControlSize?: "sm" | "default"
 }) {
   const { t } = useTranslation()
   const [selectValue, setSelectValue] = useState("")
@@ -184,7 +187,13 @@ export function MultiSelectList({
         <Plus className="pointer-events-none absolute top-1/2 left-2.5 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
         <Autocomplete.Input
           aria-invalid={Boolean(error)}
-          className="h-8 w-full min-w-0 rounded-lg border border-input bg-transparent py-1 pr-9 pl-8 text-base transition-colors outline-none placeholder:text-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:cursor-not-allowed disabled:bg-input/50 disabled:text-muted-foreground disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 md:text-sm dark:bg-input/30 dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40"
+          className={cn(
+            "w-full min-w-0 border border-input bg-transparent py-1 pr-9 pl-8 text-base transition-colors outline-none placeholder:text-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:cursor-not-allowed disabled:bg-input/50 disabled:text-muted-foreground disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 md:text-sm dark:bg-input/30 dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40",
+            addControlSize === "default"
+              ? "h-10 rounded-[4px]"
+              : "h-8 rounded-lg"
+          )}
+          data-size={addControlSize}
           disabled={availableOptions.length === 0}
           placeholder={
             availableOptions.length > 0
@@ -194,7 +203,12 @@ export function MultiSelectList({
         />
         <Autocomplete.Trigger
           aria-label={resolvedAddLabel}
-          className="absolute top-0 right-0 flex h-8 w-8 items-center justify-center rounded-r-lg text-muted-foreground transition-colors hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+          className={cn(
+            "absolute top-0 right-0 flex items-center justify-center text-muted-foreground transition-colors hover:text-foreground disabled:pointer-events-none disabled:opacity-50",
+            addControlSize === "default"
+              ? "h-10 w-10 rounded-r-[4px]"
+              : "h-8 w-8 rounded-r-lg"
+          )}
           disabled={availableOptions.length === 0}
           type="button"
         >

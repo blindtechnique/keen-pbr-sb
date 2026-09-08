@@ -15,12 +15,18 @@
 
 #include "../api/handlers.hpp"
 #include "../api/handler_connections.hpp"
+#include "../api/handler_config.hpp"
 #include "../api/handler_health_service.hpp"
 #include "../api/handler_nfqws.hpp"
+#include "../api/handler_subscriptions.hpp"
+#include "../api/subscription_transport_update.hpp"
+#include "../config/subscription_refresh.hpp"
 #include "../api/server.hpp"
+#include "../api/operation_error.hpp"
 #include "../api/status_stream.hpp"
 #include "../connections/conntrack_event_monitor.hpp"
 #include "../config/routing_state.hpp"
+#include "../config/outbound_delete.hpp"
 #include "../dns/dns_router.hpp"
 #include "../dns/dnsmasq_gen.hpp"
 #include "../util/ipv6_support.hpp"
@@ -39,6 +45,7 @@
 #include "../health/runtime_outbound_state.hpp"
 #include "../api/handler_runtime_inventory.hpp"
 #include "../api/handler_diagnostic_tasks.hpp"
+#include "../api/routing_firewall_evidence_view.hpp"
 #include "../lists/list_streamer.hpp"
 #include "../log/logger.hpp"
 #include "../util/system_info.hpp"
@@ -58,10 +65,13 @@ constexpr auto conntrack_publish_delay = std::chrono::milliseconds{500};
 constexpr auto interface_traffic_sample_interval = std::chrono::seconds{2};
 constexpr auto config_preapply_background_wait_budget =
     std::chrono::seconds{5};
+// One normal iptables restore may already wait 10s for the kernel lock.
+// Let a user request follow that in-flight background pass without requiring
+// another click; admission gives it priority over the next background pass.
+constexpr auto foreground_background_wait_budget =
+    std::chrono::seconds{30};
 constexpr auto config_preapply_background_wait_step =
     std::chrono::milliseconds{100};
-constexpr const char* runtime_firewall_background_owner_label =
-    "runtime-firewall-worker";
 
 #ifdef USE_KEENETIC_API
 class NativeImportBodyWipeGuard final {
@@ -576,24 +586,23 @@ Daemon::acquire_runtime_mutation_or_throw(
     std::string label,
     bool require_runtime_running,
     bool require_runtime_stopped) {
-    auto lease = runtime_mutation_admission_.try_acquire_after_for(
+    auto lease = runtime_mutation_admission_.try_acquire_after_background_for(
         label,
-        {runtime_firewall_background_owner_label, "urltest-selection-change"},
-        config_preapply_background_wait_budget);
+        foreground_background_wait_budget);
     if (!lease.has_value()) {
         const auto active = runtime_mutation_admission_.active();
         const std::string detail = active.has_value() && !active->label.empty()
             ? ": " + active->label
             : std::string{};
-        throw ApiError(
+        throw operation_error(
             "Another runtime mutation is already in progress" + detail,
-            409);
+            409, "busy");
     }
 
     const auto runtime_snapshot = runtime_state_store_.snapshot();
     if (runtime_snapshot.runtime_state == RuntimeState::starting ||
         runtime_snapshot.runtime_state == RuntimeState::shutting_down) {
-        throw ApiError("Routing runtime initialization or shutdown is in progress", 409);
+        throw operation_error("Routing runtime initialization or shutdown is in progress", 409, "busy");
     }
     const bool runtime_running = runtime_snapshot.routing_runtime_active;
     if (require_runtime_running && !runtime_running) {
@@ -601,6 +610,14 @@ Daemon::acquire_runtime_mutation_or_throw(
     }
     if (require_runtime_stopped && runtime_running) {
         throw ApiError("Routing runtime is already started", 409);
+    }
+
+    // A scheduled download must not keep the single list-service flight ahead
+    // of an admitted user apply. The cache publication callback checks this
+    // same cancellation under the existing snapshot mutex before committing.
+    {
+        KPBR_SHARED_UNIQUE_LOCK(cache_publication, resolver_cache_snapshot_mutex_);
+        list_refresh_tasks_.request_cancel_active();
     }
 
     Logger::instance().trace(
@@ -874,7 +891,8 @@ ConfigApplyResult
 Daemon::apply_validated_config_via_control_task_with_lease_return(
     Config config,
     std::string saved_config_json,
-    RuntimeMutationAdmission::Lease& lease) {
+    RuntimeMutationAdmission::Lease& lease,
+    std::optional<ConfigDraftRebase> draft_rebase) {
     struct ExactLeaseReturn final {
         RuntimeMutationAdmission::Lease& destination;
         RuntimeMutationAdmission::Lease& owner;
@@ -904,6 +922,7 @@ Daemon::apply_validated_config_via_control_task_with_lease_return(
     std::shared_ptr<PreparedRuntimeInputs> prepared;
     std::shared_ptr<PreparedRuntimeInputs> rollback_prepared;
     std::shared_ptr<std::string> saved_config;
+    std::shared_ptr<ConfigDraftRebase> draft_rebase_owner;
     ActiveConfigSnapshotHandle base_active_snapshot;
     std::shared_ptr<PreapplyLeaseSlot> returned;
     RuntimeFirewallLifecycleCompletion::Pair completion;
@@ -921,6 +940,10 @@ Daemon::apply_validated_config_via_control_task_with_lease_return(
         rollback_prepared = std::make_shared<PreparedRuntimeInputs>();
         saved_config =
             std::make_shared<std::string>(std::move(saved_config_json));
+        if (draft_rebase) {
+            draft_rebase_owner =
+                std::make_shared<ConfigDraftRebase>(std::move(*draft_rebase));
+        }
         base_active_snapshot = config_store_.pin_active_snapshot();
         const Config& active_config = base_active_snapshot->config;
         refresh_remote_lists_after_apply =
@@ -1051,6 +1074,7 @@ Daemon::apply_validated_config_via_control_task_with_lease_return(
              prepared,
              rollback_prepared,
              saved_config,
+             draft_rebase_owner,
              base_active_snapshot,
              expected_lease_token,
              final_continuation_slot](
@@ -1071,7 +1095,8 @@ Daemon::apply_validated_config_via_control_task_with_lease_return(
                         std::move(*prepared),
                         std::move(*rollback_prepared),
                         std::move(*saved_config),
-                        std::move(*final_continuation_slot));
+                        std::move(*final_continuation_slot),
+                        std::move(draft_rebase_owner));
                     return;
                 }
                 if (!exact_lease_returned) {
@@ -1224,7 +1249,8 @@ Daemon::apply_validated_config_via_control_task_with_lease_return(
             std::move(*prepared),
             std::move(*rollback_prepared),
             std::move(*saved_config),
-            std::move(*final_continuation_slot));
+            std::move(*final_continuation_slot),
+            std::move(draft_rebase_owner));
         disposition = RuntimeFirewallImmediateDisposition::handed_off;
     }
 
@@ -1292,7 +1318,8 @@ Daemon::apply_validated_config_via_control_task_with_lease_return(
     return *result;
 }
 
-ListRefreshOperationResult Daemon::refresh_lists_via_api(std::optional<std::string> requested_name) {
+ListRefreshOperationResult Daemon::refresh_lists_via_api(const api::ListRefreshRequest& request) {
+    const auto& requested_name = request.name;
     if (is_event_loop_thread()) {
         throw ApiError(
             "List refresh completion cannot wait on the control loop", 503);
@@ -1301,7 +1328,7 @@ ListRefreshOperationResult Daemon::refresh_lists_via_api(std::optional<std::stri
         "refresh-lists", false, false);
     const auto expected_lease_token = mutation.token();
     if (config_store_.config_is_draft()) {
-        throw ApiError("List refresh is unavailable while a draft config is staged", 409);
+        throw operation_error("List refresh is unavailable while a draft config is staged", 409, "draft_pending");
     }
 
     const auto active_snapshot = config_store_.pin_active_snapshot();
@@ -1339,6 +1366,8 @@ ListRefreshOperationResult Daemon::refresh_lists_via_api(std::optional<std::stri
                                                  target_selection.list_names.end());
         RemoteListRefreshControl control;
         control.cache_commit = make_guarded_cache_commit_callback();
+        control.force_refresh = request.force_refresh.value_or(false);
+        control.accept_shrink = request.accept_shrink;
         RemoteListsRefreshResult refresh_result =
             list_service_.refresh_remote_lists(
                 config_snapshot,
@@ -1625,7 +1654,7 @@ ListRefreshOperationResult Daemon::refresh_lists_via_api(std::optional<std::stri
 }
 
 TestRoutingResult Daemon::run_api_routing_test(
-    const std::string& target) {
+    const std::string& target, std::optional<std::string> http_probe_ip) {
     if (!event_loop_active_.load(std::memory_order_acquire)) {
         throw ApiError(
             "Routing diagnostics are unavailable until the control loop is running",
@@ -1695,6 +1724,7 @@ TestRoutingResult Daemon::run_api_routing_test(
             [this,
              snapshot,
              target,
+             http_probe_ip,
              promise,
              operation_deadline,
              lease = std::move(*admitted)]() mutable {
@@ -1708,6 +1738,22 @@ TestRoutingResult Daemon::run_api_routing_test(
                         operation_deadline,
                         snapshot->firewall_backend,
                         system_fib_lookup);
+                    if (http_probe_ip) {
+                        result.http_probe = probe_routing_http(
+                            result, snapshot->realized_rules, *http_probe_ip,
+                            operation_deadline, *default_http_transport());
+                    }
+                    attach_routing_firewall_evidence(
+                        result.entries, snapshot->realized_rules,
+                        [&](const std::vector<FirewallClassifierQuery>& queries) {
+                            return collect_firewall_counter_evidence(
+                                snapshot->firewall_backend,
+                                snapshot->raw_prerouting,
+                                snapshot->realized_rules,
+                                queries,
+                                snapshot->firewall_mark_mask,
+                                operation_deadline);
+                        });
                     result.unapplied_draft =
                         snapshot->unapplied_draft;
                     if (result.unapplied_draft) {
@@ -1955,14 +2001,39 @@ void Daemon::setup_api() {
             throw std::logic_error(
                 "Production runtime restart requires exact lease handoff");
         },
-        [this](std::optional<std::string> requested_name) {
-            return refresh_lists_via_api(requested_name);
+        [this](const api::ListRefreshRequest& request) {
+            return refresh_lists_via_api(request);
         },
         nullptr,
         &lifecycle_operations_,
     });
+    api_ctx_->compute_test_routing_with_http_fn =
+        [this](const std::string& target, const std::string& ip) {
+            return run_api_routing_test(target, ip);
+        };
     api_ctx_->get_diagnostic_tasks_fn = [this]() {
-        return build_diagnostic_tasks_response(periodic_task_metrics_);
+        // Read existing timer state only. Do not inspect control-loop task IDs
+        // or infer deadlines from metrics: a queued worker may have no timer.
+        static const std::vector<ScheduledTaskFamily> families{
+            {"resolver-hash-refresh", {
+                "resolver-config-hash-actual",
+                "resolver-config-hash-actual-retry",
+                "resolver-config-hash-inflight-retry",
+                "resolver-config-hash-executor-retry",
+                "resolver-config-hash-stale-generation-retry"}},
+            {"keenetic-dns-refresh", {
+                "keenetic-dns-refresh", "keenetic-dns-refresh-admission-retry"}},
+            {"owned-snat-health", {"owned-snat-health"}},
+            {"interface-probe", {"interface-probe"}},
+            {"interface-traffic-sample", {"interface-traffic-sample"}},
+        };
+        const auto schedules = scheduler_
+            ? scheduler_->snapshot_next_runs(families)
+            : std::vector<ScheduledTaskSnapshot>{};
+        const auto captured_at = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        return build_diagnostic_tasks_response(
+            periodic_task_metrics_, schedules, captured_at);
     };
     api_ctx_->acquire_runtime_mutation_fn =
         [this](std::string label,
@@ -1991,6 +2062,18 @@ void Daemon::setup_api() {
                 std::move(saved_config_json),
                 lease);
         };
+    api_ctx_->enqueue_apply_validated_config_with_draft_rebase_fn =
+        [this](Config config,
+               std::string saved_config_json,
+               ConfigDraftRebase draft_rebase,
+               RuntimeMutationAdmission::Lease& lease) {
+            return apply_validated_config_via_control_task_with_lease_return(
+                std::move(config), std::move(saved_config_json), lease,
+                std::move(draft_rebase));
+        };
+    api_ctx_->get_active_config_fn = [this]() {
+        return config_store_.active_config();
+    };
     api_ctx_->start_runtime_with_lease_fn =
         [this](RuntimeMutationAdmission::Lease lease) {
             start_routing_runtime_with_lease(std::move(lease));
@@ -2019,6 +2102,9 @@ void Daemon::setup_api() {
         [this]() {
             return config_store_.visible_snapshot();
         };
+    api_ctx_->get_tunnel_probe_active_config_fn = [this]() {
+        return config_store_.pin_active_snapshot()->config;
+    };
     api_ctx_->get_staged_config_cas_snapshot_fn =
         [this]() {
             return config_store_.staged_cas_snapshot();
@@ -2333,7 +2419,8 @@ void Daemon::setup_api() {
                     NdmsNativeCooperativeDeleteStop::writer_missing);
             }
             try {
-                reservation->writer().verify_held();
+                auto& writer = reservation->writer();
+                writer.verify_held();
                 NdmsNativeConfigDependencyProvider dependencies{
                     read_native_dependency_snapshot};
                 NdmsNativeCooperativeDeleteCoordinator coordinator{
@@ -2343,8 +2430,77 @@ void Daemon::setup_api() {
                     ndms_native_secret_snapshot_store_,
                     ndms_native_ownership_store_,
                     dependencies};
+                const Config original_active =
+                    config_store_.pin_active_snapshot()->config;
+                const auto original_draft =
+                    api_ctx_->get_staged_config_cas_snapshot();
+                std::vector<std::string> kernel_interfaces;
+                for (const auto& interface : netlink_.dump_interfaces())
+                    kernel_interfaces.push_back(interface.name);
+                const auto kernel_name = resolve_ndms_kernel_name(
+                    request.interface_name, kernel_interfaces);
+                const auto active_plan = plan_native_interface_outbound_delete(
+                    original_active, kernel_name.value_or(""));
+                const auto draft_plan = original_draft
+                    ? std::optional<InterfaceOutboundDeletePlan>{
+                        plan_native_interface_outbound_delete(
+                            original_draft->config, kernel_name.value_or(""))}
+                    : std::nullopt;
+                // Group membership still needs the user's explicit edit.
+                // A hidden draft must not be silently applied to remove it.
+                if (active_plan.used_by_group ||
+                    (draft_plan && draft_plan->used_by_group))
+                    return blocked_native_delete(
+                        NdmsNativeCooperativeDeleteStop::keen_pbr_dependencies_present);
+
+                const bool routes_removed = !active_plan.tags.empty() ||
+                    (draft_plan && !draft_plan->tags.empty());
+                if (routes_removed) {
+                    writer.with_outer_leases([&](MaintenanceLease& maintenance,
+                                                 RuntimeMutationAdmission::Lease& runtime) {
+                        (void)commit_prepared_config_with_lease(
+                            *api_ctx_, maintenance, runtime, [&] {
+                                PreparedConfigCommit prepared;
+                                prepared.config = active_plan.config;
+                                prepared.serialized = serialize_config_for_persistence(prepared.config);
+                                if (original_draft) {
+                                    prepared.draft_rebase = ConfigDraftRebase{
+                                        original_draft, draft_plan->config,
+                                        serialize_config_for_persistence(draft_plan->config)};
+                                }
+                                return prepared;
+                            });
+                    });
+                }
+                writer.verify_held();
                 auto result = coordinator.delete_once(
-                    reservation->writer(), request);
+                    writer, request);
+                // Restore only when this fresh invocation is definitely
+                // blocked before native dispatch. An ambiguous native result
+                // belongs to the existing native recovery path, not a blind
+                // reattachment of routing to an interface that may be gone.
+                if (routes_removed &&
+                    result.status == NdmsNativeCooperativeDeleteStatus::blocked &&
+                    !result.request_may_have_been_dispatched &&
+                    !result.delete_perform_started && !result.save_perform_started) {
+                    writer.with_outer_leases([&](MaintenanceLease& maintenance,
+                                                 RuntimeMutationAdmission::Lease& runtime) {
+                        (void)commit_prepared_config_with_lease(
+                            *api_ctx_, maintenance, runtime, [&] {
+                                PreparedConfigCommit prepared;
+                                prepared.config = original_active;
+                                prepared.serialized = serialize_config_for_persistence(original_active);
+                                if (original_draft) {
+                                    prepared.draft_rebase = ConfigDraftRebase{
+                                        api_ctx_->get_staged_config_cas_snapshot(),
+                                        original_draft->config,
+                                        original_draft->serialized,
+                                        original_draft->base_revision};
+                                }
+                                return prepared;
+                            }, false);
+                    });
+                }
                 Logger::instance().info(
                     "Native VPN delete {}: status={}, stop={}",
                     request.interface_name,
@@ -2508,6 +2664,24 @@ void Daemon::setup_api() {
         if (status_stream_) status_stream_->reconcile();
     });
     setup_conntrack_events();
+    const auto subscription_store = std::make_shared<SubscriptionStore>(
+        (std::filesystem::path(config_path_).parent_path() / "subscriptions.json").string());
+    api_ctx_->subscription_refresh_service = std::make_shared<SubscriptionRefreshService>(
+        subscription_store, make_subscription_fetcher(),
+        [path = config_path_](const auto& updates) {
+            SubscriptionUpdateResult result;
+            try {
+                result = update_subscription_transports(load_transport_manager_endpoint(path), updates);
+            } catch (...) { result.error_code = "apply_failed"; }
+            return result;
+        },
+        [path = config_path_]() {
+            return read_subscription_transports(load_transport_manager_endpoint(path));
+        }, SubscriptionRefreshService::Clock{},
+        [factory = api_ctx_->maintenance_lease_factory_fn]() -> std::unique_ptr<MaintenanceLease> {
+            return factory ? factory("transport-config-update") :
+                std::make_unique<MaintenanceCoordinator>("transport-config-update");
+        });
     register_api_handlers(*api_server_, *api_ctx_);
 
     // Latency with its measurement age. Kept out of the generated runtime

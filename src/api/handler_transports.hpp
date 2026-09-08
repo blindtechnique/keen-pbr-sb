@@ -31,6 +31,11 @@ PreparedConfigCommit prepare_linked_transport_creates(
     std::vector<LinkedTransportCreate> creates,
     bool batch_manager_api = true);
 
+// Delete the manager transport and its exact linked routing dependencies from
+// active state. An unrelated draft is rebased, never applied by this action.
+PreparedConfigCommit prepare_linked_transport_delete(
+    ApiContext& ctx, const std::string& tag);
+
 // Runs one loopback manager request and returns one parser verdict per item.
 // It never forwards manager error text, which may contain share-link secrets.
 std::vector<bool> validate_linked_transport_create_items(

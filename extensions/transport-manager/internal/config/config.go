@@ -480,6 +480,11 @@ func (a *Admin) prepareCreateManyLocked(
 	if len(specs) == 0 {
 		return nil, nil, false, errors.New("transport batch must not be empty")
 	}
+	allocated, err := transport.AllocateNewTunAddresses(a.config.Transports, specs)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	specs = allocated
 
 	nextSpecs := append([]transport.TransportSpec(nil), a.config.Transports...)
 	managed := make([]transport.Transport, len(specs))
@@ -528,6 +533,7 @@ func (a *Admin) createManyLocked(
 	if err != nil {
 		return err
 	}
+	specs = nextSpecs[len(a.config.Transports):]
 	if hasShared {
 		if err := a.validateSharedInventoryLocked(nextSpecs); err != nil {
 			return err
@@ -593,6 +599,11 @@ func (a *Admin) prepareCreateLocked(
 	if a.index(spec.Tag) >= 0 {
 		return nil, nil, fmt.Errorf("transport %q already exists", spec.Tag)
 	}
+	allocated, err := transport.AllocateNewTunAddresses(a.config.Transports, []transport.TransportSpec{spec})
+	if err != nil {
+		return nil, nil, err
+	}
+	spec = allocated[0]
 	nextSpecs := append(append([]transport.TransportSpec{}, a.config.Transports...), spec)
 	if err := transport.ValidateUniqueTunAddresses(nextSpecs); err != nil {
 		return nil, nil, err
@@ -620,6 +631,7 @@ func (a *Admin) createLocked(ctx context.Context, spec transport.TransportSpec) 
 	if err != nil {
 		return err
 	}
+	spec = nextSpecs[len(nextSpecs)-1]
 	if a.shared != nil && (spec.Type == "sing-box" || spec.Type == "sing-box-vless-reality") {
 		return a.createSharedLocked(ctx, spec, nextSpecs)
 	}
@@ -729,6 +741,10 @@ func (a *Admin) prepareUpdateLocked(
 			fmt.Errorf("transport tag cannot be changed")
 	}
 	oldSpec := a.config.Transports[index]
+	if spec.TunAddress == "" && spec.Type == oldSpec.Type {
+		// Partial/older clients must not erase a persisted vacant-slot choice.
+		spec.TunAddress = oldSpec.TunAddress
+	}
 	if a.shared != nil && spec.Type != oldSpec.Type {
 		return transport.TransportSpec{}, transport.TransportSpec{}, nil, nil,
 			fmt.Errorf("transport type cannot be changed")
@@ -863,6 +879,26 @@ func (a *Admin) updateSharedLocked(
 func (a *Admin) Delete(ctx context.Context, tag string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return a.deleteLocked(ctx, tag)
+}
+
+// DeleteIfRevision compares and deletes under the same existing Admin lock,
+// like create/update, so a stale linked-delete cannot remove a newer transport.
+func (a *Admin) DeleteIfRevision(
+	ctx context.Context,
+	tag string,
+	expectedRevision string,
+) (string, bool, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if expectedRevision != a.revision {
+		return a.revision, false, nil
+	}
+	err := a.deleteLocked(ctx, tag)
+	return a.revision, true, err
+}
+
+func (a *Admin) deleteLocked(ctx context.Context, tag string) error {
 	index := a.index(tag)
 	if index < 0 {
 		return fmt.Errorf("transport %q not found", tag)

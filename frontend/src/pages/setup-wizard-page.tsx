@@ -1,7 +1,7 @@
 import { SingBoxSetupOffer } from "@/components/transports/sing-box-setup-offer"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { CheckIcon, Link2Icon, WorkflowIcon } from "lucide-react"
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 import { useLocation } from "wouter"
@@ -20,7 +20,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { useInterfaceDisplayNames } from "@/hooks/use-interface-display-names"
-import { getApiErrorMessage } from "@/lib/api-errors"
+import { OperationErrorMessage } from "@/components/shared/operation-error-message"
 import { validateDisplayName } from "@/lib/display-name-validation"
 import { getOutboundSelectDisplayName } from "@/lib/outbound-display"
 import { cn } from "@/lib/utils"
@@ -63,6 +63,9 @@ export default function SetupWizardPage() {
   const [step, setStep] = useState<WizardStep>(1)
   const [link, setLink] = useState("")
   const [tunnelName, setTunnelName] = useState("")
+  const [nameTouched, setNameTouched] = useState(false)
+  const nameInputRef = useRef<HTMLInputElement>(null)
+  const stepHeadingRef = useRef<HTMLHeadingElement>(null)
   const [existingOutboundTag, setExistingOutboundTag] = useState("")
   const [outboundTag, setOutboundTag] = useState("")
   const [outboundName, setOutboundName] = useState("")
@@ -74,6 +77,10 @@ export default function SetupWizardPage() {
     readonly intent: CatalogSetupIntent
     readonly preview: CatalogSetupPreview
   } | null>(null)
+
+  useEffect(() => {
+    if (step > 1) stepHeadingRef.current?.focus()
+  }, [step])
 
   const existingOutbounds = loadedConfig?.outbounds ?? []
   const routableOutbounds = existingOutbounds.filter(
@@ -117,9 +124,15 @@ export default function SetupWizardPage() {
   )
 
   const nameError = validateDisplayName(tunnelName)
+  const showNameError = nameTouched && Boolean(nameError)
   const createTunnelMutation = usePostTransportConfigApplyMutation()
 
   const createTunnel = async () => {
+    if (nameError) {
+      setNameTouched(true)
+      nameInputRef.current?.focus()
+      return
+    }
     try {
       if (!setupInventoryReady || !loadedConfig) {
         throw new Error(t("pages.setupWizard.connection.inventoryUnavailable"))
@@ -150,7 +163,7 @@ export default function SetupWizardPage() {
       setOutboundName(result.displayName)
       setStep(2)
     } catch (error) {
-      toast.error(getApiErrorMessage(error as ApiError), { richColors: true })
+      toast.error(<OperationErrorMessage error={error} />, { richColors: true })
     }
   }
 
@@ -222,9 +235,11 @@ export default function SetupWizardPage() {
         setPreviewState(null)
       }
       toast.error(
-        error instanceof SetupWizardVisibleDraftError
-          ? t("pages.setupWizard.services.draftBlocked")
-          : getApiErrorMessage(error),
+        error instanceof SetupWizardVisibleDraftError ? (
+          t("pages.setupWizard.services.draftBlocked")
+        ) : (
+          <OperationErrorMessage error={error} />
+        ),
         { richColors: true }
       )
     },
@@ -280,7 +295,11 @@ export default function SetupWizardPage() {
       {step === 1 ? (
         <section className="max-w-[640px] space-y-4">
           <div className="space-y-1">
-            <h2 className="text-base font-semibold">
+            <h2
+              className="text-base font-semibold"
+              ref={stepHeadingRef}
+              tabIndex={-1}
+            >
               {t("pages.setupWizard.connection.title")}
             </h2>
             <p className="text-sm text-muted-foreground">
@@ -349,20 +368,27 @@ export default function SetupWizardPage() {
               {t("pages.setupWizard.connection.nameLabel")}
             </Label>
             <Input
+              aria-describedby={showNameError ? "setup-name-error" : undefined}
+              aria-invalid={showNameError}
               id="setup-name"
               disabled={!setupInventoryReady || createTunnelMutation.isPending}
+              onBlur={() => setNameTouched(true)}
               onChange={(event) => setTunnelName(event.target.value)}
               placeholder={t("pages.setupWizard.connection.namePlaceholder")}
+              ref={nameInputRef}
               value={tunnelName}
             />
+            {showNameError ? (
+              <p className="text-xs text-destructive" id="setup-name-error">
+                {t("transports.form.displayNameInvalid")}
+              </p>
+            ) : null}
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
             <Button
               disabled={
                 !link.trim() ||
-                Boolean(nameError) ||
-                !tunnelName.trim() ||
                 !setupInventoryReady ||
                 createTunnelMutation.isPending
               }
@@ -373,6 +399,20 @@ export default function SetupWizardPage() {
                 ? t("pages.setupWizard.connection.creating")
                 : t("pages.setupWizard.connection.create")}
             </Button>
+          </div>
+
+          <div className="space-y-2">
+            <Button
+              className="h-auto min-h-8 max-w-full whitespace-normal"
+              disabled={createTunnelMutation.isPending}
+              onClick={() => navigate("/transports")}
+              variant="outline"
+            >
+              {t("pages.setupWizard.connection.otherImport")}
+            </Button>
+            <p className="text-xs text-muted-foreground">
+              {t("pages.setupWizard.connection.otherImportHint")}
+            </p>
           </div>
 
           {routableOutbounds.length > 0 ? (
@@ -434,13 +474,20 @@ export default function SetupWizardPage() {
       {step === 2 ? (
         <section className="space-y-4">
           <div className="max-w-[640px] space-y-1">
-            <h2 className="text-base font-semibold">
+            <h2
+              className="text-base font-semibold"
+              ref={stepHeadingRef}
+              tabIndex={-1}
+            >
               {t("pages.setupWizard.services.title")}
             </h2>
             <p className="text-sm text-muted-foreground">
               {t("pages.setupWizard.services.description", {
                 name: outboundName,
               })}
+            </p>
+            <p className="text-sm text-muted-foreground">
+              {t("pages.setupWizard.services.dnsHint")}
             </p>
           </div>
 
@@ -573,7 +620,11 @@ export default function SetupWizardPage() {
       {step === 3 ? (
         <section className="max-w-[640px] space-y-4">
           <div className="space-y-1">
-            <h2 className="text-base font-semibold">
+            <h2
+              className="text-base font-semibold"
+              ref={stepHeadingRef}
+              tabIndex={-1}
+            >
               {t("pages.setupWizard.done.title")}
             </h2>
             <p className="text-sm text-muted-foreground">
@@ -587,8 +638,14 @@ export default function SetupWizardPage() {
                   })}
             </p>
           </div>
+          <p className="text-sm text-muted-foreground">
+            {t("pages.setupWizard.done.checkHint")}
+          </p>
           <div className="flex flex-wrap items-center gap-2">
-            <Button onClick={() => navigate("/")}>
+            <Button onClick={() => navigate("/?check=1")}>
+              {t("pages.setupWizard.done.checkSite")}
+            </Button>
+            <Button onClick={() => navigate("/")} variant="outline">
               {t("pages.setupWizard.done.openDashboard")}
             </Button>
             <Button onClick={() => navigate("/transports")} variant="outline">
@@ -596,6 +653,12 @@ export default function SetupWizardPage() {
             </Button>
             <Button onClick={() => navigate("/rules")} variant="outline">
               {t("pages.setupWizard.done.openRules")}
+            </Button>
+            <Button onClick={() => navigate("/dns-servers")} variant="outline">
+              {t("pages.setupWizard.done.openDns")}
+            </Button>
+            <Button onClick={() => navigate("/catalog")} variant="outline">
+              {t("pages.setupWizard.done.openCatalog")}
             </Button>
           </div>
         </section>

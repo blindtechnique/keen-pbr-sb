@@ -100,9 +100,33 @@ ComponentBootRecoveryPlan decide_component_boot_recovery(
     const bool capture_usable =
         evidence.capture == ComponentCaptureState::usable;
 
-    // Is the package provably what it was before the mutation? Both halves
-    // must be known and must match: an unreadable version or digest is not
-    // a match, it is an unknown.
+    const bool exact_previous_available =
+        record.exact_previous_ipk &&
+        evidence.previous_ipk.state == IpkSlotState::usable &&
+        evidence.previous_ipk.retained &&
+        !record.previous_version.empty() &&
+        evidence.previous_ipk.retained->version == record.previous_version;
+
+    if (exact_previous_available && capture_usable) {
+        // An interrupted unpack can change opkg's file list and metadata
+        // before replacing either the version field or the real binary
+        // (nfqws installs that binary from postinst). Matching those two
+        // observations must not skip the package manager's repair when the
+        // exact old IPK is available. Reuse the existing reinstall followed
+        // by captured-file and runtime restoration, without changing the
+        // compatibility fallback for devices that never retained that IPK.
+        plan.action = ComponentBootRecoveryAction::reinstall_previous;
+        plan.reinstall_version = record.previous_version;
+        plan.clear_journal_on_success = true;
+        plan.reason = "the exact previous package " + record.previous_version +
+                      " and a usable capture are both held; reinstall the "
+                      "package metadata before restoring captured files";
+        return plan;
+    }
+
+    // Without an exact retained IPK, preserve the existing file-repair path
+    // when both visible observations still match the pre-mutation state.
+    // An unreadable version or digest is not a match, it is an unknown.
     const bool version_known =
         !record.previous_version.empty() && !evidence.installed_version.empty();
     const bool digest_known = !record.binary_sha256.empty() &&
@@ -131,21 +155,6 @@ ComponentBootRecoveryPlan decide_component_boot_recovery(
         return plan;
     }
 
-    const bool exact_previous_available =
-        record.exact_previous_ipk &&
-        evidence.previous_ipk.state == IpkSlotState::usable &&
-        evidence.previous_ipk.retained &&
-        !record.previous_version.empty() &&
-        evidence.previous_ipk.retained->version == record.previous_version;
-
-    if (exact_previous_available && capture_usable) {
-        plan.action = ComponentBootRecoveryAction::reinstall_previous;
-        plan.reinstall_version = record.previous_version;
-        plan.clear_journal_on_success = true;
-        plan.reason = "the exact previous package " + record.previous_version +
-                      " and a usable capture are both held";
-        return plan;
-    }
     if (exact_previous_available) {
         // The package can be put back exactly; its captured files cannot.
         // Reinstalling alone would leave package defaults where the

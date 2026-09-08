@@ -1,21 +1,32 @@
 #ifdef WITH_API
 
 #include "handler_logs.hpp"
+#include "../log/subscription_notices.hpp"
+#include <ctime>
+#include "status_stream.hpp"
 
 #include "../config/config_writer.hpp"
 #include "../log/file_sink.hpp"
+#include "../log/nfqws_log_maintenance.hpp"
 #include "../log/logger.hpp"
+#include "../log/notification_state.hpp"
 #include "../util/last_command_failure.hpp"
 
 #include <httplib.h>
 
 #include <algorithm>
+#include <cerrno>
+#include <cstdio>
 #include <cstdlib>
+#include <deque>
+#include <filesystem>
 #include <fstream>
+#include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -71,6 +82,11 @@ std::string settings_path() {
 }
 
 std::string log_file_path() {
+#ifdef KEEN_PBR3_TESTING
+    if (const char* configured = std::getenv("KEEN_PBR_TEST_LOG_FILE")) {
+        if (*configured != '\0') return configured;
+    }
+#endif
 #ifdef KEEN_PBR_DEFAULT_LOG_FILE
     return KEEN_PBR_DEFAULT_LOG_FILE;
 #else
@@ -127,6 +143,94 @@ std::vector<std::string> read_tail(const std::string& path,
     return lines;
 }
 
+nlohmann::json notification_state_json(const NotificationDismissalState& state) {
+    return {{"revision", state.revision},
+            {"log_ids", state.log_ids},
+            {"update_ids", state.update_ids}};
+}
+
+struct NotificationTail {
+    std::vector<std::string> lines;
+    std::vector<std::string> line_ids;
+};
+
+NotificationTail read_notification_tail(const std::string& path) {
+    // Obtain the identity from the open file, not a pathname stat: rotation
+    // between stat/open must not attach an old line to a new file's identity.
+    const auto close_file = [](FILE* handle) { (void)std::fclose(handle); };
+    std::unique_ptr<FILE, decltype(close_file)> file(
+        std::fopen(path.c_str(), "rb"), close_file);
+    if (!file) {
+        if (errno == ENOENT) return {};
+        throw ApiError("Could not read notifications", 500);
+    }
+    struct stat metadata {};
+    if (::fstat(::fileno(file.get()), &metadata) != 0 ||
+        !S_ISREG(metadata.st_mode) || metadata.st_size < 0) {
+        throw ApiError("Could not read notifications", 500);
+    }
+    const auto size = static_cast<std::uint64_t>(metadata.st_size);
+    const auto length = static_cast<std::size_t>(
+        std::min<std::uint64_t>(size, kMaxTailBytes));
+    const auto offset = size - length;
+    if (::fseeko(file.get(), static_cast<off_t>(offset), SEEK_SET) != 0) {
+        throw ApiError("Could not read notifications", 500);
+    }
+    std::string chunk(length, '\0');
+    chunk.resize(std::fread(chunk.data(), 1, length, file.get()));
+    if (std::ferror(file.get())) {
+        throw ApiError("Could not read notifications", 500);
+    }
+
+    // Retain only the last 200 ranges. Even a log made of tiny lines keeps a
+    // bounded number of allocations and hashes only the lines being returned.
+    std::deque<std::pair<std::size_t, std::size_t>> ranges;
+    std::size_t start = 0;
+    if (offset != 0) {
+        const auto first_end = chunk.find('\n');
+        if (first_end == std::string::npos) return {};
+        start = first_end + 1;
+    }
+    while (start < chunk.size()) {
+        const auto newline = chunk.find('\n', start);
+        const auto end = newline == std::string::npos ? chunk.size() : newline;
+        ranges.emplace_back(start, end - start);
+        if (ranges.size() > 200) ranges.pop_front();
+        if (newline == std::string::npos) break;
+        start = newline + 1;
+    }
+    NotificationTail result;
+    result.lines.reserve(ranges.size());
+    result.line_ids.reserve(ranges.size());
+    for (const auto& range : ranges) {
+        result.lines.emplace_back(chunk.substr(range.first, range.second));
+        result.line_ids.push_back(notification_log_id(
+            result.lines.back(),
+            static_cast<std::uint64_t>(metadata.st_dev),
+            static_cast<std::uint64_t>(metadata.st_ino),
+            offset + range.first));
+    }
+    return result;
+}
+
+std::vector<std::string> notification_request_ids(
+    const nlohmann::json& request, const char* key, std::size_t limit) {
+    const auto value = request.find(key);
+    if (value == request.end()) return {};
+    if (!value->is_array() || value->size() > limit) {
+        throw ApiError("Invalid notification dismissal IDs", 400);
+    }
+    std::vector<std::string> ids;
+    ids.reserve(value->size());
+    for (const auto& item : *value) {
+        if (!item.is_string()) {
+            throw ApiError("Invalid notification dismissal IDs", 400);
+        }
+        ids.push_back(item.get<std::string>());
+    }
+    return ids;
+}
+
 const char* level_name(LogLevel level) {
     switch (level) {
         case LogLevel::error: return "error";
@@ -142,6 +246,14 @@ nlohmann::json read_settings() {
     nlohmann::json settings;
     settings["file_enabled"] = file_logging_enabled();
     settings["level"] = level_name(Logger::instance().level());
+    settings["max_file_bytes"] = file_logging_max_bytes();
+    settings["nfqws_max_file_bytes"] = nfqws_log_max_bytes();
+    settings["size_limit_enabled"] = file_log_size_limit_enabled();
+    settings["age_limit_enabled"] = file_log_age_limit_enabled();
+    settings["max_age_days"] = file_log_max_age_days();
+    settings["nfqws_size_limit_enabled"] = nfqws_log_size_limit_enabled();
+    settings["nfqws_age_limit_enabled"] = nfqws_log_age_limit_enabled();
+    settings["nfqws_max_age_days"] = nfqws_log_max_age_days();
 
     std::ifstream file(settings_path());
     if (!file.is_open()) {
@@ -154,6 +266,22 @@ nlohmann::json read_settings() {
         }
         if (stored.contains("level") && stored["level"].is_string()) {
             settings["level"] = stored["level"].get<std::string>();
+        }
+        for (const auto* key : {"max_file_bytes", "nfqws_max_file_bytes"}) {
+            if (stored.contains(key) && stored[key].is_number_integer()) {
+                const auto value = stored[key].get<std::uint64_t>();
+                if (value >= kMinLogFileBytes && value <= kMaxLogFileBytes) {
+                    settings[key] = value;
+                }
+            }
+        }
+        for (const auto* key : {"size_limit_enabled", "age_limit_enabled",
+                               "nfqws_size_limit_enabled", "nfqws_age_limit_enabled"}) {
+            if (stored.contains(key) && stored[key].is_boolean()) settings[key] = stored[key];
+        }
+        for (const auto* key : {"max_age_days", "nfqws_max_age_days"}) {
+            if (stored.contains(key) && stored[key].is_number_integer() &&
+                stored[key] >= 1U && stored[key] <= kMaximumLogAgeDays) settings[key] = stored[key];
         }
     } catch (const std::exception&) {
         // A corrupted preferences file must not take logging down with it.
@@ -202,6 +330,12 @@ void apply_stored_log_settings() {
     const std::lock_guard<std::mutex> lock(settings_mutex());
     const auto settings = read_settings();
     set_file_logging_enabled(settings.value("file_enabled", true));
+    set_file_logging_max_bytes(settings.value("max_file_bytes", FileLogSink::kDefaultMaxBytes));
+    set_nfqws_log_max_bytes(settings.value("nfqws_max_file_bytes", FileLogSink::kDefaultMaxBytes));
+    set_file_log_retention(settings.value("size_limit_enabled", true),
+        settings.value("age_limit_enabled", false), settings.value("max_age_days", kDefaultLogMaxAgeDays));
+    set_nfqws_log_retention(settings.value("nfqws_size_limit_enabled", true),
+        settings.value("nfqws_age_limit_enabled", false), settings.value("nfqws_max_age_days", kDefaultLogMaxAgeDays));
     try {
         Logger::instance().set_level(parse_log_level(settings.value("level", "info")));
     } catch (const std::exception&) {
@@ -209,7 +343,70 @@ void apply_stored_log_settings() {
     }
 }
 
-void register_logs_handler(ApiServer& server) {
+NotificationHandlers make_notification_handlers(
+    StatusStream* status_stream, const std::string& config_path,
+    std::function<nlohmann::json()> subscription_sources) {
+    std::string load_error;
+    const auto state_path =
+        (std::filesystem::path(config_path).parent_path() / "notifications.json").string();
+    auto notifications = std::make_shared<NotificationStateStore>(state_path, &load_error);
+    if (!load_error.empty()) Logger::instance().warn("{}", load_error);
+    if (status_stream) {
+        status_stream->publish_notification_state(
+            notification_state_json(notifications->snapshot()));
+    }
+
+    NotificationHandlers handlers;
+    handlers.get = [notifications, subscription_sources]() {
+        const auto tail = read_notification_tail(log_file_path());
+        nlohmann::json response{
+            {"lines", tail.lines},
+            {"line_ids", tail.line_ids},
+            {"state", notification_state_json(notifications->snapshot())}};
+        response["subscription_notices"] = nlohmann::json::array();
+        if (subscription_sources) {
+            try {
+                response["subscription_notices"] = subscription_notices(
+                    subscription_sources(), static_cast<std::int64_t>(std::time(nullptr)));
+            } catch (...) {
+                response["subscription_notices_error"] = true;
+            }
+        }
+        return response.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+    };
+    handlers.dismiss = [notifications, status_stream](const std::string& body) {
+        const auto request = nlohmann::json::parse(body, nullptr, false);
+        if (!request.is_object()) {
+            throw ApiError("Invalid notification dismissal request", 400);
+        }
+        const auto log_ids = notification_request_ids(request, "log_ids", 200);
+        const auto update_ids = notification_request_ids(
+            request, "update_ids", kNotificationUpdateIdLimit);
+        if (!valid_notification_dismissal(log_ids, update_ids)) {
+            throw ApiError("Invalid notification dismissal IDs", 400);
+        }
+        std::string error;
+        if (!notifications->dismiss(log_ids, update_ids, error)) {
+            throw ApiError("Could not dismiss notifications", 500);
+        }
+        // A successful rename remains applied even if its directory sync was
+        // not confirmed. The store adopts that visible state; do not retry it.
+        if (!error.empty()) Logger::instance().warn("{}", error);
+        const auto state = notification_state_json(notifications->snapshot());
+        if (status_stream) status_stream->publish_notification_state(state);
+        return state.dump();
+    };
+    return handlers;
+}
+
+void register_logs_handler(ApiServer& server,
+                           StatusStream* status_stream,
+                           const std::string& config_path,
+                           std::function<nlohmann::json()> subscription_sources) {
+    auto notifications = make_notification_handlers(status_stream, config_path, std::move(subscription_sources));
+    server.get("/api/notifications", std::move(notifications.get));
+    server.post("/api/notifications/dismiss", std::move(notifications.dismiss));
+
     // GET /api/logs?lines=N - tail of the daemon log file.
     //
     // The router runs keen-pbr from an init script where stderr is discarded,
@@ -283,6 +480,28 @@ void register_logs_handler(ApiServer& server) {
                 parse_log_level(level);
                 settings["level"] = level;
             }
+            for (const auto* key : {"max_file_bytes", "nfqws_max_file_bytes"}) {
+                if (!request.contains(key)) continue;
+                if (!request[key].is_number_integer() ||
+                    request[key] < kMinLogFileBytes || request[key] > kMaxLogFileBytes) {
+                    throw std::invalid_argument(std::string(key) +
+                        " must be an integer from 65536 to 16777216 bytes");
+                }
+                settings[key] = request[key];
+            }
+            for (const auto* key : {"size_limit_enabled", "age_limit_enabled",
+                                   "nfqws_size_limit_enabled", "nfqws_age_limit_enabled"}) {
+                if (!request.contains(key)) continue;
+                if (!request[key].is_boolean()) throw std::invalid_argument(std::string(key) + " must be a boolean");
+                settings[key] = request[key];
+            }
+            for (const auto* key : {"max_age_days", "nfqws_max_age_days"}) {
+                if (!request.contains(key)) continue;
+                if (!request[key].is_number_integer() || request[key] < 1U || request[key] > kMaximumLogAgeDays) {
+                    throw std::invalid_argument(std::string(key) + " must be an integer from 1 to 365 days");
+                }
+                settings[key] = request[key];
+            }
 
             bool settings_durable = false;
             try {
@@ -296,6 +515,12 @@ void register_logs_handler(ApiServer& server) {
             }
 
             set_file_logging_enabled(settings.value("file_enabled", true));
+            set_file_logging_max_bytes(settings.value("max_file_bytes", FileLogSink::kDefaultMaxBytes));
+            set_nfqws_log_max_bytes(settings.value("nfqws_max_file_bytes", FileLogSink::kDefaultMaxBytes));
+            set_file_log_retention(settings.value("size_limit_enabled", true),
+                settings.value("age_limit_enabled", false), settings.value("max_age_days", kDefaultLogMaxAgeDays));
+            set_nfqws_log_retention(settings.value("nfqws_size_limit_enabled", true),
+                settings.value("nfqws_age_limit_enabled", false), settings.value("nfqws_max_age_days", kDefaultLogMaxAgeDays));
             Logger::instance().set_level(
                 parse_log_level(settings.value("level", "info")));
 

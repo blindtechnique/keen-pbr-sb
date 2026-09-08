@@ -44,6 +44,7 @@ import {
   queryKeys,
 } from "@/api/query-keys"
 import { apiFetch, type ApiError } from "@/api/client"
+import { invalidateSubscriptionQueries } from "@/api/subscription-events"
 
 type UsePostListsRefreshOptions = Parameters<typeof usePostListsRefresh>[0]
 type UsePostListDeleteStageOptions = Parameters<
@@ -218,23 +219,9 @@ export const usePostSubscriptionApplyMutation = (
     mutation: {
       ...options?.mutation,
       onSuccess: async (data, variables, onMutateResult, context) => {
-        await queryClient.invalidateQueries({
-          queryKey: ["/api/subscriptions"],
-        })
-        // Same set as a manual transport create: apply reaches the same
-        // manager pipeline, so the same views go stale.
-        await queryClient.invalidateQueries({
-          queryKey: queryKeys.transportConfig(),
-        })
-        await queryClient.invalidateQueries({
-          queryKey: queryKeys.transports(),
-        })
-        await queryClient.invalidateQueries({
-          queryKey: queryKeys.runtimeInterfaces(),
-        })
-        await queryClient.invalidateQueries({
-          queryKey: queryKeys.runtimeOutbounds(),
-        })
+        // The import reply confirms creation, including linked routing.
+        // Keep caller callbacks, but do not await unrelated runtime GETs.
+        invalidateSubscriptionQueries(queryClient)
         await options?.mutation?.onSuccess?.(
           data,
           variables,
@@ -357,11 +344,13 @@ export const useApplyConfigMutation = (options?: UsePostConfigSaveOptions) => {
     mutation: {
       ...options?.mutation,
       onSuccess: async (data, variables, onMutateResult, context) => {
-        await Promise.all(
+        // The server has already finished apply. A slow diagnostic refresh
+        // must not keep Apply pending or delay its confirmation/action.
+        void Promise.all(
           invalidationKeysAfterApplyConfigMutation.map((queryKey) =>
             queryClient.invalidateQueries({ queryKey })
           )
-        )
+        ).catch(() => undefined)
 
         await options?.mutation?.onSuccess?.(
           data,

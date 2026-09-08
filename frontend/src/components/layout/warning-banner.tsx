@@ -1,16 +1,25 @@
-import { useLayoutEffect, useRef } from "react"
+import { useEffect, useLayoutEffect, useMemo, useRef } from "react"
 import { RotateCcwIcon, SaveIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
+import { Link, useLocation } from "wouter"
 
 import {
   useApplyConfigMutation,
   useDiscardConfigMutation,
   usePostServiceActionMutation,
 } from "@/api/mutations"
-import type { ApiError } from "@/api/client"
+import { useGetConfig } from "@/api/queries"
+import { selectConfig } from "@/api/selectors"
+import {
+  compareConfigEffects,
+  configFailureDestination,
+  confirmedConfigApply,
+  summarizeConfigEffects,
+} from "@/lib/config-apply-guidance"
+import { PostApplyDescription } from "@/components/layout/post-apply-feedback"
+import { OperationErrorMessage } from "@/components/shared/operation-error-message"
 import { Button } from "@/components/ui/button"
-import { getApiErrorMessage } from "@/lib/api-errors"
 import { cn } from "@/lib/utils"
 import type {
   WarningBannerMode,
@@ -26,22 +35,53 @@ export function WarningBanner({
   state: WarningBannerState
 }) {
   const { t } = useTranslation()
+  const [, navigate] = useLocation()
+  const configQuery = useGetConfig()
+  const visibleConfig = selectConfig(configQuery.data)
+  const visibleEffects = useMemo(
+    () =>
+      visibleConfig && !configQuery.isError
+        ? summarizeConfigEffects(visibleConfig)
+        : undefined,
+    [visibleConfig, configQuery.isError]
+  )
+  const activeEffects = useRef<
+    ReturnType<typeof summarizeConfigEffects> | undefined
+  >(undefined)
+  useEffect(() => {
+    if (
+      configQuery.data?.status === 200 &&
+      !configQuery.data.data.is_draft &&
+      visibleEffects
+    ) {
+      activeEffects.current = visibleEffects
+    }
+  }, [configQuery.data, visibleEffects])
+
   const applyConfigMutation = useApplyConfigMutation({
     mutation: {
       onError: (error) => {
-        toast.error(
-          t("warning.applyFailed", {
-            reason: getApiErrorMessage(error as ApiError),
-          }),
-          { richColors: true }
-        )
+        const destination = configFailureDestination(error)
+        toast.error(<OperationErrorMessage error={error} />, {
+          richColors: true,
+          ...(destination
+            ? {
+                action: {
+                  label: t("postApply.openDiagnostics"),
+                  onClick: () => navigate(`/?section=${destination}`),
+                },
+              }
+            : {}),
+        })
       },
     },
   })
   const discardConfigMutation = useDiscardConfigMutation({
     mutation: {
       onError: (error) => {
-        toast.error(getApiErrorMessage(error as ApiError), { richColors: true })
+        toast.error(<OperationErrorMessage error={error} />, {
+          richColors: true,
+        })
       },
     },
   })
@@ -94,7 +134,28 @@ export function WarningBanner({
   )
   const handleApplyAndReload = () => {
     if (state.hasDraftConfig) {
-      applyConfigMutation.mutate()
+      // Capture only the effect category at the click: invalidation may replace
+      // the cached candidate before the callback. Never retain the config body.
+      const impact = compareConfigEffects(activeEffects.current, visibleEffects)
+      applyConfigMutation.mutate(undefined, {
+        onSuccess: (response) => {
+          if (!confirmedConfigApply(response)) return
+          const checkRelevant = impact !== "none" && impact !== "unknown"
+          toast.success(t("postApply.applied"), {
+            richColors: true,
+            ...(checkRelevant
+              ? {
+                  description: <PostApplyDescription impact={impact} />,
+                  duration: 10_000,
+                  action: {
+                    label: t("postApply.checkSite"),
+                    onClick: () => navigate("/?check=1"),
+                  },
+                }
+              : {}),
+          })
+        },
+      })
       return
     }
 
@@ -129,13 +190,13 @@ export function WarningBanner({
               {t(getWarningBannerDescriptionKey(state.mode))}
             </p>
             {state.mode === "lifecycle-error" && state.operationError ? (
-              <p className="mt-1 text-[12px] leading-4 text-destructive">
-                {t("lifecycle.errorReason", { reason: state.operationError })}
-              </p>
+              <div className="mt-1 text-[12px] leading-4 text-destructive">
+                <OperationErrorMessage error={state.operationError} />
+              </div>
             ) : null}
           </div>
 
-          <div className="flex shrink-0 gap-2">
+          <div className="flex shrink-0 flex-wrap gap-2">
             {canResolveDraft ? (
               <Button
                 disabled={state.isActionDisabled}
@@ -161,6 +222,23 @@ export function WarningBanner({
                 {state.actionPending
                   ? t("warning.actions.applyingAndRestarting")
                   : t("warning.actions.applyAndRestart")}
+              </Button>
+            ) : null}
+            {isError ? (
+              <Button
+                render={
+                  <Link
+                    href={
+                      state.mode === "dnsmasq-error"
+                        ? "/?section=dns"
+                        : "/?section=routing"
+                    }
+                  />
+                }
+                size="sm"
+                variant="outline"
+              >
+                {t("postApply.openDiagnostics")}
               </Button>
             ) : null}
             {state.mode === "lifecycle-error" ? (

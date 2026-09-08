@@ -1,6 +1,28 @@
 import type { TFunction } from "i18next"
+import type { ApiError } from "@/api/client"
 
 import type { CatalogSetupWarning } from "@/pages/catalog-setup-api"
+
+export function getCatalogSetupRepairTarget(
+  error: ApiError | null
+): "route" | "dns" | null {
+  const details = error?.details
+  if (!details || typeof details !== "object" || !("code" in details))
+    return null
+  switch (details.code) {
+    case "outbound_required":
+    case "outbound_not_found":
+    case "outbound_not_routable":
+      return "route"
+    case "dns_server_required":
+    case "dns_server_not_found":
+    case "dns_automatic_unavailable":
+    case "dns_detour_mismatch":
+      return "dns"
+    default:
+      return null
+  }
+}
 
 export function getCatalogSetupWarningMessage(
   warning: CatalogSetupWarning,

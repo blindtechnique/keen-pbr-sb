@@ -1,6 +1,11 @@
 import { queryOptions } from "@tanstack/react-query"
 
 import { fetchWithStepUp } from "@/lib/step-up"
+import { setAndroidConnectivityExclusions } from "@/lib/nfqws-connectivity"
+import {
+  getValidationErrorMetadata,
+  type ValidationErrorEntry,
+} from "@/lib/api-errors"
 
 export type NfqwsActionResult = {
   ok: boolean
@@ -77,12 +82,12 @@ function boundedText(value: string, limit: number): string {
     : `${normalized.slice(0, limit - 1)}…`
 }
 
-function validationErrorDetails(payload: unknown): string[] {
+function validationErrorDetails(payload: unknown): ValidationErrorEntry[] {
   if (!payload || typeof payload !== "object") return []
   const entries = (payload as { validation_errors?: unknown }).validation_errors
   if (!Array.isArray(entries)) return []
 
-  const details: string[] = []
+  const details: ValidationErrorEntry[] = []
   for (const entry of entries) {
     if (details.length >= MAX_VALIDATION_ERRORS) break
     if (!entry || typeof entry !== "object") continue
@@ -95,11 +100,11 @@ function validationErrorDetails(payload: unknown): string[] {
         ? boundedText(path, MAX_VALIDATION_PATH_LENGTH)
         : ""
     const renderedMessage = boundedText(message, MAX_VALIDATION_MESSAGE_LENGTH)
-    details.push(
-      renderedPath
-        ? `- ${renderedPath}: ${renderedMessage}`
-        : `- ${renderedMessage}`
-    )
+    details.push({
+      path: renderedPath,
+      message: renderedMessage,
+      ...getValidationErrorMetadata(entry),
+    })
   }
   return details
 }
@@ -119,9 +124,18 @@ export async function nfqwsAction<T = NfqwsActionResult>(
       data.message ??
       data.output?.trim() ??
       `HTTP ${response.status}`
-    const details = validationErrorDetails(data)
-    throw new Error(
-      details.length > 0 ? `${message}\n${details.join("\n")}` : message
+    const validationErrors = validationErrorDetails(data)
+    const details = validationErrors.map(({ path, message }) =>
+      path ? `- ${path}: ${message}` : `- ${message}`
+    )
+    throw Object.assign(
+      new Error(
+        details.length > 0 ? `${message}\n${details.join("\n")}` : message
+      ),
+      {
+        status: response.status,
+        details: { ...data, validation_errors: validationErrors },
+      }
     )
   }
   return data as T
@@ -137,4 +151,53 @@ export function nfqwsUpdateQueryOptions() {
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: false,
   })
+}
+
+export async function saveNfqwsConnectivityExclusions({
+  enabled,
+  restart,
+  existingFile,
+}: {
+  enabled: boolean
+  restart: boolean
+  existingFile: boolean
+}): Promise<NfqwsActionResult> {
+  if (!existingFile) {
+    // A list can have been created since the settings page was opened.
+    const response = await fetch("/api/nfqws")
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    const status = (await response.json()) as {
+      files: { category: string; name: string }[]
+    }
+    existingFile = status.files.some(
+      (file) => file.category === "list" && file.name === "exclude.list"
+    )
+  }
+  // Merge into the saved file, not a copy from when the form first opened.
+  const latest = existingFile
+    ? await nfqwsAction<{ content: string }>({
+        action: "read_file",
+        category: "list",
+        name: "exclude.list",
+      })
+    : { content: "" }
+  return nfqwsAction({
+    action: "save_files",
+    files: [
+      {
+        category: "list",
+        name: "exclude.list",
+        content: setAndroidConnectivityExclusions(latest.content, enabled),
+      },
+    ],
+    restart,
+  })
+}
+
+export function nfqwsConnectivityListWasSaved(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { details?: { saved?: unknown } }).details?.saved === 1
+  )
 }

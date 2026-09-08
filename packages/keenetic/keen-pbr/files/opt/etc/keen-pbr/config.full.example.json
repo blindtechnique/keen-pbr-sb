@@ -1,4 +1,5 @@
 {
+  "schema_version": 2,
   "daemon": {
     "pid_file": "/tmp/keen-pbr.pid",
     "cache_dir": "/opt/var/cache/keen-pbr",
@@ -22,14 +23,7 @@
     }
   ],
 
-  "lists": {
-    "local_list": {
-      "domains": [
-        "example.com"
-      ],
-      "ip_cidrs": []
-    }
-  },
+  "lists": {},
 
   "dns": {
     "system_resolver": {
@@ -68,14 +62,6 @@
 
   "route": {
     "inbound_interfaces": ["br0"],
-    "rules": [
-      {
-        "enabled": true,
-        "list": [
-          "local_list"
-        ],
-        "outbound": "block"
-      }
-    ]
+    "rules": []
   }
 }

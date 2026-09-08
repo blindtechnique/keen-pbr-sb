@@ -3,6 +3,7 @@
 #include "../api/generated/api_types.hpp"
 #include "../config/config.hpp"
 #include "../http/http_client.hpp"
+#include "../lists/list_shrink_guard.hpp"
 
 #include <cstdint>
 #include <filesystem>
@@ -21,6 +22,10 @@ enum class AtomicFileWriteStage;
 
 // Use generated CacheMetadata from the API schema
 using CacheMetadata = api::CacheMetadata;
+using CacheShrinkAcceptance =
+    decltype(api::ListRefreshRequest{}.accept_shrink)::value_type;
+using CacheShrinkRejection =
+    decltype(CacheMetadata{}.last_refresh_shrink_rejection)::value_type;
 using CacheCommitCallback =
     std::function<void(const std::function<void()>&)>;
 
@@ -38,6 +43,12 @@ struct CacheDownloadOptions {
     // longer consumes the space needed by that metadata write.
     std::function<void()> before_failure_metadata_persist;
 #endif
+    // Request-scoped controls. Force only bypasses HTTP validators; accepting
+    // a shrink applies to the exact previously shown body pair, not later
+    // scheduled downloads or a changed source response.
+    bool force_refresh{false};
+    ListShrinkPolicy shrink_policy;
+    std::optional<CacheShrinkAcceptance> accept_shrink;
 };
 
 enum class CacheDownloadStatus {
@@ -57,6 +68,7 @@ struct CacheDownloadResult {
     std::string warning_message;
     std::optional<long> http_status_code;
     bool retryable{false};
+    std::optional<CacheShrinkRejection> shrink_rejection;
 
     bool updated() const {
         return status == CacheDownloadStatus::Updated;
@@ -87,14 +99,33 @@ public:
     const api::CacheGeneration& generation() const noexcept {
         return generation_;
     }
+    // Captured with the body under the existing publication mutex, never
+    // looked up again in live metadata when a pinned generation is streamed.
+    const std::optional<std::string>& source_url() const noexcept {
+        return source_url_;
+    }
+    const std::string& source_format() const noexcept { return source_format_; }
+    const std::optional<std::int64_t>& source_decoder_revision() const noexcept {
+        return source_decoder_revision_;
+    }
+    // Structured bodies are usable only for the captured explicit format and
+    // current decoder revision. Legacy text/SRS source matching stays intact.
+    bool matches_source(const std::string& url,
+                        const std::string& source_format = "text") const;
 
 private:
     CacheGenerationHandle(std::filesystem::path path,
                           api::CacheGeneration generation,
+                          std::optional<std::string> source_url,
+                          std::string source_format,
+                          std::optional<std::int64_t> source_decoder_revision,
                           std::shared_ptr<const void> lease);
 
     std::filesystem::path path_;
     api::CacheGeneration generation_;
+    std::optional<std::string> source_url_;
+    std::string source_format_{"text"};
+    std::optional<std::int64_t> source_decoder_revision_;
     std::shared_ptr<const void> lease_;
 
     friend class CacheManager;
@@ -107,10 +138,10 @@ class ListCacheGenerationSnapshot {
 public:
     bool contains(const std::string& name) const;
     const CacheGenerationHandle* find(const std::string& name) const;
-    // One stable string per pinned list: its generation digest, or empty for
-    // a list the snapshot knows but has no cached body for. Two snapshots
-    // with equal fingerprints pin identical bytes for every list, which is
-    // what a set-reusing firewall refresh needs to know without reading any.
+    // One stable digest of source identity and body digest per pinned list,
+    // or empty when its body is missing. Equal fingerprints mean identical
+    // bytes from the same URL, format and decoder: matching bytes from a
+    // replacement source may now be usable where the old source was ignored.
     std::map<std::string, std::string> fingerprints() const;
 
 private:
@@ -136,11 +167,13 @@ public:
 
     size_t max_file_size() const noexcept { return max_file_size_bytes_; }
 
-    // Download a list from URL using conditional requests (ETag/If-Modified-Since).
-    // On failure, does not overwrite existing cache.
+    // Download a list using conditional requests for the same URL/format/
+    // decoder. Explicit JSON/YAML is normalized before publication; failure
+    // never overwrites the existing cache or publishes a decoded prefix.
     CacheDownloadResult download(const std::string& name,
                                  const std::string& url,
-                                 const CacheDownloadOptions& options = {});
+                                 const CacheDownloadOptions& options = {},
+                                 const std::string& source_format = "text");
 
     // Persist a refresh failure detected before an HTTP request can be made
     // (for example, when every explicitly configured detour has no fwmark).
@@ -150,20 +183,24 @@ public:
         const std::string& name,
         const std::string& url,
         const std::string& error_message,
-        const std::optional<std::string>& detour = std::nullopt);
+        const std::optional<std::string>& detour = std::nullopt,
+        const std::optional<CacheShrinkRejection>& shrink_rejection = std::nullopt);
 
     // Check if a cached file exists for the given list name.
     bool has_cache(const std::string& name) const;
 
-    // Check that the cached body belongs to the current source and, for
-    // compiled SRS lists, was produced by the current decoder revision.
-    bool has_current_cache(const std::string& name, const std::string& url) const;
+    // Check the source format and current structured/SRS decoder revision as
+    // well as the URL. Legacy metadata without a format remains plain text.
+    bool has_current_cache(const std::string& name, const std::string& url,
+                           const std::string& source_format = "text") const;
 
     // Check whether an older converted cache can be used safely when refreshing
     // the exact same source fails. This validates the bounded text body but
-    // does not claim that it was produced by the current SRS decoder.
+    // does not claim that it was produced by the current SRS decoder. Explicit
+    // structured formats still require their current decoder revision.
     bool has_usable_same_source_cache(const std::string& name,
-                                      const std::string& url) const;
+                                      const std::string& url,
+                                      const std::string& source_format = "text") const;
 
     // Resolve the verified current generation named by metadata, falling back
     // to its verified previous generation and then to a legacy <name>.txt

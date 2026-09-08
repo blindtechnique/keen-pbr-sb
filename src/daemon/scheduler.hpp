@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -19,6 +20,19 @@ public:
 };
 
 using TaskCallback = std::function<void()>;
+
+enum class ScheduledTaskState { Scheduled, NotScheduled, Unknown };
+
+struct ScheduledTaskFamily {
+    std::string label;
+    std::vector<std::string> timer_labels;
+};
+
+struct ScheduledTaskSnapshot {
+    std::string label;
+    ScheduledTaskState state{ScheduledTaskState::Unknown};
+    std::optional<std::uint64_t> remaining_ms;
+};
 
 #ifdef KEEN_PBR3_TESTING
 struct SchedulerTestFdHooks {
@@ -81,6 +95,12 @@ public:
 
     // Number of active tasks.
     size_t size() const;
+
+    // Read-only timer observation in input family order, matching exact labels.
+    // Pending unread expirations report zero. A failed inspection of any alias
+    // makes its family Unknown; absent/disarmed timers are NotScheduled.
+    std::vector<ScheduledTaskSnapshot> snapshot_next_runs(
+        const std::vector<ScheduledTaskFamily>& families) const;
 
 #ifdef KEEN_PBR3_TESTING
     void fail_next_entry_publication_for_testing();

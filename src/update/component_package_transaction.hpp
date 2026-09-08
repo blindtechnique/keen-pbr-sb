@@ -2,6 +2,7 @@
 
 #include "component_feed_index.hpp"
 #include "component_ipk_store.hpp"
+#include "package_footprint.hpp"
 #include "../util/safe_exec.hpp"
 
 #include <cstddef>
@@ -189,6 +190,14 @@ public:
     // feed moves on, not only on the day an upgrade is attempted.
     ComponentPackagePreparation retain_installed(
         const std::string& installed_version);
+
+    // Read the verified candidate's data-archive member names before any
+    // maintainer script or install runs. The caller can capture old presence
+    // and absence for these paths even if an interrupted unpack later loses
+    // opkg's list. No data files are extracted into their installed paths.
+    // An unavailable inventory returns incomplete, never an empty footprint
+    // presented as complete; the caller owns the fallback policy.
+    PackagePathList candidate_data_paths();
 
     // `opkg install <candidate.ipk>`. Throws ComponentPackageRefused, with no
     // command issued, unless the candidate slot is usable right now - a

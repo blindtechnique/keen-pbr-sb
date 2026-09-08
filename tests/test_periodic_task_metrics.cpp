@@ -253,3 +253,122 @@ TEST_CASE("periodic task elapsed duration never underflows") {
     CHECK(snapshot.last_duration_ms == 0);
     CHECK(snapshot.total_duration_ms == 0);
 }
+
+TEST_CASE("periodic task failure streak follows terminal outcomes without resetting on begin") {
+    FakeClocks clocks;
+    PeriodicTaskMetricsRegistry registry({"resolver-refresh"}, clocks.callbacks());
+    CHECK(registry.snapshot().front().consecutive_failures == 0);
+
+    for (std::uint64_t expected = 1; expected <= 2; ++expected) {
+        auto failure = registry.begin("resolver-refresh");
+        CHECK(registry.snapshot().front().consecutive_failures == expected - 1);
+        REQUIRE(failure.failure("temporary failure"));
+        CHECK(registry.snapshot().front().consecutive_failures == expected);
+        CHECK_FALSE(failure.failure("duplicate completion"));
+        CHECK(registry.snapshot().front().consecutive_failures == expected);
+    }
+
+    registry.record_skipped("resolver-refresh", "cooldown active");
+    CHECK(registry.snapshot().front().consecutive_failures == 2);
+    auto skipped = registry.begin("resolver-refresh");
+    REQUIRE(skipped.skipped("superseded"));
+    CHECK(registry.snapshot().front().consecutive_failures == 2);
+    auto abandoned = registry.begin("resolver-refresh");
+    REQUIRE(abandoned.abandon("cancelled"));
+    CHECK(registry.snapshot().front().consecutive_failures == 2);
+    {
+        auto unfinished = registry.begin("resolver-refresh");
+        CHECK(unfinished.active());
+    }
+    CHECK(registry.snapshot().front().consecutive_failures == 2);
+
+    auto recovered = registry.begin("resolver-refresh");
+    CHECK(registry.snapshot().front().consecutive_failures == 2);
+    SUBCASE("success resets") { REQUIRE(recovered.success()); }
+    SUBCASE("noop resets") { REQUIRE(recovered.noop()); }
+    CHECK(registry.snapshot().front().consecutive_failures == 0);
+    auto failed_again = registry.begin("resolver-refresh");
+    REQUIRE(failed_again.failure("another failure"));
+    CHECK(registry.snapshot().front().consecutive_failures == 1);
+    check_run_invariant(registry.snapshot().front());
+}
+
+TEST_CASE("periodic task failure streak uses overlapping runs completion order") {
+    FakeClocks clocks;
+    PeriodicTaskMetricsRegistry registry({"resolver-refresh"}, clocks.callbacks());
+    auto older = registry.begin("resolver-refresh");
+    clocks.advance(std::chrono::milliseconds(1));
+    auto newer = registry.begin("resolver-refresh");
+    REQUIRE(newer.failure("newer run finished first"));
+    CHECK(registry.snapshot().front().consecutive_failures == 1);
+    CHECK(registry.snapshot().front().in_flight == 1);
+
+    auto newest = registry.begin("resolver-refresh");
+    CHECK(registry.snapshot().front().consecutive_failures == 1);
+    REQUIRE(older.success());
+    CHECK(registry.snapshot().front().consecutive_failures == 0);
+    REQUIRE(newest.failure("finished after recovery"));
+    CHECK(registry.snapshot().front().consecutive_failures == 1);
+
+    auto older_failure = registry.begin("resolver-refresh");
+    auto newer_recovery = registry.begin("resolver-refresh");
+    REQUIRE(newer_recovery.noop());
+    CHECK(registry.snapshot().front().consecutive_failures == 0);
+    REQUIRE(older_failure.failure("old run finished last"));
+    const auto snapshot = registry.snapshot().front();
+    CHECK(snapshot.consecutive_failures == 1);
+    CHECK(snapshot.last_outcome == PeriodicTaskOutcome::Failure);
+    CHECK(snapshot.in_flight == 0);
+    check_run_invariant(snapshot);
+}
+
+TEST_CASE("periodic task failure streak remains current after lifetime counter saturation") {
+    FakeClocks clocks;
+    PeriodicTaskMetricsRegistry registry(
+        {"route-repair"}, clocks.callbacks(),
+        PeriodicTaskMetricsOptions{/*capacity=*/1, /*counter_ceiling=*/2});
+
+    // Saturate lifetime accounting before the first failure, so the streak
+    // cannot accidentally depend on the token's counted flag.
+    for (int run = 0; run < 2; ++run) {
+        auto success = registry.begin("route-repair");
+        REQUIRE(success.success());
+    }
+    for (std::uint64_t attempt = 1; attempt <= 4; ++attempt) {
+        auto failure = registry.begin("route-repair");
+        REQUIRE(failure.failure("failure after saturation"));
+        CHECK(registry.snapshot().front().consecutive_failures ==
+              (attempt < 2 ? attempt : 2));
+    }
+    auto abandoned = registry.begin("route-repair");
+    REQUIRE(abandoned.abandon());
+    registry.record_skipped("route-repair");
+    CHECK(registry.snapshot().front().consecutive_failures == 2);
+    auto recovered = registry.begin("route-repair");
+    SUBCASE("success resets after saturation") { REQUIRE(recovered.success()); }
+    SUBCASE("noop resets after saturation") { REQUIRE(recovered.noop()); }
+    CHECK(registry.snapshot().front().consecutive_failures == 0);
+    auto failure = registry.begin("route-repair");
+    REQUIRE(failure.failure("new streak"));
+    const auto snapshot = registry.snapshot().front();
+    CHECK(snapshot.consecutive_failures == 1);
+    CHECK(snapshot.runs == 2);
+    CHECK(snapshot.success == 2);
+    CHECK(snapshot.failure == 0);
+    check_run_invariant(snapshot);
+}
+
+TEST_CASE("periodic task failure streak is isolated by stable label") {
+    FakeClocks clocks;
+    PeriodicTaskMetricsRegistry registry({"first", "second"}, clocks.callbacks());
+    auto first = registry.begin("first");
+    auto second = registry.begin("second");
+    REQUIRE(first.failure("first failed"));
+    REQUIRE(second.success());
+    const auto snapshot = registry.snapshot();
+    REQUIRE(snapshot.size() == 2);
+    CHECK(snapshot[0].label == "first");
+    CHECK(snapshot[0].consecutive_failures == 1);
+    CHECK(snapshot[1].label == "second");
+    CHECK(snapshot[1].consecutive_failures == 0);
+}

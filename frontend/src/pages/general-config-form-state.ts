@@ -1,3 +1,20 @@
+import { semanticJsonEqual } from "@/lib/semantic-json"
+
+/** Keep deliberate local field edits, not untouched values from an old config. */
+export function rebaseSettingsDraft<T extends object>(
+  previous: T,
+  current: T,
+  next: T
+): T {
+  const rebased = { ...next }
+  for (const key of Object.keys(current) as (keyof T)[]) {
+    if (!semanticJsonEqual(current[key], previous[key])) {
+      rebased[key] = current[key]
+    }
+  }
+  return rebased
+}
+
 export type GeneralConfigActionStateInput = {
   canSubmit: boolean
   deferredDirty: boolean

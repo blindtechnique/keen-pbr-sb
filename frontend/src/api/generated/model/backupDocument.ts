@@ -17,6 +17,12 @@ import type { BackupGroupSelection } from './backupGroupSelection';
 export interface BackupDocument {
   format: BackupDocumentFormat;
   schema: BackupDocumentSchema;
+  /**
+     * Source configuration format, independent of this archive's schema. Included even when general settings are not selected. Older archives use general.schema_version when present, otherwise legacy version 1. Selected sections are migrated before merging with current settings.
+
+     * @minimum 1
+     */
+  config_schema_version?: number;
   /** Unix timestamp added to documents produced by the backup endpoint. */
   created_at?: number;
   groups?: BackupGroupSelection;

@@ -2177,8 +2177,15 @@ TEST_CASE(
     REQUIRE(plan.summary.dns_rules.size() == 1U);
     CHECK(plan.summary.dns_rules.front().server == "proxy_dns");
     REQUIRE(plan.candidate.dns->rules.has_value());
-    CHECK(plan.candidate.dns->rules->size() == 2U);
-    CHECK(plan.candidate.dns->rules->back().server == "proxy_dns");
+    REQUIRE(plan.candidate.dns->rules->size() == 1U);
+    CHECK(plan.candidate.dns->rules->front().server == "proxy_dns");
+    CHECK(plan.candidate.dns->rules->front().id == config.dns->rules->front().id);
+    CHECK(plan.summary.dns_rules.front().insertion_index == 0U);
+    const auto repeated =
+        plan_catalog_setup(explicit_intent, catalog, plan.candidate);
+    CHECK(nlohmann::json(repeated.candidate) == nlohmann::json(plan.candidate));
+    CHECK(repeated.summary.route_rules.empty());
+    CHECK(repeated.summary.dns_rules.empty());
 }
 
 TEST_CASE("automatic DNS fails when every built-in endpoint is occupied") {
@@ -2631,6 +2638,208 @@ TEST_CASE(
         plan_catalog_setup(outbound_intent(), catalog, config);
     CHECK(repaired.summary.route_rule.has_value());
     CHECK(repaired.summary.dns_rule.has_value());
+    REQUIRE(repaired.candidate.route->rules->size() == 2U);
+    CHECK(repaired.candidate.route->rules->front().outbound == "proxy");
+    REQUIRE(repaired.candidate.dns->rules->size() == 2U);
+    CHECK(repaired.candidate.dns->rules->front().server == "proxy_dns");
+    const auto repeated = plan_catalog_setup(outbound_intent(), catalog, repaired.candidate);
+    CHECK(nlohmann::json(repeated.candidate) == nlohmann::json(repaired.candidate));
+    CHECK(repeated.summary.route_rules.empty());
+    CHECK(repeated.summary.dns_rules.empty());
+}
+
+TEST_CASE("catalog retargets dedicated VPN and DNS policies without losing their fields") {
+    const auto catalog = nlohmann::json::array({routing_preset()});
+    auto config = plan_catalog_setup(outbound_intent(), catalog, base_config()).candidate;
+    auto& backup = config.outbounds->at(1);
+    backup.type = OutboundType::INTERFACE;
+    backup.table.reset();
+    backup.interface = "tun1";
+    auto& old_route = config.route->rules->front();
+    old_route.failure_policy = api::FailurePolicy::BLOCK;
+    old_route.display_name = "My route";
+    auto& old_dns = config.dns->rules->front();
+    old_dns.allow_domain_rebinding = true;
+    old_dns.display_name = "My DNS";
+    validate_config(config);
+
+    auto intent = outbound_intent();
+    intent.outbound_tag = "backup";
+    const auto changed = plan_catalog_setup(intent, catalog, config);
+    REQUIRE(changed.candidate.route->rules->size() == 1U);
+    auto expected_route = old_route;
+    expected_route.outbound = "backup";
+    CHECK(nlohmann::json(changed.candidate.route->rules->front()) == nlohmann::json(expected_route));
+    REQUIRE(changed.candidate.dns->rules->size() == 1U);
+    REQUIRE(changed.summary.dns_server.has_value());
+    auto expected_dns = old_dns;
+    expected_dns.server = changed.summary.dns_server->technical_id;
+    CHECK(nlohmann::json(changed.candidate.dns->rules->front()) == nlohmann::json(expected_dns));
+    CHECK(changed.summary.dns_server->detour == "backup");
+    CHECK(nlohmann::json(*changed.candidate.lists) == nlohmann::json(*config.lists));
+    const auto repeated = plan_catalog_setup(intent, catalog, changed.candidate);
+    CHECK(nlohmann::json(repeated.candidate) == nlohmann::json(changed.candidate));
+    CHECK(repeated.summary.route_rules.empty());
+    CHECK(repeated.summary.dns_rules.empty());
+}
+
+TEST_CASE("catalog splits only selected list references and preserves selector exceptions and order") {
+    const auto catalog = nlohmann::json::array({
+        routing_preset(),
+        routing_preset("music", "Music", "https://repo.hoaxisr.ru/rulesets/srs/music.srs"),
+    });
+    auto initial_intent = outbound_intent();
+    initial_intent.selections.push_back({"music", std::nullopt});
+    auto config = plan_catalog_setup(initial_intent, catalog, base_config()).candidate;
+    const auto broad_route = config.route->rules->front();
+    const auto broad_dns = config.dns->rules->front();
+    auto exception = broad_route;
+    exception.id = "tcp_exception";
+    exception.proto = "tcp";
+    exception.dest_port = "443";
+    auto disabled = broad_route;
+    disabled.id = "disabled_route";
+    disabled.enabled = false;
+    auto later = exception;
+    later.id = "later_exception";
+    later.src_addr = "192.168.1.10";
+    config.route->rules = std::vector<RouteRule>{disabled, exception, broad_route, later};
+    auto disabled_dns = broad_dns;
+    disabled_dns.id = "disabled_dns";
+    disabled_dns.enabled = false;
+    auto shared_dns = broad_dns;
+    shared_dns.allow_domain_rebinding = true;
+    config.dns->rules = std::vector<DnsRule>{disabled_dns, shared_dns};
+    validate_config(config);
+
+    auto intent = outbound_intent();
+    intent.outbound_tag = "backup";
+    const auto changed = plan_catalog_setup(intent, catalog, config);
+    const auto& routes = *changed.candidate.route->rules;
+    REQUIRE(routes.size() == 5U);
+    CHECK(nlohmann::json(routes[0]) == nlohmann::json(disabled));
+    CHECK(nlohmann::json(routes[1]) == nlohmann::json(exception));
+    CHECK(routes[2].list == std::optional<std::vector<std::string>>{{"category_ai"}});
+    CHECK(routes[2].outbound == "backup");
+    CHECK(routes[2].id != broad_route.id);
+    auto remaining_route = broad_route;
+    remaining_route.list = std::vector<std::string>{"music"};
+    CHECK(nlohmann::json(routes[3]) == nlohmann::json(remaining_route));
+    CHECK(nlohmann::json(routes[4]) == nlohmann::json(later));
+    REQUIRE(changed.summary.route_rules.size() == 1U);
+    CHECK(changed.summary.route_rules.front().insertion_index == 2U);
+
+    const auto& dns_rules = *changed.candidate.dns->rules;
+    REQUIRE(dns_rules.size() == 3U);
+    CHECK(nlohmann::json(dns_rules[0]) == nlohmann::json(disabled_dns));
+    CHECK(dns_rules[1].list == std::vector<std::string>{"category_ai"});
+    REQUIRE(changed.summary.dns_server.has_value());
+    CHECK(dns_rules[1].server == changed.summary.dns_server->technical_id);
+    CHECK(dns_rules[1].allow_domain_rebinding == true);
+    CHECK(dns_rules[1].id != broad_dns.id);
+    auto remaining_dns = shared_dns;
+    remaining_dns.list = {"music"};
+    CHECK(nlohmann::json(dns_rules[2]) == nlohmann::json(remaining_dns));
+    REQUIRE(changed.summary.dns_rules.size() == 1U);
+    CHECK(changed.summary.dns_rules.front().insertion_index == 1U);
+    const auto repeated = plan_catalog_setup(intent, catalog, changed.candidate);
+    CHECK(nlohmann::json(repeated.candidate) == nlohmann::json(changed.candidate));
+    CHECK(repeated.summary.route_rules.empty());
+    CHECK(repeated.summary.dns_rules.empty());
+}
+
+TEST_CASE("catalog keeps independent VPN policy positions while adding fresh selected lists") {
+    const auto catalog = nlohmann::json::array({
+        routing_preset(),
+        routing_preset("music", "Music", "https://repo.hoaxisr.ru/rulesets/srs/music.srs"),
+        routing_preset("video", "Video", "https://repo.hoaxisr.ru/rulesets/srs/video.srs"),
+    });
+    auto config = plan_catalog_setup(outbound_intent(), catalog, base_config()).candidate;
+    auto music_intent = outbound_intent();
+    music_intent.selections = {{"music", std::nullopt}};
+    config = plan_catalog_setup(music_intent, catalog, config).candidate;
+    const auto old_routes = *config.route->rules;
+    const auto old_dns = *config.dns->rules;
+    auto intent = outbound_intent();
+    intent.outbound_tag = "backup";
+    intent.selections.push_back({"music", std::nullopt});
+    intent.selections.push_back({"video", std::nullopt});
+    const auto changed = plan_catalog_setup(intent, catalog, config);
+    const auto& routes = *changed.candidate.route->rules;
+    REQUIRE(routes.size() == 3U);
+    CHECK(routes[0].id == old_routes[0].id);
+    CHECK(routes[1].id == old_routes[1].id);
+    CHECK(routes[0].outbound == "backup");
+    CHECK(routes[1].outbound == "backup");
+    CHECK(routes[2].list == std::optional<std::vector<std::string>>{{"video"}});
+    REQUIRE(changed.summary.route_rules.size() == 3U);
+    for (const auto& summary : changed.summary.route_rules) {
+        CHECK(routes.at(summary.insertion_index).id == summary.technical_id);
+    }
+    const auto& dns_rules = *changed.candidate.dns->rules;
+    REQUIRE(dns_rules.size() == 3U);
+    CHECK(dns_rules[0].id == old_dns[0].id);
+    CHECK(dns_rules[1].id == old_dns[1].id);
+    REQUIRE(changed.summary.dns_rules.size() == 3U);
+    REQUIRE(changed.summary.dns_server.has_value());
+    for (const auto& summary : changed.summary.dns_rules) {
+        CHECK(dns_rules.at(summary.insertion_index).id == summary.technical_id);
+        CHECK(dns_rules.at(summary.insertion_index).server == changed.summary.dns_server->technical_id);
+    }
+    const auto repeated = plan_catalog_setup(intent, catalog, changed.candidate);
+    CHECK(nlohmann::json(repeated.candidate) == nlohmann::json(changed.candidate));
+}
+
+TEST_CASE("catalog removes a fallback that became the selected primary without selecting another VPN") {
+    const auto catalog = nlohmann::json::array({routing_preset()});
+    auto config = plan_catalog_setup(outbound_intent(), catalog, base_config()).candidate;
+    auto& backup = config.outbounds->at(1);
+    backup.type = OutboundType::INTERFACE;
+    backup.table.reset();
+    backup.interface = "tun1";
+    auto& route = config.route->rules->front();
+    route.failure_policy = api::FailurePolicy::FALLBACK;
+    route.fallback_outbound = "backup";
+    validate_config(config);
+    auto intent = outbound_intent();
+    intent.outbound_tag = "backup";
+    const auto changed = plan_catalog_setup(intent, catalog, config);
+    const auto& updated = changed.candidate.route->rules->front();
+    CHECK(updated.id == route.id);
+    CHECK(updated.outbound == "backup");
+    CHECK(updated.failure_policy == api::FailurePolicy::BLOCK);
+    CHECK_FALSE(updated.fallback_outbound.has_value());
+    const auto repeated = plan_catalog_setup(intent, catalog, changed.candidate);
+    CHECK(nlohmann::json(repeated.candidate) == nlohmann::json(changed.candidate));
+}
+
+TEST_CASE("catalog clears inapplicable VPN failure settings for direct and block destinations") {
+    for (const auto mode : {CatalogSetupMode::direct, CatalogSetupMode::block}) {
+        const auto preset = mode == CatalogSetupMode::direct ? direct_preset() : blocking_preset();
+        const auto catalog = nlohmann::json::array({preset});
+        CatalogSetupIntent intent;
+        intent.mode = mode;
+        intent.dns_mode = CatalogDnsMode::none;
+        intent.selections = {{preset["id"].get<std::string>(), std::nullopt}};
+        auto config = plan_catalog_setup(intent, catalog, base_config()).candidate;
+        auto& backup = config.outbounds->at(1);
+        backup.type = OutboundType::INTERFACE;
+        backup.table.reset();
+        backup.interface = "tun1";
+        auto& route = config.route->rules->front();
+        route.outbound = "proxy";
+        route.failure_policy = api::FailurePolicy::FALLBACK;
+        route.fallback_outbound = "backup";
+        validate_config(config);
+        const auto changed = plan_catalog_setup(intent, catalog, config);
+        const auto& updated = changed.candidate.route->rules->front();
+        CHECK(updated.id == route.id);
+        CHECK(updated.outbound != "proxy");
+        CHECK_FALSE(updated.failure_policy.has_value());
+        CHECK_FALSE(updated.fallback_outbound.has_value());
+        const auto repeated = plan_catalog_setup(intent, catalog, changed.candidate);
+        CHECK(nlohmann::json(repeated.candidate) == nlohmann::json(changed.candidate));
+    }
 }
 
 TEST_CASE(

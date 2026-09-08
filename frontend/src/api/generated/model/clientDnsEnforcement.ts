@@ -7,7 +7,7 @@
  */
 
 /**
- * Forces LAN clients to use the router's DNS. When enabled, plain DNS (port 53) from inbound interfaces is transparently redirected to the local resolver and DNS-over-TLS (port 853) is blocked, so browser Secure DNS cannot bypass domain-based routing. DNS-over-HTTPS on port 443 cannot be blocked generically.
+ * Forces LAN clients to use the router's DNS. When enabled, plain DNS (port 53) from inbound interfaces is transparently redirected to the local resolver. DNS-over-TLS (port 853) is also blocked unless block_dot is false. This does not prevent DNS-over-HTTPS on port 443 from bypassing domain-based routing; HTTPS cannot be blocked generically.
 
  */
 export interface ClientDnsEnforcement {

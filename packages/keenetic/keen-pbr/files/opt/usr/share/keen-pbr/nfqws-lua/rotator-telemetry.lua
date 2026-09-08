@@ -182,13 +182,58 @@ local function persistent_path(slot)
     return string.format("%s.%d", PERSISTENT_PREFIX, slot)
 end
 
+-- Match the durable snapshot's preference without allocating a second host
+-- inventory. The same-second tie-break keeps retention deterministic.
+local function learned_precedes(at, pool, revision, host,
+        other_at, other_pool, other_revision, other_host)
+    if at ~= other_at then return at > other_at end
+    if pool ~= other_pool then return pool < other_pool end
+    if revision ~= other_revision then return revision < other_revision end
+    return host < other_host
+end
+
 local function put_learned(entry)
     local by_revision = learned[entry.pool]
+    local by_host = by_revision and by_revision[entry.revision]
+    if not by_host or not by_host[entry.host] then
+        -- Disk writes are deliberately infrequent and their timer may stop
+        -- after an unrelated telemetry I/O failure. Bound live RAM here,
+        -- before admitting a new key, independently of either mechanism.
+        local count, oldest_at = 0, nil
+        local oldest_pool, oldest_revision, oldest_host
+        for pool, revisions in pairs(learned) do
+            for revision, hosts in pairs(revisions) do
+                for host, value in pairs(hosts) do
+                    count = count + 1
+                    if not oldest_at or learned_precedes(
+                            oldest_at, oldest_pool, oldest_revision, oldest_host,
+                            value.confirmed_at, pool, revision, host) then
+                        oldest_at = value.confirmed_at
+                        oldest_pool, oldest_revision, oldest_host = pool, revision, host
+                    end
+                end
+            end
+        end
+        if count >= PERSISTENT_MAX_RECORDS then
+            if not learned_precedes(
+                    entry.confirmed_at, entry.pool, entry.revision, entry.host,
+                    oldest_at, oldest_pool, oldest_revision, oldest_host) then
+                return false
+            end
+            local revisions = learned[oldest_pool]
+            local hosts = revisions[oldest_revision]
+            hosts[oldest_host] = nil
+            if next(hosts) == nil then revisions[oldest_revision] = nil end
+            if next(revisions) == nil then learned[oldest_pool] = nil end
+            -- Eviction may have removed this new key's last sibling.
+            by_revision = learned[entry.pool]
+            by_host = by_revision and by_revision[entry.revision]
+        end
+    end
     if not by_revision then
         by_revision = {}
         learned[entry.pool] = by_revision
     end
-    local by_host = by_revision[entry.revision]
     if not by_host then
         by_host = {}
         by_revision[entry.revision] = by_host
@@ -198,6 +243,7 @@ local function put_learned(entry)
         slot_count = entry.slot_count,
         confirmed_at = entry.confirmed_at,
     }
+    return true
 end
 
 local function find_learned(pool, revision, host)
@@ -558,14 +604,14 @@ local function mark_learned_success(desync)
     if not changed and not refresh then
         return
     end
-    put_learned({
+    if not put_learned({
         pool = pool,
         revision = revision,
         host = host,
         slot = slot,
         slot_count = slot_count,
         confirmed_at = now,
-    })
+    }) then return end
     if not state.persistent_first_dirty_unix then
         state.persistent_first_dirty_unix = now
     end
@@ -766,16 +812,9 @@ local function collect_persistent_entries(now)
 
     -- Keep the most recently confirmed records if the fixed bound is reached.
     table.sort(entries, function(left, right)
-        if left.confirmed_at ~= right.confirmed_at then
-            return left.confirmed_at > right.confirmed_at
-        end
-        if left.pool ~= right.pool then
-            return left.pool < right.pool
-        end
-        if left.revision ~= right.revision then
-            return left.revision < right.revision
-        end
-        return left.host < right.host
+        return learned_precedes(
+            left.confirmed_at, left.pool, left.revision, left.host,
+            right.confirmed_at, right.pool, right.revision, right.host)
     end)
     while #entries > PERSISTENT_MAX_RECORDS do
         table.remove(entries)

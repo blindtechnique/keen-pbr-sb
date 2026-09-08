@@ -10,6 +10,7 @@ import {
   acquireStatusEventKeepAliveLease,
   getStatusEventConnectionState,
   subscribeStatusEventConnectionState,
+  type StatusEventConnectionState,
 } from "@/api/status-event-connection"
 
 export type DnsCheckStatus =
@@ -39,6 +40,39 @@ const browserCheckTimeoutMs = 5_000
 const sseConnectionTimeoutMs = 12_000
 const pcCheckTimeoutMs = 300_000
 const pcWarningTimeoutMs = 30_000
+
+// A missing probe is informative only if the event stream covered the entire
+// observation window. Reconnecting does not replay events missed in between.
+export function createDnsCheckStreamObservation() {
+  let started = false
+  let interrupted = false
+
+  return {
+    get interrupted() {
+      return interrupted
+    },
+    observe(state: StatusEventConnectionState) {
+      if (started) {
+        if (state !== "connected") interrupted = true
+        return false
+      }
+      if (state !== "connected") return false
+      started = true
+      return true
+    },
+    timeout(performBrowserRequest: boolean): {
+      status: DnsCheckStatus
+      showWarning: boolean
+    } {
+      if (!started || interrupted) {
+        return { status: "sse-fail", showWarning: false }
+      }
+      return performBrowserRequest
+        ? { status: "browser-fail", showWarning: false }
+        : { status: "idle", showWarning: true }
+    },
+  }
+}
 
 export function useDnsCheck(): UseDnsCheckReturn {
   const dnsSubscriptionRef = useRef<(() => void) | null>(null)
@@ -102,24 +136,15 @@ export function useDnsCheck(): UseDnsCheckReturn {
         }, pcWarningTimeoutMs)
       }
 
-      let sseConnected = false
-      const finishTimedOutCheck = () => {
+      const streamObservation = createDnsCheckStreamObservation()
+      const finishWithoutProbe = () => {
         cleanup()
-
-        if (!sseConnected) {
-          setStatus("sse-fail")
-          return
-        }
-
-        if (performBrowserRequest) {
-          setStatus("browser-fail")
-          return
-        }
-
+        const outcome = streamObservation.timeout(performBrowserRequest)
+        setStatus(outcome.status)
         setCheckState((current) => ({
           ...current,
           waiting: false,
-          showWarning: true,
+          showWarning: outcome.showWarning,
         }))
       }
 
@@ -138,21 +163,24 @@ export function useDnsCheck(): UseDnsCheckReturn {
       )
 
       const beginCheckWhenConnected = () => {
-        if (
-          sseConnected ||
-          getStatusEventConnectionState() !== "connected"
-        ) {
+        const shouldBegin = streamObservation.observe(
+          getStatusEventConnectionState()
+        )
+        if (streamObservation.interrupted) {
+          // There is no event replay after reconnect. Finish now rather than
+          // keep a manual check waiting and show an absent-query warning.
+          finishWithoutProbe()
+          return
+        }
+        if (!shouldBegin) {
           return
         }
 
-        sseConnected = true
-        connectionSubscriptionRef.current?.()
-        connectionSubscriptionRef.current = null
         if (checkTimeoutRef.current !== null) {
           window.clearTimeout(checkTimeoutRef.current)
         }
         checkTimeoutRef.current = window.setTimeout(
-          finishTimedOutCheck,
+          finishWithoutProbe,
           performBrowserRequest ? browserCheckTimeoutMs : pcCheckTimeoutMs
         )
 
@@ -175,7 +203,7 @@ export function useDnsCheck(): UseDnsCheckReturn {
       }
 
       checkTimeoutRef.current = window.setTimeout(
-        finishTimedOutCheck,
+        finishWithoutProbe,
         sseConnectionTimeoutMs
       )
       connectionSubscriptionRef.current =

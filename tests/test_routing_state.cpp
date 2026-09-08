@@ -120,6 +120,167 @@ bool routing_plans_equal(const PlannedRoutingState& left,
 
 } // namespace
 
+TEST_CASE("interface family reachability does not borrow another family route") {
+    Outbound outbound;
+    outbound.type = OutboundType::INTERFACE;
+    outbound.tag = "vpn";
+    outbound.interface = "wg0";
+    outbound.gateway = "10.8.0.1";
+    outbound.gateway6 = "2001:db8::1";
+    const auto check = [&](std::string destination, int family,
+                           bool expected4, bool expected6) {
+        CAPTURE(destination);
+        CAPTURE(family);
+        const std::vector<DumpedRoute> routes{
+            DumpedRoute{destination, 254U, "wg0", std::nullopt,
+                        false, false, family, 0U, 0U}};
+        const auto result = interface_outbound_family_reachability(outbound, routes, true);
+        CHECK(result.ipv4 == expected4);
+        CHECK(result.ipv6 == expected6);
+        CHECK(result.any(false) == expected4);
+        CHECK(result.any(true) == (expected4 || expected6));
+    };
+    check("default", AF_INET, true, false);
+    check("default", AF_INET6, false, true);
+    check("10.8.0.0/24", AF_INET, true, false);
+    check("2001:db8::/64", AF_INET6, false, true);
+    check("10.8.0.1", AF_INET, true, false);
+    check("2001:db8::1", AF_INET6, false, true);
+    check("10.8.0.0/24", AF_INET6, false, false);
+    check("2001:db8::/64", AF_INET, false, false);
+    check("10.9.0.0/24", AF_INET, false, false);
+    check("2001:db9::/64", AF_INET6, false, false);
+    check("2001:db8::/129", AF_INET6, false, false);
+    check("2001:db8::/not-a-prefix", AF_INET6, false, false);
+    check("10.8.0.0/-1", AF_INET, false, false);
+    std::vector<DumpedRoute> routes{
+        DumpedRoute{"default", 254U, "wg0", std::nullopt, false, false, AF_INET, 0U, 0U}};
+    CHECK_FALSE(interface_outbound_family_reachability(outbound, routes, false).any());
+    routes.front().table = 100U;
+    CHECK_FALSE(interface_outbound_family_reachability(outbound, routes, true).any());
+    outbound.gateway.reset();
+    outbound.gateway6.reset();
+    const auto link = interface_outbound_family_reachability(outbound, {}, true);
+    CHECK(link.ipv4);
+    CHECK(link.ipv6);
+    CHECK_FALSE(interface_outbound_family_reachability(outbound, {}, false).any());
+}
+
+TEST_CASE("C1 URLTEST family leaf marks select the usable routing tables") {
+    auto cfg = parse_minimal_config(R"({
+        "iproute":{"table_start":100}, "daemon":{"strict_enforcement":true},
+        "outbounds":[
+            {"tag":"a","type":"interface","interface":"wg0","gateway":"10.8.0.1","gateway6":"2001:db8::1"},
+            {"tag":"b","type":"interface","interface":"wg1","gateway":"10.9.0.1","gateway6":"2001:db9::1"},
+            {"tag":"group","type":"urltest","url":"https://example.com",
+             "outbound_groups":[{"outbounds":["a","b"]}]}
+        ],
+        "route":{"rules":[{"dest_port":"443","outbound":"group"}]}
+    })");
+    const auto marks = allocate_outbound_marks(cfg.fwmark.value_or(FwmarkConfig{}), *cfg.outbounds);
+    std::map<std::string, std::string> selections{{"group", "a"}};
+    OutboundFamilyReachabilitySnapshot families{{"a", {true, false}}, {"b", {false, true}}};
+    SUBCASE("IPv4 selected with IPv6 reserve") {}
+    SUBCASE("IPv6 selected with IPv4 reserve") { selections["group"] = "b"; }
+    SUBCASE("explicitly missing gateway also constrains unobserved family") {
+        cfg.outbounds->at(0).gateway6.reset();
+        cfg.outbounds->at(1).gateway.reset();
+        families.clear();
+    }
+    const auto plan = plan_routing_state(cfg, marks, {}, &selections, true, &families);
+    const auto states = build_fw_rule_states(cfg, marks, &selections, nullptr, &families);
+    REQUIRE(states.size() == 1);
+    CHECK(states[0].mark_for_family(AF_INET) == marks.at("a"));
+    CHECK(states[0].mark_for_family(AF_INET6) == marks.at("b"));
+    for (const auto family : {AF_INET, AF_INET6}) {
+        const auto mark = states[0].mark_for_family(family);
+        const auto policy = std::find_if(plan.rules.begin(), plan.rules.end(),
+            [&](const RuleSpec& rule) { return rule.fwmark == mark; });
+        REQUIRE(policy != plan.rules.end());
+        const auto route = std::find_if(plan.routes.begin(), plan.routes.end(),
+            [&](const RouteSpec& item) {
+                return item.table == policy->table && item.family == family && !item.unreachable;
+            });
+        REQUIRE(route != plan.routes.end());
+        CHECK(route->interface == std::optional<std::string>(family == AF_INET ? "wg0" : "wg1"));
+    }
+}
+
+TEST_CASE("C1 URLTEST family resolution preserves closure and explicit non-interface choices") {
+    auto cfg = parse_minimal_config(R"({"outbounds":[
+        {"tag":"a","type":"interface","interface":"wg0","gateway":"10.8.0.1"},
+        {"tag":"stop","type":"blackhole"},
+        {"tag":"table","type":"table","table":123},
+        {"tag":"group","type":"urltest","url":"https://example.com",
+         "outbound_groups":[{"outbounds":["a","stop","table"]}]}
+    ],"route":{"rules":[{"dest_port":"443","outbound":"group"}]}})");
+    const auto marks = allocate_outbound_marks(cfg.fwmark.value_or(FwmarkConfig{}), *cfg.outbounds);
+    std::map<std::string, std::string> selections{{"group", "a"}};
+    auto state = build_fw_rule_states(cfg, marks, &selections).front();
+    CHECK(state.fwmark == marks.at("a"));
+    CHECK(state.mark_for_family(AF_INET6) == marks.at("group"));
+    selections.clear();
+    state = build_fw_rule_states(cfg, marks, &selections).front();
+    CHECK(state.fwmark == marks.at("group"));
+    CHECK_FALSE(state.fwmark_ipv6.has_value());
+    selections["group"] = "stop";
+    CHECK(build_fw_rule_states(cfg, marks, &selections).front().action_type == RuleActionType::Drop);
+    selections["group"] = "table";
+    state = build_fw_rule_states(cfg, marks, &selections).front();
+    CHECK(state.fwmark == marks.at("table"));
+    CHECK_FALSE(state.fwmark_ipv6.has_value());
+}
+
+TEST_CASE("routing family reachability preserves independent URLTEST defaults and fallbacks") {
+    const auto cfg = parse_minimal_config(R"({
+        "iproute":{"table_start":100},
+        "daemon":{"strict_enforcement":true},
+        "outbounds":[
+            {"tag":"a","type":"interface","interface":"wg0","gateway":"10.8.0.1","gateway6":"2001:db8::1"},
+            {"tag":"b","type":"interface","interface":"wg1","gateway":"10.9.0.1","gateway6":"2001:db9::1"},
+            {"tag":"group","type":"urltest","url":"https://example.com",
+             "outbound_groups":[{"outbounds":["a","b"]}]}
+        ]
+    })");
+    const auto marks = allocate_outbound_marks(cfg.fwmark.value_or(FwmarkConfig{}), *cfg.outbounds);
+    const std::map<std::string, std::string> selections{{"group", "a"}};
+    int primary_family = AF_INET;
+    bool ipv6_enabled = true;
+    SUBCASE("IPv4 primary and IPv6 fallback") {}
+    SUBCASE("IPv6 primary and IPv4 fallback") { primary_family = AF_INET6; }
+    SUBCASE("disabled IPv6 never emits a default or closure") { ipv6_enabled = false; }
+    const OutboundFamilyReachabilitySnapshot families{
+        {"a", {primary_family == AF_INET, primary_family == AF_INET6}},
+        {"b", {primary_family != AF_INET, primary_family != AF_INET6}}};
+    const auto plan = plan_routing_state(cfg, marks, {}, &selections, ipv6_enabled, &families);
+    std::size_t group_usable = 0U;
+    for (const auto& route : plan.routes) {
+        if (!ipv6_enabled) CHECK(route.family == AF_INET);
+        if (route.unreachable) {
+            CHECK(route.metric == kUnreachableRouteMetric);
+            continue;
+        }
+        const bool is_primary = route.interface == std::optional<std::string>("wg0");
+        CHECK(route.family == (is_primary ? primary_family :
+                              (primary_family == AF_INET ? AF_INET6 : AF_INET)));
+        if (route.table == 102U) {
+            ++group_usable;
+            CHECK(route.metric == (is_primary ? 0U : 1U));
+        }
+    }
+    CHECK(group_usable == (ipv6_enabled ? 2U : 1U));
+    NetlinkManager netlink;
+    RouteTable routes(netlink, true);
+    PolicyRuleManager rules(netlink, true);
+    std::size_t legacy_checks = 0U;
+    populate_routing_state(cfg, marks, routes, rules, [&](const Outbound&) {
+        ++legacy_checks;
+        return false;
+    }, &selections, ipv6_enabled, &families);
+    CHECK(legacy_checks == 0U);
+    CHECK(routing_plans_equal(plan, PlannedRoutingState{routes.get_routes(), rules.get_rules()}));
+}
+
 TEST_CASE("build_fw_rule_states: ignore outbound becomes pass-through firewall rule") {
     auto cfg = parse_minimal_config(R"({
         "outbounds":[
@@ -868,6 +1029,109 @@ TEST_CASE("plan_routing_state: snapshot input is deterministic and remains uncha
                      std::optional<std::string>{"wg0"}) == nullptr);
 }
 
+TEST_CASE("plan_routing_state: unavailable permissive interface has no orphan policy rule") {
+    auto cfg = parse_minimal_config(R"({
+        "iproute":{"table_start":150},
+        "daemon":{"strict_enforcement":false},
+        "outbounds":[{"tag":"disabled","type":"interface","interface":"vless2"}]
+    })");
+    SUBCASE("global permissive mode") {}
+    SUBCASE("per-outbound override also remains permissive") {
+        cfg.daemon->strict_enforcement = true;
+        cfg.outbounds->front().strict_enforcement = false;
+    }
+    const auto marks = allocate_outbound_marks(cfg.fwmark.value_or(FwmarkConfig{}), *cfg.outbounds);
+    for (const bool ipv6_enabled : {false, true}) {
+        const auto plan = plan_routing_state(
+            cfg, marks, {{"disabled", false}}, nullptr, ipv6_enabled);
+        CHECK(plan.routes.empty());
+        CHECK(plan.rules.empty());
+    }
+}
+
+TEST_CASE("plan_routing_state: permissive policy lookup follows anchored IP families") {
+    const auto cfg = parse_minimal_config(R"({
+        "iproute":{"table_start":150},
+        "daemon":{"strict_enforcement":false},
+        "outbounds":[{"tag":"vpn","type":"interface","interface":"vless1"}]
+    })");
+    const auto marks = allocate_outbound_marks(cfg.fwmark.value_or(FwmarkConfig{}), *cfg.outbounds);
+    for (const int family : {AF_INET, AF_INET6}) {
+        const OutboundFamilyReachabilitySnapshot families{
+            {"vpn", {family == AF_INET, family == AF_INET6}}};
+        const auto plan = plan_routing_state(cfg, marks, {}, nullptr, true, &families);
+        REQUIRE(plan.routes.size() == 1);
+        CHECK(plan.routes.front().family == family);
+        REQUIRE(plan.rules.size() == 1);
+        CHECK(plan.rules.front().family == family);
+        CHECK(plan.rules.front().table == plan.routes.front().table);
+        CHECK_FALSE(plan.routes.front().unreachable);
+    }
+}
+
+TEST_CASE("plan_routing_state: unavailable strict interface retains its unreachable anchors") {
+    auto cfg = parse_minimal_config(R"({
+        "iproute":{"table_start":150},
+        "daemon":{"strict_enforcement":true},
+        "outbounds":[{"tag":"disabled","type":"interface","interface":"vless2"}]
+    })");
+    SUBCASE("global strict mode") {}
+    SUBCASE("per-outbound strict override wins over permissive daemon") {
+        cfg.daemon->strict_enforcement = false;
+        cfg.outbounds->front().strict_enforcement = true;
+    }
+    const auto marks = allocate_outbound_marks(cfg.fwmark.value_or(FwmarkConfig{}), *cfg.outbounds);
+    for (const bool ipv6_enabled : {false, true}) {
+        const auto plan = plan_routing_state(
+            cfg, marks, {{"disabled", false}}, nullptr, ipv6_enabled);
+        REQUIRE(plan.routes.size() == (ipv6_enabled ? 2U : 1U));
+        for (const auto& route : plan.routes) {
+            CHECK(route.unreachable);
+            CHECK(route.metric == kUnreachableRouteMetric);
+            CHECK_FALSE(route.interface.has_value());
+        }
+        REQUIRE(plan.rules.size() == 1);
+        CHECK(plan.rules.front().family == (ipv6_enabled ? 0 : AF_INET));
+        CHECK(plan.rules.front().table == 150);
+    }
+}
+
+TEST_CASE("plan_routing_state: disabling permissive tunnel preserves other table assignments") {
+    const auto cfg = parse_minimal_config(R"({
+        "iproute":{"table_start":150},
+        "daemon":{"strict_enforcement":false},
+        "outbounds":[
+            {"tag":"first","type":"interface","interface":"vless1"},
+            {"tag":"disabled","type":"interface","interface":"vless2"},
+            {"tag":"last","type":"interface","interface":"vless3"}
+        ]
+    })");
+    const auto marks = allocate_outbound_marks(cfg.fwmark.value_or(FwmarkConfig{}), *cfg.outbounds);
+    const auto all_up = plan_routing_state(cfg, marks);
+    const auto one_down = plan_routing_state(cfg, marks, {{"disabled", false}});
+    REQUIRE(all_up.rules.size() == 3);
+    REQUIRE(one_down.rules.size() == 2);
+    CHECK(one_down.rules[0].table == 150);
+    CHECK(one_down.rules[1].table == 152);
+    CHECK(rule_specs_equal(one_down.rules[0], all_up.rules[0]));
+    CHECK(rule_specs_equal(one_down.rules[1], all_up.rules[2]));
+    CHECK(count_routes_in_table(one_down.routes, 151) == 0);
+    for (const auto& route : one_down.routes) {
+        CHECK(std::any_of(all_up.routes.begin(), all_up.routes.end(),
+            [&](const RouteSpec& previous) { return route_specs_equal(route, previous); }));
+    }
+    // Every concrete lookup has its own family/table anchor, as required by
+    // the combined route/rule transaction before any kernel mutation.
+    for (const auto& rule : one_down.rules) {
+        for (const int family : {AF_INET, AF_INET6}) {
+            CHECK(std::any_of(one_down.routes.begin(), one_down.routes.end(),
+                [&](const RouteSpec& route) {
+                    return route.table == rule.table && route.family == family;
+                }));
+        }
+    }
+}
+
 TEST_CASE("populate_routing_state: strict enforcement installs real default when up") {
     auto cfg = parse_minimal_config(R"({
         "iproute":{"table_start":100},
@@ -968,8 +1232,7 @@ TEST_CASE("populate_routing_state: unreachable interface outbound remains unavai
 
     CHECK(routes.get_routes().empty());
     CHECK(find_route(routes.get_routes(), 100, false, true) == nullptr);
-    REQUIRE(rules.get_rules().size() == 1);
-    CHECK(rules.get_rules()[0].table == 100);
+    CHECK(rules.get_rules().empty());
 }
 
 TEST_CASE("populate_routing_state: outbound true overrides daemon false") {
@@ -2178,8 +2441,8 @@ TEST_CASE("kernel routing reconciliation converges after a partial rule failure"
 }
 
 TEST_CASE(
-    "build_firewall_global_prefilter: verified OpenConnect ingress separates "
-    "forced DNS from destination-policy-only mode") {
+    "build_firewall_global_prefilter: OpenConnect OFF bypasses owned "
+    "classification while ON keeps selective destination policies") {
     auto cfg = parse_minimal_config(
         R"({"route":{"inbound_interfaces":["br0"],"rules":[]}})");
 
@@ -2189,54 +2452,59 @@ TEST_CASE(
     openconnect.process_clients = true;
     openconnect.verified_ingress_interfaces = {"oc7"};
     openconnect.source_cidrs_v4 = {"172.16.5.0/24"};
-    openconnect.dns_redirect_local_destinations_v4 = {
-        "192.168.77.1/32"};
+    openconnect.source_cidrs_v6 = {"fd77:9::/64"};
+    openconnect.dns_redirect_local_destinations_v4 = {"192.168.77.1/32"};
 
-    auto prefilter =
-        build_firewall_global_prefilter_for_runtime_targets(
-            cfg, {openconnect});
-    CHECK(
-        prefilter.include_source_cidrs_v4 ==
-        std::vector<std::string>{"172.16.5.0/24"});
+    auto prefilter = build_firewall_global_prefilter_for_runtime_targets(
+        cfg, {openconnect});
+    CHECK(prefilter.include_source_cidrs_v4 ==
+          std::vector<std::string>{"172.16.5.0/24"});
+    CHECK(prefilter.include_source_cidrs_v6 ==
+          std::vector<std::string>{"fd77:9::/64"});
     CHECK(prefilter.bypass_source_selectors_v4.empty());
-    CHECK(
-        prefilter.dns_redirect_local_destination_selectors_v4 ==
-        std::vector<FirewallIngressDestinationSelector>{
-            {"oc7", "192.168.77.1/32"}});
+    CHECK(prefilter.bypass_source_selectors_v6.empty());
+    CHECK_FALSE(internal_vpn_target_bypasses_routing(openconnect));
+    CHECK(prefilter.dns_redirect_local_destination_selectors_v4 ==
+          std::vector<FirewallIngressDestinationSelector>{
+              {"oc7", "192.168.77.1/32"}});
 
     openconnect.process_clients = false;
     openconnect.dns_redirect_local_destinations_v4.clear();
     prefilter = build_firewall_global_prefilter_for_runtime_targets(
         cfg, {openconnect});
-    CHECK(
-        prefilter.include_source_cidrs_v4 ==
-        std::vector<std::string>{"172.16.5.0/24"});
-    CHECK(prefilter.bypass_source_selectors_v4.empty());
-    REQUIRE(
-        prefilter.dns_redirect_bypass_source_selectors_v4.size() ==
-        1U);
-    CHECK(
-        prefilter.dns_redirect_bypass_source_selectors_v4.front()
-            .interface == "oc7");
-    CHECK(
-        prefilter.dns_redirect_bypass_source_selectors_v4.front()
-            .cidr ==
-        "172.16.5.0/24");
-    CHECK(
-        prefilter.dns_redirect_local_destination_selectors_v4.empty());
-    CHECK_FALSE(internal_vpn_target_bypasses_routing(openconnect));
+    CHECK(prefilter.include_source_cidrs_v4.empty());
+    CHECK(prefilter.include_source_cidrs_v6.empty());
+    REQUIRE(prefilter.bypass_source_selectors_v4.size() == 1U);
+    CHECK(prefilter.bypass_source_selectors_v4.front().interface == "oc7");
+    CHECK(prefilter.bypass_source_selectors_v4.front().cidr == "172.16.5.0/24");
+    REQUIRE(prefilter.bypass_source_selectors_v6.size() == 1U);
+    CHECK(prefilter.bypass_source_selectors_v6.front().interface == "oc7");
+    CHECK(prefilter.bypass_source_selectors_v6.front().cidr == "fd77:9::/64");
+    CHECK(prefilter.dns_redirect_bypass_source_selectors_v4.empty());
+    CHECK(prefilter.dns_redirect_bypass_source_selectors_v6.empty());
+    CHECK(prefilter.dns_redirect_local_destination_selectors_v4.empty());
+    CHECK(internal_vpn_target_bypasses_routing(openconnect));
 
-    // The authoritative pool still participates in destination policies, but
-    // DNS is never bypassed from a pool alone without an exact live ocN peer.
+    // OFF also needs the exact source RETURN with unrestricted ingress.
+    // It returns only from our chain; other hooks, including nfqws, still run.
+    cfg.route->inbound_interfaces.reset();
+    prefilter = build_firewall_global_prefilter_for_runtime_targets(
+        cfg, {openconnect});
+    CHECK_FALSE(prefilter.inbound_interfaces.has_value());
+    CHECK(prefilter.include_source_cidrs_v4.empty());
+    CHECK(prefilter.include_source_cidrs_v6.empty());
+    REQUIRE(prefilter.bypass_source_selectors_v4.size() == 1U);
+    REQUIRE(prefilter.bypass_source_selectors_v6.size() == 1U);
+
+    // A disconnected or foreign peer never grants a pool-only exemption.
     openconnect.verified_ingress_interfaces.clear();
     prefilter = build_firewall_global_prefilter_for_runtime_targets(
         cfg, {openconnect});
     CHECK(prefilter.bypass_source_selectors_v4.empty());
-    CHECK(
-        prefilter.include_source_cidrs_v4 ==
-        std::vector<std::string>{"172.16.5.0/24"});
-    CHECK(
-        prefilter.dns_redirect_bypass_source_selectors_v4.empty());
+    CHECK(prefilter.bypass_source_selectors_v6.empty());
+    CHECK(prefilter.include_source_cidrs_v4.empty());
+    CHECK(prefilter.include_source_cidrs_v6.empty());
+    CHECK(prefilter.dns_redirect_bypass_source_selectors_v4.empty());
 }
 
 TEST_CASE("kernel routing reconciliation restores a replaced route when policy commit fails") {

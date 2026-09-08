@@ -5,6 +5,7 @@ set -e
 KEEN_PBR_BIN="${KEEN_PBR_BIN:-/opt/usr/bin/keen-pbr}"
 CONFIG_PATH="${KEEN_PBR_CONFIG_PATH:-/opt/etc/keen-pbr/config.json}"
 DNSMASQ_FALLBACK_FILE="${KEEN_PBR_DNSMASQ_FALLBACK_FILE:-/opt/etc/keen-pbr/dnsmasq-fallback.conf}"
+FALLBACK_TMP="${DNSMASQ_FALLBACK_FILE}.$$"
 STATE_DIR="${KEEN_PBR_STATE_DIR:-/tmp/keen-pbr}"
 ACTIVE_FILE="${STATE_DIR}/active"
 MANAGED_CONFIG_FILE="${STATE_DIR}/dnsmasq-managed.conf"
@@ -17,7 +18,7 @@ MANAGED_CANDIDATE_COMPLETE="N"
 ACTIVE_ATTEMPT_ID=""
 
 cleanup_managed_config_tmp() {
-    rm -f "$MANAGED_CONFIG_TMP" "$ATTEMPT_TMP" "$ATTEMPT_ACCEPTED_TMP"
+    rm -f "$MANAGED_CONFIG_TMP" "$ATTEMPT_TMP" "$ATTEMPT_ACCEPTED_TMP" "$FALLBACK_TMP"
 }
 
 trap cleanup_managed_config_tmp EXIT
@@ -43,6 +44,50 @@ log_warn() {
 
 fallback_conf_line() {
     printf 'conf-file=%s\n' "$DNSMASQ_FALLBACK_FILE"
+}
+
+fallback_is_automatic() {
+    [ -e "$DNSMASQ_FALLBACK_FILE" ] || return 0
+    # A custom conffile is never rewritten. Migrate only the exact previous
+    # packaged default (CRLF is equivalent), or our explicitly marked output.
+    local current first_line
+    first_line="$(head -n 1 "$DNSMASQ_FALLBACK_FILE" | tr -d '\r')" || return 1
+    [ "$first_line" = '# keen-pbr automatic direct DNS fallback v1' ] && return 0
+    current="$(tr -d '\r' < "$DNSMASQ_FALLBACK_FILE")" || return 1
+    [ "$current" = '# Fallback upstream DNS servers for dnsmasq.
+# This file is used when keen-pbr is disabled, stopped, or otherwise not active.
+# Configure the same fallback resolvers here that you want dnsmasq to use without keen-pbr.
+
+server=8.8.8.8
+server=8.8.4.4' ]
+}
+
+update_direct_fallback() {
+    is_active || return 0
+    fallback_is_automatic || return 0
+    resolver_config_is_active "$MANAGED_CONFIG_FILE" || return 0
+    grep -qx '# keen-pbr direct-fallback v1' "$MANAGED_CONFIG_FILE" || return 0
+    # Run in the parent hook, after activation/receipt, not in dnsmasq's
+    # conf-script child. Failure to save this small convenience snapshot must
+    # not turn a successful active DNS configuration into a failed apply.
+    {
+        printf '%s\n' '# keen-pbr automatic direct DNS fallback v1' \
+            '# Refreshed from the last complete resolver activation, without VPN detours.' \
+            '# Remove the first line to keep your own fallback settings unchanged.'
+        sed -n 's/^# keen-pbr direct-fallback \(server=.*\)$/\1/p' "$MANAGED_CONFIG_FILE"
+    } > "$FALLBACK_TMP" || return 1
+    if ! grep -q '^server=' "$FALLBACK_TMP"; then
+        # Do not keep removed upstreams as an implicit permission to use them.
+        printf '%s\n' '# keen-pbr direct-fallback unavailable' \
+            '# No direct fallback DNS in this generation; configure a direct DNS or a manual fallback.' >> "$FALLBACK_TMP"
+        log_warn "No direct fallback DNS is configured; VPN-only DNS cannot work while routing is stopped"
+    fi
+    if cmp -s "$FALLBACK_TMP" "$DNSMASQ_FALLBACK_FILE"; then
+        rm -f "$FALLBACK_TMP"
+        return 0
+    fi
+    chmod 644 "$FALLBACK_TMP" || return 1
+    mv -f "$FALLBACK_TMP" "$DNSMASQ_FALLBACK_FILE"
 }
 
 resolver_attempt_is_valid() {
@@ -133,7 +178,8 @@ resolver_config_is_fallback() {
     [ -s "$path" ] || return 1
     grep -q '^# keen-pbr resolver state: fallback reason=' "$path" &&
         grep -q '^txt-record=resolver-state\.keen\.pbr,' "$path" &&
-        resolver_config_has_upstream "$path"
+        { resolver_config_has_upstream "$path" ||
+            grep -qx '# keen-pbr direct-fallback unavailable' "$path"; }
 }
 
 refresh_managed_config() {
@@ -245,8 +291,13 @@ stop_dnsmasq() {
     waited=0
     while [ "$waited" -lt 50 ]; do
         kill -0 "$pid" 2>/dev/null || return 0
-        usleep 100000 2>/dev/null || sleep 1
-        waited=$((waited + 1))
+        # Count tenths of a second even when BusyBox has no usleep applet.
+        if usleep 100000 2>/dev/null; then
+            waited=$((waited + 1))
+        else
+            sleep 1
+            waited=$((waited + 10))
+        fi
     done
 
     log_warn "dnsmasq did not stop within 5 s, forcing"
@@ -276,8 +327,12 @@ restart_dnsmasq() {
             log_info "dnsmasq restarted"
             return 0
         fi
-        usleep 100000 2>/dev/null || sleep 1
-        waited=$((waited + 1))
+        if usleep 100000 2>/dev/null; then
+            waited=$((waited + 1))
+        else
+            sleep 1
+            waited=$((waited + 10))
+        fi
     done
 
     log_warn "dnsmasq did not come back after restart"
@@ -307,18 +362,21 @@ case "$1" in
         publish_resolver_attempt "$attempt_id"
         activate_dnsmasq
         wait_for_resolver_attempt_acceptance "$attempt_id"
+        update_direct_fallback || log_warn "Could not update the automatic DNS fallback; active DNS is unchanged"
         ;;
     deactivate)
         deactivate_dnsmasq
         ;;
     restart-dnsmasq)
         restart_dnsmasq
+        update_direct_fallback || log_warn "Could not update the automatic DNS fallback; active DNS is unchanged"
         ;;
     reload)
         attempt_id="${2:-}"
         publish_resolver_attempt "$attempt_id"
         restart_dnsmasq
         wait_for_resolver_attempt_acceptance "$attempt_id"
+        update_direct_fallback || log_warn "Could not update the automatic DNS fallback; active DNS is unchanged"
         ;;
     help|-h|--help)
         print_help

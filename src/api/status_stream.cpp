@@ -92,6 +92,11 @@ SseBroadcaster::SubscriptionPtr StatusStream::subscribe() {
                 "list_refresh",
                 make_event_payload("list_refresh", list_refresh_)));
         }
+        if (notification_state_initialized_) {
+            initial_frames.push_back(make_named_sse_frame(
+                "notification_state",
+                make_event_payload("notification_state", notification_state_)));
+        }
         if (component_transaction_initialized_) {
             initial_frames.push_back(make_named_sse_frame(
                 "component_transaction",
@@ -246,6 +251,34 @@ void StatusStream::publish_component_transaction(nlohmann::json state) {
         "component_transaction",
         make_event_payload("component_transaction",
                            component_transaction_)));
+}
+
+void StatusStream::publish_subscription_change() {
+    broadcaster_.publish(make_named_sse_frame("subscriptions", "{\"type\":\"subscriptions\"}"));
+}
+
+void StatusStream::publish_router_info_change() {
+    broadcaster_.publish(make_named_sse_frame("router_info", "{\"type\":\"router_info\"}"));
+}
+
+void StatusStream::publish_notification_state(nlohmann::json state) {
+    if (!state.is_object()) return;
+    const auto revision = state.find("revision");
+    if (revision == state.end() || !revision->is_number_integer() ||
+        (!revision->is_number_unsigned() && revision->get<std::int64_t>() < 0)) {
+        return;
+    }
+    const auto next_revision = revision->get<std::uint64_t>();
+    KPBR_LOCK_GUARD(mutex_);
+    if (notification_state_initialized_ &&
+        next_revision <= notification_state_.at("revision").get<std::uint64_t>()) {
+        return;
+    }
+    notification_state_ = std::move(state);
+    notification_state_initialized_ = true;
+    broadcaster_.publish(make_named_sse_frame(
+        "notification_state",
+        make_event_payload("notification_state", notification_state_)));
 }
 
 void StatusStream::publish_sing_box_install(nlohmann::json state) {

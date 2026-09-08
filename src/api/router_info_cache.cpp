@@ -36,14 +36,21 @@ private:
 RouterInfoCache::RouterInfoCache(FetchFn fetch,
                                  Clock::duration ttl,
                                  Clock::duration failure_retry,
-                                 NowFn now)
+                                 NowFn now,
+                                 Clock::duration event_min_refresh)
     : fetch_(std::move(fetch))
     , ttl_(ttl)
     , failure_retry_(failure_retry)
-    , now_(std::move(now)) {
+    , now_(std::move(now))
+    , event_min_refresh_(event_min_refresh) {
     if (!now_) {
         now_ = [] { return Clock::now(); };
     }
+}
+
+void RouterInfoCache::invalidate() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    dirty_ = true;
 }
 
 nlohmann::json RouterInfoCache::response_locked() const {
@@ -62,7 +69,8 @@ nlohmann::json RouterInfoCache::get() {
         {
             std::unique_lock<std::mutex> lock(mutex_);
             const auto now = now_();
-            if (last_good_.has_value() && now < refresh_after_) {
+            if (last_good_.has_value() && now < refresh_after_ &&
+                (!dirty_ || now < event_refresh_after_)) {
                 return *last_good_;
             }
             if (now < retry_after_) {
@@ -86,6 +94,9 @@ nlohmann::json RouterInfoCache::get() {
                 continue;
             }
             refreshing_ = true;
+            // Consume only events already observed by this attempt. A later
+            // invalidate() sets dirty_ again while fetch_ runs unlocked.
+            dirty_ = false;
             attempt_started = now;
         }
 
@@ -109,6 +120,7 @@ nlohmann::json RouterInfoCache::get() {
         std::unique_lock<std::mutex> lock(mutex_);
         RefreshTerminalGuard terminal(
             lock, refreshing_, refresh_finished_);
+        event_refresh_after_ = completed_at + event_min_refresh_;
         if (refreshed.success) {
             last_good_ = std::move(refreshed.value);
             last_failed_.reset();
@@ -120,6 +132,9 @@ nlohmann::json RouterInfoCache::get() {
             // that the old uncached implementation would have returned.
             last_failed_ = std::move(refreshed.value);
             retry_after_ = completed_at + failure_retry_;
+            // An event-triggered attempt can fail while the ordinary TTL is
+            // still fresh. Keep it eligible after retry, not after that TTL.
+            dirty_ = true;
         }
         return response_locked();
     }

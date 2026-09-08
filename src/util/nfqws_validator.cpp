@@ -15,8 +15,14 @@ constexpr std::string_view kOwnedWritable =
     "--writable=/var/run/keen-pbr-nfqws";
 
 struct ParsedCandidate {
+    struct Assignment {
+        std::string name;
+        std::size_t begin;
+        std::size_t end;
+    };
     std::map<std::string, std::string> values;
     std::vector<ConfigValidationIssue> issues;
+    std::vector<Assignment> assignments;
 };
 
 bool name_start(char ch) {
@@ -56,8 +62,9 @@ void skip_line(const std::string& content, std::size_t& index) {
 
 void parser_issue(ParsedCandidate& parsed,
                   const std::string& path,
-                  const std::string& message) {
-    parsed.issues.push_back({path, message});
+                  const std::string& message,
+                  const std::string& code) {
+    parsed.issues.push_back({path, message, code, {}});
 }
 
 // Expand one shell parameter reference without consulting the daemon
@@ -76,7 +83,8 @@ bool append_expansion(const std::string& content,
     }
     if (content[index] == '(' || content[index] == '`') {
         parser_issue(parsed, variable,
-                     "command substitution is not allowed in an nfqws candidate");
+                     "command substitution is not allowed in an nfqws candidate",
+                     "nfqws.shell.command_substitution");
         return false;
     }
 
@@ -97,7 +105,8 @@ bool append_expansion(const std::string& content,
     if (braced) {
         if (index >= content.size() || content[index] != '}') {
             parser_issue(parsed, variable,
-                         "only simple ${NAME} expansion is allowed in an nfqws candidate");
+                         "only simple ${NAME} expansion is allowed in an nfqws candidate",
+                         "nfqws.shell.expansion_syntax");
             return false;
         }
         ++index;
@@ -106,7 +115,8 @@ bool append_expansion(const std::string& content,
     if (found == values.end()) {
         parser_issue(parsed, variable,
                      "undefined variable $" + name +
-                         " must not depend on the service environment");
+                         " must not depend on the service environment",
+                     "nfqws.shell.undefined_variable");
         return false;
     }
     output += found->second;
@@ -117,6 +127,7 @@ ParsedCandidate parse_candidate(const std::string& content) {
     ParsedCandidate parsed;
     std::size_t index = 0;
     while (index < content.size()) {
+        const std::size_t statement_begin = index;
         while (index < content.size() && horizontal_space(content[index])) ++index;
         if (index >= content.size()) break;
         if (content[index] == '\n') {
@@ -131,7 +142,8 @@ ParsedCandidate parse_candidate(const std::string& content) {
         const std::size_t line_start = index;
         if (!name_start(content[index])) {
             parser_issue(parsed, "nfqws2.conf",
-                         "only shell variable assignments and comments are allowed");
+                         "only shell variable assignments and comments are allowed",
+                         "nfqws.shell.assignments_only");
             skip_line(content, index);
             continue;
         }
@@ -140,20 +152,23 @@ ParsedCandidate parse_candidate(const std::string& content) {
         const auto name = content.substr(name_begin, index - name_begin);
         if (!supported_assignment(name)) {
             parser_issue(parsed, name,
-                         "unsupported assignment in nfqws2.conf");
+                         "unsupported assignment in nfqws2.conf",
+                         "nfqws.shell.unsupported_assignment");
             skip_line(content, index);
             continue;
         }
         if (index >= content.size() || content[index] != '=') {
             parser_issue(parsed, name,
-                         "only NAME=value assignments are allowed");
+                         "only NAME=value assignments are allowed",
+                         "nfqws.shell.assignment_syntax");
             skip_line(content, index);
             continue;
         }
         ++index;
         if (index < content.size() && horizontal_space(content[index])) {
             parser_issue(parsed, name,
-                         "whitespace after '=' would execute a shell command instead of assigning the value");
+                         "whitespace after '=' would execute a shell command instead of assigning the value",
+                         "nfqws.shell.whitespace_after_equals");
             skip_line(content, index);
             continue;
         }
@@ -163,6 +178,7 @@ ParsedCandidate parse_candidate(const std::string& content) {
         std::string value;
         bool valid = true;
         bool finished = false;
+        std::size_t assignment_end = content.size();
         while (index < content.size() && !finished) {
             const char ch = content[index];
             if (quote == Quote::single) {
@@ -182,7 +198,8 @@ ParsedCandidate parse_candidate(const std::string& content) {
                 }
                 if (ch == '`') {
                     parser_issue(parsed, name,
-                                 "command substitution is not allowed in an nfqws candidate");
+                                 "command substitution is not allowed in an nfqws candidate",
+                                 "nfqws.shell.command_substitution");
                     valid = false;
                     ++index;
                     continue;
@@ -217,18 +234,21 @@ ParsedCandidate parse_candidate(const std::string& content) {
             }
 
             if (ch == '\n') {
+                assignment_end = index;
                 ++index;
                 finished = true;
                 continue;
             }
             if (horizontal_space(ch)) {
+                assignment_end = index;
                 while (index < content.size() && horizontal_space(content[index])) {
                     ++index;
                 }
                 if (index < content.size() && content[index] != '\n' &&
                     content[index] != '#') {
                     parser_issue(parsed, name,
-                                 "unquoted whitespace would execute a shell command");
+                                 "unquoted whitespace would execute a shell command",
+                                 "nfqws.shell.unquoted_whitespace");
                     valid = false;
                 }
                 skip_line(content, index);
@@ -274,7 +294,8 @@ ParsedCandidate parse_candidate(const std::string& content) {
             if (ch == '`' || ch == ';' || ch == '&' || ch == '|' ||
                 ch == '<' || ch == '>' || ch == '(' || ch == ')') {
                 parser_issue(parsed, name,
-                             "shell commands and control operators are not allowed in an nfqws candidate");
+                             "shell commands and control operators are not allowed in an nfqws candidate",
+                             "nfqws.shell.control_operator");
                 valid = false;
             }
             value.push_back(ch);
@@ -282,10 +303,14 @@ ParsedCandidate parse_candidate(const std::string& content) {
         }
 
         if (quote != Quote::none) {
-            parser_issue(parsed, name, "unterminated quoted assignment");
+            parser_issue(parsed, name, "unterminated quoted assignment",
+                         "nfqws.shell.unterminated_quote");
             valid = false;
         }
-        if (valid) parsed.values[name] = std::move(value);
+        if (valid) {
+            parsed.values[name] = std::move(value);
+            parsed.assignments.push_back({name, statement_begin, assignment_end});
+        }
 
         // A malformed line must still make progress even if it ended at EOF.
         if (index == line_start) ++index;
@@ -323,7 +348,7 @@ void validate_port_number(const std::string& variable,
                           int& value,
                           bool& valid) {
     if (text.empty()) {
-        issues.push_back({variable + "/" + flag, "empty port"});
+        issues.push_back({variable + "/" + flag, "empty port", "nfqws.port.empty", {}});
         valid = false;
         return;
     }
@@ -333,13 +358,13 @@ void validate_port_number(const std::string& variable,
     if (converted.ec != std::errc{} ||
         converted.ptr != text.data() + text.size()) {
         issues.push_back(
-            {variable + "/" + flag, "port '" + text + "' is not a number"});
+            {variable + "/" + flag, "port '" + text + "' is not a number", "nfqws.port.number", {}});
         valid = false;
         return;
     }
     if (parsed < 1 || parsed > 65535) {
         issues.push_back({variable + "/" + flag,
-                          "port " + text + " is out of range 1-65535"});
+                          "port " + text + " is out of range 1-65535", "nfqws.port.range", {}});
         valid = false;
         return;
     }
@@ -353,7 +378,7 @@ void validate_port_spec(const std::string& variable,
                         std::vector<ConfigValidationIssue>& issues) {
     if (spec.empty()) {
         issues.push_back(
-            {variable + "/" + flag, "port filter must not be empty"});
+            {variable + "/" + flag, "port filter must not be empty", "nfqws.port.filter_empty", {}});
         return;
     }
     std::size_t begin = 0;
@@ -363,7 +388,7 @@ void validate_port_spec(const std::string& variable,
         const auto item = spec.substr(begin, end - begin);
         if (item.empty()) {
             issues.push_back(
-                {variable + "/" + flag, "port filter contains an empty item"});
+                {variable + "/" + flag, "port filter contains an empty item", "nfqws.port.empty_item", {}});
         } else {
             const auto dash = item.find('-');
             if (dash == std::string::npos) {
@@ -372,7 +397,7 @@ void validate_port_spec(const std::string& variable,
                 validate_port_number(variable, flag, item, issues, port, valid);
             } else if (item.find('-', dash + 1) != std::string::npos) {
                 issues.push_back({variable + "/" + flag,
-                                  "port range '" + item + "' is malformed"});
+                                  "port range '" + item + "' is malformed", "nfqws.port.range_malformed", {}});
             } else {
                 int low = 0;
                 int high = 0;
@@ -385,7 +410,7 @@ void validate_port_spec(const std::string& variable,
                 if (low_valid && high_valid && low > high) {
                     issues.push_back({variable + "/" + flag,
                                       "port range " + item +
-                                          " is inverted (low > high)"});
+                                          " is inverted (low > high)", "nfqws.port.range_inverted", {}});
                 }
             }
         }
@@ -453,7 +478,7 @@ void validate_token(const std::string& variable,
         (variable != "NFQWS_BASE_ARGS" || token != kOwnedWritable)) {
         issues.push_back(
             {variable + "/--writable",
-             "only the package-owned nfqws rotator writable directory is allowed"});
+             "only the package-owned nfqws rotator writable directory is allowed", "nfqws.writable.owned_only", {}});
     }
     if (token.rfind("--filter-tcp=", 0) == 0) {
         validate_port_spec(variable, "--filter-tcp",
@@ -467,24 +492,24 @@ void validate_token(const std::string& variable,
     if (token.find('$') != std::string::npos) {
         issues.push_back({variable,
                           "literal shell variable reference would reach nfqws2; "
-                          "single-quoted values are not expanded"});
+                          "single-quoted values are not expanded", "nfqws.shell.literal_variable", {}});
     }
     if (token.find_first_of("*?[") != std::string::npos) {
         issues.push_back(
             {variable,
-             "shell wildcard is not allowed because the init script would expand it differently from the dry run"});
+             "shell wildcard is not allowed because the init script would expand it differently from the dry run", "nfqws.shell.wildcard", {}});
     }
     const auto reference = input_path_reference(token);
     if (!reference.has_value()) return;
     if (reference->path.empty()) {
         issues.push_back(
-            {variable + "/" + reference->flag, "empty file path"});
+            {variable + "/" + reference->flag, "empty file path", "nfqws.path.empty", {}});
         return;
     }
     if (resolve_path &&
         !resolve_input_path(*reference, resolve_path).has_value()) {
         issues.push_back({variable + "/" + reference->flag,
-                          "referenced file does not exist: " + reference->path});
+                          "referenced file does not exist: " + reference->path, "nfqws.path.missing", {}});
     }
 }
 
@@ -497,13 +522,13 @@ void validate_tokens(const ParsedCandidate& parsed,
     if (forbid_new && contains_new(tokens)) {
         issues.push_back(
             {variable,
-             "--new is not allowed here; use NFQWS_ARGS_CUSTOM for additional profiles"});
+             "--new is not allowed here; use NFQWS_ARGS_CUSTOM for additional profiles", "nfqws.profile.new_forbidden", {}});
     }
     if (variable == "NFQWS_BASE_ARGS" &&
         std::count(tokens.begin(), tokens.end(), kOwnedWritable) > 1) {
         issues.push_back(
             {variable + "/--writable",
-             "the package-owned writable directory may be declared only once"});
+             "the package-owned writable directory may be declared only once", "nfqws.writable.duplicate", {}});
     }
     for (const auto& token : tokens) {
         validate_token(variable, token, resolve_path, issues);
@@ -524,17 +549,17 @@ void validate_custom_boundaries(const std::vector<std::string>& tokens,
     if (tokens.empty()) return;
     if (is_new_boundary(tokens.front()) || is_new_boundary(tokens.back())) {
         issues.push_back({"NFQWS_ARGS_CUSTOM",
-                          "--new must separate two non-empty custom profiles"});
+                          "--new must separate two non-empty custom profiles", "nfqws.profile.empty_boundary", {}});
     }
     for (std::size_t index = 0; index < tokens.size(); ++index) {
         if (tokens[index] == "--new=") {
             issues.push_back({"NFQWS_ARGS_CUSTOM",
-                              "a named --new boundary must have a name"});
+                              "a named --new boundary must have a name", "nfqws.profile.boundary_name_required", {}});
         }
         if (index > 0 && is_new_boundary(tokens[index]) &&
             is_new_boundary(tokens[index - 1])) {
             issues.push_back({"NFQWS_ARGS_CUSTOM",
-                              "consecutive --new tokens create an empty custom profile"});
+                              "consecutive --new tokens create an empty custom profile", "nfqws.profile.consecutive_boundaries", {}});
             break;
         }
     }
@@ -551,7 +576,7 @@ void validate_strategy_actions(const ParsedCandidate& parsed,
         if (!contains_strategy_action(tokens)) {
             issues.push_back(
                 {variable,
-                 "profile has no supported action (--lua-desync= or --dpi-desync=); filters and selectors alone do not process traffic"});
+                 "profile has no supported action (--lua-desync= or --dpi-desync=); filters and selectors alone do not process traffic", "nfqws.profile.action_required", {}});
         }
     }
 
@@ -572,7 +597,7 @@ void validate_strategy_actions(const ParsedCandidate& parsed,
             if (!exact) {
                 issues.push_back(
                     {"NFQWS_ARGS_CUSTOM",
-                     "webrtc_passthrough must contain exactly --filter-udp=49152-65535 and --filter-l7=stun"});
+                     "webrtc_passthrough must contain exactly --filter-udp=49152-65535 and --filter-l7=stun", "nfqws.profile.webrtc_passthrough", {}});
             }
             return;
         }
@@ -580,7 +605,7 @@ void validate_strategy_actions(const ParsedCandidate& parsed,
             issues.push_back(
                 {"NFQWS_ARGS_CUSTOM",
                  "custom profile " + std::to_string(segment_number) +
-                     " has no supported action (--lua-desync= or --dpi-desync=)"});
+                     " has no supported action (--lua-desync= or --dpi-desync=)", "nfqws.profile.custom_action_required", {}});
         }
     };
     for (const auto& token : custom) {
@@ -598,7 +623,7 @@ void validate_strategy_actions(const ParsedCandidate& parsed,
     if (!has_profile) {
         issues.push_back(
             {"NFQWS_ARGS",
-             "the candidate has no strategy profile; IPSET and mode selectors alone do not process traffic"});
+             "the candidate has no strategy profile; IPSET and mode selectors alone do not process traffic", "nfqws.profile.required", {}});
     }
 }
 
@@ -628,7 +653,7 @@ std::vector<ConfigValidationIssue> validate_parsed_candidate(
             converted.ptr != queue.data() + queue.size() || number < 0 ||
             number > 65535) {
             issues.push_back(
-                {"NFQUEUE_NUM", "queue number must be an integer from 0 to 65535"});
+                {"NFQUEUE_NUM", "queue number must be an integer from 0 to 65535", "nfqws.queue.range", {}});
         }
     }
 
@@ -637,7 +662,7 @@ std::vector<ConfigValidationIssue> validate_parsed_candidate(
         !std::all_of(user.begin(), user.end(), [](unsigned char ch) {
             return std::isalnum(ch) != 0 || ch == '_' || ch == '-' || ch == '.';
         })) {
-        issues.push_back({"USER", "nfqws user name contains unsafe characters"});
+        issues.push_back({"USER", "nfqws user name contains unsafe characters", "nfqws.user.unsafe", {}});
     }
     return issues;
 }
@@ -837,6 +862,104 @@ std::vector<ConfigValidationIssue> validate_nfqws_candidate(
     const std::string& content,
     const NfqwsPathResolver& resolve_path) {
     return validate_parsed_candidate(parse_candidate(content), resolve_path);
+}
+
+std::string nfqws_config_without_version_metadata(const std::string& content) {
+    const auto parsed = parse_candidate(content);
+    if (!parsed.issues.empty()) return content;
+    std::string result = content;
+    for (auto assignment = parsed.assignments.rbegin();
+         assignment != parsed.assignments.rend(); ++assignment) {
+        if (assignment->name == "CONFIG_VERSION") {
+            result.erase(assignment->begin, assignment->end - assignment->begin);
+        }
+    }
+    const auto checked = parse_candidate(result);
+    if (!checked.issues.empty()) return content;
+    for (const auto& [name, value] : parsed.values) {
+        if (name == "CONFIG_VERSION") continue;
+        const auto found = checked.values.find(name);
+        if (found == checked.values.end() || found->second != value)
+            return content;
+    }
+    return result;
+}
+
+std::optional<std::string> migrate_nfqws_config_preserving_settings(
+    const std::string& previous,
+    const std::string& package_defaults) {
+    const auto old = parse_candidate(previous);
+    const auto defaults = parse_candidate(package_defaults);
+    if (!old.issues.empty() || !defaults.issues.empty()) return std::nullopt;
+
+    const auto numeric_version = [](const ParsedCandidate& parsed)
+        -> std::optional<std::uint64_t> {
+        const auto& value = value_of(parsed, "CONFIG_VERSION");
+        if (value.empty() || !std::all_of(value.begin(), value.end(), [](char ch) {
+                return ch >= '0' && ch <= '9';
+            })) {
+            return std::nullopt;
+        }
+        std::uint64_t version = 0;
+        const auto converted = std::from_chars(
+            value.data(), value.data() + value.size(), version);
+        if (converted.ec != std::errc{} ||
+            converted.ptr != value.data() + value.size()) {
+            return std::nullopt;
+        }
+        return version;
+    };
+    const auto version = numeric_version(defaults);
+    if (!version.has_value() || !numeric_version(old).has_value())
+        return std::nullopt;
+
+    std::string migrated = previous;
+    bool version_written = false;
+    for (auto assignment = old.assignments.rbegin();
+         assignment != old.assignments.rend(); ++assignment) {
+        if (assignment->name != "CONFIG_VERSION") continue;
+        // Keep the last real assignment, not a lookalike in quoted Lua/args.
+        // Removing earlier duplicates also keeps upstream grep unambiguous.
+        migrated.replace(
+            assignment->begin, assignment->end - assignment->begin,
+            version_written ? std::string{} :
+                "CONFIG_VERSION=" + std::to_string(*version));
+        version_written = true;
+    }
+    if (!version_written) return std::nullopt;
+
+    const auto shell_literal = [](const std::string& value) {
+        std::string quoted = "'";
+        for (const char ch : value) {
+            if (ch == '\'') quoted += "'\\''";
+            else quoted += ch;
+        }
+        quoted += '\'';
+        return quoted;
+    };
+    for (const auto& [name, value] : defaults.values) {
+        if (old.values.find(name) != old.values.end()) continue;
+        if (!migrated.empty() && migrated.back() != '\n') migrated += '\n';
+        migrated += name + "=" + shell_literal(value) + "\n";
+    }
+
+    // VERSION references can change another setting's expansion despite its
+    // source text being untouched. Such a candidate needs an explicit adapter.
+    const auto checked = parse_candidate(migrated);
+    if (!checked.issues.empty()) return std::nullopt;
+    for (const auto& [name, value] : old.values) {
+        if (name == "CONFIG_VERSION") continue;
+        const auto found = checked.values.find(name);
+        if (found == checked.values.end() || found->second != value)
+            return std::nullopt;
+    }
+    for (const auto& [name, value] : defaults.values) {
+        if (old.values.find(name) != old.values.end()) continue;
+        const auto found = checked.values.find(name);
+        if (found == checked.values.end() || found->second != value)
+            return std::nullopt;
+    }
+    return migrated;
 }
 
 NfqwsPpePortContract extract_nfqws_ppe_port_contract(

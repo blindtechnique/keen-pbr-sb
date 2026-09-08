@@ -5,6 +5,7 @@
  * REST API for the keen-pbr policy-based routing daemon.
  * OpenAPI spec version: 3.0.0
  */
+import type { TunnelProbeHostReview } from './tunnelProbeHostReview';
 
 /**
  * The two files the nfqws2-to-tunnel automation owns.
@@ -25,4 +26,12 @@ export interface TunnelProbeHostsResponse {
   list_file?: string;
   /** The file the never-list is kept in. */
   exclude_file?: string;
+  /** A configuration draft exists; host actions still edit the active automation list. */
+  config_is_draft?: boolean;
+  /** Review history is readable and belongs to the current ISP and tunnel configuration. */
+  review_available?: boolean;
+  /** Current routed membership exceeds the bounded review capacity of 512 hosts. */
+  review_limited?: boolean;
+  /** @maxItems 512 */
+  reviews?: TunnelProbeHostReview[];
 }

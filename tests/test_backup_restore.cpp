@@ -247,7 +247,7 @@ ApiContext make_backup_context(
         [] {},
         [] {},
         [] {},
-        [](std::optional<std::string>) {
+        [](const api::ListRefreshRequest&) {
             return ListRefreshOperationResult{};
         },
     };
@@ -2338,6 +2338,36 @@ TEST_CASE("backup validation rejects NUL path before filesystem conversion") {
         std::filesystem::exists(
             nfqws_root / "truncated.list"));
     CHECK(read_text(config_path) == original_config);
+    CHECK(applied.empty());
+}
+
+TEST_CASE("backup future configuration version returns field error before mutation") {
+    BackupTempDir directory;
+    const auto config_path = directory.path / "config.json";
+    const Config original = make_valid_config("127.0.0.1:12121");
+    const auto original_bytes = nlohmann::json(original).dump();
+    write_text(config_path, original_bytes);
+    SseBroadcaster broadcaster;
+    std::vector<Config> applied;
+    auto context = make_backup_context(config_path.string(), broadcaster, original, applied);
+    const nlohmann::json backup = {
+        {"format", "keen-pbr-sb-backup"}, {"schema", 1},
+        {"data", {{"general", {{"schema_version", original.schema_version + 1}}}}},
+    };
+    try {
+        restore_backup_bundle_for_test(context, backup);
+        FAIL("future configuration version accepted");
+    } catch (const ApiError& error) {
+        CHECK(error.status() == 400);
+        REQUIRE(error.body().has_value());
+        const auto body = nlohmann::json::parse(*error.body());
+        CHECK(body.at("code") == "validation");
+        REQUIRE(body.at("validation_errors").size() == 1);
+        CHECK(body.at("validation_errors").at(0).at("path") == "schema_version");
+        CHECK(body.at("validation_errors").at(0).at("message").get<std::string>()
+                  .find("newer than supported version") != std::string::npos);
+    }
+    CHECK(read_text(config_path) == original_bytes);
     CHECK(applied.empty());
 }
 

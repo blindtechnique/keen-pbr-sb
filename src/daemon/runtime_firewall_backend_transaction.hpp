@@ -68,6 +68,7 @@ struct RuntimeFirewallBackendTransactionInput {
     Config config;
     OutboundMarkMap outbound_marks;
     std::map<std::string, std::string> urltest_selections;
+    RouteFailureHealthSnapshot failure_health;
     std::vector<InternalVpnServer> effective_internal_vpn_servers;
     std::vector<InternalVpnRuntimeTarget> effective_internal_vpn_targets;
     std::vector<FirewallSourceEgressSnatSelector>
@@ -126,7 +127,9 @@ RuntimeFirewallBackendTransactionResult
 execute_runtime_firewall_backend_transaction(
     const RuntimeFirewallBackendTransactionInput& input,
     Firewall& firewall,
-    MetaUdp443ActivationBackendServices& meta_services);
+    MetaUdp443ActivationBackendServices& meta_services,
+    const RouteFailureHealthSnapshot* failure_health = nullptr,
+    const OutboundFamilyReachabilitySnapshot* family_reachability = nullptr);
 
 // Production convenience overload. The explicit service references keep the
 // worker boundary visible while constructing the narrow Meta adapter locally.

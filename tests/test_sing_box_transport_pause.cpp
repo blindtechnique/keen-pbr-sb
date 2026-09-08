@@ -59,7 +59,7 @@ TEST_CASE("the transports come back even when the scope is left by a throw") {
     CHECK(manager.calls == std::vector<std::string>{"down:nl", "up:nl"});
 }
 
-TEST_CASE("a transport that would not stop is reported and none is invented") {
+TEST_CASE("a refused stop restores every addressed originally running transport") {
     // Something is still running on the binary the install would replace,
     // which is the exact situation the blocker exists to prevent. The caller
     // must be able to see it and refuse.
@@ -69,11 +69,49 @@ TEST_CASE("a transport that would not stop is reported and none is invented") {
 
     CHECK_FALSE(pause.all_stopped());
     CHECK(pause.unstoppable() == std::vector<std::string>{"de"});
-    // The one that did stop is still this pause's responsibility.
+    // Only an acknowledged stop is reported as stopped, but a failed Down
+    // may still have changed desired state and must be resumed too.
     CHECK(pause.stopped() == std::vector<std::string>{"nl"});
     pause.resume();
     CHECK(manager.calls ==
-          std::vector<std::string>{"down:nl", "down:de", "up:nl"});
+          std::vector<std::string>{"down:nl", "down:de", "up:nl", "up:de"});
+}
+
+TEST_CASE("a lost Down response still restores the VPN after install refusal") {
+    bool running = true;
+    std::vector<std::string> calls;
+    {
+        SingBoxTransportPause pause(
+            [&](const std::string& tag, const char* action) {
+                calls.push_back(std::string(action) + ":" + tag);
+                if (std::string(action) == "down") {
+                    running = false;
+                    return false; // Down completed, but its reply was lost.
+                }
+                running = true;
+                return true;
+            },
+            {"nl"});
+        CHECK_FALSE(pause.all_stopped());
+        CHECK(pause.stopped().empty());
+        CHECK_FALSE(running);
+    }
+    CHECK(running);
+    CHECK(calls == std::vector<std::string>{"down:nl", "up:nl"});
+}
+
+TEST_CASE("an unconfirmed resume after a lost Down reply is reported once") {
+    Manager manager;
+    manager.refuse_down.insert("nl");
+    manager.refuse_up.insert("nl");
+    {
+        SingBoxTransportPause pause(manager.action(), {"nl"});
+        pause.resume();
+        CHECK(pause.left_down() == std::vector<std::string>{"nl"});
+        pause.resume();
+        CHECK(pause.left_down() == std::vector<std::string>{"nl"});
+    }
+    CHECK(manager.calls == std::vector<std::string>{"down:nl", "up:nl"});
 }
 
 TEST_CASE("a transport that did not come back is named") {

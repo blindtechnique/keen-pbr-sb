@@ -320,7 +320,8 @@ api::RuntimeOutboundStateElement build_interface_outbound_state(
     interface_state.outbound_tag = outbound.tag;
     interface_state.interface_name = outbound.interface;
     const bool reachable =
-        is_interface_outbound_reachable(outbound, main_table_routes);
+        interface_outbound_family_reachability(outbound, main_table_routes)
+            .any(!config.daemon || config.daemon->ipv6_enabled.value_or(true));
     // "active" says which route is installed and selected. That is a fact
     // about configuration, not about the far end, so it selects the member
     // label but never the health verdict.
@@ -472,7 +473,8 @@ api::RuntimeOutboundStateElement build_urltest_outbound_state(const Config& conf
         interface_state.interface_name = child->interface;
         const bool reachable =
             child->type == OutboundType::INTERFACE
-                ? is_interface_outbound_reachable(*child, main_table_routes)
+                ? interface_outbound_family_reachability(*child, main_table_routes)
+                      .any(!config.daemon || config.daemon->ipv6_enabled.value_or(true))
                 : false;
         const bool is_active = !live_active_child_tag.empty() && live_active_child_tag == child->tag;
         interface_state.status = map_urltest_child_status(*child, reachable, is_active, urltest_state);

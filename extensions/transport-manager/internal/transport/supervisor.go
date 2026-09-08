@@ -151,6 +151,9 @@ func (s *Supervisor) Run(ctx context.Context) {
 }
 
 func (s *Supervisor) reconcile(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
 	now := time.Now()
 	s.mu.Lock()
 	type workItem struct {
@@ -186,7 +189,10 @@ func (s *Supervisor) reconcile(ctx context.Context) {
 }
 
 func (s *Supervisor) reconcileGroup(ctx context.Context, key string, state *groupRetryState) {
-	state.opMu.Lock()
+	if err := lockMutexContext(ctx, &state.opMu); err != nil {
+		s.releaseGroup(key, state)
+		return
+	}
 	defer state.opMu.Unlock()
 	s.mu.Lock()
 	current := s.groupStates[key]
@@ -197,7 +203,10 @@ func (s *Supervisor) reconcileGroup(ctx context.Context, key string, state *grou
 		return
 	}
 	now := time.Now()
-	if state.runtime.Healthy() && s.groupMembersHealthy(ctx, key) {
+	// Remote reachability belongs to each member's status, not to the shared
+	// process lifecycle. Restarting healthy siblings cannot repair a failed
+	// remote server. Recover only a lost process/TUN; repair rules in place.
+	if state.runtime.Healthy() {
 		if s.groupRuleCheckDue(key, state, now) {
 			if err := state.runtime.EnsureRuntimeRules(); err != nil {
 				log.Printf("transport group %s: restore forwarding rules: %v", key, err)
@@ -213,32 +222,6 @@ func (s *Supervisor) reconcileGroup(ctx context.Context, key string, state *grou
 	defer cancel()
 	err := state.runtime.Reconcile(operationCtx)
 	s.recordGroupAttempt(key, state, err)
-}
-
-// groupMembersHealthy preserves the existing per-transport routing-health
-// semantics in shared mode. Process and TUN liveness are group-owned, while an
-// individual proxy may still be alive but unable to carry traffic. The member
-// Status implementation applies the same three-failure threshold used by
-// isolated sing-box before a coordinated restart is scheduled.
-func (s *Supervisor) groupMembersHealthy(ctx context.Context, key string) bool {
-	s.mu.Lock()
-	tags := make([]string, 0)
-	for tag, candidate := range s.tagGroups {
-		if candidate == key {
-			tags = append(tags, tag)
-		}
-	}
-	s.mu.Unlock()
-	for _, tag := range tags {
-		status, err := s.manager.Status(ctx, tag)
-		if err != nil {
-			return false
-		}
-		if status.DesiredUp && status.State != StateUp {
-			return false
-		}
-	}
-	return true
 }
 
 func (s *Supervisor) releaseGroup(key string, expected *groupRetryState) {
@@ -325,7 +308,10 @@ func (s *Supervisor) scheduleGroupRetry(state *groupRetryState) {
 }
 
 func (s *Supervisor) reconcileOne(ctx context.Context, tag string, state *retryState) {
-	state.opMu.Lock()
+	if err := lockMutexContext(ctx, &state.opMu); err != nil {
+		s.release(tag, state)
+		return
+	}
 	defer state.opMu.Unlock()
 	if !s.isActive(tag, state) {
 		s.release(tag, state)
@@ -459,6 +445,9 @@ func (s *Supervisor) scheduleRetry(state *retryState) {
 }
 
 func (s *Supervisor) Up(ctx context.Context, tag string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	status, err := s.manager.Status(ctx, tag)
 	if err != nil {
 		return err
@@ -467,14 +456,18 @@ func (s *Supervisor) Up(ctx context.Context, tag string) error {
 		return s.manager.Up(ctx, tag)
 	}
 	if group, state := s.groupStateForTag(tag); state != nil {
-		state.opMu.Lock()
+		if err := lockMutexContext(ctx, &state.opMu); err != nil {
+			return err
+		}
 		defer state.opMu.Unlock()
 		err = s.manager.Up(ctx, tag)
 		s.recordGroupAttempt(group, state, err)
 		return err
 	}
 	state := s.stateFor(tag)
-	state.opMu.Lock()
+	if err := lockMutexContext(ctx, &state.opMu); err != nil {
+		return err
+	}
 	defer state.opMu.Unlock()
 	s.setDesired(tag, state, true)
 	err = s.manager.Up(ctx, tag)
@@ -483,6 +476,9 @@ func (s *Supervisor) Up(ctx context.Context, tag string) error {
 }
 
 func (s *Supervisor) Down(ctx context.Context, tag string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	status, err := s.manager.Status(ctx, tag)
 	if err != nil {
 		return err
@@ -491,7 +487,9 @@ func (s *Supervisor) Down(ctx context.Context, tag string) error {
 		return s.manager.Down(ctx, tag)
 	}
 	if group, state := s.groupStateForTag(tag); state != nil {
-		state.opMu.Lock()
+		if err := lockMutexContext(ctx, &state.opMu); err != nil {
+			return err
+		}
 		defer state.opMu.Unlock()
 		err = s.manager.Down(ctx, tag)
 		s.mu.Lock()
@@ -506,13 +504,18 @@ func (s *Supervisor) Down(ctx context.Context, tag string) error {
 		return err
 	}
 	state := s.stateFor(tag)
-	state.opMu.Lock()
+	if err := lockMutexContext(ctx, &state.opMu); err != nil {
+		return err
+	}
 	defer state.opMu.Unlock()
 	s.setDesired(tag, state, false)
 	return s.manager.Down(ctx, tag)
 }
 
 func (s *Supervisor) Restart(ctx context.Context, tag string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	status, err := s.manager.Status(ctx, tag)
 	if err != nil {
 		return err
@@ -521,14 +524,18 @@ func (s *Supervisor) Restart(ctx context.Context, tag string) error {
 		return s.manager.Restart(ctx, tag)
 	}
 	if group, state := s.groupStateForTag(tag); state != nil {
-		state.opMu.Lock()
+		if err := lockMutexContext(ctx, &state.opMu); err != nil {
+			return err
+		}
 		defer state.opMu.Unlock()
 		err = s.manager.Restart(ctx, tag)
 		s.recordGroupAttempt(group, state, err)
 		return err
 	}
 	state := s.stateFor(tag)
-	state.opMu.Lock()
+	if err := lockMutexContext(ctx, &state.opMu); err != nil {
+		return err
+	}
 	defer state.opMu.Unlock()
 	s.setDesired(tag, state, true)
 	err = s.manager.Restart(ctx, tag)

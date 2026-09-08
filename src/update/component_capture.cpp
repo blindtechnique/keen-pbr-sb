@@ -15,6 +15,7 @@
 #include <fstream>
 #include <iomanip>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <system_error>
 
@@ -28,6 +29,8 @@ namespace {
 namespace fs = std::filesystem;
 
 constexpr const char* kManifestHeader = "keen-pbr-component-capture-v2";
+constexpr const char* kAbsentManifestHeader = "keen-pbr-component-capture-v3";
+constexpr const char* kMetadataManifestHeader = "keen-pbr-component-capture-v4";
 constexpr const char* kManifestName = "manifest";
 constexpr const char* kReadyName = ".ready";
 constexpr const char* kFilesDir = "files";
@@ -37,7 +40,8 @@ constexpr mode_t kStoredFileMode = 0600;
 constexpr mode_t kStoreDirectoryMode = 0700;
 constexpr std::size_t kMaxStoredGenerations = 8;
 constexpr std::uintmax_t kMaxManifestBytes =
-    kComponentMaxPathCount * (kComponentMaxPathLength + 160U);
+    kComponentMaxPathCount * (kComponentMaxPathLength + 160U) +
+    4U * kComponentMaxPathLength + 256U;
 
 struct ManifestEntry {
     std::size_t index{0};
@@ -47,6 +51,9 @@ struct ManifestEntry {
     std::uintmax_t size{0};
     std::string sha256;
     std::string path;
+    bool absent{false};
+    bool metadata{false};
+    bool status{false};
 };
 
 std::string stored_name(std::size_t index) {
@@ -71,7 +78,119 @@ bool valid_path(const std::string& value) {
         return false;
     }
     const fs::path path(value);
-    return path.is_absolute() && path.lexically_normal() == path;
+    return path.is_absolute() && path.lexically_normal() == path &&
+           path.has_filename() && path != path.root_path();
+}
+
+bool insert_unique_path(std::set<std::string>& paths, const std::string& path) {
+    if (paths.count(path) != 0U) return false;
+    for (auto parent = fs::path(path).parent_path();
+         parent != parent.root_path(); parent = parent.parent_path()) {
+        if (paths.count(parent.string()) != 0U) return false;
+    }
+    const auto prefix = path + '/';
+    const auto child = paths.lower_bound(prefix);
+    if (child != paths.end() && child->compare(0, prefix.size(), prefix) == 0)
+        return false;
+    paths.insert(path);
+    return true;
+}
+
+bool below(const fs::path& path, const fs::path& root) {
+    const auto relative = path.lexically_relative(root);
+    return !relative.empty() && relative != "." &&
+           *relative.begin() != ".." && !relative.is_absolute();
+}
+
+std::optional<fs::path> source_anchor(const fs::path& path,
+                                    const fs::path& store) {
+    if (below(path, fs::path("/opt"))) return fs::path("/opt");
+    // Fixtures have no global override: both store and source must belong to
+    // the same private directory immediately below the system temporary root.
+    std::error_code error;
+    const auto temporary = fs::temp_directory_path(error);
+    if (error || temporary == temporary.root_path() ||
+        !below(path, temporary) || !below(store, temporary)) return std::nullopt;
+    const auto relative = path.lexically_relative(temporary);
+    const auto anchor = temporary / *relative.begin();
+    if (!below(path, anchor) || !below(store, anchor) ||
+        !real_directory(anchor)) return std::nullopt;
+    return anchor;
+}
+
+enum class ParentState { blocked, missing, ready };
+
+struct SourceParent {
+    int fd{-1};
+    ParentState state{ParentState::blocked};
+    SourceParent() = default;
+    SourceParent(const SourceParent&) = delete;
+    SourceParent& operator=(const SourceParent&) = delete;
+    ~SourceParent() { if (fd >= 0) ::close(fd); }
+};
+
+void open_source_parent(const fs::path& path, const fs::path& store,
+                        SourceParent& result) {
+    const auto anchor = source_anchor(path, store);
+    if (!anchor) return;
+    // /opt itself may be the platform's mount alias; only this trusted anchor
+    // is followed. Each parent below it is inspected without following links.
+    const int anchor_flags = O_RDONLY | O_DIRECTORY | O_CLOEXEC |
+                             (*anchor == fs::path("/opt") ? 0 : O_NOFOLLOW);
+    result.fd = ::open(anchor->c_str(), anchor_flags);
+    if (result.fd < 0) return;
+    const auto parents = path.parent_path().lexically_relative(*anchor);
+    for (const auto& part : parents) {
+        if (part == ".") continue;
+        struct stat state {};
+        if (::fstatat(result.fd, part.c_str(), &state, AT_SYMLINK_NOFOLLOW) != 0) {
+            if (errno != ENOENT) return;
+            result.state = ParentState::missing;
+            return;
+        }
+        if (!S_ISDIR(state.st_mode)) return;
+        const int next = ::openat(result.fd, part.c_str(),
+                                  O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (next < 0) return;
+        struct stat opened {};
+        if (::fstat(next, &opened) != 0 || !S_ISDIR(opened.st_mode) ||
+            opened.st_dev != state.st_dev || opened.st_ino != state.st_ino) {
+            ::close(next);
+            return;
+        }
+        ::close(result.fd);
+        result.fd = next;
+    }
+    result.state = ParentState::ready;
+}
+
+bool source_is_absent(const fs::path& path, const fs::path& store) {
+    SourceParent parent;
+    open_source_parent(path, store, parent);
+    if (parent.state == ParentState::missing) return true;
+    if (parent.state != ParentState::ready) return false;
+    struct stat state {};
+    return ::fstatat(parent.fd, path.filename().c_str(), &state,
+                     AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT;
+}
+
+bool restore_absent_leaf(const fs::path& path, const fs::path& store,
+                         bool& removed) {
+    SourceParent parent;
+    open_source_parent(path, store, parent);
+    if (parent.state == ParentState::missing) return true;
+    if (parent.state != ParentState::ready) return false;
+    struct stat state {};
+    if (::fstatat(parent.fd, path.filename().c_str(), &state,
+                  AT_SYMLINK_NOFOLLOW) != 0)
+        return errno == ENOENT && ::fsync(parent.fd) == 0;
+    if (!S_ISREG(state.st_mode) && !S_ISLNK(state.st_mode)) return false;
+    // unlinkat never follows the leaf, and a directory race cannot turn this
+    // into tree removal because AT_REMOVEDIR is deliberately not supplied.
+    if (::unlinkat(parent.fd, path.filename().c_str(), 0) != 0)
+        return errno == ENOENT && ::fsync(parent.fd) == 0;
+    removed = true;
+    return ::fsync(parent.fd) == 0;
 }
 
 bool valid_generation_name(const std::string& value) {
@@ -296,7 +415,8 @@ CopyResult copy_file(const PackageFileState& expected, const fs::path& to) {
 }
 
 bool parse_manifest(const fs::path& manifest,
-                    std::vector<ManifestEntry>& entries) {
+                    std::vector<ManifestEntry>& entries,
+                    std::optional<ComponentOpkgMetadataPaths>* metadata_out = nullptr) {
     struct stat state {};
     if (::lstat(manifest.c_str(), &state) != 0 || !S_ISREG(state.st_mode) ||
         state.st_size <= 0 ||
@@ -306,13 +426,63 @@ bool parse_manifest(const fs::path& manifest,
     std::ifstream input(manifest);
     if (!input) return false;
     std::string line;
-    if (!std::getline(input, line) || line != kManifestHeader) return false;
+    if (!std::getline(input, line) || input.eof() ||
+        (line != kManifestHeader && line != kAbsentManifestHeader &&
+         line != kMetadataManifestHeader)) return false;
+    const bool records_metadata = line == kMetadataManifestHeader;
+    const bool records_absent = line != kManifestHeader;
+    std::optional<ComponentOpkgMetadataPaths> metadata;
+    std::set<std::string> metadata_paths;
+    if (records_metadata) {
+        ComponentOpkgMetadataPaths paths;
+        auto field = [&](const char* label, std::string& value) {
+            const std::string prefix = std::string(label) + ' ';
+            if (!std::getline(input, line) || input.eof() ||
+                line.compare(0, prefix.size(), prefix) != 0) return false;
+            value = line.substr(prefix.size());
+            return !value.empty();
+        };
+        std::string status, info, lock;
+        if (!field("package", paths.package) || !field("status", status) ||
+            !field("info", info) || !field("lock", lock) ||
+            !valid_path(status) || !valid_path(info) || !valid_path(lock)) return false;
+        paths.status_file = status;
+        paths.info_directory = info;
+        paths.lock_file = lock;
+        if (!valid_component_opkg_metadata_paths(paths)) return false;
+        const auto files = component_opkg_metadata_files(paths);
+        metadata_paths.insert(files.begin(), files.end());
+        metadata = std::move(paths);
+    }
     std::uintmax_t total = 0;
+    std::size_t present = 0;
+    std::set<std::string> paths;
     while (std::getline(input, line)) {
+        if (input.eof()) return false; // A published line is never truncated.
         std::istringstream fields(line);
         ManifestEntry entry;
+        if (records_absent) {
+            std::string kind;
+            if (!(fields >> kind) ||
+                (kind != "P" && kind != "A" &&
+                 !(records_metadata && (kind == "M" || kind == "N" || kind == "S"))))
+                return false;
+            entry.absent = kind == "A" || kind == "N";
+            entry.metadata = kind == "M" || kind == "N" || kind == "S";
+            entry.status = kind == "S";
+        }
+        if (!(fields >> entry.index) || entry.index != entries.size() + 1U ||
+            entries.size() >= kComponentMaxPathCount) return false;
+        if (entry.absent) {
+            fields >> std::ws;
+            std::getline(fields, entry.path);
+            if (!valid_path(entry.path) ||
+                !insert_unique_path(paths, entry.path)) return false;
+            entries.push_back(std::move(entry));
+            continue;
+        }
         std::string mode;
-        if (!(fields >> entry.index >> mode >> entry.owner >> entry.group >>
+        if (!(fields >> mode >> entry.owner >> entry.group >>
               entry.size >> entry.sha256)) {
             return false;
         }
@@ -331,14 +501,30 @@ bool parse_manifest(const fs::path& manifest,
         entry.mode = static_cast<std::uint32_t>(parsed);
         fields >> std::ws;
         std::getline(fields, entry.path);
-        if (!valid_path(entry.path)) return false;
+        if (!valid_path(entry.path) ||
+            !insert_unique_path(paths, entry.path)) return false;
         total += entry.size;
+        if (!entry.metadata) ++present;
         entries.push_back(std::move(entry));
     }
-    return !entries.empty() && !input.bad();
+    if (present == 0U || input.bad()) return false;
+    if (metadata) {
+        for (const auto& entry : entries) {
+            const bool known = metadata_paths.count(entry.path) != 0U;
+            if (entry.metadata != known) return false;
+            if (!known) continue;
+            const bool status = entry.path == metadata->status_file.string();
+            if (entry.status != status || (status && entry.absent)) return false;
+            metadata_paths.erase(entry.path);
+        }
+        if (!metadata_paths.empty()) return false;
+    }
+    if (metadata_out) *metadata_out = std::move(metadata);
+    return true;
 }
 
-ComponentCaptureState verify_generation(const fs::path& generation) {
+ComponentCaptureState verify_generation(const fs::path& generation,
+                                         bool verify_metadata = false) {
     if (!real_directory(generation)) return ComponentCaptureState::incomplete;
     const auto manifest = generation / kManifestName;
     const auto expected =
@@ -351,6 +537,7 @@ ComponentCaptureState verify_generation(const fs::path& generation) {
     if (!parse_manifest(manifest, entries))
         return ComponentCaptureState::incomplete;
     for (const auto& entry : entries) {
+        if (entry.absent || (entry.metadata && !verify_metadata)) continue;
         const auto stored = generation / kFilesDir / stored_name(entry.index);
         struct stat state {};
         if (::lstat(stored.c_str(), &state) != 0 ||
@@ -426,11 +613,152 @@ bool generation_count_is_bounded(const fs::path& store) noexcept {
     return !error;
 }
 
+std::optional<std::string> stored_entry_body(const fs::path& generation,
+                                            const ManifestEntry& entry) {
+    const auto body = read_exact_file(generation / kFilesDir /
+                                      stored_name(entry.index), entry.size);
+    if (!body) return std::nullopt;
+    Sha256 digest;
+    digest.update(body->data(), body->size());
+    return digest.hex_digest() == entry.sha256 ? body : std::nullopt;
+}
+
+bool restore_present_entry(const fs::path& generation,
+                            const ManifestEntry& entry) {
+    const auto body = stored_entry_body(generation, entry);
+    if (!body) return false;
+    try {
+        AtomicFileWriteOptions options;
+        options.create_parent_directories = true;
+        options.file_mode = static_cast<mode_t>(entry.mode);
+        options.owner = static_cast<uid_t>(entry.owner);
+        options.group = static_cast<gid_t>(entry.group);
+        write_file_atomically(entry.path, *body, options);
+    } catch (const std::exception&) {
+        return false;
+    }
+    const auto written = bounded_digest(entry.path, kComponentMaxFileBytes,
+                                         entry.size);
+    struct stat destination {};
+    return written && *written == entry.sha256 &&
+           ::lstat(entry.path.c_str(), &destination) == 0 &&
+           S_ISREG(destination.st_mode) &&
+           static_cast<std::uint32_t>(destination.st_mode & 07777) == entry.mode &&
+           static_cast<std::uint32_t>(destination.st_uid) == entry.owner &&
+           static_cast<std::uint32_t>(destination.st_gid) == entry.group &&
+           destination.st_size >= 0 &&
+           static_cast<std::uintmax_t>(destination.st_size) == entry.size;
+}
+
+bool restore_metadata_entries(const fs::path& generation,
+                               const fs::path& store,
+                               const std::vector<ManifestEntry>& entries,
+                               const ComponentOpkgMetadataPaths& metadata,
+                               const std::string& expected_version,
+                               std::vector<std::string>& failed) {
+    if (!source_anchor(metadata.status_file, store) ||
+        !source_anchor(metadata.info_directory, store) ||
+        !source_anchor(metadata.lock_file, store)) {
+        failed.emplace_back("metadata paths are outside the capture source boundary");
+        return false;
+    }
+    std::optional<std::string> saved_status;
+    for (const auto& entry : entries) {
+        if (!entry.metadata || entry.absent) continue;
+        const auto body = stored_entry_body(generation, entry);
+        if (!body) failed.push_back(entry.path);
+        else if (entry.status) saved_status = *body;
+    }
+    if (!failed.empty() || !saved_status) return false;
+
+    ComponentOpkgMetadataLock lock(metadata.lock_file);
+    if (!lock.locked()) {
+        failed.push_back(lock.error());
+        return false;
+    }
+    // Validate the live database before any info mutation. The saved database
+    // is input to a package-paragraph merge, never an overwrite candidate.
+    struct stat status {};
+    if (::lstat(metadata.status_file.c_str(), &status) != 0 ||
+        !S_ISREG(status.st_mode) || status.st_size < 0) {
+        failed.push_back(metadata.status_file.string());
+        return false;
+    }
+    const auto current = read_exact_file(metadata.status_file,
+                         static_cast<std::uintmax_t>(status.st_size));
+    if (!current || !merge_component_opkg_status(*saved_status, *current,
+                                                 metadata.package, expected_version).complete) {
+        failed.push_back(metadata.status_file.string());
+        return false;
+    }
+    for (const auto& entry : entries) {
+        if (!entry.metadata || entry.status || entry.absent) continue;
+        if (!restore_present_entry(generation, entry)) failed.push_back(entry.path);
+    }
+    if (!failed.empty()) return false;
+    for (const auto& entry : entries) {
+        if (!entry.metadata || !entry.absent) continue;
+        bool removed = false;
+        if (!restore_absent_leaf(entry.path, store, removed)) failed.push_back(entry.path);
+    }
+    if (!failed.empty()) return false;
+    const auto merged = restore_component_opkg_status(metadata, *saved_status,
+                                                       expected_version);
+    if (!merged.complete) {
+        failed.push_back(metadata.status_file.string() + ": " + merged.error);
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 ComponentCaptureResult capture_component_files(
-    const PackageFootprint& footprint, const fs::path& store) {
+    const PackageFootprint& requested, const fs::path& store,
+    bool record_absent, std::optional<ComponentOpkgMetadataPaths> metadata) {
     ComponentCaptureResult result;
+    if (!requested.complete || requested.files.size() > kComponentMaxPathCount ||
+        requested.total_bytes > kComponentMaxTotalBytes) {
+        result.failed = requested.errors;
+        if (result.failed.empty())
+            result.failed.emplace_back("component footprint exceeds capture limits");
+        return result;
+    }
+    std::optional<ComponentOpkgMetadataLock> metadata_lock;
+    std::set<std::string> metadata_paths;
+    PackageFootprint expanded;
+    if (metadata) {
+        if (!valid_component_opkg_metadata_paths(*metadata) ||
+            !source_anchor(metadata->status_file, store) ||
+            !source_anchor(metadata->info_directory, store) ||
+            !source_anchor(metadata->lock_file, store)) {
+            result.failed.emplace_back("invalid component metadata paths");
+            return result;
+        }
+        metadata_lock.emplace(metadata->lock_file);
+        if (!metadata_lock->locked()) {
+            result.failed.push_back(metadata_lock->error());
+            return result;
+        }
+        const auto files = component_opkg_metadata_files(*metadata);
+        metadata_paths.insert(files.begin(), files.end());
+        std::set<std::string> union_paths = metadata_paths;
+        for (const auto& file : requested.files) {
+            if (metadata_paths.count(file.path) != 0U ||
+                !insert_unique_path(union_paths, file.path)) {
+                result.failed.push_back(file.path);
+                return result;
+            }
+        }
+        if (union_paths.size() > kComponentMaxPathCount) {
+            result.failed.emplace_back("metadata capture union exceeds path limit");
+            return result;
+        }
+        expanded = observe_package_footprint(
+            std::vector<std::string>(union_paths.begin(), union_paths.end()));
+        record_absent = true;
+    }
+    const auto& footprint = metadata ? expanded : requested;
     if (!footprint.complete || footprint.files.size() > kComponentMaxPathCount ||
         footprint.total_bytes > kComponentMaxTotalBytes) {
         result.failed = footprint.errors;
@@ -438,6 +766,16 @@ ComponentCaptureResult capture_component_files(
             result.failed.emplace_back("component footprint exceeds capture limits");
         return result;
     }
+
+    std::set<std::string> paths;
+    for (const auto& state : footprint.files) {
+        if (!valid_path(state.path) || !insert_unique_path(paths, state.path) ||
+            state.unreadable ||
+            (record_absent && !source_anchor(state.path, store))) {
+            result.failed.push_back(state.path);
+        }
+    }
+    if (!result.failed.empty()) return result;
 
     std::error_code error;
     if (fs::exists(store, error) && !real_directory(store)) {
@@ -499,13 +837,41 @@ ComponentCaptureResult capture_component_files(
     }
 
     std::ostringstream manifest;
-    manifest << kManifestHeader << '\n';
+    manifest << (metadata ? kMetadataManifestHeader :
+                 record_absent ? kAbsentManifestHeader : kManifestHeader) << '\n';
+    if (metadata) {
+        manifest << "package " << metadata->package << '\n'
+                 << "status " << metadata->status_file.string() << '\n'
+                 << "info " << metadata->info_directory.string() << '\n'
+                 << "lock " << metadata->lock_file.string() << '\n';
+    }
     std::size_t index = 0;
+    std::size_t payload_captured = 0;
     std::uintmax_t total = 0;
     for (const auto& state : footprint.files) {
+        const bool metadata_entry = metadata_paths.count(state.path) != 0U;
+        const bool status_entry = metadata && state.path == metadata->status_file.string();
         if (!state.present) {
             ++result.skipped_absent;
+            if (record_absent) {
+                if (status_entry || !state.sha256.empty() || state.mode != 0U ||
+                    state.owner != 0U || state.group != 0U || state.size != 0U ||
+                    !source_is_absent(state.path, store)) {
+                    result.failed.push_back(state.path);
+                    continue;
+                }
+                manifest << (metadata_entry ? "N " : "A ") << ++index
+                         << ' ' << state.path << '\n';
+            }
             continue;
+        }
+        if (record_absent) {
+            SourceParent parent;
+            open_source_parent(state.path, store, parent);
+            if (parent.state != ParentState::ready) {
+                result.failed.push_back(state.path);
+                continue;
+            }
         }
         if (state.unreadable || state.sha256.empty() ||
             !valid_path(state.path) || state.size > kComponentMaxFileBytes ||
@@ -521,13 +887,24 @@ ComponentCaptureResult capture_component_files(
             continue;
         }
         total += copy.size;
+        if (status_entry) {
+            const auto body = read_exact_file(
+                generation / kFilesDir / stored_name(index), copy.size);
+            if (!body || !merge_component_opkg_status(*body, *body, metadata->package).complete) {
+                result.failed.push_back(state.path);
+                continue;
+            }
+        }
+        if (record_absent)
+            manifest << (status_entry ? "S " : metadata_entry ? "M " : "P ");
         manifest << index << ' ' << std::oct << copy.mode << std::dec << ' '
                  << copy.owner << ' ' << copy.group << ' ' << copy.size << ' '
                  << state.sha256 << ' ' << state.path << '\n';
         ++result.captured;
+        if (!metadata_entry) ++payload_captured;
     }
 
-    if (result.captured == 0 || !result.failed.empty()) {
+    if (payload_captured == 0 || !result.failed.empty()) {
         if (result.failed.empty()) result.failed.push_back(store.string());
         remove_generation(generation);
         return result;
@@ -545,7 +922,7 @@ ComponentCaptureResult capture_component_files(
         !sync_directory(generation / kFilesDir) ||
         !sync_directory(generation) ||
         !sync_directory(store / kGenerationsDir) ||
-        verify_generation(generation) != ComponentCaptureState::usable) {
+        verify_generation(generation, true) != ComponentCaptureState::usable) {
         result.failed.push_back(generation.string());
         remove_generation(generation);
         return result;
@@ -573,7 +950,30 @@ ComponentCaptureResult capture_component_files(
     }
     remove_stale_generations(store, name);
     result.complete = true;
+    result.metadata_recorded = metadata.has_value();
     return result;
+}
+
+ComponentCaptureResult capture_component_upgrade_files(
+    const PackageFootprint& previous,
+    const std::vector<std::string>& target_paths, const fs::path& store,
+    std::optional<ComponentOpkgMetadataPaths> metadata) {
+    ComponentCaptureResult result;
+    if (!previous.complete || previous.files.empty() || target_paths.empty() ||
+        previous.files.size() > kComponentMaxPathCount ||
+        target_paths.size() > kComponentMaxPathCount) {
+        result.failed.emplace_back("upgrade capture requires bounded current and target paths");
+        return result;
+    }
+    std::set<std::string> unique(target_paths.begin(), target_paths.end());
+    for (const auto& state : previous.files) unique.insert(state.path);
+    if (unique.size() > kComponentMaxPathCount) {
+        result.failed.emplace_back("upgrade capture union exceeds path limit");
+        return result;
+    }
+    const std::vector<std::string> paths(unique.begin(), unique.end());
+    return capture_component_files(observe_package_footprint(paths), store, true,
+                                    std::move(metadata));
 }
 
 ComponentCaptureState verify_component_capture(const fs::path& store) {
@@ -587,7 +987,72 @@ ComponentCaptureState verify_component_capture(const fs::path& store) {
                   : ComponentCaptureState::incomplete;
 }
 
-ComponentRestoreResult restore_component_files(const fs::path& store) {
+ComponentCaptureReinstallPreparation prepare_component_capture_reinstall(
+    const fs::path& store, const std::string& expected_version) {
+    ComponentCaptureReinstallPreparation result;
+    try {
+        const auto state = verify_component_capture(store);
+        if (state != ComponentCaptureState::usable) {
+            result.error = component_capture_state_name(state);
+            return result;
+        }
+        const auto active = active_generation(store);
+        std::vector<ManifestEntry> entries;
+        std::optional<ComponentOpkgMetadataPaths> metadata;
+        if (!active || !parse_manifest(*active / kManifestName, entries, &metadata)) {
+            result.error = "incomplete component capture manifest";
+            return result;
+        }
+        result.metadata_recorded = metadata.has_value();
+        if (!metadata) {
+            // v2/v3 never promised opkg metadata; preserve their old-IPK path.
+            result.complete = true;
+            return result;
+        }
+        if (!source_anchor(metadata->status_file, store) ||
+            !source_anchor(metadata->info_directory, store) ||
+            !source_anchor(metadata->lock_file, store)) {
+            result.error = "metadata paths are outside the capture source boundary";
+            return result;
+        }
+        std::string saved_status;
+        std::optional<ComponentOpkgStatusFileAttributes> saved_attributes;
+        for (const auto& entry : entries) {
+            if (!entry.status) continue;
+            const auto body = stored_entry_body(*active, entry);
+            if (body) {
+                saved_status = *body;
+                saved_attributes = ComponentOpkgStatusFileAttributes{
+                    entry.mode, entry.owner, entry.group};
+            }
+            break;
+        }
+        ComponentOpkgMetadataLock lock(metadata->lock_file);
+        if (!lock.locked()) {
+            result.error = lock.error();
+            return result;
+        }
+        // A healthy current database needs no saved status. Optional metadata
+        // damage must not prevent reinstalling a verified old IPK in that case.
+        // A real repair, however, can only use the verified same-generation S
+        // blob and the expected version from the interrupted transaction.
+        const auto prepared = prepare_component_opkg_status_for_reinstall(
+            *metadata, saved_status, expected_version, saved_attributes);
+        result.complete = prepared.complete;
+        result.status_repaired = prepared.changed;
+        result.shared_database_reconstructed = prepared.shared_database_reconstructed;
+        result.error = prepared.error;
+    } catch (const std::exception& error) {
+        result.error = error.what();
+    } catch (...) {
+        result.error = "component status preparation failed unexpectedly";
+    }
+    return result;
+}
+
+ComponentRestoreResult restore_component_files(const fs::path& store,
+                                                bool restore_absent,
+                                                const std::string& expected_version) {
     ComponentRestoreResult result;
     const auto state = verify_component_capture(store);
     if (state != ComponentCaptureState::usable) {
@@ -600,47 +1065,53 @@ ComponentRestoreResult restore_component_files(const fs::path& store) {
         return result;
     }
     std::vector<ManifestEntry> entries;
-    if (!parse_manifest(*active / kManifestName, entries)) {
+    std::optional<ComponentOpkgMetadataPaths> metadata;
+    if (!parse_manifest(*active / kManifestName, entries, &metadata)) {
         result.refused = "incomplete";
         return result;
     }
+    result.metadata_recorded = metadata.has_value();
 
+    std::size_t present = 0;
     for (const auto& entry : entries) {
-        const auto stored = *active / kFilesDir / stored_name(entry.index);
-        const auto body = read_exact_file(stored, entry.size);
-        if (!body) {
-            result.failed.push_back(entry.path);
-            continue;
-        }
-        try {
-            AtomicFileWriteOptions options;
-            options.create_parent_directories = true;
-            options.file_mode = static_cast<mode_t>(entry.mode);
-            options.owner = static_cast<uid_t>(entry.owner);
-            options.group = static_cast<gid_t>(entry.group);
-            write_file_atomically(entry.path, *body, options);
-        } catch (const std::exception&) {
-            result.failed.push_back(entry.path);
-            continue;
-        }
-        const auto written =
-            bounded_digest(entry.path, kComponentMaxFileBytes, entry.size);
-        struct stat destination {};
-        if (!written || *written != entry.sha256 ||
-            ::lstat(entry.path.c_str(), &destination) != 0 ||
-            !S_ISREG(destination.st_mode) ||
-            static_cast<std::uint32_t>(destination.st_mode & 07777) !=
-                entry.mode ||
-            static_cast<std::uint32_t>(destination.st_uid) != entry.owner ||
-            static_cast<std::uint32_t>(destination.st_gid) != entry.group ||
-            destination.st_size < 0 ||
-            static_cast<std::uintmax_t>(destination.st_size) != entry.size) {
+        if (entry.absent || entry.metadata) continue;
+        ++present;
+        if (!restore_present_entry(*active, entry)) {
             result.failed.push_back(entry.path);
             continue;
         }
         ++result.restored;
     }
-    result.complete = result.failed.empty() && result.restored == entries.size();
+    std::size_t absence_count = 0;
+    std::size_t absence_restored = 0;
+    if (restore_absent) {
+        for (const auto& entry : entries) {
+            if (!entry.absent || entry.metadata) continue;
+            ++absence_count;
+            // Failed present restoration must not be compounded by removals.
+            if (result.restored != present) continue;
+            bool removed = false;
+            const bool restored = restore_absent_leaf(entry.path, store, removed);
+            if (removed) ++result.removed;
+            if (restored) ++absence_restored;
+            else result.failed.push_back(entry.path);
+        }
+    }
+    result.payload_restored = result.failed.empty() && result.restored == present &&
+                              absence_restored == absence_count;
+    if (result.payload_restored && restore_absent && metadata) {
+        try {
+            result.metadata_restored = restore_metadata_entries(
+                *active, store, entries, *metadata, expected_version,
+                result.metadata_failed);
+        } catch (const std::exception& error) {
+            result.metadata_failed.push_back(std::string("metadata recovery failed: ") + error.what());
+        } catch (...) {
+            result.metadata_failed.emplace_back("metadata recovery failed unexpectedly");
+        }
+    }
+    result.complete = result.payload_restored &&
+                      (!restore_absent || !metadata || result.metadata_restored);
     return result;
 }
 

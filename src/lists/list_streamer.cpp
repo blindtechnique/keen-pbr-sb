@@ -1,4 +1,5 @@
 #include "list_streamer.hpp"
+#include "list_source_decoder.hpp"
 #include "../config/list_parser.hpp"
 
 #include <array>
@@ -31,27 +32,14 @@ ListStreamer::ListStreamer(
 }
 
 void ListStreamer::stream_list(const std::string& name, const ListConfig& config, ListEntryVisitor& visitor) {
-    // The cached URL file is used only while the list still declares a URL
-    // source; a stale cache for a removed URL is ignored here.
-    const auto operation_snapshot = operation_cache_snapshot(name);
-    const auto cached = config.url.has_value()
-                            ? cache_source_path(name, operation_snapshot)
-                            : std::nullopt;
+    // Retain the snapshot lease until every cached byte has been streamed.
+    // Local-only lists neither need nor inspect a URL-cache snapshot entry.
+    const auto operation_snapshot = config.url.has_value()
+        ? operation_cache_snapshot(name) : nullptr;
+    const auto cached = operation_snapshot
+        ? cache_source_path(name, operation_snapshot, config.url,
+                            config.source_format.value_or("text")) : std::nullopt;
     stream_all_sources(name, config, visitor, cached);
-}
-
-void ListStreamer::stream_list_preferring_cache(const std::string& name,
-                                                const ListConfig& config,
-                                                ListEntryVisitor& visitor) {
-    // Use the cached file whenever it exists, even if the URL source was
-    // removed from the config. The local file and inline entries are always
-    // streamed too — they must not be dropped just because a cache exists.
-    const auto operation_snapshot = operation_cache_snapshot(name);
-    stream_all_sources(
-        name,
-        config,
-        visitor,
-        cache_source_path(name, operation_snapshot));
 }
 
 void ListStreamer::stream_all_sources(const std::string& name,
@@ -66,7 +54,7 @@ void ListStreamer::stream_all_sources(const std::string& name,
 
     // 2. Local file (if configured)
     if (config.file.has_value()) {
-        stream_file(config.file.value(), visitor, true);
+        stream_file(config.file.value(), visitor, true, config.source_format.value_or("text"));
     }
 
     // Inline values follow the same normalization and validation path as file
@@ -113,7 +101,9 @@ ListStreamer::operation_cache_snapshot(const std::string& name) const {
 
 std::optional<std::filesystem::path> ListStreamer::cache_source_path(
     const std::string& name,
-    const std::shared_ptr<const ListCacheGenerationSnapshot>& snapshot) {
+    const std::shared_ptr<const ListCacheGenerationSnapshot>& snapshot,
+    const std::optional<std::string>& expected_url,
+    const std::string& source_format) {
     if (!snapshot) {
         throw std::invalid_argument("cache snapshot must not be null");
     }
@@ -123,12 +113,19 @@ std::optional<std::filesystem::path> ListStreamer::cache_source_path(
     }
     const auto* generation = snapshot->find(name);
     if (generation == nullptr) return std::nullopt;
+    if (expected_url && !generation->matches_source(*expected_url, source_format)) {
+        return std::nullopt;
+    }
     return generation->path();
 }
 
 void ListStreamer::stream_file(const std::filesystem::path& path,
                                ListEntryVisitor& visitor,
-                               bool log_invalid_entries) {
+                               bool log_invalid_entries,
+                               const std::string& source_format) {
+    if (!valid_list_source_format(source_format))
+        throw std::runtime_error("Unknown list source format");
+    const bool structured = source_format != "text";
     const int fd =
         ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (fd < 0) {
@@ -151,7 +148,8 @@ void ListStreamer::stream_file(const std::filesystem::path& path,
             "List source is not a regular file: " + path.string());
     }
     if (st.st_size < 0 ||
-        static_cast<std::uintmax_t>(st.st_size) > max_file_size_bytes_) {
+        static_cast<std::uintmax_t>(st.st_size) > max_file_size_bytes_ ||
+        (structured && static_cast<std::uintmax_t>(st.st_size) > kListSourceMaxBytes)) {
         close_fd();
         throw std::runtime_error(
             "List file exceeds configured size limit: " + path.string());
@@ -159,6 +157,7 @@ void ListStreamer::stream_file(const std::filesystem::path& path,
 
     std::array<char, 4096> buffer {};
     std::string line;
+    std::string structured_body;
     line.reserve(256);
     std::size_t total_bytes = 0;
     std::size_t line_number = 1;
@@ -174,10 +173,15 @@ void ListStreamer::stream_file(const std::filesystem::path& path,
         }
         if (count == 0) break;
         total_bytes += static_cast<std::size_t>(count);
-        if (total_bytes > max_file_size_bytes_) {
+        if (total_bytes > max_file_size_bytes_ ||
+            (structured && total_bytes > kListSourceMaxBytes)) {
             close_fd();
             throw std::runtime_error(
                 "List file exceeds configured size limit: " + path.string());
+        }
+        if (structured) {
+            structured_body.append(buffer.data(), static_cast<std::size_t>(count));
+            continue;
         }
         for (ssize_t index = 0; index < count; ++index) {
             const char ch = buffer[static_cast<std::size_t>(index)];
@@ -197,6 +201,18 @@ void ListStreamer::stream_file(const std::filesystem::path& path,
         }
     }
     close_fd();
+    if (structured) {
+        const auto decoded = decode_list_source(structured_body, source_format);
+        if (!decoded.complete) {
+            const auto detail = decoded.errors.empty() ? decoded.limit_reason :
+                decoded.errors.front().code + " at line " + std::to_string(decoded.errors.front().line);
+            throw std::runtime_error("Invalid list source " + path.string() + ": " + detail);
+        }
+        // A malformed structured file must not feed its valid prefix to routing.
+        for (const auto& entry : decoded.entries)
+            ListParser::classify_entry(entry.value, visitor);
+        return;
+    }
     if (!line.empty()) {
         ListParser::parse_line(
             line, visitor, path.string(), line_number, &context);

@@ -1,5 +1,9 @@
 import type { ListConfig } from "@/api/generated/model/listConfig"
 import type { OutboundType } from "@/api/generated/model/outboundType"
+import {
+  localizeCatalogText,
+  type CatalogTextTranslations,
+} from "@/lib/catalog-localization"
 
 export type CatalogWarningCode = "broad_traffic_scope" | (string & {})
 
@@ -12,6 +16,7 @@ export interface CatalogWarning {
 export interface CatalogRoutingCompanion {
   readonly id: string
   readonly name: string
+  readonly name_i18n?: CatalogTextTranslations
   readonly catalog_identity?: string
   readonly kind?: "ip" | (string & {})
   readonly url?: string
@@ -23,10 +28,12 @@ export interface CatalogRoutingCompanion {
 export type CatalogPreset = {
   id: string
   name: string
+  name_i18n?: CatalogTextTranslations
   catalog_identity?: string
   category?: string
   hidden?: boolean
   notice?: string
+  notice_i18n?: CatalogTextTranslations
   covers?: string[]
   routingCompanions?: CatalogRoutingCompanion[]
   warnings?: CatalogWarning[]
@@ -79,17 +86,36 @@ export interface CatalogPresetInstallState {
   readonly coveredBy?: CatalogPreset
 }
 
+export function getCatalogPresetName(
+  preset: Pick<CatalogPreset, "name" | "name_i18n">,
+  language?: string
+): string {
+  return localizeCatalogText(preset.name, preset.name_i18n, language)
+}
+
+export function getCatalogPresetNotice(
+  preset: CatalogPreset,
+  language?: string
+): string {
+  return localizeCatalogText(preset.notice, preset.notice_i18n, language)
+}
+
 export function matchesCatalogSearch(
   preset: CatalogPreset,
-  query: string
+  query: string,
+  language?: string
 ): boolean {
   const needle = query.trim().toLowerCase()
   if (!needle) {
     return true
   }
-  return [preset.id, preset.name, preset.notice ?? ""].some((value) =>
-    value.toLowerCase().includes(needle)
-  )
+  return [
+    preset.id,
+    preset.name,
+    getCatalogPresetName(preset, language),
+    preset.notice ?? "",
+    getCatalogPresetNotice(preset, language),
+  ].some((value) => value.toLowerCase().includes(needle))
 }
 
 export function canSelectCatalogPreset(
@@ -174,7 +200,8 @@ export function getCatalogPresetSourceSummary(
  */
 export function getCatalogRoutingCompanionSourceSummaries(
   preset: CatalogPreset,
-  presets: readonly CatalogPreset[]
+  presets: readonly CatalogPreset[],
+  language?: string
 ): readonly CatalogRoutingCompanionSourceSummary[] {
   const byId = new Map(presets.map((candidate) => [candidate.id, candidate]))
 
@@ -186,7 +213,7 @@ export function getCatalogRoutingCompanionSourceSummaries(
         : undefined
       return {
         id: companion.id,
-        name: companion.name,
+        name: getCatalogPresetName(companion, language),
         urlBacked: Boolean(
           companion.url ||
           source?.engines?.singbox?.ruleSets?.[0]?.url ||
@@ -199,7 +226,8 @@ export function getCatalogRoutingCompanionSourceSummaries(
 
 export function resolveSelectedCatalogRoutingCompanions(
   presets: readonly CatalogPreset[],
-  selectedIds: ReadonlySet<string>
+  selectedIds: ReadonlySet<string>,
+  language?: string
 ): ReadonlyMap<string, CatalogRoutingCompanionSourceSummary> {
   const result = new Map<string, CatalogRoutingCompanionSourceSummary>()
   for (const preset of presets) {
@@ -208,7 +236,8 @@ export function resolveSelectedCatalogRoutingCompanions(
     }
     for (const companion of getCatalogRoutingCompanionSourceSummaries(
       preset,
-      presets
+      presets,
+      language
     )) {
       result.set(companion.id, companion)
     }

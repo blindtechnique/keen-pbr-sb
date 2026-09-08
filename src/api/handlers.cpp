@@ -3,6 +3,8 @@
 #include "handlers.hpp"
 #include "handler_health_service.hpp"
 #include "handler_lists_refresh.hpp"
+#include "handler_lists_query.hpp"
+#include "handler_list_preview.hpp"
 #include "handler_reload.hpp"
 #include "handler_config.hpp"
 #include "handler_dependency_analysis.hpp"
@@ -16,6 +18,7 @@
 #include "handler_test_routing.hpp"
 #include "handler_transports.hpp"
 #include "handler_subscriptions.hpp"
+#include "../config/subscription_refresh.hpp"
 #include "handler_transport_exit_check.hpp"
 #include "handler_dns_test.hpp"
 #include "handler_connections.hpp"
@@ -46,6 +49,8 @@ void register_api_handlers(ApiServer& server, ApiContext& ctx) {
     register_health_service_handler(server, ctx);
     register_reload_handler(server, ctx);
     register_lists_refresh_handler(server, ctx);
+    register_lists_query_handler(server, ctx);
+    register_list_preview_handler(server, ctx);
     register_config_handler(server, ctx);
     register_dependency_analysis_handler(server, ctx);
     register_health_routing_handler(server, ctx);
@@ -62,7 +67,10 @@ void register_api_handlers(ApiServer& server, ApiContext& ctx) {
     register_dns_test_handler(server, ctx);
     register_connections_handler(server, ctx);
     register_nfqws_handler(server, ctx);
-    register_logs_handler(server);
+    register_logs_handler(server, ctx.status_stream, ctx.config_path,
+        [service = ctx.subscription_refresh_service]() {
+            return service ? service->store()->list() : nlohmann::json::array();
+        });
     register_router_info_handler(server, ctx);
     register_catalog_handler(server, ctx);
     register_catalog_setup_handler(server, ctx);

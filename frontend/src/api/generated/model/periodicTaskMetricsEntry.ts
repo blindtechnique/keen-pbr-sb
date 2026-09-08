@@ -42,4 +42,16 @@ export interface PeriodicTaskMetricsEntry {
   last_outcome?: PeriodicTaskOutcome;
   /** @maxLength 256 */
   last_error?: string;
+  /**
+     * Failures in a row since process start. Success and noop reset the streak; skipped and abandoned attempts leave it unchanged.
+     * @minimum 0
+     */
+  consecutive_failures?: number;
+  /**
+     * Read-only snapshot of existing task timers. A missing timer means not_scheduled, not disabled: work may already be queued or running. Unknown means the timer state could not be read.
+     * @pattern ^(scheduled|not_scheduled|unknown)$
+     */
+  scheduling_state?: string;
+  /** Next scheduled callback, projected from the kernel monotonic timer onto the snapshot wall clock. A pending expiration is due now. The callback may skip unchanged or inactive work; this is not a promise of an actual worker run or automatic recovery. */
+  next_run_at_unix_ms?: number;
 }

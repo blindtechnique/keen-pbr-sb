@@ -309,7 +309,7 @@ TEST_CASE("internal VPN stable id rejects proxy even with server role") {
         InternalVpnServerResolutionError::unsupported_kind);
 }
 
-TEST_CASE("internal VPN incomplete observation may retain an all-included verified generation") {
+TEST_CASE("internal VPN partial candidate wins over its retained identity while keeping other verified includes") {
     const auto configured = std::vector<InternalVpnServer>{
         server_policy("nwg0", true, "WgServer"),
         server_policy("nwg1", true, "AwgServer"),
@@ -340,7 +340,7 @@ TEST_CASE("internal VPN incomplete observation may retain an all-included verifi
         selected.source ==
         InternalVpnServerGenerationSource::retained_previous);
     REQUIRE(selected.effective_servers.size() == 2);
-    CHECK(selected.effective_servers[0].interface == "nwg7");
+    CHECK(selected.effective_servers[0].interface == "nwg4");
     CHECK(selected.effective_servers[0].ndms_id ==
           std::optional<std::string>{"WgServer"});
     CHECK(selected.effective_servers[0].process_clients);
@@ -470,6 +470,100 @@ TEST_CASE("internal VPN authoritative role change invalidates previous generatio
     CHECK(
         selected.source ==
         InternalVpnServerGenerationSource::safe_degraded_candidate);
+}
+
+TEST_CASE("internal VPN partial observation preserves a verified bypass without retaining an unverified one") {
+    auto unavailable = server_policy("nwg9", true, "MissingServer");
+    SUBCASE("unrelated stable server is absent") {}
+    SUBCASE("unrelated legacy interface is absent") {
+        unavailable = server_policy("vanished0", true);
+    }
+    const std::vector<InternalVpnServer> configured{
+        server_policy("nwg4", false, "BypassServer"), unavailable,
+    };
+    const auto catalog = parse_ndms_interface_catalog(nlohmann::json{
+        {"BypassServer", {
+            {"type", "Wireguard"},
+            {"interface-name", "Wireguard4"},
+            {"role", "server"},
+        }},
+    });
+    const auto candidate = resolve_internal_vpn_server_policies(
+        configured, catalog, true, {"lo", "nwg4"});
+    REQUIRE_FALSE(candidate.complete());
+    REQUIRE(candidate.effective_servers.size() == 1);
+    const auto selected = select_internal_vpn_server_generation(
+        configured, candidate, {});
+    REQUIRE(selected.effective_servers.size() == 1);
+    CHECK(selected.effective_servers.front().interface == "nwg4");
+    CHECK(selected.effective_servers.front().ndms_id ==
+          std::optional<std::string>{"BypassServer"});
+    CHECK_FALSE(selected.effective_servers.front().process_clients);
+
+    // The same live name is not sufficient once this row's own authority is lost.
+    const auto stale = resolve_internal_vpn_server_policies(
+        configured, catalog, false, {"lo", "nwg4"});
+    REQUIRE_FALSE(stale.complete());
+    const auto degraded = select_internal_vpn_server_generation(
+        configured, stale, selected.effective_servers);
+    CHECK(degraded.effective_servers.empty());
+}
+
+TEST_CASE("internal VPN fresh partial bypass takes precedence over a retained interface binding") {
+    const std::vector<InternalVpnServer> configured{
+        server_policy("nwg4", false),
+        server_policy("nwg0", true, "StaleServer"),
+    };
+    const auto candidate = resolve_internal_vpn_server_policies(
+        configured, NdmsInterfaceCatalog{}, false, {"lo", "nwg0", "nwg4"});
+    REQUIRE_FALSE(candidate.complete());
+    REQUIRE(candidate.effective_servers.size() == 1);
+    const auto selected = select_internal_vpn_server_generation(
+        configured, candidate,
+        {server_policy("nwg4", true, "StaleServer")});
+    REQUIRE(selected.effective_servers.size() == 2);
+    CHECK(selected.effective_servers[0].interface == "nwg4");
+    CHECK_FALSE(selected.effective_servers[0].process_clients);
+    CHECK_FALSE(selected.effective_servers[0].ndms_id.has_value());
+    CHECK(selected.effective_servers[1].interface == "nwg0");
+    CHECK(selected.effective_servers[1].process_clients);
+    CHECK(selected.effective_servers[1].ndms_id ==
+          std::optional<std::string>{"StaleServer"});
+}
+
+TEST_CASE("internal VPN partial observation never publishes a conflicting bypass") {
+    bool other_processes_clients = true;
+    SUBCASE("conflicting row requests processing") {}
+    SUBCASE("conflicting row also requests bypass") {
+        other_processes_clients = false;
+    }
+    const std::vector<InternalVpnServer> configured{
+        server_policy("nwg0", false, "BypassServer"),
+        server_policy("nwg4", other_processes_clients),
+    };
+    const auto catalog = parse_ndms_interface_catalog(nlohmann::json{
+        {"BypassServer", {
+            {"type", "Wireguard"},
+            {"interface-name", "Wireguard4"},
+            {"role", "server"},
+        }},
+    });
+    const auto candidate = resolve_internal_vpn_server_policies(
+        configured, catalog, true, {"lo", "nwg4"});
+    REQUIRE_FALSE(candidate.complete());
+    REQUIRE(candidate.issues.size() == 1);
+    CHECK(candidate.issues.front().error ==
+          InternalVpnServerResolutionError::duplicate_kernel_interface);
+    REQUIRE(candidate.effective_servers.size() == 1);
+    CHECK_FALSE(candidate.effective_servers.front().process_clients);
+    const auto selected = select_internal_vpn_server_generation(
+        configured, candidate, {});
+    REQUIRE(selected.effective_servers.size() ==
+            (other_processes_clients ? 1U : 0U));
+    for (const auto& server : selected.effective_servers) {
+        CHECK(server.interface == "nwg4");
+        CHECK(server.process_clients);
+    }
 }
 
 TEST_CASE("internal VPN partial authoritative observation publishes only verified includes") {

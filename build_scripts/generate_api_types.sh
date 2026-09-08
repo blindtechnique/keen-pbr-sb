@@ -123,6 +123,15 @@ content = content.replace(
   '\$1\$2 \$3 = 0;'
 );
 
+// Required scalars with explicit schema defaults must not default to zero.
+const { applyApiScalarDefaults } = require('$REPO_ROOT/build_scripts/apply_api_scalar_defaults.cjs');
+content = applyApiScalarDefaults(content,
+  JSON.parse(fs.readFileSync('$SCHEMA_TMP', 'utf8'))['\$defs']);
+
+// Retain opaque fields only in ConfigObject and its reachable config structs.
+const { preserveConfigFields } = require('$REPO_ROOT/build_scripts/preserve_config_fields.cjs');
+content = preserveConfigFields(content);
+
 // Add generation comment at the top
 const header = '// Generated from docs/openapi.yaml via build_scripts/generate_api_types.sh\n' +
                '// Run \"make generate\" to regenerate (requires Node.js).\n\n';

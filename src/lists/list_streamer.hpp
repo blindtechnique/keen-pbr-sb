@@ -28,16 +28,10 @@ public:
         std::size_t max_file_size_bytes,
         std::shared_ptr<const ListCacheGenerationSnapshot> cache_snapshot);
 
-    // Stream all sources for a named list (cache file, local file, inline entries)
-    // through the visitor. Calls visitor.on_list_complete(name) when done.
+    // Stream the configured URL's cache, local file and inline entries through
+    // the visitor. A cache for a removed or different URL is not a source.
+    // Calls visitor.on_list_complete(name) when done.
     void stream_list(const std::string& name, const ListConfig& config, ListEntryVisitor& visitor);
-
-    // Stream all sources for a named list, the same as stream_list(), but use
-    // the cached file whenever it exists — even if the list no longer declares
-    // a URL source. Calls visitor.on_list_complete(name) when done.
-    void stream_list_preferring_cache(const std::string& name,
-                                     const ListConfig& config,
-                                     ListEntryVisitor& visitor);
 
     // Stream only the cached file for a named list through the visitor.
     void stream_cache(const std::string& name, ListEntryVisitor& visitor);
@@ -54,7 +48,8 @@ private:
     // Open a file and stream its entries through the visitor.
     void stream_file(const std::filesystem::path& path,
                      ListEntryVisitor& visitor,
-                     bool log_invalid_entries);
+                     bool log_invalid_entries,
+                     const std::string& source_format = "text");
 
     // Resolve a cache body from the immutable transaction snapshot. Explicit
     // misses never fall back to live state; uncaptured names are rejected.
@@ -62,7 +57,9 @@ private:
     operation_cache_snapshot(const std::string& name) const;
     static std::optional<std::filesystem::path> cache_source_path(
         const std::string& name,
-        const std::shared_ptr<const ListCacheGenerationSnapshot>& snapshot);
+        const std::shared_ptr<const ListCacheGenerationSnapshot>& snapshot,
+        const std::optional<std::string>& expected_url = std::nullopt,
+        const std::string& source_format = "text");
 
     const CacheManager* cache_{nullptr};
     std::size_t max_file_size_bytes_;

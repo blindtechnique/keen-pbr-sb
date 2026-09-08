@@ -4,8 +4,7 @@ import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 import { useLocation } from "wouter"
 
-import type { ApiError } from "@/api/client"
-import { postConfigSave, postTransportConfig } from "@/api/generated/keen-api"
+import { postConfigSave } from "@/api/generated/keen-api"
 import {
   TransportConfigOperationOperation,
   TransportSpecType,
@@ -36,7 +35,7 @@ import {
 } from "@/components/transports/transport-config-dialog"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
-import { getApiErrorMessage } from "@/lib/api-errors"
+import { OperationErrorMessage } from "@/components/shared/operation-error-message"
 import { buildNativeTransportCandidates } from "@/lib/hidden-native-interfaces"
 import { mapNativeInterfaces } from "@/lib/native-interfaces"
 import { makeTechnicalId } from "@/lib/technical-id"
@@ -46,8 +45,9 @@ import {
   NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID,
   readStagedNativeWireGuardImportCompletion,
 } from "@/lib/native-wireguard-import-completion"
-import { resolveNativeWireGuardImportLocation } from "@/lib/native-wireguard-import-geo"
+import { persistNativeWireGuardImportCountry } from "@/lib/native-wireguard-import-country"
 import { queryKeys } from "@/api/query-keys"
+import { useCatalogNavigation } from "@/hooks/use-catalog-navigation"
 
 type TransportEnvironment = {
   sing_box_installed: boolean
@@ -67,6 +67,7 @@ export function TransportUpsertPage({
 }) {
   const { t } = useTranslation()
   const [, navigate] = useLocation()
+  const catalogNavigation = useCatalogNavigation()
   const queryClient = useQueryClient()
   const [dirty, setDirty] = useState(false)
   const [linkedRouteApplyPending, setLinkedRouteApplyPending] = useState(false)
@@ -132,19 +133,9 @@ export function TransportUpsertPage({
       return
     }
 
-    void resolveNativeWireGuardImportLocation(plan.endpointHost)
-      .then(async (location) => {
-        if (!location) return
-        const response = await postTransportConfig({
-          operation: TransportConfigOperationOperation.update,
-          tag: transport.tag,
-          transport: {
-            ...transport,
-            country_code: location.country_code,
-            country: location.country,
-          },
-        })
-        if (response.status !== 200) return
+    void persistNativeWireGuardImportCountry(transport, plan.endpointHost)
+      .then(async (updated) => {
+        if (!updated) return
         await Promise.all([
           queryClient.invalidateQueries({
             queryKey: queryKeys.transportConfig(),
@@ -171,12 +162,19 @@ export function TransportUpsertPage({
                   ? "transports.configMessages.nativeLinked"
                   : "transports.configMessages.nativeTrackerUpdated"
               )
-            : t(`transports.configMessages.${variables.data.operation}`)
+            : t(`transports.configMessages.${variables.data.operation}`),
+          variables.data.operation === TransportConfigOperationOperation.create
+            ? {
+                action: catalogNavigation.successAction(
+                  variables.data.transport?.tag
+                ),
+              }
+            : undefined
         )
-        navigate("/transports")
+        navigate("/transports", catalogNavigation.navigationOptions)
       },
       onError: (mutationError) => {
-        toast.error(getApiErrorMessage(mutationError as ApiError), {
+        toast.error(<OperationErrorMessage error={mutationError} />, {
           richColors: true,
         })
       },
@@ -186,7 +184,8 @@ export function TransportUpsertPage({
   // Изменение kill-switch живёт в связанном маршруте, то есть в черновике
   // конфигурации, — отдельная мутация с отдельным сообщением об ошибке.
   const routeMutation = usePostConfigMutation()
-  const close = () => navigate("/transports")
+  const close = () =>
+    navigate("/transports", catalogNavigation.navigationOptions)
   const editsNativeTracker =
     (mode === "edit" && initial?.type === TransportSpecType.native) ||
     Boolean(requestedNativeInterface)
@@ -375,14 +374,17 @@ export function TransportUpsertPage({
                   ? "transports.nativeImport.importedToast"
                   : "transports.configMessages.create"
               ),
-              spec.type === TransportSpecType.native
-                ? { id: NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID }
-                : undefined
+              {
+                ...(spec.type === TransportSpecType.native
+                  ? { id: NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID }
+                  : {}),
+                action: catalogNavigation.successAction(spec.tag),
+              }
             )
-            navigate("/transports")
+            navigate("/transports", catalogNavigation.navigationOptions)
           },
           onError: (mutationError) => {
-            toast.error(getApiErrorMessage(mutationError), {
+            toast.error(<OperationErrorMessage error={mutationError} />, {
               ...(spec.type === TransportSpecType.native
                 ? { id: NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID }
                 : {}),
@@ -464,7 +466,7 @@ export function TransportUpsertPage({
               }
               updateTransport()
             } catch (mutationError) {
-              toast.error(getApiErrorMessage(mutationError as ApiError), {
+              toast.error(<OperationErrorMessage error={mutationError} />, {
                 richColors: true,
               })
             } finally {
@@ -472,7 +474,7 @@ export function TransportUpsertPage({
             }
           },
           onError: (mutationError) => {
-            toast.error(getApiErrorMessage(mutationError as ApiError), {
+            toast.error(<OperationErrorMessage error={mutationError} />, {
               richColors: true,
             })
           },

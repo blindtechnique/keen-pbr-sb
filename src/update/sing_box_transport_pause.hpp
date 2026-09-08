@@ -7,10 +7,10 @@
 namespace keen_pbr3 {
 
 // Stops the operator's sing-box transports for the duration of an install and
-// guarantees they are started again.
+// attempts to restore each addressed transport, reporting unconfirmed resumes.
 //
-// The guarantee is why this is a class rather than two calls. Between the stop
-// and the restart there is a fetch, a verification, an unpack and a file swap,
+// Scope-bound restoration is why this is a class rather than two calls.
+// Between the stop and restart are a fetch, verification, unpack and file swap,
 // and any of them can throw; without a destructor doing it, a failed install
 // would leave an operator with no VPN and nothing saying why.
 //
@@ -20,8 +20,9 @@ namespace keen_pbr3 {
 // again.
 class SingBoxTransportPause {
 public:
-    // Returns whether the manager accepted the action. `action` is "down" or
-    // "up". Must not throw: it is called from a destructor.
+    // Returns whether the manager completed the action successfully. A false
+    // result can also mean its response was lost, not that nothing changed.
+    // `action` is "down" or "up". Must not throw: used by a destructor.
     using Action =
         std::function<bool(const std::string& tag, const char* action)>;
 
@@ -44,7 +45,8 @@ public:
         return stopped_;
     }
 
-    // Transports that were stopped and did not come back. Reported rather than
+    // Originally running transports whose resume was not confirmed. Includes
+    // a Down whose response was lost. Reported rather than
     // logged and forgotten: silence reads as "everything is fine" while the
     // operator's traffic has nowhere to go.
     const std::vector<std::string>& left_down() const noexcept {
@@ -62,6 +64,9 @@ public:
 
 private:
     Action action_;
+    // Restore every addressed original-running transport: even an explicit
+    // Down error may already have changed the manager's desired state.
+    std::vector<std::string> resume_;
     std::vector<std::string> stopped_;
     std::vector<std::string> unstoppable_;
     std::vector<std::string> left_down_;

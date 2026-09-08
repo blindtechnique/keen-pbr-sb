@@ -44,6 +44,10 @@ IpkSlotInspection usable_ipk(const std::string& version) {
 
 TEST_CASE("no journal or a live owner means nothing to recover") {
     ComponentBootRecoveryEvidence evidence;
+    evidence.capture = ComponentCaptureState::usable;
+    evidence.previous_ipk = usable_ipk("1.2.4");
+    evidence.installed_version = "1.2.4";
+    evidence.installed_binary_sha256 = std::string(64, 'a');
     CHECK(decide_component_boot_recovery(evidence).action ==
           ComponentBootRecoveryAction::none);
     evidence.journal.state = ComponentTransactionState::in_flight;
@@ -65,7 +69,10 @@ TEST_CASE("an unreadable journal is handed to the operator, never guessed") {
 TEST_CASE("interrupted before mutation: the journal is simply cleared") {
     auto record = mutating_record();
     record.phase = ComponentTransactionPhase::started;
-    const auto plan = decide_component_boot_recovery(abandoned_with(record));
+    auto evidence = abandoned_with(record);
+    evidence.capture = ComponentCaptureState::usable;
+    evidence.previous_ipk = usable_ipk("1.2.4");
+    const auto plan = decide_component_boot_recovery(evidence);
     CHECK(plan.action == ComponentBootRecoveryAction::clear_journal);
     CHECK(plan.clear_journal_on_success);
 }
@@ -87,7 +94,7 @@ TEST_CASE("verified before the interruption: clear, never reinstall the old vers
     CHECK(plan.clear_journal_on_success);
 }
 
-TEST_CASE("package provably unchanged: restore files, or manual without a capture") {
+TEST_CASE("matching binary and version without an exact ipk retain file repair") {
     auto evidence = abandoned_with(mutating_record());
     evidence.installed_version = "1.2.4";
     evidence.installed_binary_sha256 = std::string(64, 'a');
@@ -112,6 +119,32 @@ TEST_CASE("package provably unchanged: restore files, or manual without a captur
         // Falls through to the exact reinstall, which does not depend on
         // reading the binary.
         CHECK(plan.action == ComponentBootRecoveryAction::reinstall_previous);
+    }
+}
+
+TEST_CASE("interrupted unpack repairs exact package metadata despite matching binary and version") {
+    for (const auto phase : {ComponentTransactionPhase::mutating,
+                             ComponentTransactionPhase::verifying}) {
+        for (const bool was_running : {false, true}) {
+            auto record = mutating_record();
+            record.phase = phase;
+            record.runtime_was_running = was_running;
+            auto evidence = abandoned_with(record);
+            evidence.installed_version = record.previous_version;
+            evidence.installed_binary_sha256 = record.binary_sha256;
+            evidence.capture = ComponentCaptureState::usable;
+            evidence.previous_ipk = usable_ipk(record.previous_version);
+
+            const auto plan = decide_component_boot_recovery(evidence);
+            CHECK(plan.action == ComponentBootRecoveryAction::reinstall_previous);
+            CHECK(plan.reinstall_version == record.previous_version);
+            CHECK(plan.clear_journal_on_success);
+            CHECK(plan.reason.find("package metadata") != std::string::npos);
+            // The executor must still restore the original running/stopped
+            // intent, not infer it from the package or recovery decision.
+            REQUIRE(evidence.journal.record.has_value());
+            CHECK(evidence.journal.record->runtime_was_running == was_running);
+        }
     }
 }
 

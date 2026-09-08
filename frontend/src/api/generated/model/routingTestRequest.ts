@@ -9,4 +9,7 @@
 export interface RoutingTestRequest {
   /** IP address or domain name to test routing for. */
   target: string;
+  /** Explicit opt-in to one HTTPS HEAD request for this IP after fresh routing evaluation. The server derives mark and interface; the IP must still occur in that evaluation. Absent means no HTTP request.
+   */
+  http_probe_ip?: string;
 }

@@ -7,6 +7,25 @@
  */
 
 export interface SavedSubscription {
+  /**
+     * Zero disables automatic refresh; otherwise 3600..604800 seconds.
+     * @minimum 0
+     * @maximum 604800
+     */
+  refresh_interval_seconds?: number;
+  /** Next daemon-side check, Unix seconds; absent when automatic refresh is off. */
+  next_check_at?: number;
+  /** @minimum 0 */
+  pending_new_servers_count?: number;
+  /** Stable identity of the current pending server set, not a refresh timestamp. */
+  pending_servers_revision?: string;
+  /**
+     * Increments when provider usage counters reset so a new allowance can warn again.
+     * @minimum 0
+     */
+  usage_cycle?: number;
+  /** Finite code for the last imported VPN parameter update failure; never includes credentials. */
+  last_sync_error?: string;
   id: string;
   name: string;
   /** Host only; never includes source path, query or credentials. */

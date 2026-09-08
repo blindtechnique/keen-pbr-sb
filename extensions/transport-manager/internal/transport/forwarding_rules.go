@@ -128,16 +128,24 @@ func legacyForwardingRuleArgs(interfaceName string) []string {
 }
 
 func (m *forwardingRuleManager) ensureInterfaces(interfaceNames []string) error {
-	m.mu.Lock()
+	return m.ensureInterfacesContext(context.Background(), interfaceNames)
+}
+
+func (m *forwardingRuleManager) ensureInterfacesContext(ctx context.Context, interfaceNames []string) error {
+	if err := lockMutexContext(ctx, &m.mu); err != nil {
+		return err
+	}
 	defer m.mu.Unlock()
 
 	interfaces := uniqueNonEmptyStrings(interfaceNames)
 	sawScaffoldTransient := false
 	for attempt := 0; ; attempt++ {
-		err := m.ensureInterfacesOnceLocked(interfaces)
+		err := m.ensureInterfacesOnceLocked(ctx, interfaces)
 		if err == nil && sawScaffoldTransient {
-			m.sleep(m.scaffoldStableDelay)
-			stable, stableErr := m.rulesPresentLocked(interfaces)
+			if err := m.sleepContext(ctx, m.scaffoldStableDelay); err != nil {
+				return err
+			}
+			stable, stableErr := m.rulesPresentLocked(ctx, interfaces)
 			switch {
 			case stableErr != nil:
 				err = stableErr
@@ -152,11 +160,13 @@ func (m *forwardingRuleManager) ensureInterfaces(interfaceNames []string) error 
 			return err
 		}
 		sawScaffoldTransient = true
-		m.sleep(m.scaffoldRetryDelays[attempt])
+		if err := m.sleepContext(ctx, m.scaffoldRetryDelays[attempt]); err != nil {
+			return err
+		}
 	}
 }
 
-func (m *forwardingRuleManager) ensureInterfacesOnceLocked(interfaces []string) error {
+func (m *forwardingRuleManager) ensureInterfacesOnceLocked(ctx context.Context, interfaces []string) error {
 	for _, binary := range []string{"iptables", "ip6tables"} {
 		if _, err := m.runner.LookPath(binary); err != nil {
 			if binary == "iptables" {
@@ -165,7 +175,7 @@ func (m *forwardingRuleManager) ensureInterfacesOnceLocked(interfaces []string) 
 			continue
 		}
 		for _, interfaceName := range interfaces {
-			if err := m.ensureInterfaceLocked(binary, interfaceName); err != nil {
+			if err := m.ensureInterfaceLocked(ctx, binary, interfaceName); err != nil {
 				return err
 			}
 		}
@@ -173,7 +183,26 @@ func (m *forwardingRuleManager) ensureInterfacesOnceLocked(interfaces []string) 
 	return nil
 }
 
-func (m *forwardingRuleManager) ensureInterfaceLocked(binary, interfaceName string) error {
+func (m *forwardingRuleManager) sleepContext(ctx context.Context, delay time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if ctx.Done() == nil {
+		// Preserve the existing delay hook for ordinary reconciliation/tests.
+		m.sleep(delay)
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return ctx.Err()
+	}
+}
+
+func (m *forwardingRuleManager) ensureInterfaceLocked(ctx context.Context, binary, interfaceName string) error {
 	marked := forwardingRuleArgs(interfaceName)
 	legacy := legacyForwardingRuleArgs(interfaceName)
 
@@ -181,7 +210,7 @@ func (m *forwardingRuleManager) ensureInterfaceLocked(binary, interfaceName stri
 	markedPresent := false
 	var err error
 	if !commentUnavailable {
-		markedPresent, err = m.rulePresentLocked(binary, marked)
+		markedPresent, err = m.rulePresentContextLocked(ctx, binary, marked)
 		commentUnavailable = errors.Is(err, errCommentMatchUnavailable)
 		if commentUnavailable {
 			m.commentSupport[binary] = commentMatchUnavailable
@@ -192,36 +221,36 @@ func (m *forwardingRuleManager) ensureInterfaceLocked(binary, interfaceName stri
 	}
 	if markedPresent {
 		m.commentSupport[binary] = commentMatchAvailable
-		if err := m.dedupeRulePreservingOneLocked(binary, marked); err != nil {
+		if err := m.dedupeRulePreservingOneLocked(ctx, binary, marked); err != nil {
 			return fmt.Errorf("deduplicate marked forwarding rule for %s with %s: %w", interfaceName, binary, err)
 		}
 		// A compatibility rule may have survived an older process. It is not
 		// distinguishable from a user rule, so runtime reconciliation only
 		// removes duplicates and deliberately preserves one matching rule.
-		if err := m.dedupeRuleIfPresentLocked(binary, legacy); err != nil {
+		if err := m.dedupeRuleIfPresentLocked(ctx, binary, legacy); err != nil {
 			return fmt.Errorf("deduplicate compatibility forwarding rule for %s with %s: %w", interfaceName, binary, err)
 		}
 		return nil
 	}
 
-	legacyPresent, err := m.rulePresentLocked(binary, legacy)
+	legacyPresent, err := m.rulePresentContextLocked(ctx, binary, legacy)
 	if err != nil {
 		return fmt.Errorf("inspect compatibility forwarding rule for %s with %s: %w", interfaceName, binary, err)
 	}
 	if legacyPresent {
-		if err := m.dedupeRulePreservingOneLocked(binary, legacy); err != nil {
+		if err := m.dedupeRulePreservingOneLocked(ctx, binary, legacy); err != nil {
 			return fmt.Errorf("deduplicate compatibility forwarding rule for %s with %s: %w", interfaceName, binary, err)
 		}
 		return nil
 	}
 	if commentUnavailable {
-		if err := m.appendRuleLocked(binary, legacy); err != nil {
+		if err := m.appendRuleContextLocked(ctx, binary, legacy); err != nil {
 			return fmt.Errorf("allow forwarding into %s with %s compatibility rule: %w", interfaceName, binary, err)
 		}
 		return nil
 	}
 
-	if err := m.appendRuleLocked(binary, marked); err == nil {
+	if err := m.appendRuleContextLocked(ctx, binary, marked); err == nil {
 		m.commentSupport[binary] = commentMatchAvailable
 		return nil
 	} else if !errors.Is(err, errCommentMatchUnavailable) {
@@ -229,7 +258,7 @@ func (m *forwardingRuleManager) ensureInterfaceLocked(binary, interfaceName stri
 	}
 	m.commentSupport[binary] = commentMatchUnavailable
 
-	if err := m.appendRuleLocked(binary, legacy); err != nil {
+	if err := m.appendRuleContextLocked(ctx, binary, legacy); err != nil {
 		return fmt.Errorf("allow forwarding into %s with %s compatibility rule: %w", interfaceName, binary, err)
 	}
 	return nil
@@ -238,11 +267,11 @@ func (m *forwardingRuleManager) ensureInterfaceLocked(binary, interfaceName stri
 func (m *forwardingRuleManager) rulesPresent(interfaceName string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	present, err := m.rulesPresentLocked([]string{interfaceName})
+	present, err := m.rulesPresentLocked(context.Background(), []string{interfaceName})
 	return err == nil && present
 }
 
-func (m *forwardingRuleManager) rulesPresentLocked(interfaceNames []string) (bool, error) {
+func (m *forwardingRuleManager) rulesPresentLocked(ctx context.Context, interfaceNames []string) (bool, error) {
 	interfaces := uniqueNonEmptyStrings(interfaceNames)
 	for _, binary := range []string{"iptables", "ip6tables"} {
 		if _, err := m.runner.LookPath(binary); err != nil {
@@ -256,7 +285,7 @@ func (m *forwardingRuleManager) rulesPresentLocked(interfaceNames []string) (boo
 			markedPresent := false
 			var err error
 			if !commentUnavailable {
-				markedPresent, err = m.rulePresentLocked(binary, forwardingRuleArgs(interfaceName))
+				markedPresent, err = m.rulePresentContextLocked(ctx, binary, forwardingRuleArgs(interfaceName))
 				commentUnavailable = errors.Is(err, errCommentMatchUnavailable)
 				if commentUnavailable {
 					m.commentSupport[binary] = commentMatchUnavailable
@@ -269,7 +298,7 @@ func (m *forwardingRuleManager) rulesPresentLocked(interfaceNames []string) (boo
 				m.commentSupport[binary] = commentMatchAvailable
 				continue
 			}
-			legacyPresent, err := m.rulePresentLocked(binary, legacyForwardingRuleArgs(interfaceName))
+			legacyPresent, err := m.rulePresentContextLocked(ctx, binary, legacyForwardingRuleArgs(interfaceName))
 			if err != nil {
 				return false, err
 			}
@@ -315,10 +344,14 @@ func (m *forwardingRuleManager) cleanupInterfacesContext(ctx context.Context, in
 }
 
 func (m *forwardingRuleManager) rulePresentLocked(binary string, rule []string) (bool, error) {
+	return m.rulePresentContextLocked(context.Background(), binary, rule)
+}
+
+func (m *forwardingRuleManager) rulePresentContextLocked(ctx context.Context, binary string, rule []string) (bool, error) {
 	args := append([]string{"-C"}, rule...)
 	ambiguousScaffoldRetryUsed := false
 	for attempt := 0; ; attempt++ {
-		result, err := m.runLocked(binary, args)
+		result, err := m.runContextLocked(ctx, binary, args)
 		if err != nil {
 			return false, err
 		}
@@ -333,11 +366,13 @@ func (m *forwardingRuleManager) rulePresentLocked(binary string, rule []string) 
 			// never be interpreted as permission to append.
 			return false, nil
 		case isXtablesTransient(result) && attempt < len(m.retryDelays):
-			m.sleep(m.retryDelays[attempt])
+			if err := m.sleepContext(ctx, m.retryDelays[attempt]); err != nil {
+				return false, err
+			}
 			continue
 		default:
 			if isForwardingScaffoldUnavailable(result) {
-				if scaffoldErr := m.confirmForwardingScaffoldLocked(binary); scaffoldErr != nil {
+				if scaffoldErr := m.confirmForwardingScaffoldContextLocked(ctx, binary); scaffoldErr != nil {
 					return false, scaffoldErr
 				}
 				// NDMS can republish the filter table between the failed
@@ -347,7 +382,9 @@ func (m *forwardingRuleManager) rulePresentLocked(binary string, rule []string) 
 				// indicate a genuinely missing target or match extension.
 				if !ambiguousScaffoldRetryUsed {
 					ambiguousScaffoldRetryUsed = true
-					m.sleep(m.scaffoldStableDelay)
+					if err := m.sleepContext(ctx, m.scaffoldStableDelay); err != nil {
+						return false, err
+					}
 					continue
 				}
 				if isManagedMarkedForwardingRule(rule) {
@@ -360,20 +397,24 @@ func (m *forwardingRuleManager) rulePresentLocked(binary string, rule []string) 
 }
 
 func (m *forwardingRuleManager) appendRuleLocked(binary string, rule []string) error {
+	return m.appendRuleContextLocked(context.Background(), binary, rule)
+}
+
+func (m *forwardingRuleManager) appendRuleContextLocked(ctx context.Context, binary string, rule []string) error {
 	args := append([]string{"-A"}, rule...)
 	ambiguousScaffoldRetryUsed := false
 	for attempt := 0; ; attempt++ {
-		result, err := m.runLocked(binary, args)
+		result, err := m.runContextLocked(ctx, binary, args)
 		if err != nil {
 			return err
 		}
 		if result.exitCode == 0 {
-			present, inspectErr := m.rulePresentLocked(binary, rule)
+			present, inspectErr := m.rulePresentContextLocked(ctx, binary, rule)
 			if inspectErr != nil {
 				return fmt.Errorf("appended rule but could not verify it: %w", inspectErr)
 			}
 			if !present {
-				if scaffoldErr := m.confirmForwardingScaffoldLocked(binary); scaffoldErr != nil {
+				if scaffoldErr := m.confirmForwardingScaffoldContextLocked(ctx, binary); scaffoldErr != nil {
 					return scaffoldErr
 				}
 				return errors.New("iptables reported success but the appended rule is absent")
@@ -384,11 +425,13 @@ func (m *forwardingRuleManager) appendRuleLocked(binary string, rule []string) e
 			return fmt.Errorf("%w: %s", errCommentMatchUnavailable, commandResultDetails(result))
 		}
 		if isKnownNoMutationLockFailure(result) && attempt < len(m.retryDelays) {
-			m.sleep(m.retryDelays[attempt])
+			if err := m.sleepContext(ctx, m.retryDelays[attempt]); err != nil {
+				return err
+			}
 			continue
 		}
 		if isForwardingScaffoldUnavailable(result) {
-			if scaffoldErr := m.confirmForwardingScaffoldLocked(binary); scaffoldErr != nil {
+			if scaffoldErr := m.confirmForwardingScaffoldContextLocked(ctx, binary); scaffoldErr != nil {
 				return scaffoldErr
 			}
 			// The FORWARD chain may have returned after the append raced an
@@ -397,7 +440,9 @@ func (m *forwardingRuleManager) appendRuleLocked(binary string, rule []string) e
 			// is still treated as a permanent error with no legacy fallback.
 			if !ambiguousScaffoldRetryUsed {
 				ambiguousScaffoldRetryUsed = true
-				m.sleep(m.scaffoldStableDelay)
+				if err := m.sleepContext(ctx, m.scaffoldStableDelay); err != nil {
+					return err
+				}
 				continue
 			}
 			if isManagedMarkedForwardingRule(rule) {
@@ -409,7 +454,7 @@ func (m *forwardingRuleManager) appendRuleLocked(binary string, rule []string) e
 		// Verify authoritatively, but never append a second copy after an
 		// uncertain outcome.
 		if result.err != nil || isXtablesTransient(result) {
-			present, inspectErr := m.rulePresentLocked(binary, rule)
+			present, inspectErr := m.rulePresentContextLocked(ctx, binary, rule)
 			if inspectErr == nil && present {
 				return nil
 			}
@@ -421,16 +466,16 @@ func (m *forwardingRuleManager) appendRuleLocked(binary string, rule []string) e
 	}
 }
 
-func (m *forwardingRuleManager) dedupeRuleIfPresentLocked(binary string, rule []string) error {
-	present, err := m.rulePresentLocked(binary, rule)
+func (m *forwardingRuleManager) dedupeRuleIfPresentLocked(ctx context.Context, binary string, rule []string) error {
+	present, err := m.rulePresentContextLocked(ctx, binary, rule)
 	if err != nil || !present {
 		return err
 	}
-	return m.dedupeRulePreservingOneLocked(binary, rule)
+	return m.dedupeRulePreservingOneLocked(ctx, binary, rule)
 }
 
-func (m *forwardingRuleManager) dedupeRulePreservingOneLocked(binary string, rule []string) error {
-	count, err := m.ruleCountLocked(binary, rule)
+func (m *forwardingRuleManager) dedupeRulePreservingOneLocked(ctx context.Context, binary string, rule []string) error {
+	count, err := m.ruleCountLocked(ctx, binary, rule)
 	if err != nil {
 		return err
 	}
@@ -438,7 +483,7 @@ func (m *forwardingRuleManager) dedupeRulePreservingOneLocked(binary string, rul
 		if deleted >= maximumForwardingRuleDeletes {
 			return fmt.Errorf("refusing to delete more than %d duplicate rules", maximumForwardingRuleDeletes)
 		}
-		result, runErr := m.deleteRuleLocked(binary, rule)
+		result, runErr := m.deleteRuleContextLocked(ctx, binary, rule)
 		if runErr != nil {
 			return runErr
 		}
@@ -447,7 +492,7 @@ func (m *forwardingRuleManager) dedupeRulePreservingOneLocked(binary string, rul
 		}
 		// Re-list before every subsequent deletion. External firewall owners
 		// may mutate FORWARD concurrently; never delete the sole remaining rule.
-		count, err = m.ruleCountLocked(binary, rule)
+		count, err = m.ruleCountLocked(ctx, binary, rule)
 		if err != nil {
 			return err
 		}
@@ -495,7 +540,9 @@ func (m *forwardingRuleManager) deleteRuleContextLocked(ctx context.Context, bin
 			return result, nil
 		}
 		if isKnownNoMutationLockFailure(result) && attempt < len(m.retryDelays) {
-			m.sleep(m.retryDelays[attempt])
+			if err := m.sleepContext(ctx, m.retryDelays[attempt]); err != nil {
+				return result, err
+			}
 			continue
 		}
 		if isForwardingScaffoldUnavailable(result) {
@@ -504,7 +551,9 @@ func (m *forwardingRuleManager) deleteRuleContextLocked(ctx context.Context, bin
 			}
 			if !ambiguousScaffoldRetryUsed {
 				ambiguousScaffoldRetryUsed = true
-				m.sleep(m.scaffoldStableDelay)
+				if err := m.sleepContext(ctx, m.scaffoldStableDelay); err != nil {
+					return result, err
+				}
 				continue
 			}
 			if isManagedMarkedForwardingRule(rule) {
@@ -515,10 +564,10 @@ func (m *forwardingRuleManager) deleteRuleContextLocked(ctx context.Context, bin
 	}
 }
 
-func (m *forwardingRuleManager) ruleCountLocked(binary string, rule []string) (int, error) {
+func (m *forwardingRuleManager) ruleCountLocked(ctx context.Context, binary string, rule []string) (int, error) {
 	args := []string{"-S", "FORWARD"}
 	for attempt := 0; ; attempt++ {
-		result, err := m.runLocked(binary, args)
+		result, err := m.runContextLocked(ctx, binary, args)
 		if err != nil {
 			return 0, err
 		}
@@ -529,7 +578,9 @@ func (m *forwardingRuleManager) ruleCountLocked(binary string, rule []string) (i
 			return 0, forwardingScaffoldError(binary, result)
 		}
 		if isXtablesTransient(result) && attempt < len(m.retryDelays) {
-			m.sleep(m.retryDelays[attempt])
+			if err := m.sleepContext(ctx, m.retryDelays[attempt]); err != nil {
+				return 0, err
+			}
 			continue
 		}
 		return 0, firewallCommandError(binary, args, result)
@@ -560,7 +611,9 @@ func (m *forwardingRuleManager) confirmForwardingScaffoldContextLocked(ctx conte
 			return forwardingScaffoldError(binary, result)
 		}
 		if isXtablesTransient(result) && attempt < len(m.retryDelays) {
-			m.sleep(m.retryDelays[attempt])
+			if err := m.sleepContext(ctx, m.retryDelays[attempt]); err != nil {
+				return err
+			}
 			continue
 		}
 		return firewallCommandError(binary, args, result)

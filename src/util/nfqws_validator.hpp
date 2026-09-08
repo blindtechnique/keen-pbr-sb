@@ -65,6 +65,22 @@ std::vector<ConfigValidationIssue> validate_nfqws_candidate(
     const std::string& content,
     const NfqwsPathResolver& resolve_path = {});
 
+// Migrates only the known assignment format without sourcing either input.
+// Preserves previous text/settings, apart from normalizing real CONFIG_VERSION
+// assignments to the package's numeric version; missing supported fields get
+// the package's resolved defaults as shell-quoted literals. Unsupported syntax,
+// invalid/missing versions or changed previous setting values return nullopt.
+// This does not promise compatibility with arbitrary future package formats;
+// the caller determines eligibility and validates against the installed engine.
+std::optional<std::string> migrate_nfqws_config_preserving_settings(
+    const std::string& previous,
+    const std::string& package_defaults);
+
+// Removes only syntactically parsed CONFIG_VERSION assignments for strategy
+// identity comparisons. Quoted lookalikes and all other text stay untouched;
+// a parse issue or a setting that depends on VERSION leaves it unchanged.
+std::string nfqws_config_without_version_metadata(const std::string& content);
+
 // Parses and validates once, then derives a bounded, canonical PPE selector
 // from the same parsed candidate.  TCP filters from action-bearing active
 // profiles must exactly match TCP_PORTS.  Empty, malformed, ambiguous or

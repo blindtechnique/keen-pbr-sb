@@ -192,6 +192,72 @@ describe("urltest editor validation", () => {
     })
   })
 
+  it("treats an explicit fallback as a routed reference for delete conntrack mode", () => {
+    expect(
+      validate(
+        draft({ conntrackOnSwitch: "delete" }),
+        [leaf("vpn"), leaf("primary")],
+        {
+          route: {
+            rules: [
+              {
+                outbound: "primary",
+                failure_policy: "fallback",
+                fallback_outbound: "vpn",
+              },
+            ],
+          },
+        }
+      )
+    ).toContainEqual({
+      field: "conntrackOnSwitch",
+      code: "conntrackRoute",
+      target: "vpn",
+    })
+
+    for (const mode of ["default", "preserve", "delete_on_failure"] as const) {
+      expect(
+        validate(
+          draft({ conntrackOnSwitch: mode }),
+          [leaf("vpn"), leaf("primary")],
+          {
+            route: {
+              rules: [
+                {
+                  outbound: "primary",
+                  failure_policy: "fallback",
+                  fallback_outbound: "vpn",
+                },
+              ],
+            },
+          }
+        )
+      ).toEqual([])
+    }
+  })
+
+  it("matches the backend by ignoring an inactive fallback for conntrack reference checks", () => {
+    for (const policy of [undefined, null, "inherit", "block"] as const) {
+      expect(
+        validate(
+          draft({ conntrackOnSwitch: "delete" }),
+          [leaf("vpn"), leaf("primary")],
+          {
+            route: {
+              rules: [
+                {
+                  outbound: "primary",
+                  failure_policy: policy,
+                  fallback_outbound: "vpn",
+                },
+              ],
+            },
+          }
+        )
+      ).toEqual([])
+    }
+  })
+
   it("rejects delete for route, DNS, and effective list detours", () => {
     expect(
       validate(draft({ conntrackOnSwitch: "delete" }), [leaf("vpn")], {

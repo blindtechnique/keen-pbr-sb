@@ -5,8 +5,10 @@
  * REST API for the keen-pbr policy-based routing daemon.
  * OpenAPI spec version: 3.0.0
  */
+import type { ListShrinkRejection } from './listShrinkRejection';
 
 export interface ListRefreshState {
+  shrink_rejection?: ListShrinkRejection | null;
   /** ISO-8601 timestamp of the last successful download or conditional refresh attempt for the currently configured URL. A failed attempt never replaces this timestamp.
    */
   last_updated?: string;

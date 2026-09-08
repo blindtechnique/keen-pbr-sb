@@ -28,6 +28,10 @@ WRITABLE=$work "$lua_bin" \
     "$repo_root/tests/nfqws_rotator_telemetry_smoke.lua" \
     "$repo_root/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/nfqws-lua/rotator-telemetry.lua"
 
+"$lua_bin" \
+    "$repo_root/tests/nfqws_rotator_memory_bound.lua" \
+    "$repo_root/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/nfqws-lua/rotator-telemetry.lua"
+
 WRITABLE=$work \
 KEEN_PBR_NFQWS_ROTATOR_LEARNED_PREFIX="$work/nfqws-rotator-learned-v1" \
 "$lua_bin" \
@@ -39,3 +43,8 @@ KEEN_PBR_NFQWS_ROTATOR_LEARNED_PREFIX="$work/nfqws-rotator-learned-v1" \
     "$repo_root/tests/nfqws_circular_v103_semantics.lua" \
     "$fixture/zapret-auto.lua" \
     "$fixture/zapret-lib-is-retransmission.lua"
+
+"$lua_bin" \
+    "$repo_root/tests/nfqws_legacy_udp_pool_semantics.lua" \
+    "$fixture/zapret-auto.lua" \
+    "$repo_root/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/nfqws-strategies"

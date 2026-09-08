@@ -268,7 +268,7 @@ std::vector<std::string> filter_addrs_by_family(const std::vector<std::string>& 
 }
 
 bool needs_family_specific_rule(const FirewallRuleCriteria& criteria) {
-    return criteria.dst_set_name.has_value() ||
+    return criteria.family != AF_UNSPEC || criteria.dst_set_name.has_value() ||
            criteria.src_udp_peer_set_name.has_value() ||
            criteria.dscp.has_value() ||
            !criteria.src_addr.empty() ||
@@ -306,6 +306,7 @@ struct ExpectedNftRule {
     RuleActionType action_type{RuleActionType::Skip};
     uint32_t fwmark{0};
     FirewallRuleCriteria criteria;
+    bool requires_family_match{false};
 };
 
 std::vector<ExpectedNftRule> expand_expected_rule_states(
@@ -320,8 +321,8 @@ std::vector<ExpectedNftRule> expand_expected_rule_states(
             for (const auto& set_name : rs.set_names) {
                 targets.push_back({set_name, ipv6_from_set_name(set_name).value_or(false)});
             }
-        } else if (rs.criteria.has_rule_selector()) {
-            if (!needs_family_specific_rule(rs.criteria)) {
+        } else if (rs.list_names.empty() && rs.criteria.has_rule_selector()) {
+            if (!needs_family_specific_rule(rs.criteria) && !rs.fwmark_ipv6.has_value()) {
                 targets.push_back({"", false});
             } else {
                 targets.push_back({"", false});
@@ -332,6 +333,8 @@ std::vector<ExpectedNftRule> expand_expected_rule_states(
         }
 
         for (const auto& [set_name, ipv6] : targets) {
+            if (rs.criteria.family != AF_UNSPEC &&
+                rs.criteria.family != (ipv6 ? AF_INET6 : AF_INET)) continue;
             const auto filtered_src = rs.criteria.src_addr.empty()
                 ? std::vector<std::string>{}
                 : filter_addrs_by_family(rs.criteria.src_addr, ipv6);
@@ -349,8 +352,9 @@ std::vector<ExpectedNftRule> expand_expected_rule_states(
                 exp.set_name = set_name;
                 exp.ipv6 = ipv6;
                 exp.action_type = rs.action_type;
-                exp.fwmark = rs.fwmark;
+                exp.fwmark = rs.mark_for_family(ipv6 ? AF_INET6 : AF_INET);
                 exp.criteria = rs.criteria;
+                exp.requires_family_match = rs.fwmark_ipv6.has_value() || rs.criteria.family != AF_UNSPEC;
                 exp.criteria.proto = proto;
                 if (!rs.criteria.src_addr.empty()) exp.criteria.src_addr = filtered_src;
                 if (!rs.criteria.dst_addr.empty()) exp.criteria.dst_addr = filtered_dst;
@@ -376,6 +380,8 @@ bool action_matches(const ParsedNftRule& actual,
 bool rule_matches(const ParsedNftRule& actual,
                   const ExpectedNftRule& expected) {
     return actual.ipv6 == expected.ipv6 &&
+           (!expected.requires_family_match ||
+            actual.criteria.family == (expected.ipv6 ? AF_INET6 : AF_INET)) &&
            actual.set_name == expected.set_name &&
            action_matches(actual, expected) &&
            criteria_equal(actual.criteria, expected.criteria);
@@ -454,7 +460,10 @@ ParsedNftablesState parse_nft_json(const std::string& json_output) {
                         const std::string protocol = payload.value("protocol", "");
                         const std::string field = payload.value("field", "");
 
-                        if (protocol == "ip6") nr.ipv6 = true;
+                        if (protocol == "ip" || protocol == "ip6") {
+                            nr.ipv6 = protocol == "ip6";
+                            nr.criteria.family = nr.ipv6 ? AF_INET6 : AF_INET;
+                        }
 
                         if (field == "dscp" && match.contains("right")) {
                             const auto value = parse_nft_dscp_value(match["right"]);
@@ -491,6 +500,11 @@ ParsedNftablesState parse_nft_json(const std::string& json_output) {
                             nr.criteria.dst_port = parse_nft_port_spec(match["right"]);
                             nr.criteria.negate_dst_port = (op == "!=");
                         }
+                    } else if (left.contains("meta") && left["meta"].is_object() &&
+                               left["meta"].value("key", "") == "nfproto" &&
+                               match.contains("right")) {
+                        nr.ipv6 = match["right"] == "ipv6" || match["right"] == AF_INET6;
+                        nr.criteria.family = nr.ipv6 ? AF_INET6 : AF_INET;
                     } else if (left.contains("meta") && left["meta"].is_object() &&
                                left["meta"].value("key", "") == "l4proto" &&
                                match.contains("right") && match["right"].is_string()) {
@@ -541,6 +555,31 @@ ParsedNftablesState parse_nft_json(const std::string& json_output) {
 
 NftablesFirewallVerifier::NftablesFirewallVerifier(CommandRunner runner)
     : runner_(std::move(runner)) {}
+
+std::vector<std::vector<std::size_t>> match_nft_counter_rules(
+    const std::vector<ParsedNftRule>& actual,
+    const std::vector<RuleState>& expected,
+    std::chrono::steady_clock::time_point deadline) {
+    std::vector<std::pair<std::size_t, ExpectedNftRule>> expanded;
+    for (const auto& state : expected) {
+        for (auto& item : expand_expected_rule_states({state})) {
+            expanded.emplace_back(state.rule_index, std::move(item));
+        }
+    }
+    std::vector<std::vector<std::size_t>> matches(actual.size());
+    for (std::size_t index = 0; index < actual.size(); ++index) {
+        for (const auto& item : expanded) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                throw std::runtime_error("counter identity deadline");
+            }
+            if (rule_matches(actual[index], item.second) &&
+                std::find(matches[index].begin(), matches[index].end(), item.first) == matches[index].end()) {
+                matches[index].push_back(item.first);
+            }
+        }
+    }
+    return matches;
+}
 
 const NftablesFirewallVerifier::CachedState& NftablesFirewallVerifier::get_state() const {
     if (!cached_state_.has_value()) {
@@ -684,6 +723,7 @@ std::vector<FirewallRuleCheck> NftablesFirewallVerifier::verify_rules(
                                                static_cast<size_t>(&actual - state.rules.data());
                                            return !used[index] &&
                                                   actual.ipv6 == exp.ipv6 &&
+                                                  (!exp.requires_family_match || actual.criteria.family == (exp.ipv6 ? AF_INET6 : AF_INET)) &&
                                                   actual.set_name == exp.set_name &&
                                                   criteria_equal(actual.criteria, exp.criteria);
                                        });

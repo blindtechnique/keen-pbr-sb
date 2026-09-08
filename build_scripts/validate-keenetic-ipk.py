@@ -31,6 +31,7 @@ REQUIRED_EXECUTABLES = {
     "opt/etc/init.d/S52keen-pbr-ssh-guard",
     "opt/etc/ndm/netfilter.d/50-keen-pbr-routing.sh",
     "opt/usr/lib/keen-pbr/self-update.sh",
+    "opt/usr/lib/keen-pbr/release-verify.sh",
     "opt/usr/lib/keen-pbr/rescue-update.sh",
     "opt/usr/lib/keen-pbr/rescue-startup-guard.sh",
     "opt/usr/lib/keen-pbr/ssh-boot-guard.sh",
@@ -38,6 +39,7 @@ REQUIRED_EXECUTABLES = {
     "opt/usr/lib/keen-pbr/portable-stat.sh",
 }
 REQUIRED_FILES = REQUIRED_EXECUTABLES | {
+    "opt/etc/keen-pbr/keys/release-public.pem",
     "opt/etc/keen-pbr/config.json",
     "opt/etc/keen-pbr/transports.json",
     "opt/usr/share/keen-pbr/catalog.json",
@@ -82,6 +84,7 @@ REQUIRED_CONTROL_EXECUTABLES = {
 }
 REQUIRED_PACKAGE_DEPENDENCIES = {
     "conntrack",
+    "openssl-util",
 }
 EXPECTED_OUTER_MEMBERS = {
     "debian-binary",
@@ -373,14 +376,6 @@ def validate(path: Path, arch: str, expected_commit: str | None = None) -> None:
             validate_elf(entries[binary], binary_content[:64], arch)
             if binary == "opt/usr/bin/keen-pbr":
                 keen_pbr_binary_content = binary_content
-            if (
-                expected_commit is not None
-                and binary == "opt/usr/bin/keen-pbr"
-                and expected_commit.encode("ascii") not in binary_content
-            ):
-                raise ValidationError(
-                    "keen-pbr binary does not contain the expected build commit"
-                )
 
         config_stream = data_tar.extractfile(entries["opt/etc/keen-pbr/transports.json"])
         if config_stream is None:
@@ -504,9 +499,22 @@ def validate(path: Path, arch: str, expected_commit: str | None = None) -> None:
         expected_binary_identity = (
             f"{package_version} (build {build_timestamp}, commit "
         ).encode("ascii")
-        if expected_binary_identity not in keen_pbr_binary_content:
+        binary_identity_pattern = (
+            rb"(?<![A-Za-z0-9_.-])" + re.escape(expected_binary_identity)
+        )
+        if re.search(binary_identity_pattern, keen_pbr_binary_content) is None:
             raise ValidationError(
                 "keen-pbr binary build identity does not match package Version"
+            )
+        # Match one combined identity, not a commit found elsewhere in the ELF
+        # or a clean commit that is merely a prefix of a dirty/different one.
+        if expected_commit is not None and re.search(
+            binary_identity_pattern + re.escape(expected_commit.encode("ascii")) + rb"\)",
+            keen_pbr_binary_content,
+        ) is None:
+            raise ValidationError(
+                "keen-pbr binary does not contain the expected build commit "
+                "in its package build identity"
             )
         if expected_commit is not None and (
             f"Built from source commit {expected_commit}." not in control

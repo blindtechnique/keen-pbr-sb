@@ -46,6 +46,7 @@ import { OrderedGroupCard } from "@/components/shared/ordered-group-card"
 import { AdvancedSection } from "@/components/shared/advanced-section"
 import { SectionCard } from "@/components/shared/section-card"
 import { ServerValidationAlert } from "@/components/shared/server-validation-alert"
+import { getFirstFieldError, getFormErrorMessage } from "@/lib/form-field-error"
 import {
   UpsertPage,
   type UpsertPagePresentation,
@@ -58,8 +59,10 @@ import {
   clearFormServerErrors,
   setFormServerErrors,
   splitFormApiErrors,
+  getUnmappedFormErrors,
 } from "@/lib/form-api-errors"
 import { getTagNameValidationError } from "@/lib/tag-name-validation"
+import { buildChoiceDisplayNames } from "@/lib/choice-display-names"
 import { getInterfaceSearchText } from "@/lib/runtime-interfaces"
 import {
   getOutboundDisplayName,
@@ -374,12 +377,13 @@ function OutboundForm({
   const { labelFor: interfaceLabelFor } = useInterfaceDisplayNames()
   // Имя туннеля для участника группы: имя маршрута, затем имя туннеля по
   // интерфейсу (управляемого или KeeneticOS), тег — последний запасной.
-  const groupMemberLabel = (tag: string) => {
-    const outbound = interfaceOutboundByTag.get(tag)
-    return outbound
-      ? getOutboundSelectDisplayName(outbound, interfaceLabelFor)
-      : tag
-  }
+  const groupMemberNames = buildChoiceDisplayNames(
+    groupMemberCandidates.map((outbound) => ({
+      value: outbound.tag,
+      label: getOutboundSelectDisplayName(outbound, interfaceLabelFor),
+    }))
+  )
+  const groupMemberLabel = (tag: string) => groupMemberNames.get(tag) ?? tag
   const strictSelectItems = strictOptions.map((option) => ({
     value: option,
     label: getStrictOptionLabel(option, t),
@@ -560,19 +564,13 @@ function OutboundForm({
   }
 
   const outboundType = useStore(form.store, (state) => state.values.type)
-  const apiErrorMessage = useStore(
+  const serverFormError = useStore(
     form.store,
-    (state) =>
-      (state.errorMap.onServer as { form?: string } | undefined)?.form ?? null
+    (state) => state.errorMap.onServer
   )
-  const unmappedServerErrors = useStore(
-    form.store,
-    (state) =>
-      (
-        state.errorMap.onServer as
-          | { unmapped?: { path: string; message: string }[] }
-          | undefined
-      )?.unmapped ?? []
+  const apiErrorMessage = getFormErrorMessage(serverFormError)
+  const unmappedServerErrors = useStore(form.store, (state) =>
+    getUnmappedFormErrors(state.errorMap.onServer)
   )
   const isDirty = useStore(
     form.store,
@@ -1674,11 +1672,6 @@ function OutboundForm({
       </div>
     </form>
   )
-}
-
-function getFirstFieldError(errors: unknown[]) {
-  const firstError = errors[0]
-  return typeof firstError === "string" ? firstError : null
 }
 
 function getOutboundDraftValidationFieldErrors(

@@ -106,6 +106,17 @@ RULES
 RULES
             exit 0
             ;;
+        native-stale|native-duplicate|native-foreign)
+            printf '%s\n' '-P FORWARD DROP' '-N NDMS_FORWARD' \
+                '-N KeenPbrNativeFwd' '-A FORWARD -j NDMS_FORWARD' \
+                '-A FORWARD -j KeenPbrNativeFwd' \
+                '-A KeenPbrNativeFwd -i oc0 -s 172.16.5.0/24 -o nwg5 -m mark --mark 0x60000/0xff0000 -j ACCEPT'
+            [ "$state" != native-duplicate ] || \
+                echo '-A FORWARD -j KeenPbrNativeFwd'
+            [ "$state" != native-foreign ] || \
+                echo '-A ForeignChain -j KeenPbrNativeFwd'
+            exit 0
+            ;;
         tcp-stale|tcp-fail-restore|tcp-remains)
             cat <<'RULES'
 -N KeenPbrTcpRst
@@ -156,6 +167,21 @@ printf '%s\n' "$payload" | sed "s/^/$restore stdin: /" >> "$META_TEST_LOG"
 }
 
 case "$state" in
+    native-stale)
+        expected='*filter
+-D FORWARD -j KeenPbrNativeFwd
+-F KeenPbrNativeFwd
+-X KeenPbrNativeFwd
+COMMIT'
+        ;;
+    native-duplicate)
+        expected='*filter
+-D FORWARD -j KeenPbrNativeFwd
+-D FORWARD -j KeenPbrNativeFwd
+-F KeenPbrNativeFwd
+-X KeenPbrNativeFwd
+COMMIT'
+        ;;
     tcp-stale|tcp-fail-restore|tcp-remains)
         expected='*filter
 -D FORWARD -j KeenPbrTcpRst
@@ -202,7 +228,7 @@ case "$state" in
         printf '%s\n' foreign > "$state_file"
         exit 4
         ;;
-    tcp-stale|tcp-duplicate)
+    tcp-stale|tcp-duplicate|native-stale|native-duplicate)
         printf '%s\n' absent > "$state_file"
         exit 0
         ;;
@@ -586,6 +612,63 @@ run_live_daemon_start_does_not_cleanup_case() (
     fi
 )
 
+run_native_forward_stop_cleanup_case() (
+    reset_case native-stale native-duplicate absent
+    PATH="$work/bin:$PATH"
+    META_TEST_STATE="$work/state"
+    META_TEST_LOG="$work/calls"
+    FASTNAT_UNSAFE_STOP_FILE="$work/unsafe"
+    IPTABLES_WAIT_MODE=""
+    IP6TABLES_WAIT_MODE=""
+    STOP_KEEN_PBR_SAFE=yes
+    export PATH META_TEST_STATE META_TEST_LOG
+    log_error() { printf 'error: %s\n' "$1" >&2; }
+    . "$work/functions.sh"
+    prepare_stop() { :; }
+    stop_keen_pbr() { STOP_KEEN_PBR_SAFE=yes; return 0; }
+    restore_hwnat_if_safe() { : > "$work/restored"; }
+
+    stop_service_for_action stop yes
+    assert_state absent iptables
+    assert_state absent ip6tables
+    [ -e "$work/restored" ]
+    [ ! -e "$FASTNAT_UNSAFE_STOP_FILE" ]
+    grep -F -x -q -- \
+        'iptables-restore stdin: -X KeenPbrNativeFwd' "$work/calls"
+    [ "$(grep -F -c -- \
+        'ip6tables-restore stdin: -D FORWARD -j KeenPbrNativeFwd' \
+        "$work/calls")" -eq 2 ]
+    if grep -Eq -- 'stdin: -[FX] (FORWARD|NDMS_FORWARD)' "$work/calls"; then
+        echo 'native forwarding cleanup touched firmware objects' >&2
+        exit 1
+    fi
+)
+
+run_native_forward_foreign_reference_case() (
+    reset_case native-foreign absent absent
+    PATH="$work/bin:$PATH"
+    META_TEST_STATE="$work/state"
+    META_TEST_LOG="$work/calls"
+    FASTNAT_UNSAFE_STOP_FILE="$work/unsafe"
+    IPTABLES_WAIT_MODE=""
+    IP6TABLES_WAIT_MODE=""
+    STOP_KEEN_PBR_SAFE=yes
+    export PATH META_TEST_STATE META_TEST_LOG
+    log_error() { :; }
+    . "$work/functions.sh"
+
+    if cleanup_stale_native_forward_firewall; then
+        echo 'native forwarding cleanup accepted a foreign reference' >&2
+        exit 1
+    fi
+    assert_state native-foreign iptables
+    [ "$STOP_KEEN_PBR_SAFE" = no ]
+    if grep -F -q -- 'tables-restore ' "$work/calls"; then
+        echo 'foreign native forwarding reference triggered mutation' >&2
+        exit 1
+    fi
+)
+
 run_tcp_rst_duplicate_stop_cleanup_case() (
     reset_case tcp-duplicate unavailable absent
     PATH="$work/bin-ipv4-only:/bin:/usr/bin"
@@ -843,6 +926,8 @@ run_restart_with_missing_prior_owner_case nftables
 run_ipv4_only_start_and_clean_stop_case
 run_crash_reconciles_before_new_start_case
 run_live_daemon_start_does_not_cleanup_case
+run_native_forward_stop_cleanup_case
+run_native_forward_foreign_reference_case
 run_tcp_rst_duplicate_stop_cleanup_case
 run_tcp_rst_foreign_reference_case
 run_tcp_rst_post_cleanup_verification_case

@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 
 namespace keen_pbr3 {
@@ -69,6 +70,12 @@ public:
     // Revalidates both outer guards and the descriptor/path identity of the
     // owner-only lock immediately before an irreversible RCI dispatch.
     void verify_held();
+
+    // Synchronous scoped config work borrows the existing outer ownership.
+    // The callback must return both capabilities before native dispatch; it
+    // cannot retain references or reacquire the same maintenance/runtime lock.
+    void with_outer_leases(const std::function<void(
+        MaintenanceLease&, RuntimeMutationAdmission::Lease&)>& callback);
 
 private:
     NdmsNativeWriterLease() = default;

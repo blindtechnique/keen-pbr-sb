@@ -243,4 +243,53 @@ TEST_CASE("dependency analysis rejects unknown targets") {
         std::invalid_argument);
 }
 
+TEST_CASE("route fallback dependency identifies the reserve without deleting the primary rule") {
+    auto config = dependency_fixture();
+    auto& rule = config.route->rules->at(0);
+    rule.failure_policy = api::FailurePolicy::FALLBACK;
+    rule.fallback_outbound = "backup";
+    rule.enabled = false;
+    const auto analysis = analyze_dependencies(
+        config, {{DependencyEntityKind::Outbound, "backup", false}});
+    CHECK_FALSE(analysis.safe_to_delete);
+    const auto* fallback = find_reference(
+        analysis, DependencyDependentKind::RoutingRule, "0", DependencyConsequence::Modify);
+    REQUIRE(fallback != nullptr);
+    CHECK(fallback->relation == DependencyRelation::FallbackTo);
+    CHECK(fallback->target.id == "backup");
+    CHECK(fallback->path == "route.rules[0].fallback_outbound");
+    CHECK(fallback->href == "/routing-rules/0/edit");
+    CHECK_FALSE(has_reference(
+        analysis, DependencyDependentKind::RoutingRule, "0", DependencyConsequence::Delete));
+}
+
+TEST_CASE("route fallback dependency also follows a cascaded selector removal") {
+    auto config = dependency_fixture();
+    auto& rule = config.route->rules->at(1);
+    rule.outbound = "backup";
+    rule.failure_policy = api::FailurePolicy::FALLBACK;
+    rule.fallback_outbound = "automatic";
+    const auto analysis = analyze_dependencies(
+        config, {{DependencyEntityKind::Outbound, "vpn", false}});
+    const auto* fallback = find_reference(
+        analysis, DependencyDependentKind::RoutingRule, "1", DependencyConsequence::Modify);
+    REQUIRE(fallback != nullptr);
+    CHECK(fallback->target.id == "automatic");
+    CHECK(fallback->relation == DependencyRelation::FallbackTo);
+    CHECK_FALSE(has_reference(
+        analysis, DependencyDependentKind::RoutingRule, "1", DependencyConsequence::Delete));
+}
+
+TEST_CASE("route fallback dependency ignores inactive fallback metadata outside fallback mode") {
+    auto config = dependency_fixture();
+    config.route->rules->at(0).fallback_outbound = "backup";
+    for (const auto policy : {api::FailurePolicy::INHERIT, api::FailurePolicy::BLOCK}) {
+        config.route->rules->at(0).failure_policy = policy;
+        const auto analysis = analyze_dependencies(
+            config, {{DependencyEntityKind::Outbound, "backup", false}});
+        CHECK_FALSE(has_reference(
+            analysis, DependencyDependentKind::RoutingRule, "0", DependencyConsequence::Modify));
+    }
+}
+
 } // namespace keen_pbr3

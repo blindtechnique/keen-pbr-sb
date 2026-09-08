@@ -560,8 +560,8 @@ TEST_CASE("stale service inventory retains verified includes but never bypass") 
 }
 
 TEST_CASE(
-    "stale OpenConnect inventory retains its destination-policy pool across "
-    "the client DNS mode toggle") {
+    "stale OpenConnect inventory retains its verified pool across the "
+    "selective-routing and direct mode toggle") {
     const auto disabled_candidate =
         resolve_internal_vpn_service_policies(
             {policy("ndms-service:oc-server", false)},
@@ -588,6 +588,8 @@ TEST_CASE(
             retained_previous_includes);
     REQUIRE(disabled.effective_targets.size() == 1U);
     CHECK_FALSE(disabled.effective_targets.front().process_clients);
+    CHECK(internal_vpn_target_bypasses_routing(
+        disabled.effective_targets.front()));
     CHECK(
         disabled.effective_targets.front().source_cidrs_v4 ==
         std::vector<std::string>{"172.16.5.0/24"});
@@ -606,6 +608,8 @@ TEST_CASE(
             /*default_process_clients=*/true);
     REQUIRE(enabled.effective_targets.size() == 1U);
     CHECK(enabled.effective_targets.front().process_clients);
+    CHECK_FALSE(internal_vpn_target_bypasses_routing(
+        enabled.effective_targets.front()));
 
     const auto lkg = merge_internal_vpn_service_verified_includes_lkg(
         {},

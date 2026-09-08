@@ -70,6 +70,8 @@ struct RemoteListRefreshControl {
     HttpCancellationToken cancellation;
     std::function<void(const RemoteListRefreshProgress&)> progress;
     CacheCommitCallback cache_commit;
+    bool force_refresh{false};
+    std::optional<CacheShrinkAcceptance> accept_shrink;
 };
 
 class RemoteListRefreshCancelled : public std::runtime_error {

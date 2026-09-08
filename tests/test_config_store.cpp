@@ -95,6 +95,7 @@ struct CanCommitPreparedActive<
 
 static_assert(CanCommitPreparedActive<NoexceptPublication>::value);
 static_assert(!CanCommitPreparedActive<ThrowingPublication>::value);
+static_assert(std::is_nothrow_swappable_v<std::optional<Config>>);
 
 template <typename Publication, typename = void>
 struct CanCommitPreparedActiveRuntimeReload : std::false_type {};
@@ -114,6 +115,117 @@ static_assert(
 static_assert(
     !CanCommitPreparedActiveRuntimeReload<ThrowingPublication>::value);
 } // namespace
+
+TEST_CASE("targeted active commit preserves unrelated draft edits") {
+    auto active = interface_config_named("active", "nwg1");
+    auto draft = interface_config_named("user-edited", "nwg1");
+    ConfigStore store(active);
+    store.stage_config(draft, staged_json(draft));
+    bool already_stale = false;
+    SUBCASE("current draft moves to the newly committed base") {}
+    SUBCASE("already stale draft remains stale") {
+        already_stale = true;
+        active.daemon->cache_dir = "/tmp/other-active-generation";
+        store.replace_active(active, {});
+    }
+    const auto original = store.staged_cas_snapshot();
+    REQUIRE(original.has_value());
+    auto candidate = active;
+    candidate.outbounds->clear();
+    draft.outbounds->clear();
+    const auto base = store.pin_active_snapshot();
+    const auto prepared = ConfigStore::prepare_active_commit(
+        base, ConfigStore::prepare_active_snapshot(candidate, {}),
+        ConfigDraftRebase{original, draft, staged_json(draft)});
+    // Preparation/failed runtime apply does not clear or re-stage the draft.
+    CHECK(store.staged_cas_snapshot()->serialized == original->serialized);
+    CHECK(store.pin_active_snapshot() == base);
+    bool published = false;
+    CHECK(store.commit_prepared_active(prepared, NoexceptPublication{&published}) ==
+          PreparedActiveConfigCommitResult::committed);
+    CHECK(published);
+    CHECK(store.active_config().daemon->cache_dir == active.daemon->cache_dir);
+    CHECK(store.active_config().outbounds->empty());
+    const auto after = store.staged_cas_snapshot();
+    REQUIRE(after.has_value());
+    CHECK(after->config.daemon->cache_dir == "/tmp/user-edited");
+    CHECK(after->config.outbounds->empty());
+    CHECK(after->serialized == staged_json(draft));
+    if (already_stale) {
+        CHECK(after->base_revision == original->base_revision);
+        CHECK(after->base_revision != after->active_revision);
+    } else {
+        CHECK(after->base_revision == after->active_revision);
+    }
+    // A copied prepared token cannot publish its swapped-out draft again.
+    published = false;
+    CHECK(store.commit_prepared_active(prepared, NoexceptPublication{&published}) ==
+          PreparedActiveConfigCommitResult::base_mismatch);
+    CHECK_FALSE(published);
+}
+
+TEST_CASE("targeted active commit rejects draft or active drift without publication") {
+    const auto active = interface_config_named("active", "nwg1");
+    auto draft = interface_config_named("user-edited", "nwg1");
+    ConfigStore store(active);
+    store.stage_config(draft, staged_json(draft));
+    const auto original = store.staged_cas_snapshot();
+    auto candidate = active;
+    candidate.outbounds->clear();
+    draft.outbounds->clear();
+    const auto prepared = ConfigStore::prepare_active_commit(
+        store.pin_active_snapshot(), ConfigStore::prepare_active_snapshot(candidate, {}),
+        ConfigDraftRebase{original, draft, staged_json(draft)});
+    auto expected = PreparedActiveConfigCommitResult::staged_mismatch;
+    SUBCASE("draft modified") {
+        draft.daemon->cache_dir = "/tmp/new-user-edit";
+        store.stage_config(draft, staged_json(draft));
+    }
+    SUBCASE("draft discarded") { store.clear_staged(); }
+    SUBCASE("active replaced") {
+        store.replace_active(config_named("another-active"), {});
+        expected = PreparedActiveConfigCommitResult::base_mismatch;
+    }
+    const auto active_before = store.pin_active_snapshot();
+    const auto draft_before = store.staged_cas_snapshot();
+    bool published = false;
+    CHECK(store.commit_prepared_active(prepared, NoexceptPublication{&published}) == expected);
+    CHECK_FALSE(published);
+    CHECK(store.pin_active_snapshot() == active_before);
+    const auto after = store.staged_cas_snapshot();
+    REQUIRE(after.has_value() == draft_before.has_value());
+    if (after) CHECK(after->serialized == draft_before->serialized);
+}
+
+TEST_CASE("targeted active compensation restores a draft removed by cleanup") {
+    const auto active = config_named("active");
+    auto draft = interface_config_named("active", "nwg1");
+    ConfigStore store(active);
+    store.stage_config(draft, staged_json(draft));
+    auto original = *store.staged_cas_snapshot();
+    SUBCASE("original current draft") {}
+    SUBCASE("original stale draft") {
+        original.base_revision = "original-stale-base";
+    }
+    const auto cleanup = ConfigStore::prepare_active_commit(
+        store.pin_active_snapshot(), ConfigStore::prepare_active_snapshot(active, {}),
+        ConfigDraftRebase{store.staged_cas_snapshot(), active, staged_json(active)});
+    bool published = false;
+    REQUIRE(store.commit_prepared_active(cleanup, NoexceptPublication{&published}) ==
+            PreparedActiveConfigCommitResult::committed);
+    CHECK_FALSE(store.config_is_draft());
+    const auto compensation = ConfigStore::prepare_active_commit(
+        store.pin_active_snapshot(), ConfigStore::prepare_active_snapshot(active, {}),
+        ConfigDraftRebase{std::nullopt, original.config, original.serialized,
+                          original.base_revision});
+    REQUIRE(store.commit_prepared_active(compensation, NoexceptPublication{&published}) ==
+            PreparedActiveConfigCommitResult::committed);
+    const auto restored = store.staged_cas_snapshot();
+    REQUIRE(restored.has_value());
+    CHECK(restored->serialized == original.serialized);
+    CHECK(restored->base_revision == original.base_revision);
+    CHECK(staged_json(store.active_config()) == staged_json(active));
+}
 
 TEST_CASE(
     "prepared active commit publishes and clears the matching staged draft") {

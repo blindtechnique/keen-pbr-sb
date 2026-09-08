@@ -1,8 +1,11 @@
 import type {
   ConfigStateResponseListRefreshState,
   HealthResponse,
+  SubscriptionNotice,
 } from "@/api/generated/model"
 import type { NfqwsUpdateStatus } from "@/api/nfqws"
+import { presentNotificationMessage } from "@/components/layout/notification-message"
+import { presentSubscriptionNotice } from "@/components/layout/subscription-notices"
 
 export type SoftwareUpdateResponse = {
   available?: boolean
@@ -13,6 +16,9 @@ export type Notice = {
   id: string
   level: "error" | "warning" | "info"
   text: string
+  details?: string
+  href?: string
+  actionLabel?: string
   timestamp?: string
 }
 
@@ -212,10 +218,11 @@ export function collectNotices(
   softwareUpdate: SoftwareUpdateResponse | undefined,
   nfqwsUpdate: NfqwsUpdateStatus | undefined,
   listRefreshState: ConfigStateResponseListRefreshState | undefined,
-  dismissedUntil: number,
+  lineIds: readonly string[],
   dismissedIds: ReadonlySet<string>,
   t: Translate,
-  currentState?: NotificationCurrentState
+  currentState?: NotificationCurrentState,
+  subscriptionNotices: readonly SubscriptionNotice[] = []
 ): Notice[] {
   const notices: Notice[] = []
   const seenRuntimeIncidents = new Set<RuntimeIncidentFamily>()
@@ -251,6 +258,14 @@ export function collectNotices(
       : undefined,
     dismissedIds
   )
+
+  for (const subscription of subscriptionNotices) {
+    addSyntheticNotice(
+      notices,
+      presentSubscriptionNotice(subscription, t),
+      dismissedIds
+    )
+  }
 
   // Newest first: the tail of the file is the most recent.
   for (let index = lines.length - 1; index >= 0; index -= 1) {
@@ -294,16 +309,15 @@ export function collectNotices(
       continue
     }
     // The log keeps its history; dismissing only hides what was already read.
-    if (
-      dismissedUntil > 0 &&
-      Date.parse(timestamp.replace(" ", "T")) <= dismissedUntil
-    ) {
+    const id = lineIds[index] ?? `${timestamp}-${index}`
+    if (dismissedIds.has(id)) {
       continue
     }
+    const level = marker === "E" ? "error" : "warning"
     notices.push({
-      id: `${timestamp}-${index}`,
-      level: marker === "E" ? "error" : "warning",
-      text,
+      id,
+      level,
+      ...presentNotificationMessage(text, level, t),
       timestamp,
     })
   }
@@ -316,7 +330,7 @@ function addSyntheticNotice(
   notice: Notice | undefined,
   dismissedIds: ReadonlySet<string>
 ) {
-  if (notice && !dismissedIds.has(notice.id)) {
+  if (notice && notices.length < MAX_NOTICES && !dismissedIds.has(notice.id)) {
     notices.push(notice)
   }
 }

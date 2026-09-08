@@ -436,15 +436,18 @@ bool UrltestManager::commit_probe_results(const std::string& urltest_tag,
             it->second.generation == generation &&
             it->second.probe_inflight) {
             if (!transition_admitted) {
+                it->second.selection_pending = false;
                 // The old cursor was copied before candidate publication, so
                 // this rollback is allocation-free and cannot strand a
                 // half-published selection under memory pressure.
                 it->second.selected_outbound.swap(previous_selected);
             }
-            it->second.probe_inflight = false;
-            external_health_resolution =
-                finish_external_health_probe_locked(
-                    it->second, transition_admitted);
+            if (!it->second.selection_pending) {
+                it->second.probe_inflight = false;
+                external_health_resolution =
+                    finish_external_health_probe_locked(
+                        it->second, transition_admitted);
+            }
         }
     }
 
@@ -460,17 +463,23 @@ bool UrltestManager::commit_probe_results(const std::string& urltest_tag,
     } catch (...) {
     }
 
-    if (external_health_resolution.retry_task_to_cancel >= 0) {
-        cancel_scheduler_task(
-            external_health_resolution.retry_task_to_cancel);
-    }
-    if (external_health_resolution.launch_trailing) {
-        try_start_external_health_probe(urltest_tag);
-    } else if (external_health_resolution.ensure_retry) {
-        ensure_external_health_retry(urltest_tag);
-    }
+    dispatch_external_health_resolution(urltest_tag, external_health_resolution);
 
     return selection_changed && transition_admitted;
+}
+
+void UrltestManager::dispatch_external_health_resolution(
+    const std::string& tag,
+    const ExternalHealthResolution& resolution) noexcept {
+    if (resolution.retry_task_to_cancel >= 0) {
+        cancel_scheduler_task(
+            resolution.retry_task_to_cancel);
+    }
+    if (resolution.launch_trailing) {
+        try_start_external_health_probe(tag);
+    } else if (resolution.ensure_retry) {
+        ensure_external_health_retry(tag);
+    }
 }
 
 #ifdef KEEN_PBR3_TESTING
@@ -810,6 +819,61 @@ bool UrltestManager::synchronize_selected_if_generation(
     return true;
 }
 
+bool UrltestManager::defer_selection_completion(
+    const std::string& urltest_tag,
+    std::uint64_t expected_generation) {
+    KPBR_SHARED_UNIQUE_LOCK(lock, mutex_);
+    const auto it = states_.find(urltest_tag);
+    if (it == states_.end() ||
+        it->second.generation != expected_generation ||
+        !it->second.probe_inflight) {
+        return false;
+    }
+    it->second.selection_pending = true;
+    return true;
+}
+
+void UrltestManager::complete_selection(
+    const std::string& urltest_tag,
+    std::uint64_t expected_generation,
+    bool resume_pending) noexcept {
+    ExternalHealthResolution resolution;
+    try {
+        KPBR_SHARED_UNIQUE_LOCK(lock, mutex_);
+        const auto it = states_.find(urltest_tag);
+        if (it == states_.end() ||
+            it->second.generation != expected_generation ||
+            !it->second.selection_pending) {
+            return;
+        }
+        auto& state = it->second;
+        state.selection_pending = false;
+        state.probe_inflight = false;
+        resolution = finish_external_health_probe_locked(
+            state, /*controller_admitted=*/true);
+        if (!resume_pending) {
+            // A health edge may already have armed a retry while this
+            // selection was pending. Retain its serial, not its timer: central
+            // recovery (or a fresh request) owns the next wake after release.
+            if (state.external_health_retry_task_id >= 0) {
+                resolution.retry_task_to_cancel =
+                    state.external_health_retry_task_id;
+                state.external_health_retry_task_id = -1;
+            }
+            state.external_health_retry_scheduling = false;
+            state.external_health_retry_epoch = next_nonzero_serial(
+                state.external_health_retry_epoch);
+        }
+    } catch (...) {
+        return;
+    }
+    if (!resume_pending) {
+        resolution.launch_trailing = false;
+        resolution.ensure_retry = false;
+    }
+    dispatch_external_health_resolution(urltest_tag, resolution);
+}
+
 void UrltestManager::clear() {
     std::map<std::string, UrltestState> retired_states;
     {
@@ -880,6 +944,7 @@ void UrltestManager::abandon_probe(
 
             auto& state = it->second;
             state.probe_inflight = false;
+            state.selection_pending = false;
             record_claimed_external_health_failure_locked(state);
             external_retry_needed =
                 state.external_health_request_serial !=
@@ -921,6 +986,7 @@ void UrltestManager::abandon_probe_results(
 
             auto& state = it->second;
             state.probe_inflight = false;
+            state.selection_pending = false;
             record_claimed_external_health_failure_locked(state);
             external_retry_needed =
                 state.external_health_request_serial !=
@@ -965,6 +1031,19 @@ bool UrltestManager::queue_probe_unlocked(const std::string& tag,
 
         auto& state = it->second;
         if (state.probe_inflight) {
+            if (state.selection_pending &&
+                (reason == "manual" || reason == "scheduled")) {
+                // Keep one trailing probe through the existing health serial,
+                // without advancing the generation used by candidate/rollback.
+                if (state.external_health_request_serial ==
+                        state.probe_external_health_serial ||
+                    state.external_health_request_serial ==
+                        state.external_health_completed_serial) {
+                    state.external_health_request_serial = next_nonzero_serial(
+                        state.external_health_request_serial);
+                    state.external_health_failures = 0;
+                }
+            }
             Logger::instance().trace("urltest_probe_skip",
                                      "tag={} reason=inflight trigger={}",
                                      tag,

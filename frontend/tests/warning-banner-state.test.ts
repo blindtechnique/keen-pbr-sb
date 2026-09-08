@@ -146,8 +146,8 @@ describe("WarningBanner draft actions", () => {
     const applySetup = warningBannerSource.slice(applyStart, discardStart)
 
     expect(applySetup).toContain("onError")
-    expect(applySetup).toContain("getApiErrorMessage")
-    expect(applySetup).toContain("warning.applyFailed")
+    expect(applySetup).toContain("<OperationErrorMessage error={error} />")
+    expect(applySetup).not.toContain("warning.applyFailed")
     expect(applySetup).toContain("toast.error")
   })
 

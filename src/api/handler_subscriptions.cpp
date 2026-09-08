@@ -6,6 +6,7 @@
 #include "handler_config.hpp"
 #include "handler_transports.hpp"
 #include "maintenance_api.hpp"
+#include "operation_error.hpp"
 #include "transport_manager_endpoint.hpp"
 
 #include "../config/subscription_fetch_policy.hpp"
@@ -162,7 +163,8 @@ ExistingTransports read_existing_transports(
     };
     const auto response = client.Get("/v1/config/transports", headers);
     if (!response) {
-        throw ApiError("transport manager is unavailable", 503);
+        throw operation_error("transport manager is unavailable", 503,
+                              "service_unavailable");
     }
     if (response->status < 200 || response->status >= 300) {
         throw ApiError("transport manager returned HTTP " +
@@ -287,27 +289,8 @@ void validate_source_url(const std::string& url) {
 
 nlohmann::json subscription_metadata(const SubscriptionFetchResult& fetched,
                                      const SubscriptionImportPlan& plan) {
-    const auto header = fetched.headers.find("subscription-userinfo");
-    auto metadata = parse_subscription_userinfo(
-        header == fetched.headers.end() ? "" : header->second);
-    const auto title_header = fetched.headers.find("profile-title");
-    const auto title = parse_subscription_title(
-        title_header == fetched.headers.end() ? "" : title_header->second);
-    if (!title.empty()) metadata["provider_name"] = title;
-    const auto now = subscription_now();
-    metadata["checked_at"] = now;
-    metadata["updated_at"] = now;
-    if (plan.kind == SubscriptionDocumentKind::link_list ||
-        plan.kind == SubscriptionDocumentKind::base64_link_list) {
-        std::size_t count = 0U;
-        for (const auto& item : plan.candidates)
-            if (item.disposition != SubscriptionCandidateDisposition::duplicate_in_document &&
-                item.disposition != SubscriptionCandidateDisposition::malformed) ++count;
-        metadata["node_count"] = count;
-    } else if (plan.kind != SubscriptionDocumentKind::json_document) {
-        throw ApiError("invalid subscription document", 400);
-    }
-    return metadata;
+    try { return subscription_refresh_metadata(fetched, plan, subscription_now()); }
+    catch (const std::invalid_argument&) { throw ApiError("invalid subscription document", 400); }
 }
 
 template <typename Function>
@@ -328,8 +311,10 @@ void register_subscriptions_handler_impl(
         ApiContext&,
         std::string,
         PrepareConfigCommit)> commit_config) {
-    const auto store = std::make_shared<SubscriptionStore>(
-        (std::filesystem::path(ctx.config_path).parent_path() / "subscriptions.json").string());
+    const auto service = ctx.subscription_refresh_service ? ctx.subscription_refresh_service :
+        std::make_shared<SubscriptionRefreshService>(std::make_shared<SubscriptionStore>(
+            (std::filesystem::path(ctx.config_path).parent_path() / "subscriptions.json").string()), fetcher);
+    const auto store = service->store();
     server.get("/api/subscriptions", [store]() {
         return subscription_store_call([&] { return store->list(); });
     });
@@ -345,33 +330,34 @@ void register_subscriptions_handler_impl(
             const auto plan = plan_subscription_import(fetched.body, {}, {});
             const auto metadata = subscription_metadata(fetched, plan);
             std::vector<std::string> tags;
+            std::map<std::size_t, std::string> tags_by_line;
             // Linking an old import is advisory and read-only. An unavailable
             // manager does not prevent saving provider limits and the source.
             try {
                 const auto existing = read_existing_transports(load_transport_manager_endpoint(ctx.config_path));
-                for (const auto& link : plan.links) {
-                    const auto it = existing.identities_by_fingerprint.find(subscription_link_fingerprint(link));
-                    if (it != existing.identities_by_fingerprint.end() && it->second.tag)
+                for (std::size_t i = 0; i < plan.links.size(); ++i) {
+                    const auto it = existing.identities_by_fingerprint.find(subscription_link_fingerprint(plan.links[i]));
+                    if (it != existing.identities_by_fingerprint.end() && it->second.tag) {
                         tags.push_back(*it->second.tag);
+                        tags_by_line.emplace(plan.candidates[i].source_line, *it->second.tag);
+                    }
                 }
             } catch (...) {}
-            return store->save(url, name, metadata, tags);
+            return store->save(url, name, metadata, tags, subscription_import_bindings(plan, tags_by_line));
         });
     });
-    server.post("/api/subscriptions/refresh", [store, fetcher](const std::string& body) {
+    server.post("/api/subscriptions/refresh", [service](const std::string& body) {
         return subscription_store_call([&] {
             const auto id = nlohmann::json::parse(body).at("id").get<std::string>();
-            const auto record = store->find(id);
-            nlohmann::json metadata;
-            try {
-                const auto url = record.at("url").get<std::string>();
-                validate_source_url(url);
-                const auto fetched = fetcher(url);
-                metadata = subscription_metadata(fetched, plan_subscription_import(fetched.body, {}, {}));
-            } catch (...) {
-                metadata = {{"checked_at", subscription_now()}, {"error", "fetch_failed"}};
-            }
-            return store->refresh(id, metadata);
+            return service->refresh(id);
+        });
+    });
+    server.post("/api/subscriptions/settings", [store](const std::string& body) {
+        return subscription_store_call([&] {
+            const auto request = nlohmann::json::parse(body);
+            const auto& interval = request.at("refresh_interval_seconds");
+            if (!interval.is_number_integer()) throw ApiError("invalid subscription refresh interval", 400);
+            return store->set_refresh_interval(request.at("id").get<std::string>(), interval.get<std::int64_t>());
         });
     });
     server.post("/api/subscriptions/rename", [store](const std::string& body) {
@@ -388,7 +374,7 @@ void register_subscriptions_handler_impl(
     });
     server.post(
         "/api/subscriptions/preview",
-        [&ctx, fetcher = std::move(fetcher)](
+        [&ctx, store, fetcher = std::move(fetcher)](
             const std::string& request_body) -> std::string {
             api::SubscriptionPreviewRequest request;
             try {
@@ -396,8 +382,8 @@ void register_subscriptions_handler_impl(
                               .get<api::SubscriptionPreviewRequest>();
             } catch (const std::exception&) {
                 throw ApiError(
-                    "subscription preview requires a JSON body with a url or "
-                    "a document",
+                    "subscription preview requires a JSON body with a url, "
+                    "document or subscription_id",
                     400);
             }
 
@@ -405,19 +391,29 @@ void register_subscriptions_handler_impl(
                 request.url.has_value() && !request.url->empty();
             const bool has_document =
                 request.document.has_value() && !request.document->empty();
+            const bool has_source = request.subscription_id.has_value() && !request.subscription_id->empty();
             // Exactly one, and said so rather than picking a winner: a request
             // carrying both is a caller that does not know which source it
             // meant, and guessing for them would import from a source they did
             // not choose.
-            if (has_url == has_document) {
+            if (static_cast<int>(has_url) + static_cast<int>(has_document) + static_cast<int>(has_source) != 1) {
                 throw ApiError(
-                    "subscription preview takes exactly one of url or "
-                    "document",
+                    "subscription preview takes exactly one of url, "
+                    "document or subscription_id",
                     400);
             }
+            if (request.pending_only.value_or(false) && !has_source)
+                throw ApiError("pending subscription preview requires a subscription_id", 400);
+            nlohmann::json source;
+            std::string source_url = request.url.value_or("");
+            if (has_source) {
+                try { source = store->find(*request.subscription_id); }
+                catch (const std::out_of_range&) { throw ApiError("subscription not found", 404); }
+                source_url = source.at("url").get<std::string>();
+            }
 
-            if (has_url) {
-                const auto verdict = classify_subscription_url(*request.url);
+            if (!source_url.empty()) {
+                const auto verdict = classify_subscription_url(source_url);
                 if (verdict != SubscriptionUrlVerdict::allowed) {
                     throw ApiError(
                         std::string("subscription URL refused: ") +
@@ -451,7 +447,7 @@ void register_subscriptions_handler_impl(
             // 400 - the operator learns what was wrong with their file. A
             // second bound here would be the same contract written twice, and
             // the copy that drifts is always the one nobody is looking at.
-            const auto fetched = has_url ? fetcher(*request.url)
+            const auto fetched = !source_url.empty() ? fetcher(source_url)
                                         : SubscriptionFetchResult(*request.document);
             auto plan = plan_subscription_import(
                 fetched.body, existing.tags, existing.link_fingerprints);
@@ -465,7 +461,9 @@ void register_subscriptions_handler_impl(
                 title_header == fetched.headers.end() ? "" : title_header->second);
             if (!title.empty()) response.subscription_name = title;
             response.candidates.reserve(plan.candidates.size());
-            for (const auto& candidate : plan.candidates) {
+            for (std::size_t index = 0; index < plan.candidates.size(); ++index) {
+                const auto& candidate = plan.candidates[index];
+                if (request.pending_only.value_or(false) && !subscription_candidate_pending(source, plan, index)) continue;
                 api::SubscriptionPreviewCandidate entry;
                 entry.line = static_cast<int64_t>(candidate.source_line);
                 entry.scheme = candidate.scheme;
@@ -504,8 +502,8 @@ void register_subscriptions_handler_impl(
                 }
                 PreviewSession session;
                 session.expires = now + kPreviewTtl;
-                if (has_url) {
-                    session.source_url = *request.url;
+                if (!source_url.empty()) {
+                    session.source_url = source_url;
                     // Invalid documents still get their existing explanatory
                     // preview; they cannot reach a successful apply.
                     if (plan.kind == SubscriptionDocumentKind::link_list ||
@@ -579,10 +577,10 @@ void register_subscriptions_handler_impl(
                 const auto found =
                     registry.sessions.find(request.preview_id);
                 if (found == registry.sessions.end()) {
-                    throw ApiError(
+                    throw operation_error(
                         "the subscription preview has expired; fetch it "
                         "again",
-                        410);
+                        410, "preview_expired");
                 }
                 const auto& session = found->second;
                 for (const auto& selection : request.selections) {
@@ -648,6 +646,11 @@ void register_subscriptions_handler_impl(
             const auto finish_response = [&]() -> std::string {
                 std::string url;
                 nlohmann::json metadata;
+                std::map<std::size_t, std::string> tags_by_line;
+                for (const auto& result : response.results)
+                    if (result.outcome != api::Outcome::FAILED && result.tag)
+                        tags_by_line.emplace(static_cast<std::size_t>(result.line), *result.tag);
+                nlohmann::json bindings = nlohmann::json::array();
                 {
                     auto& registry = preview_registry();
                     std::lock_guard<std::mutex> lock(registry.mutex);
@@ -655,6 +658,7 @@ void register_subscriptions_handler_impl(
                     if (found != registry.sessions.end()) {
                         url = found->second.source_url;
                         metadata = found->second.source_metadata;
+                        bindings = subscription_import_bindings(found->second.plan, tags_by_line);
                     }
                 }
                 std::vector<std::string> tags;
@@ -664,7 +668,7 @@ void register_subscriptions_handler_impl(
                 output.erase("subscription_error");
                 if (!url.empty() && !tags.empty()) {
                     try {
-                        store->save(url, request.subscription_name.value_or(""), metadata, tags);
+                        store->save(url, request.subscription_name.value_or(""), metadata, tags, bindings);
                     } catch (...) {
                         // VPN creation already succeeded. Do not turn a failed
                         // metadata write into a failed/retryable VPN import.
@@ -753,6 +757,7 @@ void register_subscriptions_handler_impl(
                                 result.outcome = api::Outcome::FAILED;
                                 result.error =
                                     "cannot derive link identity";
+                                result.code = "invalid_connection";
                                 response.results.push_back(
                                     std::move(result));
                                 continue;
@@ -787,6 +792,7 @@ void register_subscriptions_handler_impl(
                                     static_cast<int64_t>(entry.line);
                                 result.outcome = api::Outcome::FAILED;
                                 result.error = "name is already in use";
+                                result.code = "name_in_use";
                                 response.results.push_back(
                                     std::move(result));
                                 continue;
@@ -802,6 +808,7 @@ void register_subscriptions_handler_impl(
                                 result.outcome = api::Outcome::FAILED;
                                 result.error =
                                     "no free interface name could be derived";
+                                result.code = "no_interface_name";
                                 response.results.push_back(
                                     std::move(result));
                                 continue;
@@ -866,6 +873,7 @@ void register_subscriptions_handler_impl(
                             result.outcome = api::Outcome::FAILED;
                             result.error =
                                 "connection data was not accepted";
+                            result.code = "invalid_connection";
                             response.results.push_back(
                                 std::move(result));
                         }
@@ -917,12 +925,12 @@ SubscriptionFetcher make_subscription_fetcher() {
             result.headers = std::move(response.headers);
             return result;
         } catch (const HttpError& error) {
-            throw ApiError(
+            throw operation_error(
                 std::string("subscription fetch failed") +
                     (error.status_code() > 0 ? ": HTTP " + std::to_string(error.status_code()) :
                      std::string(error.what()).find("destination policy") != std::string::npos ?
                      ": destination policy" : ""),
-                502);
+                502, "subscription_unavailable");
         }
     };
 }

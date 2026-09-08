@@ -4,10 +4,19 @@
 #include "generated/api_types.hpp"
 
 #include <nlohmann/json.hpp>
+#include <utility>
 
 #include "../health/routing_health_checker.hpp"
 
 namespace keen_pbr3 {
+
+std::string make_routing_health_response(const RoutingHealthReport& report) {
+    auto body = routing_health_report_to_json(report).dump();
+    if (!report.error.empty()) {
+        throw ApiError("Routing health check failed", 500, std::move(body));
+    }
+    return body;
+}
 
 void register_health_routing_handler(ApiServer& server, ApiContext& ctx) {
     // GET /api/health/routing - verify live routing and firewall state against expected config.
@@ -15,8 +24,9 @@ void register_health_routing_handler(ApiServer& server, ApiContext& ctx) {
     // the server wrapper returns HTTP 500. The JSON body contains "overall":"ok"/"degraded"/"error".
     server.get("/api/health/routing", [&ctx]() -> std::string {
         try {
-            auto report = ctx.get_routing_health();
-            return routing_health_report_to_json(report).dump();
+            return make_routing_health_response(ctx.get_routing_health());
+        } catch (const ApiError&) {
+            throw;
         } catch (const std::exception& e) {
             api::RoutingHealthErrorResponse err;
             err.error = e.what();

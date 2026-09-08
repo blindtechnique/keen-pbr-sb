@@ -115,6 +115,77 @@ void use_iptables_test_path(
   guard.set(directory.string() + ":" + (current == nullptr ? "" : current));
 }
 
+class IpsetCleanupTestHarness {
+public:
+  IpsetCleanupTestHarness()
+      : path_("PATH"), directory_("KPBR_IPSET_CLEANUP_DIR"),
+        failure_path_(temp_.path() / "last-failure") {
+    write("before", "");
+    write("after", "");
+    write_iptables_test_executable(temp_.path() / "ipset", R"(#!/bin/sh
+printf '%s\n' "$*" >> "$KPBR_IPSET_CLEANUP_DIR/calls"
+printf '%s\n' "$#" >> "$KPBR_IPSET_CLEANUP_DIR/arg-counts"
+case "$1" in
+  list)
+    [ "$*" = 'list -name' ] || exit 91
+    if [ -f "$KPBR_IPSET_CLEANUP_DIR/list-seen" ]; then
+      /bin/cat "$KPBR_IPSET_CLEANUP_DIR/after"
+      [ ! -f "$KPBR_IPSET_CLEANUP_DIR/fail-after" ] || exit 1
+    else
+      : > "$KPBR_IPSET_CLEANUP_DIR/list-seen"
+      /bin/cat "$KPBR_IPSET_CLEANUP_DIR/before"
+      [ ! -f "$KPBR_IPSET_CLEANUP_DIR/fail-before" ] || exit 1
+    fi
+    ;;
+  restore)
+    [ "$*" = 'restore -exist' ] || exit 92
+    /bin/cat > "$KPBR_IPSET_CLEANUP_DIR/restore-script"
+    [ ! -f "$KPBR_IPSET_CLEANUP_DIR/fail-restore" ] || exit 1
+    ;;
+  flush) ;;
+  destroy)
+    # A referenced first set must not prevent attempts on later sets.
+    [ "$2" != 'kpbr4_stuck' ] || exit 1
+    ;;
+  *) exit 93 ;;
+esac
+exit 0
+)");
+    // No inherited PATH: a missing fake must never reach a real host ipset.
+    path_.set(temp_.path().string());
+    directory_.set(temp_.path().string());
+  }
+
+  void write(const std::string& name, const std::string& value) {
+    std::ofstream output(temp_.path() / name);
+    output << value;
+    output.close();
+    if (!output) {
+      throw std::runtime_error("failed to write ipset cleanup fixture");
+    }
+  }
+
+  std::vector<std::string> lines(const std::string& name) const {
+    std::istringstream input(read_iptables_test_file(temp_.path() / name));
+    std::vector<std::string> result;
+    std::string line;
+    while (std::getline(input, line)) {
+      result.push_back(line);
+    }
+    return result;
+  }
+
+  std::string script() const {
+    return read_iptables_test_file(temp_.path() / "restore-script");
+  }
+
+private:
+  IptablesTestTempDir temp_;
+  IptablesTestEnvironment path_;
+  IptablesTestEnvironment directory_;
+  IptablesFailurePathGuard failure_path_;
+};
+
 void write_meta_udp443_test_tools(
     const std::filesystem::path& directory) {
   const std::string inspector =
@@ -290,6 +361,39 @@ public:
     return IptablesFirewall::build_exact_tcp_reset_rule_line(rule);
   }
 
+  static std::string build_native_forward_script(
+      bool ipv6,
+      bool chain_exists,
+      std::size_t hook_count,
+      const std::vector<FirewallNativeForwardSelector>& selectors,
+      uint32_t mask = 0x00FF0000U) {
+    IptablesFirewall fw;
+    fw.set_fwmark_mask(mask);
+    fw.create_native_vpn_forward_rules(selectors);
+    return IptablesFirewall::build_native_forward_script(
+        ipv6, chain_exists, hook_count,
+        fw.pending_native_forward_selectors_, mask);
+  }
+
+  static bool native_forward_prepare_clears_pending() {
+    IptablesFirewall fw;
+    fw.set_ipv6_enabled(false);
+    fw.set_fwmark_mask(0x00FF0000U);
+    fw.create_native_vpn_forward_rules(
+        {{"oc0", "172.16.5.0/24", "nwg5", 0x00060000U}});
+    fw.native_forward_v4_created_ = true;
+    fw.prepare_apply(FirewallApplyMode::Destructive);
+    return fw.pending_native_forward_selectors_.empty() &&
+           !fw.native_forward_requested_ && fw.native_forward_v4_created_;
+  }
+
+  static bool native_forward_cleanup_clears_created() {
+    IptablesFirewall fw;
+    fw.native_forward_v4_created_ = true;
+    fw.reconcile_native_forward_rules(false, {});
+    return !fw.native_forward_v4_created_;
+  }
+
   static std::string build_exact_tcp_reset_script(
       bool chain_exists,
       std::size_t hook_count,
@@ -314,10 +418,25 @@ public:
     return IptablesFirewall::parse_live_set_schemas(xml);
   }
 
-  static std::string build_managed_set_teardown_script(
-      const std::string& ipset_save_output, bool preserve_dynamic_sets) {
-    return IptablesFirewall::build_managed_set_teardown_script(
-        ipset_save_output, preserve_dynamic_sets);
+  static std::string build_set_teardown_script(
+      const std::vector<std::string>& names) {
+    return IptablesFirewall::build_set_teardown_script(names);
+  }
+
+  static void cleanup_saved_sets_for_test(
+      const std::vector<std::string>& known,
+      bool preserve_dynamic_sets,
+      bool sweep_live_state = true) {
+    IptablesFirewall firewall;
+    for (const auto& name : known) {
+      firewall.created_sets_.emplace(name, AF_INET);
+    }
+    firewall.cleanup_saved_sets(preserve_dynamic_sets, sweep_live_state);
+  }
+
+  static FirewallOwnedCleanupInspection cleanup_saved_sets_strict_for_test() {
+    IptablesFirewall firewall;
+    return firewall.cleanup_saved_sets_strict();
   }
 
   static bool live_set_schema_compatible(
@@ -958,6 +1077,100 @@ public:
 using namespace keen_pbr3;
 using T = IptablesBuilderTest;
 using Rule = IptablesBuilderTest::RuleDesc;
+
+TEST_CASE("C1 iptables family selector never publishes the opposite leaf mark") {
+  FirewallRuleCriteria criteria;
+  criteria.family = AF_INET6;
+  criteria.proto = L4Proto::Tcp;
+  criteria.dst_port = "443";
+  FirewallGlobalPrefilter prefilter;
+  prefilter.restore_conntrack_mark = true;
+  prefilter.conntrack_mark_mask = 0x00ff0000U;
+  const auto ipv4 = T::build_ipt_script_for_rule(false, T::RuleDesc::Mark,
+      0x20000, criteria, false, 0x00ff0000U, prefilter);
+  const auto ipv6 = T::build_ipt_script_for_rule(true, T::RuleDesc::Mark,
+      0x20000, criteria, false, 0x00ff0000U, prefilter);
+  CHECK(ipv4.find("--set-xmark") == std::string::npos);
+  CHECK(ipv6.find("--set-xmark") != std::string::npos);
+  CHECK(ipv6.find("--save-mark") != std::string::npos);
+  CHECK(ipv6.find("--restore-mark") != std::string::npos);
+}
+
+TEST_CASE("native VPN forwarding scopes every rule and appends after existing ACLs") {
+  const FirewallNativeForwardSelector first{
+      "oc0", "172.16.5.0/24", "nwg5", 0x00060000U};
+  const FirewallNativeForwardSelector second{
+      "oc1", "172.16.5.0/24", "nwg7", 0x00080000U};
+  const auto script = T::build_native_forward_script(
+      false, false, 0U, {first, second, first});
+  CHECK(script ==
+        "*filter\n:KeenPbrNativeFwd - [0:0]\n"
+        "-A KeenPbrNativeFwd -i oc0 -s 172.16.5.0/24 -o nwg5 "
+        "-m mark --mark 0x60000/0xff0000 -j ACCEPT\n"
+        "-A KeenPbrNativeFwd -i oc1 -s 172.16.5.0/24 -o nwg7 "
+        "-m mark --mark 0x80000/0xff0000 -j ACCEPT\n"
+        "-A FORWARD -j KeenPbrNativeFwd\nCOMMIT\n");
+  CHECK(script.find("-I FORWARD") == std::string::npos);
+  CHECK(script.find("--comment") == std::string::npos);
+  CHECK(script.find("--set-mark") == std::string::npos);
+  CHECK(T::native_forward_prepare_clears_pending());
+}
+
+TEST_CASE("native VPN forwarding keeps address families separate and removes old IPv6") {
+  const std::vector<FirewallNativeForwardSelector> selectors{
+      {"oc0", "172.16.5.0/24", "nwg5", 0x00060000U},
+      {"oc0", "2001:db8:5::/64", "nwg8", 0x00090000U}};
+  const auto ipv6 = T::build_native_forward_script(true, true, 1U, selectors);
+  CHECK(ipv6.find("172.16.5") == std::string::npos);
+  CHECK(ipv6.find("-i oc0 -s 2001:db8:5::/64 -o nwg8 ") != std::string::npos);
+  CHECK(ipv6.find("-F KeenPbrNativeFwd\n") != std::string::npos);
+  CHECK(ipv6.find("-D FORWARD -j KeenPbrNativeFwd\n") != std::string::npos);
+  CHECK(T::build_native_forward_script(true, true, 1U, {}) ==
+        "*filter\n-F KeenPbrNativeFwd\n"
+        "-D FORWARD -j KeenPbrNativeFwd\n-X KeenPbrNativeFwd\nCOMMIT\n");
+  CHECK(T::build_native_forward_script(true, false, 0U, {selectors.front()}).empty());
+}
+
+TEST_CASE("native VPN forwarding empty replacement removes only its chain and hooks") {
+  CHECK(T::build_native_forward_script(false, true, 2U, {}) ==
+        "*filter\n-F KeenPbrNativeFwd\n"
+        "-D FORWARD -j KeenPbrNativeFwd\n"
+        "-D FORWARD -j KeenPbrNativeFwd\n"
+        "-X KeenPbrNativeFwd\nCOMMIT\n");
+  CHECK(T::build_native_forward_script(false, false, 0U, {}).empty());
+  CHECK(T::build_native_forward_script(false, false, 0U,
+      {{"", "172.16.5.0/24", "nwg5", 0x60000U},
+       {"oc0", "", "nwg5", 0x60000U},
+       {"oc0", "172.16.5.0/24", "", 0x60000U},
+       {"oc0", "172.16.5.0/24", "nwg5", 0U},
+       {"oc0", "172.16.5.0/24", "nwg5", 0x60001U}}).empty());
+}
+
+TEST_CASE("native VPN forwarding cleanup restores only the owned filter objects") {
+  IptablesTestTempDir temp;
+  const auto scripts = temp.path() / "scripts";
+  write_iptables_test_executable(temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "printf '%s\\n' '-P FORWARD DROP' '-N NDMS_FORWARD' "
+      "'-N KeenPbrNativeFwd' '-A FORWARD -j NDMS_FORWARD' "
+      "'-A FORWARD -j KeenPbrNativeFwd'\n");
+  write_iptables_test_executable(temp.path() / "iptables-restore",
+      "#!/bin/sh\n"
+      "case \"$*\" in *--help*) exit 0 ;; esac\n"
+      "cat >> \"$KPBR_NATIVE_SCRIPTS\"\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment scripts_env("KPBR_NATIVE_SCRIPTS");
+  use_iptables_test_path(path, temp.path());
+  scripts_env.set(scripts.string());
+  testing::reset_restore_wait_option_probe_for_test();
+  CHECK(T::native_forward_cleanup_clears_created());
+  const auto script = read_iptables_test_file(scripts);
+  CHECK(script.find("-D FORWARD -j KeenPbrNativeFwd\n") != std::string::npos);
+  CHECK(script.find("-X KeenPbrNativeFwd\n") != std::string::npos);
+  CHECK(script.find("NDMS_FORWARD") == std::string::npos);
+  CHECK(script.find("-F FORWARD") == std::string::npos);
+  testing::reset_restore_wait_option_probe_for_test();
+}
 
 TEST_CASE("exact TCP reset builder is tuple-scoped ACK-guarded and hook-first") {
   const FirewallExactTcpResetRule first{
@@ -3588,45 +3801,197 @@ TEST_CASE("ipset inventory: every header arrives in one read") {
 }
 
 TEST_CASE("ipset teardown: one script for every set we own") {
-  // The other half: forty managed sets cost eighty fork/execs when each flush
-  // and destroy went on its own.
-  const std::string save =
-      "create kpbr4_static hash:net family inet\n"
-      "add kpbr4_static 10.0.0.0/8\n"
-      "create kpbr6d_domains hash:net family inet6 timeout 300\n"
-      "create foreign_set hash:ip family inet\n"
-      "add foreign_set 1.2.3.4\n"
-      "create kpbr4m_media hash:net family inet\n";
-
-  const auto script =
-      T::build_managed_set_teardown_script(save, /*preserve_dynamic_sets=*/false);
-
-  CHECK(script ==
+  // Ownership filtering happens before serialization, not inside this helper.
+  CHECK(T::build_set_teardown_script(
+            {"kpbr4_static", "kpbr6d_domains", "explicitly_created"}) ==
         "flush kpbr4_static\ndestroy kpbr4_static\n"
         "flush kpbr6d_domains\ndestroy kpbr6d_domains\n"
-        "flush kpbr4m_media\ndestroy kpbr4m_media\n");
-  // Somebody else's set is never named in it.
-  CHECK(script.find("foreign_set") == std::string::npos);
+        "flush explicitly_created\ndestroy explicitly_created\n");
 }
 
-TEST_CASE("ipset teardown: preserved dynamic sets stay out of the script") {
-  const std::string save =
-      "create kpbr4_static hash:net family inet\n"
-      "create kpbr4d_domains hash:net family inet timeout 300\n"
-      "create kpbr6d_domains hash:net family inet6 timeout 300\n";
-
-  const auto script =
-      T::build_managed_set_teardown_script(save, /*preserve_dynamic_sets=*/true);
-
-  CHECK(script == "flush kpbr4_static\ndestroy kpbr4_static\n");
+TEST_CASE("ipset teardown: unsafe restore names never publish a partial script") {
+  for (const std::string name :
+       {"", "kpbr4_bad name", "kpbr4_bad\tname", "kpbr4_bad\rname",
+        "kpbr4_bad\nflush foreign_set", "kpbr4_quoted'name",
+        "kpbr4_back\\slash", "kpbr4_#comment", "kpbr4_double\"quote"}) {
+    CAPTURE(name);
+    CHECK(T::build_set_teardown_script({"kpbr4_valid", name}).empty());
+  }
+  CHECK(T::build_set_teardown_script(
+            {"kpbr4_valid", std::string("bad\0name", 8)}).empty());
 }
 
-TEST_CASE("ipset teardown: nothing of ours means no script and no exec") {
-  CHECK(T::build_managed_set_teardown_script(
-            "create foreign_set hash:ip family inet\nadd foreign_set 1.2.3.4\n",
-            false)
-            .empty());
-  CHECK(T::build_managed_set_teardown_script("", false).empty());
+TEST_CASE("ipset teardown: empty input has no script") {
+  CHECK(T::build_set_teardown_script({}).empty());
+}
+
+TEST_CASE("ipset teardown: many known and live names use one unique restore") {
+  IpsetCleanupTestHarness tools;
+  std::vector<std::string> known;
+  std::string inventory = "foreign_set\n_NDM_HTSP_MAC_BLOCK\n";
+  for (int index = 0; index < 40; ++index) {
+    const std::string name = "kpbr4s_test_" + std::to_string(index);
+    known.push_back(name);
+    inventory += name + "\n";
+  }
+  inventory += "kpbr6_static\nkpbr6_static\nexplicitly_created\n";
+  known.push_back("explicitly_created");
+  tools.write("before", inventory);
+
+  T::cleanup_saved_sets_for_test(known, false);
+
+  CHECK(tools.lines("calls") ==
+        std::vector<std::string>{"list -name", "restore -exist"});
+  const auto script = tools.lines("restore-script");
+  CHECK(script.size() == 84);
+  for (const auto& name : known) {
+    CHECK(std::count(script.begin(), script.end(), "flush " + name) == 1);
+    CHECK(std::count(script.begin(), script.end(), "destroy " + name) == 1);
+  }
+  CHECK(std::count(script.begin(), script.end(), "destroy kpbr6_static") == 1);
+  CHECK(tools.script().find("foreign_set") == std::string::npos);
+  CHECK(tools.script().find("_NDM_") == std::string::npos);
+}
+
+TEST_CASE("ipset teardown: complete inventory excludes staged names not yet created") {
+  IpsetCleanupTestHarness tools;
+  tools.write("before", "kpbr6_live\nforeign_set\n");
+
+  T::cleanup_saved_sets_for_test(
+      {"kpbr4_staged_absent", "explicitly_staged_absent"}, false);
+
+  CHECK(tools.lines("calls") ==
+        std::vector<std::string>{"list -name", "restore -exist"});
+  CHECK(tools.script() == "flush kpbr6_live\ndestroy kpbr6_live\n");
+}
+
+TEST_CASE("ipset teardown: preservation filters dynamic known and live sets") {
+  IpsetCleanupTestHarness tools;
+  tools.write("before", "kpbr4_static\nkpbr4d_domains\nkpbr6d_domains\n"
+                        "foreign_set\n");
+
+  T::cleanup_saved_sets_for_test(
+      {"kpbr4_static", "kpbr4d_domains"}, true);
+
+  CHECK(tools.lines("calls") ==
+        std::vector<std::string>{"list -name", "restore -exist"});
+  CHECK(tools.script() == "flush kpbr4_static\ndestroy kpbr4_static\n");
+}
+
+TEST_CASE("ipset teardown: empty selection never starts a mutation") {
+  IpsetCleanupTestHarness tools;
+  SUBCASE("no known names and no live sweep means no exec at all") {
+    T::cleanup_saved_sets_for_test({}, false, false);
+    CHECK(tools.lines("calls").empty());
+  }
+  SUBCASE("foreign inventory is read but never mutated") {
+    tools.write("before", "foreign_set\n_NDM_HTSP_MAC_BLOCK\n");
+    T::cleanup_saved_sets_for_test({}, false);
+    CHECK(tools.lines("calls") == std::vector<std::string>{"list -name"});
+  }
+  SUBCASE("only preserved dynamic sets need no restore") {
+    tools.write("before", "kpbr4d_domains\nkpbr6d_domains\n");
+    T::cleanup_saved_sets_for_test({"kpbr4d_domains"}, true);
+    CHECK(tools.lines("calls") == std::vector<std::string>{"list -name"});
+  }
+  CHECK(tools.script().empty());
+}
+
+TEST_CASE("ipset teardown: failed restore still reaches every later name") {
+  IpsetCleanupTestHarness tools;
+  tools.write("before", "kpbr4_stuck\nkpbr6_later\n");
+  tools.write("fail-restore", "");
+
+  T::cleanup_saved_sets_for_test({}, false);
+
+  CHECK(tools.lines("calls") == std::vector<std::string>{
+      "list -name", "restore -exist", "flush kpbr4_stuck",
+      "destroy kpbr4_stuck", "flush kpbr6_later", "destroy kpbr6_later"});
+  CHECK(tools.script() == "flush kpbr4_stuck\ndestroy kpbr4_stuck\n"
+                          "flush kpbr6_later\ndestroy kpbr6_later\n");
+}
+
+TEST_CASE("ipset teardown: failed inventory does not strand known created sets") {
+  IpsetCleanupTestHarness tools;
+  SUBCASE("unavailable inventory") {
+    tools.write("before", "");
+  }
+  SUBCASE("failed command returned only a partial inventory") {
+    tools.write("before", "kpbr6_partial\n");
+  }
+  tools.write("fail-before", "");
+
+  T::cleanup_saved_sets_for_test({"kpbr4_known"}, false);
+
+  CHECK(tools.lines("calls") ==
+        std::vector<std::string>{"list -name", "restore -exist"});
+  CHECK(tools.script() == "flush kpbr4_known\ndestroy kpbr4_known\n");
+}
+
+TEST_CASE("ipset teardown: skipping live sweep still batches known created sets") {
+  IpsetCleanupTestHarness tools;
+  tools.write("before", "kpbr6_must_not_be_read\n");
+
+  T::cleanup_saved_sets_for_test({"kpbr4_known", "kpbr6_known"}, false, false);
+
+  CHECK(tools.lines("calls") == std::vector<std::string>{"restore -exist"});
+  CHECK(tools.script() == "flush kpbr4_known\ndestroy kpbr4_known\n"
+                          "flush kpbr6_known\ndestroy kpbr6_known\n");
+}
+
+TEST_CASE("ipset teardown: unusual known names retain exact argv fallback") {
+  IpsetCleanupTestHarness tools;
+
+  T::cleanup_saved_sets_for_test(
+      {"tracked name", "tracked'name", "tracked\\name"}, false, false);
+
+  CHECK(tools.lines("calls") == std::vector<std::string>{
+      "flush tracked name", "destroy tracked name",
+      "flush tracked'name", "destroy tracked'name",
+      "flush tracked\\name", "destroy tracked\\name"});
+  // Even the space-bearing name arrives as one argument, never restore text.
+  CHECK(tools.lines("arg-counts") ==
+        std::vector<std::string>{"2", "2", "2", "2", "2", "2"});
+  CHECK(tools.script().empty());
+}
+
+TEST_CASE("ipset teardown: strict cleanup relies on a fresh final observation") {
+  IpsetCleanupTestHarness tools;
+  tools.write("before", "kpbr4_stuck\nkpbr6_later\nforeign_set\n");
+  auto expected = FirewallOwnedCleanupState::verified_absent;
+  bool fallback = false;
+  SUBCASE("successful batch and no remaining managed names") {
+    tools.write("after", "foreign_set\n");
+  }
+  SUBCASE("successful command cannot conceal a still referenced set") {
+    tools.write("after", "kpbr4_stuck\nforeign_set\n");
+    expected = FirewallOwnedCleanupState::owned_artifacts_present;
+  }
+  SUBCASE("failed final inventory cannot prove absence") {
+    tools.write("after", "");
+    tools.write("fail-after", "");
+    expected = FirewallOwnedCleanupState::observation_failed;
+  }
+  SUBCASE("fallback reaches later names but preserves the referenced-set verdict") {
+    tools.write("after", "kpbr4_stuck\n");
+    tools.write("fail-restore", "");
+    expected = FirewallOwnedCleanupState::owned_artifacts_present;
+    fallback = true;
+  }
+
+  const auto result = T::cleanup_saved_sets_strict_for_test();
+
+  CHECK(result.state == expected);
+  if (fallback) {
+    CHECK(tools.lines("calls") == std::vector<std::string>{
+        "list -name", "restore -exist", "flush kpbr4_stuck",
+        "destroy kpbr4_stuck", "flush kpbr6_later", "destroy kpbr6_later",
+        "list -name"});
+  } else {
+    CHECK(tools.lines("calls") == std::vector<std::string>{
+        "list -name", "restore -exist", "list -name"});
+  }
+  CHECK(tools.script().find("foreign_set") == std::string::npos);
 }
 
 TEST_CASE("ipset inventory: a firmware set we cannot read is not our problem") {
@@ -4086,6 +4451,57 @@ TEST_CASE("iptables policy rules classify verified service source pools") {
   CHECK(s.find(
             "-A KeenPbrTable -m set --match-set kpbr4_local dst -j MARK") ==
         std::string::npos);
+}
+
+TEST_CASE("iptables OpenConnect OFF returns only from owned chains before marks and DNS") {
+  Config cfg;
+  cfg.route = RouteConfig{};
+  InternalVpnRuntimeTarget target;
+  target.stable_id = "ndms-service:oc-server";
+  target.match_kind = InternalVpnRuntimeMatchKind::source_pool;
+  target.verified_ingress_interfaces = {"oc17"};
+  target.source_cidrs_v4 = {"172.29.9.0/24"};
+  target.source_cidrs_v6 = {"fd77:9::/64"};
+
+  for (const bool process_clients : {false, true}) {
+    target.process_clients = process_clients;
+    auto prefilter = build_firewall_global_prefilter_for_runtime_targets(
+        cfg, {target});
+    prefilter.restore_conntrack_mark = true;
+    prefilter.conntrack_mark_mask = 0x00ff0000;
+    const auto raw_scripts = T::build_raw_prerouting_scripts_both_families(prefilter);
+    IptablesFirewall firewall;
+    firewall.set_fwmark_mask(prefilter.conntrack_mark_mask);
+    firewall.create_mark_rule(0x60000);
+    for (const bool ipv6 : {false, true}) {
+      const auto rule = mark_rule("vpn_destination", ipv6, 0x60000);
+      const auto cidr = ipv6 ? "fd77:9::/64" : "172.29.9.0/24";
+      const auto selector = std::string{" -i oc17 -s "} + cidr;
+      const std::vector<std::pair<std::string, std::string>> scripts = {
+          {"KeenPbrRaw_A", ipv6 ? raw_scripts.second : raw_scripts.first},
+          {"KeenPbrTable", T::build_ipt_script(ipv6, {rule}, prefilter)},
+          {"KeenPbrRawCt", T::raw_conntrack_for(firewall, ipv6, prefilter)},
+          {"KeenPbrDnsRdr", T::build_dns_nat_script(
+              prefilter, true, false, {}, ipv6)},
+      };
+      for (const auto& [chain, script] : scripts) {
+        const auto bypass = script.find("-A " + chain + selector + " -j RETURN\n");
+        if (process_clients) {
+          CHECK(bypass == std::string::npos);
+        } else {
+          REQUIRE(bypass != std::string::npos);
+          for (const auto* action : {"-j MARK", "CONNMARK --restore-mark",
+                                     "-j REDIRECT"}) {
+            const auto position = script.find(action);
+            if (position != std::string::npos) CHECK(bypass < position);
+          }
+        }
+        // ACCEPT here would terminate the shared iptables hook and could
+        // prevent later nfqws processing. Both modes leave it untouched.
+        CHECK(script.find(selector + " -j ACCEPT") == std::string::npos);
+      }
+    }
+  }
 }
 
 TEST_CASE("iptables pooled VPN bypass fails closed without exact ingress") {

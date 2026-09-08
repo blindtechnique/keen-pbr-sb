@@ -2,10 +2,32 @@ import type { ListConfig } from "@/api/generated/model/listConfig"
 import type { ListRefreshConfig } from "@/api/generated/model/listRefreshConfig"
 import type { ListRefreshDetourMode } from "@/api/generated/model/listRefreshDetourMode"
 import type { Outbound } from "@/api/generated/model/outbound"
+import { configKnownFields } from "@/lib/config-known-fields.generated"
+import { pickUnknownConfigProperties } from "@/lib/config-unknown-fields"
 
 export type ListRefreshRouteChain = {
   detour: string
   fallbackDetours: string[]
+}
+
+export function buildListRefreshConfig(
+  original: ListRefreshConfig | undefined,
+  chain: ListRefreshRouteChain
+): ListRefreshConfig | undefined {
+  const normalized = normalizeListRefreshRouteChain(chain)
+  const updated: ListRefreshConfig = {
+    ...pickUnknownConfigProperties(
+      original,
+      configKnownFields.ListRefreshConfig
+    ),
+    ...(normalized.detour
+      ? {
+          detour: normalized.detour,
+          fallback_detours: normalized.fallbackDetours,
+        }
+      : {}),
+  }
+  return Object.keys(updated).length ? updated : undefined
 }
 
 export function getListRefreshCapableOutbounds(

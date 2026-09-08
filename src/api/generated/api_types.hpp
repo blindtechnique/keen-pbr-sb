@@ -96,6 +96,8 @@ namespace api {
     struct ApiConfig {
         std::optional<bool> enabled;
         std::optional<std::string> listen;
+        // Opaque fields belonging to this object; not an API property.
+        json _config_unknown_fields = nullptr;
     };
 
     struct AuthCredentials {
@@ -150,6 +152,7 @@ namespace api {
         std::optional<std::map<std::string, nlohmann::json>> nfqws;
         std::optional<std::vector<std::map<std::string, nlohmann::json>>> outbounds;
         std::optional<std::map<std::string, nlohmann::json>> route;
+        std::optional<std::vector<std::map<std::string, nlohmann::json>>> subscriptions;
         std::optional<std::map<std::string, nlohmann::json>> transports;
     };
 
@@ -167,6 +170,7 @@ namespace api {
     };
 
     struct BackupDocument {
+        std::optional<int64_t> config_schema_version;
         std::optional<int64_t> created_at;
         Data data;
         Format format;
@@ -188,6 +192,15 @@ namespace api {
         int64_t size = 0;
     };
 
+    struct LastRefreshShrinkRejection {
+        int64_t candidate_entries = 0;
+        std::string candidate_sha256;
+        int64_t min_previous_entries = 0;
+        double min_retained_fraction = 0;
+        int64_t previous_entries = 0;
+        std::string previous_sha256;
+    };
+
     struct CacheMetadata {
         std::optional<int64_t> cidrs;
         std::optional<CacheGeneration> current;
@@ -199,8 +212,11 @@ namespace api {
         std::optional<std::string> last_refresh_attempt;
         std::optional<std::string> last_refresh_detour;
         std::optional<std::string> last_refresh_error;
+        std::optional<LastRefreshShrinkRejection> last_refresh_shrink_rejection;
         std::optional<std::string> last_refresh_url;
         std::optional<CacheGeneration> previous;
+        std::optional<int64_t> source_decoder_revision;
+        std::optional<std::string> source_format;
         std::optional<int64_t> srs_decoder_revision;
         std::optional<std::string> url;
     };
@@ -340,11 +356,15 @@ namespace api {
         std::optional<int64_t> half_open_max_requests;
         std::optional<int64_t> success_threshold;
         std::optional<int64_t> timeout_ms;
+        // Opaque fields belonging to this object; not an API property.
+        json _config_unknown_fields = nullptr;
     };
 
     struct ClientDnsEnforcement {
         std::optional<bool> block_dot;
         std::optional<bool> enabled;
+        // Opaque fields belonging to this object; not an API property.
+        json _config_unknown_fields = nullptr;
     };
 
     enum class DaemonConfigFirewallBackend : int { AUTO, IPTABLES, NFTABLES };
@@ -372,11 +392,15 @@ namespace api {
         std::optional<bool> skip_marked_packets;
         std::optional<bool> strict_enforcement;
         std::optional<bool> ttl_bypass_enabled;
+        // Opaque fields belonging to this object; not an API property.
+        json _config_unknown_fields = nullptr;
     };
 
     struct DnsTestServer {
         std::optional<std::string> answer_ipv4;
         std::string listen;
+        // Opaque fields belonging to this object; not an API property.
+        json _config_unknown_fields = nullptr;
     };
 
     struct DnsRuleElement {
@@ -386,6 +410,8 @@ namespace api {
         std::optional<std::string> id;
         std::vector<std::string> list;
         std::string server;
+        // Opaque fields belonging to this object; not an API property.
+        json _config_unknown_fields = nullptr;
     };
 
     enum class DnsServerType : int { KEENETIC, STATIC };
@@ -394,38 +420,59 @@ namespace api {
         std::optional<std::string> address;
         std::optional<std::string> detour;
         std::optional<std::string> display_name;
+        std::optional<std::vector<std::string>> domains;
         std::string tag;
         std::optional<DnsServerType> type;
+        // Opaque fields belonging to this object; not an API property.
+        json _config_unknown_fields = nullptr;
     };
 
     struct SystemResolver {
         std::string address;
+        // Opaque fields belonging to this object; not an API property.
+        json _config_unknown_fields = nullptr;
     };
 
     struct Dns {
         std::optional<ClientDnsEnforcement> client_dns_enforcement;
         std::optional<DnsTestServer> dns_test_server;
         std::optional<std::vector<std::string>> fallback;
+        std::optional<bool> firefox_doh_canary;
         std::optional<std::vector<DnsRuleElement>> rules;
         std::optional<std::vector<DnsServerElement>> servers;
         std::optional<SystemResolver> system_resolver;
+        // Opaque fields belonging to this object; not an API property.
+        json _config_unknown_fields = nullptr;
     };
 
     struct Fwmark {
         std::optional<std::string> mask;
         std::optional<std::string> start;
+        // Opaque fields belonging to this object; not an API property.
+        json _config_unknown_fields = nullptr;
     };
 
     struct Iproute {
         std::optional<int64_t> table_start;
+        // Opaque fields belonging to this object; not an API property.
+        json _config_unknown_fields = nullptr;
     };
 
     struct ListRefresh {
         std::optional<std::string> detour;
         std::optional<std::vector<std::string>> fallback_detours;
+        // Opaque fields belonging to this object; not an API property.
+        json _config_unknown_fields = nullptr;
     };
 
     enum class RefreshDetourMode : int { INHERIT, OVERRIDE };
+
+    struct ShrinkPolicy {
+        std::optional<int64_t> min_previous_entries;
+        std::optional<double> min_retained_fraction;
+        // Opaque fields belonging to this object; not an API property.
+        json _config_unknown_fields = nullptr;
+    };
 
     struct ListConfigValue {
         std::optional<std::string> catalog_identity;
@@ -436,13 +483,19 @@ namespace api {
         std::optional<std::string> file;
         std::optional<std::vector<std::string>> ip_cidrs;
         std::optional<RefreshDetourMode> refresh_detour_mode;
+        std::optional<ShrinkPolicy> shrink_policy;
+        std::optional<std::string> source_format;
         std::optional<int64_t> ttl_ms;
         std::optional<std::string> url;
+        // Opaque fields belonging to this object; not an API property.
+        json _config_unknown_fields = nullptr;
     };
 
     struct ListsAutoupdate {
         std::optional<std::string> cron;
         std::optional<bool> enabled;
+        // Opaque fields belonging to this object; not an API property.
+        json _config_unknown_fields = nullptr;
     };
 
     enum class ConntrackOnSwitch : int { DELETE, DELETE_ON_FAILURE, PRESERVE };
@@ -450,11 +503,15 @@ namespace api {
     struct OutboundGroupElement {
         std::vector<std::string> outbounds;
         std::optional<int64_t> weight;
+        // Opaque fields belonging to this object; not an API property.
+        json _config_unknown_fields = nullptr;
     };
 
     struct Retry {
         std::optional<int64_t> attempts;
         std::optional<int64_t> interval_ms;
+        // Opaque fields belonging to this object; not an API property.
+        json _config_unknown_fields = nullptr;
     };
 
     enum class SelectionMode : int { LATENCY, PRIORITY };
@@ -479,18 +536,26 @@ namespace api {
         std::optional<int64_t> tolerance_ms;
         OutboundType type;
         std::optional<std::string> url;
+        // Opaque fields belonging to this object; not an API property.
+        json _config_unknown_fields = nullptr;
     };
 
     struct InternalVpnServerElement {
         std::string interface;
         std::optional<std::string> ndms_id;
         bool process_clients = false;
+        // Opaque fields belonging to this object; not an API property.
+        json _config_unknown_fields = nullptr;
     };
 
     struct InternalVpnServiceElement {
         bool process_clients = false;
         std::string service_id;
+        // Opaque fields belonging to this object; not an API property.
+        json _config_unknown_fields = nullptr;
     };
+
+    enum class FailurePolicy : int { BLOCK, FALLBACK, INHERIT };
 
     struct RouteRuleElement {
         std::optional<std::string> dest_addr;
@@ -498,12 +563,16 @@ namespace api {
         std::optional<std::string> display_name;
         std::optional<int64_t> dscp;
         std::optional<bool> enabled;
+        std::optional<FailurePolicy> failure_policy;
+        std::optional<std::string> fallback_outbound;
         std::optional<std::string> id;
         std::optional<std::vector<std::string>> list;
         std::string outbound;
         std::optional<std::string> proto;
         std::optional<std::string> src_addr;
         std::optional<std::string> src_port;
+        // Opaque fields belonging to this object; not an API property.
+        json _config_unknown_fields = nullptr;
     };
 
     struct Route {
@@ -511,6 +580,8 @@ namespace api {
         std::optional<std::vector<InternalVpnServerElement>> internal_vpn_servers;
         std::optional<std::vector<InternalVpnServiceElement>> internal_vpn_services;
         std::optional<std::vector<RouteRuleElement>> rules;
+        // Opaque fields belonging to this object; not an API property.
+        json _config_unknown_fields = nullptr;
     };
 
     struct TunnelProbe {
@@ -520,17 +591,23 @@ namespace api {
         std::optional<int64_t> max_probes_per_pass;
         std::optional<std::string> outbound;
         std::optional<bool> require_registry_confirmation;
+        // Opaque fields belonging to this object; not an API property.
+        json _config_unknown_fields = nullptr;
     };
 
     struct PlainDnsTemplateElement {
         std::string name;
         std::string primary_ipv4;
         std::optional<std::string> secondary_ipv4;
+        // Opaque fields belonging to this object; not an API property.
+        json _config_unknown_fields = nullptr;
     };
 
     struct UiPreferences {
         std::optional<std::vector<std::string>> hidden_native_interface_ids;
         std::optional<std::vector<PlainDnsTemplateElement>> plain_dns_templates;
+        // Opaque fields belonging to this object; not an API property.
+        json _config_unknown_fields = nullptr;
     };
 
     struct ConfigObject {
@@ -544,8 +621,11 @@ namespace api {
         std::optional<ListsAutoupdate> lists_autoupdate;
         std::optional<std::vector<OutboundElement>> outbounds;
         std::optional<Route> route;
+        int64_t schema_version = 2;
         std::optional<TunnelProbe> tunnel_probe;
         std::optional<UiPreferences> ui_preferences;
+        // Opaque fields belonging to this object; not an API property.
+        json _config_unknown_fields = nullptr;
     };
 
     struct ListRefreshStateValue {
@@ -553,6 +633,7 @@ namespace api {
         std::optional<std::string> last_detour;
         std::optional<std::string> last_error;
         std::optional<std::string> last_updated;
+        std::optional<LastRefreshShrinkRejection> shrink_rejection;
     };
 
     struct ConfigStateResponse {
@@ -674,11 +755,14 @@ namespace api {
     };
 
     struct ValidationErrorElement {
+        std::optional<std::string> code;
         std::string message;
+        std::optional<std::map<std::string, std::string>> params;
         std::optional<std::string> path;
     };
 
     struct ErrorResponse {
+        std::optional<std::string> code;
         std::string error;
         std::optional<std::vector<ValidationErrorElement>> validation_errors;
     };
@@ -762,6 +846,7 @@ namespace api {
         std::string build_variant;
         std::optional<std::string> commit;
         bool config_is_draft = false;
+        std::optional<int64_t> daemon_pid;
         std::optional<LifecycleOperation> lifecycle_operation;
         std::string os_type;
         std::string os_version;
@@ -784,6 +869,27 @@ namespace api {
         bool available = false;
         CatalogStatus catalog_status;
         std::map<std::string, std::string> names;
+    };
+
+    struct ListContentImportRequest {
+        std::string format;
+        std::string text;
+    };
+
+    struct ListSourcePreviewErrorElement {
+        std::string code;
+        int64_t line = 0;
+        std::string value;
+    };
+
+    struct ListContentImportResponse {
+        bool complete = false;
+        std::vector<std::string> domains;
+        int64_t duplicates = 0;
+        std::vector<ListSourcePreviewErrorElement> errors;
+        bool errors_limited = false;
+        std::vector<std::string> ip_cidrs;
+        std::optional<std::string> limit_reason;
     };
 
     struct ListDeleteTargetElement {
@@ -811,7 +917,45 @@ namespace api {
         ListDeleteStageSummaryClass summary;
     };
 
+    struct ListPageItem {
+        std::optional<std::string> display_name;
+        int64_t domain_count = 0;
+        std::optional<std::string> file;
+        std::string id;
+        int64_t ipv4_count = 0;
+        int64_t ipv6_count = 0;
+        std::optional<std::string> url;
+    };
+
+    struct ListPage {
+        int64_t filtered_total = 0;
+        bool has_refreshable_lists = false;
+        bool is_draft = false;
+        std::vector<ListPageItem> items;
+        int64_t limit = 0;
+        int64_t offset = 0;
+        std::string revision;
+        int64_t total = 0;
+    };
+
+    enum class Sort : int { ID, NAME, SOURCE };
+
+    struct ListQueryRequest {
+        std::optional<int64_t> limit;
+        std::optional<int64_t> offset;
+        std::optional<SortOrder> order;
+        std::optional<std::string> search;
+        std::optional<Sort> sort;
+    };
+
+    struct AcceptShrink {
+        std::string candidate_sha256;
+        std::string previous_sha256;
+    };
+
     struct ListRefreshRequest {
+        std::optional<AcceptShrink> accept_shrink;
+        std::optional<bool> force_refresh;
         std::optional<std::string> name;
     };
 
@@ -824,16 +968,70 @@ namespace api {
         ConfigUpdateResponseStatus status;
     };
 
+    enum class ListSourcePreviewEntryType : int { DOMAIN, IPV4, IPV6 };
+
+    struct ListSourcePreviewEntry {
+        int64_t line = 0;
+        ListSourcePreviewEntryType type;
+        std::string value;
+    };
+
+    struct ListSourcePreviewRequest {
+        std::optional<std::string> detour;
+        std::optional<std::vector<std::string>> fallback_detours;
+        std::optional<std::string> format;
+        std::optional<RefreshDetourMode> refresh_detour_mode;
+        std::optional<std::string> text;
+        std::optional<std::string> url;
+    };
+
+    enum class ListSourcePreviewResponseStatus : int { DOWNLOAD_FAILED, OK, ROUTE_UNAVAILABLE, TOO_LARGE, UNSUPPORTED_FORMAT };
+
+    struct ListSourcePreviewResponse {
+        bool complete = false;
+        int64_t domains = 0;
+        int64_t duplicates = 0;
+        std::vector<ListSourcePreviewEntry> entries;
+        bool entries_limited = false;
+        std::vector<ListSourcePreviewErrorElement> errors;
+        bool errors_limited = false;
+        int64_t ignored_lines = 0;
+        int64_t invalid_entries = 0;
+        int64_t ipv4 = 0;
+        int64_t ipv6 = 0;
+        std::optional<std::string> limit_reason;
+        int64_t lines = 0;
+        ListSourcePreviewResponseStatus status;
+        int64_t unique_entries = 0;
+        int64_t valid_entries = 0;
+    };
+
     enum class LogLevel : int { DEBUG, ERROR, INFO, VERBOSE, WARN };
 
     struct LogSettings {
+        std::optional<bool> age_limit_enabled;
         bool file_enabled = false;
         LogLevel level;
+        std::optional<int64_t> max_age_days;
+        std::optional<int64_t> max_file_bytes;
+        std::optional<bool> nfqws_age_limit_enabled;
+        std::optional<int64_t> nfqws_max_age_days;
+        std::optional<int64_t> nfqws_max_file_bytes;
+        std::optional<bool> nfqws_size_limit_enabled;
+        std::optional<bool> size_limit_enabled;
     };
 
     struct LogSettingsRequest {
+        std::optional<bool> age_limit_enabled;
         std::optional<bool> file_enabled;
         std::optional<LogLevel> level;
+        std::optional<int64_t> max_age_days;
+        std::optional<int64_t> max_file_bytes;
+        std::optional<bool> nfqws_age_limit_enabled;
+        std::optional<int64_t> nfqws_max_age_days;
+        std::optional<int64_t> nfqws_max_file_bytes;
+        std::optional<bool> nfqws_size_limit_enabled;
+        std::optional<bool> size_limit_enabled;
     };
 
     struct LogSettingsResult {
@@ -1227,6 +1425,37 @@ namespace api {
         std::optional<std::string> version;
     };
 
+    struct NotificationDismissRequest {
+        std::optional<std::vector<std::string>> log_ids;
+        std::optional<std::vector<std::string>> update_ids;
+    };
+
+    struct NotificationDismissalState {
+        std::vector<std::string> log_ids;
+        int64_t revision = 0;
+        std::vector<std::string> update_ids;
+    };
+
+    enum class Kind : int { EXPIRED, EXPIRES_SOON, NEW_SERVERS, SYNC_FAILED, TRAFFIC_EXHAUSTED, TRAFFIC_LOW };
+
+    struct SubscriptionNoticeElement {
+        std::optional<int64_t> count;
+        std::optional<int64_t> days;
+        std::string id;
+        Kind kind;
+        std::string name;
+        std::optional<int64_t> remaining_percent;
+        std::string subscription_id;
+    };
+
+    struct NotificationsResponse {
+        std::vector<std::string> line_ids;
+        std::vector<std::string> lines;
+        NotificationDismissalState state;
+        std::optional<std::vector<SubscriptionNoticeElement>> subscription_notices;
+        std::optional<bool> subscription_notices_error;
+    };
+
     struct OkResponse {
         bool ok = false;
     };
@@ -1235,6 +1464,7 @@ namespace api {
 
     struct PeriodicTaskMetricsEntry {
         int64_t abandoned = 0;
+        std::optional<int64_t> consecutive_failures;
         int64_t failure = 0;
         int64_t in_flight = 0;
         std::string label;
@@ -1245,8 +1475,10 @@ namespace api {
         std::optional<LastOutcome> last_outcome;
         std::optional<int64_t> last_started_at_unix_ms;
         int64_t max_duration_ms = 0;
+        std::optional<int64_t> next_run_at_unix_ms;
         int64_t noop = 0;
         int64_t runs = 0;
+        std::optional<std::string> scheduling_state;
         int64_t skipped = 0;
         int64_t success = 0;
         int64_t total_duration_ms = 0;
@@ -1311,7 +1543,7 @@ namespace api {
         std::string target;
     };
 
-    enum class Reason : int { LOOKUP_FAILED, REGISTRY_LOOKUP_DISABLED, UNREADABLE_RESPONSE };
+    enum class RegistryCheckResponseReason : int { LOOKUP_FAILED, REGISTRY_LOOKUP_DISABLED, UNREADABLE_RESPONSE };
 
     struct RegistryCheckResponse {
         std::optional<bool> blocked;
@@ -1322,7 +1554,7 @@ namespace api {
         std::optional<std::string> error;
         std::optional<std::vector<std::string>> ips;
         std::optional<std::string> organisation;
-        std::optional<Reason> reason;
+        std::optional<RegistryCheckResponseReason> reason;
         std::optional<std::string> rkn_domain;
         std::string service;
         std::optional<std::string> target;
@@ -1440,6 +1672,22 @@ namespace api {
         std::optional<std::string> vendor;
     };
 
+    struct RouterMetrics {
+        std::optional<int64_t> conntrack_free;
+        std::optional<int64_t> conntrack_total;
+        std::optional<int64_t> cpu_load_percent;
+        std::optional<std::string> cpu_model;
+        std::optional<double> cpu_temperature_c;
+        std::optional<int64_t> disk_total_mb;
+        std::optional<int64_t> disk_used_mb;
+        std::optional<int64_t> disk_used_percent;
+        std::optional<std::vector<double>> load_average;
+        std::optional<int64_t> memory_total_mb;
+        std::optional<int64_t> memory_used_mb;
+        std::optional<int64_t> memory_used_percent;
+        std::optional<int64_t> uptime_seconds;
+    };
+
     enum class RoutingHealthErrorResponseOverall : int { ERROR };
 
     struct RoutingHealthErrorResponse {
@@ -1470,7 +1718,56 @@ namespace api {
         std::optional<TtlBypassState> ttl_bypass_state;
     };
 
+    struct RoutingTestConnection {
+        std::string destination;
+        int64_t destination_port = 0;
+        int64_t last_seen = 0;
+        int64_t mark = 0;
+        std::string protocol;
+        std::string source;
+        int64_t source_port = 0;
+        std::string state;
+    };
+
+    struct RoutingTestConnections {
+        std::vector<RoutingTestConnection> items;
+        int64_t snapshot_at = 0;
+        bool snapshot_available = false;
+        int64_t total = 0;
+        bool truncated = false;
+    };
+
     enum class Evaluation : int { INSUFFICIENT_CONTEXT, MATCHED, NOT_MATCHED };
+
+    enum class RoutingTestFirewallCounterAction : int { DROP, MARK, PASS };
+
+    enum class Family : int { IPV4, IPV6 };
+
+    struct RoutingTestFirewallCounterElement {
+        RoutingTestFirewallCounterAction action;
+        std::string bytes;
+        std::string chain;
+        Family family;
+        std::optional<int64_t> fwmark;
+        std::optional<int64_t> fwmask;
+        std::string packets;
+        int64_t position = 0;
+        std::string set_name;
+        std::string table;
+    };
+
+    enum class RoutingTestFirewallCountersScope : int { PREROUTING };
+
+    enum class RoutingTestFirewallCountersStatus : int { AMBIGUOUS, NOT_APPLICABLE, OBSERVED, UNAVAILABLE };
+
+    struct FirewallCounters {
+        std::vector<RoutingTestFirewallCounterElement> rules;
+        RoutingTestFirewallCountersScope scope;
+        int64_t snapshot_at = 0;
+        RoutingTestFirewallCountersStatus status;
+        int64_t total = 0;
+        bool truncated = false;
+    };
 
     enum class RouteStatus : int { NOT_APPLICABLE, RESOLVED, UNAVAILABLE, UNROUTABLE };
 
@@ -1487,17 +1784,66 @@ namespace api {
         std::string via;
     };
 
+    struct RoutingTestPolicyRuleElement {
+        bool details_complete = false;
+        Family family;
+        int64_t fwmark = 0;
+        int64_t fwmask = 0;
+        int64_t priority = 0;
+        int64_t table = 0;
+    };
+
+    enum class RoutingTestPolicyRulesStatus : int { NOT_APPLICABLE, OBSERVED, UNAVAILABLE };
+
+    struct PolicyRules {
+        std::vector<RoutingTestPolicyRuleElement> rules;
+        int64_t snapshot_at = 0;
+        RoutingTestPolicyRulesStatus status;
+        int64_t total = 0;
+        bool truncated = false;
+    };
+
     enum class RoutingTestUnknownConditionElement : int { DESTINATION_ADDRESS, DESTINATION_PORT, DSCP, FIREWALL_SET, FIREWALL_STATE, FIREWALL_TOOL, INBOUND_INTERFACE, PROTOCOL, RESOLVED_IP, SOURCE_ADDRESS, SOURCE_PORT };
 
     struct RoutingTestEntry {
         std::string actual_outbound;
+        std::optional<int64_t> actual_rule_index;
         Evaluation evaluation;
         std::string expected_outbound;
+        std::optional<int64_t> expected_rule_index;
+        std::optional<FirewallCounters> firewall_counters;
         std::string ip;
         KernelRoute kernel_route;
         std::optional<ListMatch> list_match;
         bool ok = false;
+        std::optional<PolicyRules> policy_rules;
         std::vector<RoutingTestUnknownConditionElement> unknown_conditions;
+    };
+
+    enum class Method : int { HEAD };
+
+    enum class RoutingTestHttpProbeReason : int { BINDING_FAILED, BLOCKED_ROUTE, BUDGET_EXHAUSTED, CONNECTION_FAILED, CONTEXT_REQUIRED, DESTINATION_CHANGED, HTTP_RESPONSE, NO_ROUTE, RESPONSE_LIMIT, TIMEOUT, TLS_ERROR, TRANSPORT_ERROR, UNSUPPORTED_TARGET };
+
+    enum class RoutingTestHttpProbeScope : int { ROUTER };
+
+    enum class RoutingTestHttpProbeStatus : int { ANSWERED, FAILED, NOT_APPLICABLE, UNAVAILABLE };
+
+    struct RoutingTestHttpProbe {
+        int64_t attempted_at = 0;
+        std::optional<int64_t> connect_ms;
+        std::optional<std::string> connected_ip;
+        std::optional<int64_t> elapsed_ms;
+        std::optional<int64_t> fwmark;
+        std::optional<int64_t> http_status;
+        std::string interface;
+        std::string ip;
+        Method method;
+        RoutingTestHttpProbeReason reason;
+        RoutingTestHttpProbeScope scope;
+        RoutingTestHttpProbeStatus status;
+        std::optional<int64_t> table;
+        std::optional<int64_t> tls_ms;
+        std::string url;
     };
 
     enum class RoutingTestNfqwsMatchRole : int { HOSTLIST, HOSTLIST_AUTO, HOSTLIST_EXCLUDE, IPSET, IPSET_EXCLUDE };
@@ -1518,6 +1864,7 @@ namespace api {
     };
 
     struct RoutingTestRequest {
+        std::optional<std::string> http_probe_ip;
         std::string target;
     };
 
@@ -1544,7 +1891,12 @@ namespace api {
 
     struct RoutingTestResponse {
         ConfigScope config_scope;
+        std::optional<RoutingTestConnections> connections;
         std::optional<std::string> dns_error;
+        std::optional<std::string> dns_server;
+        std::optional<std::string> dns_source;
+        std::optional<int64_t> fwmark_mask;
+        std::optional<RoutingTestHttpProbe> http_probe;
         bool is_domain = false;
         std::optional<RoutingTestNfqws> nfqws;
         bool no_matching_rule = false;
@@ -1642,13 +1994,19 @@ namespace api {
         std::optional<std::string> error;
         std::optional<int64_t> expires_at;
         std::string id;
+        std::optional<std::string> last_sync_error;
         std::string name;
+        std::optional<int64_t> next_check_at;
         std::optional<int64_t> node_count;
+        std::optional<int64_t> pending_new_servers_count;
+        std::optional<std::string> pending_servers_revision;
+        std::optional<int64_t> refresh_interval_seconds;
         std::string source_host;
         std::optional<int64_t> total_bytes;
         std::vector<std::string> transport_tags;
         std::optional<int64_t> updated_at;
         std::optional<int64_t> upload_bytes;
+        std::optional<int64_t> usage_cycle;
     };
 
     enum class Blocker : int { ARCHITECTURE_UNSUPPORTED, ENTWARE_ABSENT, FOREIGN_BINARY_PRESENT, TARGET_NOT_WRITABLE, TRANSPORTS_RUNNING, TRANSPORT_STATE_UNKNOWN };
@@ -1709,6 +2067,13 @@ namespace api {
         StatusEventInterfacesType type;
     };
 
+    enum class StatusEventNotificationStateType : int { NOTIFICATION_STATE };
+
+    struct StatusEventNotificationState {
+        NotificationDismissalState data;
+        StatusEventNotificationStateType type;
+    };
+
     enum class StatusEventOutboundsType : int { OUTBOUNDS };
 
     struct StatusEventOutbounds {
@@ -1730,6 +2095,12 @@ namespace api {
         StatusEventSnapshotType type;
     };
 
+    enum class StatusEventSubscriptionsType : int { SUBSCRIPTIONS };
+
+    struct StatusEventSubscriptions {
+        StatusEventSubscriptionsType type;
+    };
+
     struct SubscriptionApplySelectionElement {
         int64_t line = 0;
         std::optional<std::string> tag;
@@ -1744,6 +2115,7 @@ namespace api {
     enum class Outcome : int { ALREADY_IMPORTED, CREATED, FAILED };
 
     struct SubscriptionApplyResultElement {
+        std::optional<std::string> code;
         std::optional<std::string> error;
         std::optional<std::string> interface;
         int64_t line = 0;
@@ -1774,6 +2146,8 @@ namespace api {
 
     struct SubscriptionPreviewRequest {
         std::optional<std::string> document;
+        std::optional<bool> pending_only;
+        std::optional<std::string> subscription_id;
         std::optional<std::string> url;
     };
 
@@ -1790,6 +2164,11 @@ namespace api {
     struct SubscriptionRenameRequest {
         std::string id;
         std::string name;
+    };
+
+    struct SubscriptionSettingsRequest {
+        std::string id;
+        int64_t refresh_interval_seconds = 0;
     };
 
     struct SubscriptionSourceRequest {
@@ -1945,6 +2324,18 @@ namespace api {
         Verdict verdict;
     };
 
+    struct TransportGeoUpdate {
+        std::string country;
+        std::string country_code;
+        std::string expected_interface;
+        std::string tag;
+    };
+
+    struct TransportGeoUpdateResponse {
+        std::string config_revision;
+        bool updated = false;
+    };
+
     struct TransportManagerSettings {
         bool restart_required = false;
         SingBoxProcessMode running_sing_box_process_mode;
@@ -2011,12 +2402,25 @@ namespace api {
         std::string host;
     };
 
+    struct TunnelProbeHostReview {
+        int64_t direct_successes = 0;
+        std::string host;
+        std::optional<int64_t> last_checked_unix_ms;
+        std::optional<int64_t> next_check_unix_ms;
+        int64_t required_successes = 0;
+        bool suggested = false;
+    };
+
     struct TunnelProbeHostsResponse {
         bool available = false;
+        std::optional<bool> config_is_draft;
         std::optional<std::string> exclude_file;
         std::vector<std::string> excluded;
         std::optional<std::string> list_file;
         std::optional<std::string> list_name;
+        std::optional<bool> review_available;
+        std::optional<bool> review_limited;
+        std::optional<std::vector<TunnelProbeHostReview>> reviews;
         std::vector<std::string> routed;
     };
 
@@ -2111,16 +2515,30 @@ namespace api {
         std::optional<LifecycleOperation> lifecycle_operation;
         std::optional<LifecycleOperationStageElement> lifecycle_operation_stage;
         std::optional<ListConfigValue> list_config;
+        std::optional<ListContentImportRequest> list_content_import_request;
+        std::optional<ListContentImportResponse> list_content_import_response;
         std::optional<ListDeleteStageRequest> list_delete_stage_request;
         std::optional<ListDeleteStageResponse> list_delete_stage_response;
         std::optional<ListDeleteStageSummaryClass> list_delete_stage_summary;
         std::optional<ListDeleteTargetElement> list_delete_target;
+        std::optional<ListPage> list_page;
+        std::optional<ListPageItem> list_page_item;
+        std::optional<ListQueryRequest> list_query_request;
+        std::optional<Sort> list_query_sort;
         std::optional<ListRefresh> list_refresh_config;
         std::optional<RefreshDetourMode> list_refresh_detour_mode;
         std::optional<ListRefreshRequest> list_refresh_request;
         std::optional<ListRefreshResponse> list_refresh_response;
         std::optional<ListRefreshStateValue> list_refresh_state;
         std::optional<ListsAutoupdate> lists_autoupdate_config;
+        std::optional<AcceptShrink> list_shrink_acceptance;
+        std::optional<LastRefreshShrinkRejection> list_shrink_rejection;
+        std::optional<std::string> list_source_format;
+        std::optional<ListSourcePreviewEntry> list_source_preview_entry;
+        std::optional<ListSourcePreviewErrorElement> list_source_preview_error;
+        std::optional<ListSourcePreviewRequest> list_source_preview_request;
+        std::optional<ListSourcePreviewResponse> list_source_preview_response;
+        std::optional<ShrinkPolicy> list_source_shrink_policy;
         std::optional<LogLevel> log_level;
         std::optional<LogSettings> log_settings;
         std::optional<LogSettingsRequest> log_settings_request;
@@ -2184,6 +2602,9 @@ namespace api {
         std::optional<NfqwsActionResult> nfqws_action_result;
         std::optional<NfqwsFileEntryElement> nfqws_file_entry;
         std::optional<NfqwsStatus> nfqws_status;
+        std::optional<NotificationDismissalState> notification_dismissal_state;
+        std::optional<NotificationDismissRequest> notification_dismiss_request;
+        std::optional<NotificationsResponse> notifications_response;
         std::optional<OkResponse> ok_response;
         std::optional<OutboundElement> outbound;
         std::optional<OutboundGroupElement> outbound_group;
@@ -2213,17 +2634,25 @@ namespace api {
         std::optional<Retry> retry_config;
         std::optional<Route> route_config;
         std::optional<RouterInfo> router_info;
+        std::optional<RouterMetrics> router_metrics;
         std::optional<RouteRuleElement> route_rule;
         std::optional<RouteTableCheck> route_table_check;
         std::optional<RoutingHealthErrorResponse> routing_health_error_response;
         std::optional<RoutingHealthResponse> routing_health_response;
+        std::optional<RoutingTestConnection> routing_test_connection;
+        std::optional<RoutingTestConnections> routing_test_connections;
         std::optional<RoutingTestEntry> routing_test_entry;
         std::optional<Evaluation> routing_test_evaluation;
+        std::optional<RoutingTestFirewallCounterElement> routing_test_firewall_counter;
+        std::optional<FirewallCounters> routing_test_firewall_counters;
+        std::optional<RoutingTestHttpProbe> routing_test_http_probe;
         std::optional<KernelRoute> routing_test_kernel_route;
         std::optional<RouteStatus> routing_test_kernel_route_status;
         std::optional<ListMatch> routing_test_list_match;
         std::optional<RoutingTestNfqws> routing_test_nfqws;
         std::optional<RoutingTestNfqwsMatchElement> routing_test_nfqws_match;
+        std::optional<RoutingTestPolicyRuleElement> routing_test_policy_rule;
+        std::optional<PolicyRules> routing_test_policy_rules;
         std::optional<RoutingTestRequest> routing_test_request;
         std::optional<RoutingTestResponse> routing_test_response;
         std::optional<RoutingTestRuleDiagnosticElement> routing_test_rule_diagnostic;
@@ -2252,18 +2681,23 @@ namespace api {
         std::optional<StatusEventConnections> status_event_connections;
         std::optional<StatusEventInterfaces> status_event_interfaces;
         std::optional<StatusEventInterfaceTraffic> status_event_interface_traffic;
+        std::optional<StatusEventNotificationState> status_event_notification_state;
         std::optional<StatusEventOutbounds> status_event_outbounds;
         std::optional<StatusEventService> status_event_service;
         std::optional<StatusEventSnapshot> status_event_snapshot;
+        std::optional<StatusEventSubscriptions> status_event_subscriptions;
         std::optional<SubscriptionApplyRequest> subscription_apply_request;
         std::optional<SubscriptionApplyResponse> subscription_apply_response;
         std::optional<SubscriptionApplyResultElement> subscription_apply_result;
         std::optional<SubscriptionApplySelectionElement> subscription_apply_selection;
         std::optional<SubscriptionIdRequest> subscription_id_request;
+        std::optional<SubscriptionNoticeElement> subscription_notice;
+        std::optional<Kind> subscription_notice_kind;
         std::optional<SubscriptionPreviewCandidate> subscription_preview_candidate;
         std::optional<SubscriptionPreviewRequest> subscription_preview_request;
         std::optional<SubscriptionPreviewResponse> subscription_preview_response;
         std::optional<SubscriptionRenameRequest> subscription_rename_request;
+        std::optional<SubscriptionSettingsRequest> subscription_settings_request;
         std::optional<SubscriptionSourceRequest> subscription_source_request;
         std::optional<SystemUpdateLocalStatus> system_update_local_status;
         std::optional<SystemUpdateStatus> system_update_status;
@@ -2276,6 +2710,8 @@ namespace api {
         std::optional<TransportExitCheckProbe> transport_exit_check_probe;
         std::optional<TransportExitCheckRequest> transport_exit_check_request;
         std::optional<TransportExitCheckResponse> transport_exit_check_response;
+        std::optional<TransportGeoUpdate> transport_geo_update;
+        std::optional<TransportGeoUpdateResponse> transport_geo_update_response;
         std::optional<LinkedOutbound> transport_linked_outbound_ensure;
         std::optional<TransportManagerSettings> transport_manager_settings;
         std::optional<TransportPath> transport_path;
@@ -2285,6 +2721,7 @@ namespace api {
         std::optional<TransportStatus> transport_status;
         std::optional<TunnelProbe> tunnel_probe_config;
         std::optional<TunnelProbeHostRequest> tunnel_probe_host_request;
+        std::optional<TunnelProbeHostReview> tunnel_probe_host_review;
         std::optional<TunnelProbeHostsResponse> tunnel_probe_hosts_response;
         std::optional<TunnelProbeStateResponse> tunnel_probe_state_response;
         std::optional<UiPreferences> ui_preferences_config;
@@ -2332,6 +2769,9 @@ void to_json(json & j, const BackupRollbackAvailability & x);
 
 void from_json(const json & j, CacheGeneration & x);
 void to_json(json & j, const CacheGeneration & x);
+
+void from_json(const json & j, LastRefreshShrinkRejection & x);
+void to_json(json & j, const LastRefreshShrinkRejection & x);
 
 void from_json(const json & j, CacheMetadata & x);
 void to_json(json & j, const CacheMetadata & x);
@@ -2416,6 +2856,9 @@ void to_json(json & j, const Iproute & x);
 
 void from_json(const json & j, ListRefresh & x);
 void to_json(json & j, const ListRefresh & x);
+
+void from_json(const json & j, ShrinkPolicy & x);
+void to_json(json & j, const ShrinkPolicy & x);
 
 void from_json(const json & j, ListConfigValue & x);
 void to_json(json & j, const ListConfigValue & x);
@@ -2531,6 +2974,15 @@ void to_json(json & j, const HealthResponse & x);
 void from_json(const json & j, InterfaceNames & x);
 void to_json(json & j, const InterfaceNames & x);
 
+void from_json(const json & j, ListContentImportRequest & x);
+void to_json(json & j, const ListContentImportRequest & x);
+
+void from_json(const json & j, ListSourcePreviewErrorElement & x);
+void to_json(json & j, const ListSourcePreviewErrorElement & x);
+
+void from_json(const json & j, ListContentImportResponse & x);
+void to_json(json & j, const ListContentImportResponse & x);
+
 void from_json(const json & j, ListDeleteTargetElement & x);
 void to_json(json & j, const ListDeleteTargetElement & x);
 
@@ -2543,11 +2995,32 @@ void to_json(json & j, const ListDeleteStageSummaryClass & x);
 void from_json(const json & j, ListDeleteStageResponse & x);
 void to_json(json & j, const ListDeleteStageResponse & x);
 
+void from_json(const json & j, ListPageItem & x);
+void to_json(json & j, const ListPageItem & x);
+
+void from_json(const json & j, ListPage & x);
+void to_json(json & j, const ListPage & x);
+
+void from_json(const json & j, ListQueryRequest & x);
+void to_json(json & j, const ListQueryRequest & x);
+
+void from_json(const json & j, AcceptShrink & x);
+void to_json(json & j, const AcceptShrink & x);
+
 void from_json(const json & j, ListRefreshRequest & x);
 void to_json(json & j, const ListRefreshRequest & x);
 
 void from_json(const json & j, ListRefreshResponse & x);
 void to_json(json & j, const ListRefreshResponse & x);
+
+void from_json(const json & j, ListSourcePreviewEntry & x);
+void to_json(json & j, const ListSourcePreviewEntry & x);
+
+void from_json(const json & j, ListSourcePreviewRequest & x);
+void to_json(json & j, const ListSourcePreviewRequest & x);
+
+void from_json(const json & j, ListSourcePreviewResponse & x);
+void to_json(json & j, const ListSourcePreviewResponse & x);
 
 void from_json(const json & j, LogSettings & x);
 void to_json(json & j, const LogSettings & x);
@@ -2633,6 +3106,18 @@ void to_json(json & j, const NfqwsActionResult & x);
 void from_json(const json & j, NfqwsStatus & x);
 void to_json(json & j, const NfqwsStatus & x);
 
+void from_json(const json & j, NotificationDismissRequest & x);
+void to_json(json & j, const NotificationDismissRequest & x);
+
+void from_json(const json & j, NotificationDismissalState & x);
+void to_json(json & j, const NotificationDismissalState & x);
+
+void from_json(const json & j, SubscriptionNoticeElement & x);
+void to_json(json & j, const SubscriptionNoticeElement & x);
+
+void from_json(const json & j, NotificationsResponse & x);
+void to_json(json & j, const NotificationsResponse & x);
+
 void from_json(const json & j, OkResponse & x);
 void to_json(json & j, const OkResponse & x);
 
@@ -2693,11 +3178,26 @@ void to_json(json & j, const RouteTableCheck & x);
 void from_json(const json & j, RouterInfo & x);
 void to_json(json & j, const RouterInfo & x);
 
+void from_json(const json & j, RouterMetrics & x);
+void to_json(json & j, const RouterMetrics & x);
+
 void from_json(const json & j, RoutingHealthErrorResponse & x);
 void to_json(json & j, const RoutingHealthErrorResponse & x);
 
 void from_json(const json & j, RoutingHealthResponse & x);
 void to_json(json & j, const RoutingHealthResponse & x);
+
+void from_json(const json & j, RoutingTestConnection & x);
+void to_json(json & j, const RoutingTestConnection & x);
+
+void from_json(const json & j, RoutingTestConnections & x);
+void to_json(json & j, const RoutingTestConnections & x);
+
+void from_json(const json & j, RoutingTestFirewallCounterElement & x);
+void to_json(json & j, const RoutingTestFirewallCounterElement & x);
+
+void from_json(const json & j, FirewallCounters & x);
+void to_json(json & j, const FirewallCounters & x);
 
 void from_json(const json & j, KernelRoute & x);
 void to_json(json & j, const KernelRoute & x);
@@ -2705,8 +3205,17 @@ void to_json(json & j, const KernelRoute & x);
 void from_json(const json & j, ListMatch & x);
 void to_json(json & j, const ListMatch & x);
 
+void from_json(const json & j, RoutingTestPolicyRuleElement & x);
+void to_json(json & j, const RoutingTestPolicyRuleElement & x);
+
+void from_json(const json & j, PolicyRules & x);
+void to_json(json & j, const PolicyRules & x);
+
 void from_json(const json & j, RoutingTestEntry & x);
 void to_json(json & j, const RoutingTestEntry & x);
+
+void from_json(const json & j, RoutingTestHttpProbe & x);
+void to_json(json & j, const RoutingTestHttpProbe & x);
 
 void from_json(const json & j, RoutingTestNfqwsMatchElement & x);
 void to_json(json & j, const RoutingTestNfqwsMatchElement & x);
@@ -2777,6 +3286,9 @@ void to_json(json & j, const StatusEventInterfaceTraffic & x);
 void from_json(const json & j, StatusEventInterfaces & x);
 void to_json(json & j, const StatusEventInterfaces & x);
 
+void from_json(const json & j, StatusEventNotificationState & x);
+void to_json(json & j, const StatusEventNotificationState & x);
+
 void from_json(const json & j, StatusEventOutbounds & x);
 void to_json(json & j, const StatusEventOutbounds & x);
 
@@ -2785,6 +3297,9 @@ void to_json(json & j, const StatusEventService & x);
 
 void from_json(const json & j, StatusEventSnapshot & x);
 void to_json(json & j, const StatusEventSnapshot & x);
+
+void from_json(const json & j, StatusEventSubscriptions & x);
+void to_json(json & j, const StatusEventSubscriptions & x);
 
 void from_json(const json & j, SubscriptionApplySelectionElement & x);
 void to_json(json & j, const SubscriptionApplySelectionElement & x);
@@ -2812,6 +3327,9 @@ void to_json(json & j, const SubscriptionPreviewResponse & x);
 
 void from_json(const json & j, SubscriptionRenameRequest & x);
 void to_json(json & j, const SubscriptionRenameRequest & x);
+
+void from_json(const json & j, SubscriptionSettingsRequest & x);
+void to_json(json & j, const SubscriptionSettingsRequest & x);
 
 void from_json(const json & j, SubscriptionSourceRequest & x);
 void to_json(json & j, const SubscriptionSourceRequest & x);
@@ -2858,6 +3376,12 @@ void to_json(json & j, const TransportExitCheckRequest & x);
 void from_json(const json & j, TransportExitCheckResponse & x);
 void to_json(json & j, const TransportExitCheckResponse & x);
 
+void from_json(const json & j, TransportGeoUpdate & x);
+void to_json(json & j, const TransportGeoUpdate & x);
+
+void from_json(const json & j, TransportGeoUpdateResponse & x);
+void to_json(json & j, const TransportGeoUpdateResponse & x);
+
 void from_json(const json & j, TransportManagerSettings & x);
 void to_json(json & j, const TransportManagerSettings & x);
 
@@ -2875,6 +3399,9 @@ void to_json(json & j, const TransportsEnvironment & x);
 
 void from_json(const json & j, TunnelProbeHostRequest & x);
 void to_json(json & j, const TunnelProbeHostRequest & x);
+
+void from_json(const json & j, TunnelProbeHostReview & x);
+void to_json(json & j, const TunnelProbeHostReview & x);
 
 void from_json(const json & j, TunnelProbeHostsResponse & x);
 void to_json(json & j, const TunnelProbeHostsResponse & x);
@@ -2930,6 +3457,9 @@ void to_json(json & j, const SelectionMode & x);
 void from_json(const json & j, OutboundType & x);
 void to_json(json & j, const OutboundType & x);
 
+void from_json(const json & j, FailurePolicy & x);
+void to_json(json & j, const FailurePolicy & x);
+
 void from_json(const json & j, ConfigUpdateResponseStatus & x);
 void to_json(json & j, const ConfigUpdateResponseStatus & x);
 
@@ -2980,6 +3510,15 @@ void to_json(json & j, const HealthResponseStatus & x);
 
 void from_json(const json & j, CatalogStatus & x);
 void to_json(json & j, const CatalogStatus & x);
+
+void from_json(const json & j, Sort & x);
+void to_json(json & j, const Sort & x);
+
+void from_json(const json & j, ListSourcePreviewEntryType & x);
+void to_json(json & j, const ListSourcePreviewEntryType & x);
+
+void from_json(const json & j, ListSourcePreviewResponseStatus & x);
+void to_json(json & j, const ListSourcePreviewResponseStatus & x);
 
 void from_json(const json & j, LogLevel & x);
 void to_json(json & j, const LogLevel & x);
@@ -3119,6 +3658,9 @@ void to_json(json & j, const Command & x);
 void from_json(const json & j, NfqwsFileEntryCategory & x);
 void to_json(json & j, const NfqwsFileEntryCategory & x);
 
+void from_json(const json & j, Kind & x);
+void to_json(json & j, const Kind & x);
+
 void from_json(const json & j, LastOutcome & x);
 void to_json(json & j, const LastOutcome & x);
 
@@ -3128,8 +3670,8 @@ void to_json(json & j, const PpeDeoffloadCapability & x);
 void from_json(const json & j, PpeDeoffloadHealthState & x);
 void to_json(json & j, const PpeDeoffloadHealthState & x);
 
-void from_json(const json & j, Reason & x);
-void to_json(json & j, const Reason & x);
+void from_json(const json & j, RegistryCheckResponseReason & x);
+void to_json(json & j, const RegistryCheckResponseReason & x);
 
 void from_json(const json & j, BlockedReason & x);
 void to_json(json & j, const BlockedReason & x);
@@ -3152,11 +3694,38 @@ void to_json(json & j, const TtlBypassState & x);
 void from_json(const json & j, Evaluation & x);
 void to_json(json & j, const Evaluation & x);
 
+void from_json(const json & j, RoutingTestFirewallCounterAction & x);
+void to_json(json & j, const RoutingTestFirewallCounterAction & x);
+
+void from_json(const json & j, Family & x);
+void to_json(json & j, const Family & x);
+
+void from_json(const json & j, RoutingTestFirewallCountersScope & x);
+void to_json(json & j, const RoutingTestFirewallCountersScope & x);
+
+void from_json(const json & j, RoutingTestFirewallCountersStatus & x);
+void to_json(json & j, const RoutingTestFirewallCountersStatus & x);
+
 void from_json(const json & j, RouteStatus & x);
 void to_json(json & j, const RouteStatus & x);
 
+void from_json(const json & j, RoutingTestPolicyRulesStatus & x);
+void to_json(json & j, const RoutingTestPolicyRulesStatus & x);
+
 void from_json(const json & j, RoutingTestUnknownConditionElement & x);
 void to_json(json & j, const RoutingTestUnknownConditionElement & x);
+
+void from_json(const json & j, Method & x);
+void to_json(json & j, const Method & x);
+
+void from_json(const json & j, RoutingTestHttpProbeReason & x);
+void to_json(json & j, const RoutingTestHttpProbeReason & x);
+
+void from_json(const json & j, RoutingTestHttpProbeScope & x);
+void to_json(json & j, const RoutingTestHttpProbeScope & x);
+
+void from_json(const json & j, RoutingTestHttpProbeStatus & x);
+void to_json(json & j, const RoutingTestHttpProbeStatus & x);
 
 void from_json(const json & j, RoutingTestNfqwsMatchRole & x);
 void to_json(json & j, const RoutingTestNfqwsMatchRole & x);
@@ -3197,6 +3766,9 @@ void to_json(json & j, const StatusEventInterfaceTrafficType & x);
 void from_json(const json & j, StatusEventInterfacesType & x);
 void to_json(json & j, const StatusEventInterfacesType & x);
 
+void from_json(const json & j, StatusEventNotificationStateType & x);
+void to_json(json & j, const StatusEventNotificationStateType & x);
+
 void from_json(const json & j, StatusEventOutboundsType & x);
 void to_json(json & j, const StatusEventOutboundsType & x);
 
@@ -3205,6 +3777,9 @@ void to_json(json & j, const StatusEventServiceType & x);
 
 void from_json(const json & j, StatusEventSnapshotType & x);
 void to_json(json & j, const StatusEventSnapshotType & x);
+
+void from_json(const json & j, StatusEventSubscriptionsType & x);
+void to_json(json & j, const StatusEventSubscriptionsType & x);
 
 void from_json(const json & j, Outcome & x);
 void to_json(json & j, const Outcome & x);
@@ -3283,12 +3858,20 @@ struct adl_serializer<std::variant<std::vector<keen_pbr3::api::NfqwsFileEntryEle
 namespace keen_pbr3 {
 namespace api {
     inline void from_json(const json & j, ApiConfig& x) {
+        x._config_unknown_fields = nullptr;
+        if (j.is_object()) {
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                if (it.key() == "enabled" || it.key() == "listen") continue;
+                if (x._config_unknown_fields.is_null()) x._config_unknown_fields = json::object();
+                x._config_unknown_fields[it.key()] = it.value();
+            }
+        }
         x.enabled = get_stack_optional<bool>(j, "enabled");
         x.listen = get_stack_optional<std::string>(j, "listen");
     }
 
     inline void to_json(json & j, const ApiConfig & x) {
-        j = json::object();
+        j = x._config_unknown_fields.is_object() ? x._config_unknown_fields : json::object();
         j["enabled"] = x.enabled;
         j["listen"] = x.listen;
     }
@@ -3391,6 +3974,7 @@ namespace api {
         x.nfqws = get_stack_optional<std::map<std::string, nlohmann::json>>(j, "nfqws");
         x.outbounds = get_stack_optional<std::vector<std::map<std::string, nlohmann::json>>>(j, "outbounds");
         x.route = get_stack_optional<std::map<std::string, nlohmann::json>>(j, "route");
+        x.subscriptions = get_stack_optional<std::vector<std::map<std::string, nlohmann::json>>>(j, "subscriptions");
         x.transports = get_stack_optional<std::map<std::string, nlohmann::json>>(j, "transports");
     }
 
@@ -3402,6 +3986,7 @@ namespace api {
         j["nfqws"] = x.nfqws;
         j["outbounds"] = x.outbounds;
         j["route"] = x.route;
+        j["subscriptions"] = x.subscriptions;
         j["transports"] = x.transports;
     }
 
@@ -3429,6 +4014,7 @@ namespace api {
     }
 
     inline void from_json(const json & j, BackupDocument& x) {
+        x.config_schema_version = get_stack_optional<int64_t>(j, "config_schema_version");
         x.created_at = get_stack_optional<int64_t>(j, "created_at");
         x.data = j.at("data").get<Data>();
         x.format = j.at("format").get<Format>();
@@ -3438,6 +4024,7 @@ namespace api {
 
     inline void to_json(json & j, const BackupDocument & x) {
         j = json::object();
+        j["config_schema_version"] = x.config_schema_version;
         j["created_at"] = x.created_at;
         j["data"] = x.data;
         j["format"] = x.format;
@@ -3476,6 +4063,25 @@ namespace api {
         j["size"] = x.size;
     }
 
+    inline void from_json(const json & j, LastRefreshShrinkRejection& x) {
+        x.candidate_entries = j.at("candidate_entries").get<int64_t>();
+        x.candidate_sha256 = j.at("candidate_sha256").get<std::string>();
+        x.min_previous_entries = j.at("min_previous_entries").get<int64_t>();
+        x.min_retained_fraction = j.at("min_retained_fraction").get<double>();
+        x.previous_entries = j.at("previous_entries").get<int64_t>();
+        x.previous_sha256 = j.at("previous_sha256").get<std::string>();
+    }
+
+    inline void to_json(json & j, const LastRefreshShrinkRejection & x) {
+        j = json::object();
+        j["candidate_entries"] = x.candidate_entries;
+        j["candidate_sha256"] = x.candidate_sha256;
+        j["min_previous_entries"] = x.min_previous_entries;
+        j["min_retained_fraction"] = x.min_retained_fraction;
+        j["previous_entries"] = x.previous_entries;
+        j["previous_sha256"] = x.previous_sha256;
+    }
+
     inline void from_json(const json & j, CacheMetadata& x) {
         x.cidrs = get_stack_optional<int64_t>(j, "cidrs");
         x.current = get_stack_optional<CacheGeneration>(j, "current");
@@ -3487,8 +4093,11 @@ namespace api {
         x.last_refresh_attempt = get_stack_optional<std::string>(j, "last_refresh_attempt");
         x.last_refresh_detour = get_stack_optional<std::string>(j, "last_refresh_detour");
         x.last_refresh_error = get_stack_optional<std::string>(j, "last_refresh_error");
+        x.last_refresh_shrink_rejection = get_stack_optional<LastRefreshShrinkRejection>(j, "last_refresh_shrink_rejection");
         x.last_refresh_url = get_stack_optional<std::string>(j, "last_refresh_url");
         x.previous = get_stack_optional<CacheGeneration>(j, "previous");
+        x.source_decoder_revision = get_stack_optional<int64_t>(j, "source_decoder_revision");
+        x.source_format = get_stack_optional<std::string>(j, "source_format");
         x.srs_decoder_revision = get_stack_optional<int64_t>(j, "srs_decoder_revision");
         x.url = get_stack_optional<std::string>(j, "url");
     }
@@ -3505,8 +4114,11 @@ namespace api {
         j["last_refresh_attempt"] = x.last_refresh_attempt;
         j["last_refresh_detour"] = x.last_refresh_detour;
         j["last_refresh_error"] = x.last_refresh_error;
+        j["last_refresh_shrink_rejection"] = x.last_refresh_shrink_rejection;
         j["last_refresh_url"] = x.last_refresh_url;
         j["previous"] = x.previous;
+        j["source_decoder_revision"] = x.source_decoder_revision;
+        j["source_format"] = x.source_format;
         j["srs_decoder_revision"] = x.srs_decoder_revision;
         j["url"] = x.url;
     }
@@ -3772,6 +4384,14 @@ namespace api {
     }
 
     inline void from_json(const json & j, CircuitBreakerConfig& x) {
+        x._config_unknown_fields = nullptr;
+        if (j.is_object()) {
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                if (it.key() == "failure_threshold" || it.key() == "half_open_max_requests" || it.key() == "success_threshold" || it.key() == "timeout_ms") continue;
+                if (x._config_unknown_fields.is_null()) x._config_unknown_fields = json::object();
+                x._config_unknown_fields[it.key()] = it.value();
+            }
+        }
         x.failure_threshold = get_stack_optional<int64_t>(j, "failure_threshold");
         x.half_open_max_requests = get_stack_optional<int64_t>(j, "half_open_max_requests");
         x.success_threshold = get_stack_optional<int64_t>(j, "success_threshold");
@@ -3779,7 +4399,7 @@ namespace api {
     }
 
     inline void to_json(json & j, const CircuitBreakerConfig & x) {
-        j = json::object();
+        j = x._config_unknown_fields.is_object() ? x._config_unknown_fields : json::object();
         j["failure_threshold"] = x.failure_threshold;
         j["half_open_max_requests"] = x.half_open_max_requests;
         j["success_threshold"] = x.success_threshold;
@@ -3787,17 +4407,33 @@ namespace api {
     }
 
     inline void from_json(const json & j, ClientDnsEnforcement& x) {
+        x._config_unknown_fields = nullptr;
+        if (j.is_object()) {
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                if (it.key() == "block_dot" || it.key() == "enabled") continue;
+                if (x._config_unknown_fields.is_null()) x._config_unknown_fields = json::object();
+                x._config_unknown_fields[it.key()] = it.value();
+            }
+        }
         x.block_dot = get_stack_optional<bool>(j, "block_dot");
         x.enabled = get_stack_optional<bool>(j, "enabled");
     }
 
     inline void to_json(json & j, const ClientDnsEnforcement & x) {
-        j = json::object();
+        j = x._config_unknown_fields.is_object() ? x._config_unknown_fields : json::object();
         j["block_dot"] = x.block_dot;
         j["enabled"] = x.enabled;
     }
 
     inline void from_json(const json & j, Daemon& x) {
+        x._config_unknown_fields = nullptr;
+        if (j.is_object()) {
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                if (it.key() == "cache_dir" || it.key() == "clear_dynamic_sets_on_apply" || it.key() == "firewall_backend" || it.key() == "firewall_verify_max_bytes" || it.key() == "ipset_hashsize" || it.key() == "ipset_maxelem" || it.key() == "ipv6_enabled" || it.key() == "max_file_size_bytes" || it.key() == "meta_udp443_policy" || it.key() == "pid_file" || it.key() == "ppe_deoffload_mode" || it.key() == "ppe_deoffload_quic_enabled" || it.key() == "reconnect_owned_flows_on_routing_change_lists" || it.key() == "reconnect_unmarked_flows_on_routing_change" || it.key() == "reuse_static_sets_on_runtime_refresh" || it.key() == "skip_marked_packets" || it.key() == "strict_enforcement" || it.key() == "ttl_bypass_enabled") continue;
+                if (x._config_unknown_fields.is_null()) x._config_unknown_fields = json::object();
+                x._config_unknown_fields[it.key()] = it.value();
+            }
+        }
         x.cache_dir = get_stack_optional<std::string>(j, "cache_dir");
         x.clear_dynamic_sets_on_apply = get_stack_optional<bool>(j, "clear_dynamic_sets_on_apply");
         x.firewall_backend = get_stack_optional<DaemonConfigFirewallBackend>(j, "firewall_backend");
@@ -3819,7 +4455,7 @@ namespace api {
     }
 
     inline void to_json(json & j, const Daemon & x) {
-        j = json::object();
+        j = x._config_unknown_fields.is_object() ? x._config_unknown_fields : json::object();
         j["cache_dir"] = x.cache_dir;
         j["clear_dynamic_sets_on_apply"] = x.clear_dynamic_sets_on_apply;
         j["firewall_backend"] = x.firewall_backend;
@@ -3841,17 +4477,33 @@ namespace api {
     }
 
     inline void from_json(const json & j, DnsTestServer& x) {
+        x._config_unknown_fields = nullptr;
+        if (j.is_object()) {
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                if (it.key() == "answer_ipv4" || it.key() == "listen") continue;
+                if (x._config_unknown_fields.is_null()) x._config_unknown_fields = json::object();
+                x._config_unknown_fields[it.key()] = it.value();
+            }
+        }
         x.answer_ipv4 = get_stack_optional<std::string>(j, "answer_ipv4");
         x.listen = j.at("listen").get<std::string>();
     }
 
     inline void to_json(json & j, const DnsTestServer & x) {
-        j = json::object();
+        j = x._config_unknown_fields.is_object() ? x._config_unknown_fields : json::object();
         j["answer_ipv4"] = x.answer_ipv4;
         j["listen"] = x.listen;
     }
 
     inline void from_json(const json & j, DnsRuleElement& x) {
+        x._config_unknown_fields = nullptr;
+        if (j.is_object()) {
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                if (it.key() == "allow_domain_rebinding" || it.key() == "display_name" || it.key() == "enabled" || it.key() == "id" || it.key() == "list" || it.key() == "server") continue;
+                if (x._config_unknown_fields.is_null()) x._config_unknown_fields = json::object();
+                x._config_unknown_fields[it.key()] = it.value();
+            }
+        }
         x.allow_domain_rebinding = get_stack_optional<bool>(j, "allow_domain_rebinding");
         x.display_name = get_stack_optional<std::string>(j, "display_name");
         x.enabled = get_stack_optional<bool>(j, "enabled");
@@ -3861,7 +4513,7 @@ namespace api {
     }
 
     inline void to_json(json & j, const DnsRuleElement & x) {
-        j = json::object();
+        j = x._config_unknown_fields.is_object() ? x._config_unknown_fields : json::object();
         j["allow_domain_rebinding"] = x.allow_domain_rebinding;
         j["display_name"] = x.display_name;
         j["enabled"] = x.enabled;
@@ -3871,82 +4523,161 @@ namespace api {
     }
 
     inline void from_json(const json & j, DnsServerElement& x) {
+        x._config_unknown_fields = nullptr;
+        if (j.is_object()) {
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                if (it.key() == "address" || it.key() == "detour" || it.key() == "display_name" || it.key() == "domains" || it.key() == "tag" || it.key() == "type") continue;
+                if (x._config_unknown_fields.is_null()) x._config_unknown_fields = json::object();
+                x._config_unknown_fields[it.key()] = it.value();
+            }
+        }
         x.address = get_stack_optional<std::string>(j, "address");
         x.detour = get_stack_optional<std::string>(j, "detour");
         x.display_name = get_stack_optional<std::string>(j, "display_name");
+        x.domains = get_stack_optional<std::vector<std::string>>(j, "domains");
         x.tag = j.at("tag").get<std::string>();
         x.type = get_stack_optional<DnsServerType>(j, "type");
     }
 
     inline void to_json(json & j, const DnsServerElement & x) {
-        j = json::object();
+        j = x._config_unknown_fields.is_object() ? x._config_unknown_fields : json::object();
         j["address"] = x.address;
         j["detour"] = x.detour;
         j["display_name"] = x.display_name;
+        j["domains"] = x.domains;
         j["tag"] = x.tag;
         j["type"] = x.type;
     }
 
     inline void from_json(const json & j, SystemResolver& x) {
+        x._config_unknown_fields = nullptr;
+        if (j.is_object()) {
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                if (it.key() == "address") continue;
+                if (x._config_unknown_fields.is_null()) x._config_unknown_fields = json::object();
+                x._config_unknown_fields[it.key()] = it.value();
+            }
+        }
         x.address = j.at("address").get<std::string>();
     }
 
     inline void to_json(json & j, const SystemResolver & x) {
-        j = json::object();
+        j = x._config_unknown_fields.is_object() ? x._config_unknown_fields : json::object();
         j["address"] = x.address;
     }
 
     inline void from_json(const json & j, Dns& x) {
+        x._config_unknown_fields = nullptr;
+        if (j.is_object()) {
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                if (it.key() == "client_dns_enforcement" || it.key() == "dns_test_server" || it.key() == "fallback" || it.key() == "firefox_doh_canary" || it.key() == "rules" || it.key() == "servers" || it.key() == "system_resolver") continue;
+                if (x._config_unknown_fields.is_null()) x._config_unknown_fields = json::object();
+                x._config_unknown_fields[it.key()] = it.value();
+            }
+        }
         x.client_dns_enforcement = get_stack_optional<ClientDnsEnforcement>(j, "client_dns_enforcement");
         x.dns_test_server = get_stack_optional<DnsTestServer>(j, "dns_test_server");
         x.fallback = get_stack_optional<std::vector<std::string>>(j, "fallback");
+        x.firefox_doh_canary = get_stack_optional<bool>(j, "firefox_doh_canary");
         x.rules = get_stack_optional<std::vector<DnsRuleElement>>(j, "rules");
         x.servers = get_stack_optional<std::vector<DnsServerElement>>(j, "servers");
         x.system_resolver = get_stack_optional<SystemResolver>(j, "system_resolver");
     }
 
     inline void to_json(json & j, const Dns & x) {
-        j = json::object();
+        j = x._config_unknown_fields.is_object() ? x._config_unknown_fields : json::object();
         j["client_dns_enforcement"] = x.client_dns_enforcement;
         j["dns_test_server"] = x.dns_test_server;
         j["fallback"] = x.fallback;
+        j["firefox_doh_canary"] = x.firefox_doh_canary;
         j["rules"] = x.rules;
         j["servers"] = x.servers;
         j["system_resolver"] = x.system_resolver;
     }
 
     inline void from_json(const json & j, Fwmark& x) {
+        x._config_unknown_fields = nullptr;
+        if (j.is_object()) {
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                if (it.key() == "mask" || it.key() == "start") continue;
+                if (x._config_unknown_fields.is_null()) x._config_unknown_fields = json::object();
+                x._config_unknown_fields[it.key()] = it.value();
+            }
+        }
         x.mask = get_stack_optional<std::string>(j, "mask");
         x.start = get_stack_optional<std::string>(j, "start");
     }
 
     inline void to_json(json & j, const Fwmark & x) {
-        j = json::object();
+        j = x._config_unknown_fields.is_object() ? x._config_unknown_fields : json::object();
         j["mask"] = x.mask;
         j["start"] = x.start;
     }
 
     inline void from_json(const json & j, Iproute& x) {
+        x._config_unknown_fields = nullptr;
+        if (j.is_object()) {
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                if (it.key() == "table_start") continue;
+                if (x._config_unknown_fields.is_null()) x._config_unknown_fields = json::object();
+                x._config_unknown_fields[it.key()] = it.value();
+            }
+        }
         x.table_start = get_stack_optional<int64_t>(j, "table_start");
     }
 
     inline void to_json(json & j, const Iproute & x) {
-        j = json::object();
+        j = x._config_unknown_fields.is_object() ? x._config_unknown_fields : json::object();
         j["table_start"] = x.table_start;
     }
 
     inline void from_json(const json & j, ListRefresh& x) {
+        x._config_unknown_fields = nullptr;
+        if (j.is_object()) {
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                if (it.key() == "detour" || it.key() == "fallback_detours") continue;
+                if (x._config_unknown_fields.is_null()) x._config_unknown_fields = json::object();
+                x._config_unknown_fields[it.key()] = it.value();
+            }
+        }
         x.detour = get_stack_optional<std::string>(j, "detour");
         x.fallback_detours = get_stack_optional<std::vector<std::string>>(j, "fallback_detours");
     }
 
     inline void to_json(json & j, const ListRefresh & x) {
-        j = json::object();
+        j = x._config_unknown_fields.is_object() ? x._config_unknown_fields : json::object();
         j["detour"] = x.detour;
         j["fallback_detours"] = x.fallback_detours;
     }
 
+    inline void from_json(const json & j, ShrinkPolicy& x) {
+        x._config_unknown_fields = nullptr;
+        if (j.is_object()) {
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                if (it.key() == "min_previous_entries" || it.key() == "min_retained_fraction") continue;
+                if (x._config_unknown_fields.is_null()) x._config_unknown_fields = json::object();
+                x._config_unknown_fields[it.key()] = it.value();
+            }
+        }
+        x.min_previous_entries = get_stack_optional<int64_t>(j, "min_previous_entries");
+        x.min_retained_fraction = get_stack_optional<double>(j, "min_retained_fraction");
+    }
+
+    inline void to_json(json & j, const ShrinkPolicy & x) {
+        j = x._config_unknown_fields.is_object() ? x._config_unknown_fields : json::object();
+        j["min_previous_entries"] = x.min_previous_entries;
+        j["min_retained_fraction"] = x.min_retained_fraction;
+    }
+
     inline void from_json(const json & j, ListConfigValue& x) {
+        x._config_unknown_fields = nullptr;
+        if (j.is_object()) {
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                if (it.key() == "catalog_identity" || it.key() == "detour" || it.key() == "display_name" || it.key() == "domains" || it.key() == "fallback_detours" || it.key() == "file" || it.key() == "ip_cidrs" || it.key() == "refresh_detour_mode" || it.key() == "shrink_policy" || it.key() == "source_format" || it.key() == "ttl_ms" || it.key() == "url") continue;
+                if (x._config_unknown_fields.is_null()) x._config_unknown_fields = json::object();
+                x._config_unknown_fields[it.key()] = it.value();
+            }
+        }
         x.catalog_identity = get_stack_optional<std::string>(j, "catalog_identity");
         x.detour = get_stack_optional<std::string>(j, "detour");
         x.display_name = get_stack_optional<std::string>(j, "display_name");
@@ -3955,12 +4686,14 @@ namespace api {
         x.file = get_stack_optional<std::string>(j, "file");
         x.ip_cidrs = get_stack_optional<std::vector<std::string>>(j, "ip_cidrs");
         x.refresh_detour_mode = get_stack_optional<RefreshDetourMode>(j, "refresh_detour_mode");
+        x.shrink_policy = get_stack_optional<ShrinkPolicy>(j, "shrink_policy");
+        x.source_format = get_stack_optional<std::string>(j, "source_format");
         x.ttl_ms = get_stack_optional<int64_t>(j, "ttl_ms");
         x.url = get_stack_optional<std::string>(j, "url");
     }
 
     inline void to_json(json & j, const ListConfigValue & x) {
-        j = json::object();
+        j = x._config_unknown_fields.is_object() ? x._config_unknown_fields : json::object();
         j["catalog_identity"] = x.catalog_identity;
         j["detour"] = x.detour;
         j["display_name"] = x.display_name;
@@ -3969,44 +4702,78 @@ namespace api {
         j["file"] = x.file;
         j["ip_cidrs"] = x.ip_cidrs;
         j["refresh_detour_mode"] = x.refresh_detour_mode;
+        j["shrink_policy"] = x.shrink_policy;
+        j["source_format"] = x.source_format;
         j["ttl_ms"] = x.ttl_ms;
         j["url"] = x.url;
     }
 
     inline void from_json(const json & j, ListsAutoupdate& x) {
+        x._config_unknown_fields = nullptr;
+        if (j.is_object()) {
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                if (it.key() == "cron" || it.key() == "enabled") continue;
+                if (x._config_unknown_fields.is_null()) x._config_unknown_fields = json::object();
+                x._config_unknown_fields[it.key()] = it.value();
+            }
+        }
         x.cron = get_stack_optional<std::string>(j, "cron");
         x.enabled = get_stack_optional<bool>(j, "enabled");
     }
 
     inline void to_json(json & j, const ListsAutoupdate & x) {
-        j = json::object();
+        j = x._config_unknown_fields.is_object() ? x._config_unknown_fields : json::object();
         j["cron"] = x.cron;
         j["enabled"] = x.enabled;
     }
 
     inline void from_json(const json & j, OutboundGroupElement& x) {
+        x._config_unknown_fields = nullptr;
+        if (j.is_object()) {
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                if (it.key() == "outbounds" || it.key() == "weight") continue;
+                if (x._config_unknown_fields.is_null()) x._config_unknown_fields = json::object();
+                x._config_unknown_fields[it.key()] = it.value();
+            }
+        }
         x.outbounds = j.at("outbounds").get<std::vector<std::string>>();
         x.weight = get_stack_optional<int64_t>(j, "weight");
     }
 
     inline void to_json(json & j, const OutboundGroupElement & x) {
-        j = json::object();
+        j = x._config_unknown_fields.is_object() ? x._config_unknown_fields : json::object();
         j["outbounds"] = x.outbounds;
         j["weight"] = x.weight;
     }
 
     inline void from_json(const json & j, Retry& x) {
+        x._config_unknown_fields = nullptr;
+        if (j.is_object()) {
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                if (it.key() == "attempts" || it.key() == "interval_ms") continue;
+                if (x._config_unknown_fields.is_null()) x._config_unknown_fields = json::object();
+                x._config_unknown_fields[it.key()] = it.value();
+            }
+        }
         x.attempts = get_stack_optional<int64_t>(j, "attempts");
         x.interval_ms = get_stack_optional<int64_t>(j, "interval_ms");
     }
 
     inline void to_json(json & j, const Retry & x) {
-        j = json::object();
+        j = x._config_unknown_fields.is_object() ? x._config_unknown_fields : json::object();
         j["attempts"] = x.attempts;
         j["interval_ms"] = x.interval_ms;
     }
 
     inline void from_json(const json & j, OutboundElement& x) {
+        x._config_unknown_fields = nullptr;
+        if (j.is_object()) {
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                if (it.key() == "circuit_breaker" || it.key() == "conntrack_on_switch" || it.key() == "display_name" || it.key() == "gateway" || it.key() == "gateway6" || it.key() == "interface" || it.key() == "interval_ms" || it.key() == "outbound_groups" || it.key() == "probe_timeout_ms" || it.key() == "retry" || it.key() == "selection_mode" || it.key() == "strict_enforcement" || it.key() == "table" || it.key() == "tag" || it.key() == "tolerance_ms" || it.key() == "type" || it.key() == "url") continue;
+                if (x._config_unknown_fields.is_null()) x._config_unknown_fields = json::object();
+                x._config_unknown_fields[it.key()] = it.value();
+            }
+        }
         x.circuit_breaker = get_stack_optional<CircuitBreakerConfig>(j, "circuit_breaker");
         x.conntrack_on_switch = get_stack_optional<ConntrackOnSwitch>(j, "conntrack_on_switch");
         x.display_name = get_stack_optional<std::string>(j, "display_name");
@@ -4027,7 +4794,7 @@ namespace api {
     }
 
     inline void to_json(json & j, const OutboundElement & x) {
-        j = json::object();
+        j = x._config_unknown_fields.is_object() ? x._config_unknown_fields : json::object();
         j["circuit_breaker"] = x.circuit_breaker;
         j["conntrack_on_switch"] = x.conntrack_on_switch;
         j["display_name"] = x.display_name;
@@ -4048,35 +4815,61 @@ namespace api {
     }
 
     inline void from_json(const json & j, InternalVpnServerElement& x) {
+        x._config_unknown_fields = nullptr;
+        if (j.is_object()) {
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                if (it.key() == "interface" || it.key() == "ndms_id" || it.key() == "process_clients") continue;
+                if (x._config_unknown_fields.is_null()) x._config_unknown_fields = json::object();
+                x._config_unknown_fields[it.key()] = it.value();
+            }
+        }
         x.interface = j.at("interface").get<std::string>();
         x.ndms_id = get_stack_optional<std::string>(j, "ndms_id");
         x.process_clients = j.at("process_clients").get<bool>();
     }
 
     inline void to_json(json & j, const InternalVpnServerElement & x) {
-        j = json::object();
+        j = x._config_unknown_fields.is_object() ? x._config_unknown_fields : json::object();
         j["interface"] = x.interface;
         j["ndms_id"] = x.ndms_id;
         j["process_clients"] = x.process_clients;
     }
 
     inline void from_json(const json & j, InternalVpnServiceElement& x) {
+        x._config_unknown_fields = nullptr;
+        if (j.is_object()) {
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                if (it.key() == "process_clients" || it.key() == "service_id") continue;
+                if (x._config_unknown_fields.is_null()) x._config_unknown_fields = json::object();
+                x._config_unknown_fields[it.key()] = it.value();
+            }
+        }
         x.process_clients = j.at("process_clients").get<bool>();
         x.service_id = j.at("service_id").get<std::string>();
     }
 
     inline void to_json(json & j, const InternalVpnServiceElement & x) {
-        j = json::object();
+        j = x._config_unknown_fields.is_object() ? x._config_unknown_fields : json::object();
         j["process_clients"] = x.process_clients;
         j["service_id"] = x.service_id;
     }
 
     inline void from_json(const json & j, RouteRuleElement& x) {
+        x._config_unknown_fields = nullptr;
+        if (j.is_object()) {
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                if (it.key() == "dest_addr" || it.key() == "dest_port" || it.key() == "display_name" || it.key() == "dscp" || it.key() == "enabled" || it.key() == "failure_policy" || it.key() == "fallback_outbound" || it.key() == "id" || it.key() == "list" || it.key() == "outbound" || it.key() == "proto" || it.key() == "src_addr" || it.key() == "src_port") continue;
+                if (x._config_unknown_fields.is_null()) x._config_unknown_fields = json::object();
+                x._config_unknown_fields[it.key()] = it.value();
+            }
+        }
         x.dest_addr = get_stack_optional<std::string>(j, "dest_addr");
         x.dest_port = get_stack_optional<std::string>(j, "dest_port");
         x.display_name = get_stack_optional<std::string>(j, "display_name");
         x.dscp = get_stack_optional<int64_t>(j, "dscp");
         x.enabled = get_stack_optional<bool>(j, "enabled");
+        x.failure_policy = get_stack_optional<FailurePolicy>(j, "failure_policy");
+        x.fallback_outbound = get_stack_optional<std::string>(j, "fallback_outbound");
         x.id = get_stack_optional<std::string>(j, "id");
         x.list = get_stack_optional<std::vector<std::string>>(j, "list");
         x.outbound = j.at("outbound").get<std::string>();
@@ -4086,12 +4879,14 @@ namespace api {
     }
 
     inline void to_json(json & j, const RouteRuleElement & x) {
-        j = json::object();
+        j = x._config_unknown_fields.is_object() ? x._config_unknown_fields : json::object();
         j["dest_addr"] = x.dest_addr;
         j["dest_port"] = x.dest_port;
         j["display_name"] = x.display_name;
         j["dscp"] = x.dscp;
         j["enabled"] = x.enabled;
+        j["failure_policy"] = x.failure_policy;
+        j["fallback_outbound"] = x.fallback_outbound;
         j["id"] = x.id;
         j["list"] = x.list;
         j["outbound"] = x.outbound;
@@ -4101,6 +4896,14 @@ namespace api {
     }
 
     inline void from_json(const json & j, Route& x) {
+        x._config_unknown_fields = nullptr;
+        if (j.is_object()) {
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                if (it.key() == "inbound_interfaces" || it.key() == "internal_vpn_servers" || it.key() == "internal_vpn_services" || it.key() == "rules") continue;
+                if (x._config_unknown_fields.is_null()) x._config_unknown_fields = json::object();
+                x._config_unknown_fields[it.key()] = it.value();
+            }
+        }
         x.inbound_interfaces = get_stack_optional<std::vector<std::string>>(j, "inbound_interfaces");
         x.internal_vpn_servers = get_stack_optional<std::vector<InternalVpnServerElement>>(j, "internal_vpn_servers");
         x.internal_vpn_services = get_stack_optional<std::vector<InternalVpnServiceElement>>(j, "internal_vpn_services");
@@ -4108,7 +4911,7 @@ namespace api {
     }
 
     inline void to_json(json & j, const Route & x) {
-        j = json::object();
+        j = x._config_unknown_fields.is_object() ? x._config_unknown_fields : json::object();
         j["inbound_interfaces"] = x.inbound_interfaces;
         j["internal_vpn_servers"] = x.internal_vpn_servers;
         j["internal_vpn_services"] = x.internal_vpn_services;
@@ -4116,6 +4919,14 @@ namespace api {
     }
 
     inline void from_json(const json & j, TunnelProbe& x) {
+        x._config_unknown_fields = nullptr;
+        if (j.is_object()) {
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                if (it.key() == "enabled" || it.key() == "interval_ms" || it.key() == "list" || it.key() == "max_probes_per_pass" || it.key() == "outbound" || it.key() == "require_registry_confirmation") continue;
+                if (x._config_unknown_fields.is_null()) x._config_unknown_fields = json::object();
+                x._config_unknown_fields[it.key()] = it.value();
+            }
+        }
         x.enabled = get_stack_optional<bool>(j, "enabled");
         x.interval_ms = get_stack_optional<int64_t>(j, "interval_ms");
         x.list = get_stack_optional<std::string>(j, "list");
@@ -4125,7 +4936,7 @@ namespace api {
     }
 
     inline void to_json(json & j, const TunnelProbe & x) {
-        j = json::object();
+        j = x._config_unknown_fields.is_object() ? x._config_unknown_fields : json::object();
         j["enabled"] = x.enabled;
         j["interval_ms"] = x.interval_ms;
         j["list"] = x.list;
@@ -4135,30 +4946,54 @@ namespace api {
     }
 
     inline void from_json(const json & j, PlainDnsTemplateElement& x) {
+        x._config_unknown_fields = nullptr;
+        if (j.is_object()) {
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                if (it.key() == "name" || it.key() == "primary_ipv4" || it.key() == "secondary_ipv4") continue;
+                if (x._config_unknown_fields.is_null()) x._config_unknown_fields = json::object();
+                x._config_unknown_fields[it.key()] = it.value();
+            }
+        }
         x.name = j.at("name").get<std::string>();
         x.primary_ipv4 = j.at("primary_ipv4").get<std::string>();
         x.secondary_ipv4 = get_stack_optional<std::string>(j, "secondary_ipv4");
     }
 
     inline void to_json(json & j, const PlainDnsTemplateElement & x) {
-        j = json::object();
+        j = x._config_unknown_fields.is_object() ? x._config_unknown_fields : json::object();
         j["name"] = x.name;
         j["primary_ipv4"] = x.primary_ipv4;
         j["secondary_ipv4"] = x.secondary_ipv4;
     }
 
     inline void from_json(const json & j, UiPreferences& x) {
+        x._config_unknown_fields = nullptr;
+        if (j.is_object()) {
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                if (it.key() == "hidden_native_interface_ids" || it.key() == "plain_dns_templates") continue;
+                if (x._config_unknown_fields.is_null()) x._config_unknown_fields = json::object();
+                x._config_unknown_fields[it.key()] = it.value();
+            }
+        }
         x.hidden_native_interface_ids = get_stack_optional<std::vector<std::string>>(j, "hidden_native_interface_ids");
         x.plain_dns_templates = get_stack_optional<std::vector<PlainDnsTemplateElement>>(j, "plain_dns_templates");
     }
 
     inline void to_json(json & j, const UiPreferences & x) {
-        j = json::object();
+        j = x._config_unknown_fields.is_object() ? x._config_unknown_fields : json::object();
         j["hidden_native_interface_ids"] = x.hidden_native_interface_ids;
         j["plain_dns_templates"] = x.plain_dns_templates;
     }
 
     inline void from_json(const json & j, ConfigObject& x) {
+        x._config_unknown_fields = nullptr;
+        if (j.is_object()) {
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                if (it.key() == "api" || it.key() == "daemon" || it.key() == "dns" || it.key() == "fwmark" || it.key() == "iproute" || it.key() == "list_refresh" || it.key() == "lists" || it.key() == "lists_autoupdate" || it.key() == "outbounds" || it.key() == "route" || it.key() == "schema_version" || it.key() == "tunnel_probe" || it.key() == "ui_preferences") continue;
+                if (x._config_unknown_fields.is_null()) x._config_unknown_fields = json::object();
+                x._config_unknown_fields[it.key()] = it.value();
+            }
+        }
         x.api = get_stack_optional<ApiConfig>(j, "api");
         x.daemon = get_stack_optional<Daemon>(j, "daemon");
         x.dns = get_stack_optional<Dns>(j, "dns");
@@ -4169,12 +5004,13 @@ namespace api {
         x.lists_autoupdate = get_stack_optional<ListsAutoupdate>(j, "lists_autoupdate");
         x.outbounds = get_stack_optional<std::vector<OutboundElement>>(j, "outbounds");
         x.route = get_stack_optional<Route>(j, "route");
+        x.schema_version = j.at("schema_version").get<int64_t>();
         x.tunnel_probe = get_stack_optional<TunnelProbe>(j, "tunnel_probe");
         x.ui_preferences = get_stack_optional<UiPreferences>(j, "ui_preferences");
     }
 
     inline void to_json(json & j, const ConfigObject & x) {
-        j = json::object();
+        j = x._config_unknown_fields.is_object() ? x._config_unknown_fields : json::object();
         j["api"] = x.api;
         j["daemon"] = x.daemon;
         j["dns"] = x.dns;
@@ -4185,6 +5021,7 @@ namespace api {
         j["lists_autoupdate"] = x.lists_autoupdate;
         j["outbounds"] = x.outbounds;
         j["route"] = x.route;
+        j["schema_version"] = x.schema_version;
         j["tunnel_probe"] = x.tunnel_probe;
         j["ui_preferences"] = x.ui_preferences;
     }
@@ -4194,6 +5031,7 @@ namespace api {
         x.last_detour = get_stack_optional<std::string>(j, "last_detour");
         x.last_error = get_stack_optional<std::string>(j, "last_error");
         x.last_updated = get_stack_optional<std::string>(j, "last_updated");
+        x.shrink_rejection = get_stack_optional<LastRefreshShrinkRejection>(j, "shrink_rejection");
     }
 
     inline void to_json(json & j, const ListRefreshStateValue & x) {
@@ -4202,6 +5040,7 @@ namespace api {
         j["last_detour"] = x.last_detour;
         j["last_error"] = x.last_error;
         j["last_updated"] = x.last_updated;
+        j["shrink_rejection"] = x.shrink_rejection;
     }
 
     inline void from_json(const json & j, ConfigStateResponse& x) {
@@ -4425,23 +5264,29 @@ namespace api {
     }
 
     inline void from_json(const json & j, ValidationErrorElement& x) {
+        x.code = get_stack_optional<std::string>(j, "code");
         x.message = j.at("message").get<std::string>();
+        x.params = get_stack_optional<std::map<std::string, std::string>>(j, "params");
         x.path = get_stack_optional<std::string>(j, "path");
     }
 
     inline void to_json(json & j, const ValidationErrorElement & x) {
         j = json::object();
+        j["code"] = x.code;
         j["message"] = x.message;
+        j["params"] = x.params;
         j["path"] = x.path;
     }
 
     inline void from_json(const json & j, ErrorResponse& x) {
+        x.code = get_stack_optional<std::string>(j, "code");
         x.error = j.at("error").get<std::string>();
         x.validation_errors = get_stack_optional<std::vector<ValidationErrorElement>>(j, "validation_errors");
     }
 
     inline void to_json(json & j, const ErrorResponse & x) {
         j = json::object();
+        j["code"] = x.code;
         j["error"] = x.error;
         j["validation_errors"] = x.validation_errors;
     }
@@ -4570,6 +5415,7 @@ namespace api {
         x.build_variant = j.at("build_variant").get<std::string>();
         x.commit = get_stack_optional<std::string>(j, "commit");
         x.config_is_draft = j.at("config_is_draft").get<bool>();
+        x.daemon_pid = get_stack_optional<int64_t>(j, "daemon_pid");
         x.lifecycle_operation = get_stack_optional<LifecycleOperation>(j, "lifecycle_operation");
         x.os_type = j.at("os_type").get<std::string>();
         x.os_version = j.at("os_version").get<std::string>();
@@ -4593,6 +5439,7 @@ namespace api {
         j["build_variant"] = x.build_variant;
         j["commit"] = x.commit;
         j["config_is_draft"] = x.config_is_draft;
+        j["daemon_pid"] = x.daemon_pid;
         j["lifecycle_operation"] = x.lifecycle_operation;
         j["os_type"] = x.os_type;
         j["os_version"] = x.os_version;
@@ -4620,6 +5467,51 @@ namespace api {
         j["available"] = x.available;
         j["catalog_status"] = x.catalog_status;
         j["names"] = x.names;
+    }
+
+    inline void from_json(const json & j, ListContentImportRequest& x) {
+        x.format = j.at("format").get<std::string>();
+        x.text = j.at("text").get<std::string>();
+    }
+
+    inline void to_json(json & j, const ListContentImportRequest & x) {
+        j = json::object();
+        j["format"] = x.format;
+        j["text"] = x.text;
+    }
+
+    inline void from_json(const json & j, ListSourcePreviewErrorElement& x) {
+        x.code = j.at("code").get<std::string>();
+        x.line = j.at("line").get<int64_t>();
+        x.value = j.at("value").get<std::string>();
+    }
+
+    inline void to_json(json & j, const ListSourcePreviewErrorElement & x) {
+        j = json::object();
+        j["code"] = x.code;
+        j["line"] = x.line;
+        j["value"] = x.value;
+    }
+
+    inline void from_json(const json & j, ListContentImportResponse& x) {
+        x.complete = j.at("complete").get<bool>();
+        x.domains = j.at("domains").get<std::vector<std::string>>();
+        x.duplicates = j.at("duplicates").get<int64_t>();
+        x.errors = j.at("errors").get<std::vector<ListSourcePreviewErrorElement>>();
+        x.errors_limited = j.at("errors_limited").get<bool>();
+        x.ip_cidrs = j.at("ip_cidrs").get<std::vector<std::string>>();
+        x.limit_reason = get_stack_optional<std::string>(j, "limit_reason");
+    }
+
+    inline void to_json(json & j, const ListContentImportResponse & x) {
+        j = json::object();
+        j["complete"] = x.complete;
+        j["domains"] = x.domains;
+        j["duplicates"] = x.duplicates;
+        j["errors"] = x.errors;
+        j["errors_limited"] = x.errors_limited;
+        j["ip_cidrs"] = x.ip_cidrs;
+        j["limit_reason"] = x.limit_reason;
     }
 
     inline void from_json(const json & j, ListDeleteTargetElement& x) {
@@ -4676,12 +5568,88 @@ namespace api {
         j["summary"] = x.summary;
     }
 
+    inline void from_json(const json & j, ListPageItem& x) {
+        x.display_name = get_stack_optional<std::string>(j, "display_name");
+        x.domain_count = j.at("domain_count").get<int64_t>();
+        x.file = get_stack_optional<std::string>(j, "file");
+        x.id = j.at("id").get<std::string>();
+        x.ipv4_count = j.at("ipv4_count").get<int64_t>();
+        x.ipv6_count = j.at("ipv6_count").get<int64_t>();
+        x.url = get_stack_optional<std::string>(j, "url");
+    }
+
+    inline void to_json(json & j, const ListPageItem & x) {
+        j = json::object();
+        j["display_name"] = x.display_name;
+        j["domain_count"] = x.domain_count;
+        j["file"] = x.file;
+        j["id"] = x.id;
+        j["ipv4_count"] = x.ipv4_count;
+        j["ipv6_count"] = x.ipv6_count;
+        j["url"] = x.url;
+    }
+
+    inline void from_json(const json & j, ListPage& x) {
+        x.filtered_total = j.at("filtered_total").get<int64_t>();
+        x.has_refreshable_lists = j.at("has_refreshable_lists").get<bool>();
+        x.is_draft = j.at("is_draft").get<bool>();
+        x.items = j.at("items").get<std::vector<ListPageItem>>();
+        x.limit = j.at("limit").get<int64_t>();
+        x.offset = j.at("offset").get<int64_t>();
+        x.revision = j.at("revision").get<std::string>();
+        x.total = j.at("total").get<int64_t>();
+    }
+
+    inline void to_json(json & j, const ListPage & x) {
+        j = json::object();
+        j["filtered_total"] = x.filtered_total;
+        j["has_refreshable_lists"] = x.has_refreshable_lists;
+        j["is_draft"] = x.is_draft;
+        j["items"] = x.items;
+        j["limit"] = x.limit;
+        j["offset"] = x.offset;
+        j["revision"] = x.revision;
+        j["total"] = x.total;
+    }
+
+    inline void from_json(const json & j, ListQueryRequest& x) {
+        x.limit = get_stack_optional<int64_t>(j, "limit");
+        x.offset = get_stack_optional<int64_t>(j, "offset");
+        x.order = get_stack_optional<SortOrder>(j, "order");
+        x.search = get_stack_optional<std::string>(j, "search");
+        x.sort = get_stack_optional<Sort>(j, "sort");
+    }
+
+    inline void to_json(json & j, const ListQueryRequest & x) {
+        j = json::object();
+        j["limit"] = x.limit;
+        j["offset"] = x.offset;
+        j["order"] = x.order;
+        j["search"] = x.search;
+        j["sort"] = x.sort;
+    }
+
+    inline void from_json(const json & j, AcceptShrink& x) {
+        x.candidate_sha256 = j.at("candidate_sha256").get<std::string>();
+        x.previous_sha256 = j.at("previous_sha256").get<std::string>();
+    }
+
+    inline void to_json(json & j, const AcceptShrink & x) {
+        j = json::object();
+        j["candidate_sha256"] = x.candidate_sha256;
+        j["previous_sha256"] = x.previous_sha256;
+    }
+
     inline void from_json(const json & j, ListRefreshRequest& x) {
+        x.accept_shrink = get_stack_optional<AcceptShrink>(j, "accept_shrink");
+        x.force_refresh = get_stack_optional<bool>(j, "force_refresh");
         x.name = get_stack_optional<std::string>(j, "name");
     }
 
     inline void to_json(json & j, const ListRefreshRequest & x) {
         j = json::object();
+        j["accept_shrink"] = x.accept_shrink;
+        j["force_refresh"] = x.force_refresh;
         j["name"] = x.name;
     }
 
@@ -4704,26 +5672,129 @@ namespace api {
         j["status"] = x.status;
     }
 
+    inline void from_json(const json & j, ListSourcePreviewEntry& x) {
+        x.line = j.at("line").get<int64_t>();
+        x.type = j.at("type").get<ListSourcePreviewEntryType>();
+        x.value = j.at("value").get<std::string>();
+    }
+
+    inline void to_json(json & j, const ListSourcePreviewEntry & x) {
+        j = json::object();
+        j["line"] = x.line;
+        j["type"] = x.type;
+        j["value"] = x.value;
+    }
+
+    inline void from_json(const json & j, ListSourcePreviewRequest& x) {
+        x.detour = get_stack_optional<std::string>(j, "detour");
+        x.fallback_detours = get_stack_optional<std::vector<std::string>>(j, "fallback_detours");
+        x.format = get_stack_optional<std::string>(j, "format");
+        x.refresh_detour_mode = get_stack_optional<RefreshDetourMode>(j, "refresh_detour_mode");
+        x.text = get_stack_optional<std::string>(j, "text");
+        x.url = get_stack_optional<std::string>(j, "url");
+    }
+
+    inline void to_json(json & j, const ListSourcePreviewRequest & x) {
+        j = json::object();
+        j["detour"] = x.detour;
+        j["fallback_detours"] = x.fallback_detours;
+        j["format"] = x.format;
+        j["refresh_detour_mode"] = x.refresh_detour_mode;
+        j["text"] = x.text;
+        j["url"] = x.url;
+    }
+
+    inline void from_json(const json & j, ListSourcePreviewResponse& x) {
+        x.complete = j.at("complete").get<bool>();
+        x.domains = j.at("domains").get<int64_t>();
+        x.duplicates = j.at("duplicates").get<int64_t>();
+        x.entries = j.at("entries").get<std::vector<ListSourcePreviewEntry>>();
+        x.entries_limited = j.at("entries_limited").get<bool>();
+        x.errors = j.at("errors").get<std::vector<ListSourcePreviewErrorElement>>();
+        x.errors_limited = j.at("errors_limited").get<bool>();
+        x.ignored_lines = j.at("ignored_lines").get<int64_t>();
+        x.invalid_entries = j.at("invalid_entries").get<int64_t>();
+        x.ipv4 = j.at("ipv4").get<int64_t>();
+        x.ipv6 = j.at("ipv6").get<int64_t>();
+        x.limit_reason = get_stack_optional<std::string>(j, "limit_reason");
+        x.lines = j.at("lines").get<int64_t>();
+        x.status = j.at("status").get<ListSourcePreviewResponseStatus>();
+        x.unique_entries = j.at("unique_entries").get<int64_t>();
+        x.valid_entries = j.at("valid_entries").get<int64_t>();
+    }
+
+    inline void to_json(json & j, const ListSourcePreviewResponse & x) {
+        j = json::object();
+        j["complete"] = x.complete;
+        j["domains"] = x.domains;
+        j["duplicates"] = x.duplicates;
+        j["entries"] = x.entries;
+        j["entries_limited"] = x.entries_limited;
+        j["errors"] = x.errors;
+        j["errors_limited"] = x.errors_limited;
+        j["ignored_lines"] = x.ignored_lines;
+        j["invalid_entries"] = x.invalid_entries;
+        j["ipv4"] = x.ipv4;
+        j["ipv6"] = x.ipv6;
+        j["limit_reason"] = x.limit_reason;
+        j["lines"] = x.lines;
+        j["status"] = x.status;
+        j["unique_entries"] = x.unique_entries;
+        j["valid_entries"] = x.valid_entries;
+    }
+
     inline void from_json(const json & j, LogSettings& x) {
+        x.age_limit_enabled = get_stack_optional<bool>(j, "age_limit_enabled");
         x.file_enabled = j.at("file_enabled").get<bool>();
         x.level = j.at("level").get<LogLevel>();
+        x.max_age_days = get_stack_optional<int64_t>(j, "max_age_days");
+        x.max_file_bytes = get_stack_optional<int64_t>(j, "max_file_bytes");
+        x.nfqws_age_limit_enabled = get_stack_optional<bool>(j, "nfqws_age_limit_enabled");
+        x.nfqws_max_age_days = get_stack_optional<int64_t>(j, "nfqws_max_age_days");
+        x.nfqws_max_file_bytes = get_stack_optional<int64_t>(j, "nfqws_max_file_bytes");
+        x.nfqws_size_limit_enabled = get_stack_optional<bool>(j, "nfqws_size_limit_enabled");
+        x.size_limit_enabled = get_stack_optional<bool>(j, "size_limit_enabled");
     }
 
     inline void to_json(json & j, const LogSettings & x) {
         j = json::object();
+        j["age_limit_enabled"] = x.age_limit_enabled;
         j["file_enabled"] = x.file_enabled;
         j["level"] = x.level;
+        j["max_age_days"] = x.max_age_days;
+        j["max_file_bytes"] = x.max_file_bytes;
+        j["nfqws_age_limit_enabled"] = x.nfqws_age_limit_enabled;
+        j["nfqws_max_age_days"] = x.nfqws_max_age_days;
+        j["nfqws_max_file_bytes"] = x.nfqws_max_file_bytes;
+        j["nfqws_size_limit_enabled"] = x.nfqws_size_limit_enabled;
+        j["size_limit_enabled"] = x.size_limit_enabled;
     }
 
     inline void from_json(const json & j, LogSettingsRequest& x) {
+        x.age_limit_enabled = get_stack_optional<bool>(j, "age_limit_enabled");
         x.file_enabled = get_stack_optional<bool>(j, "file_enabled");
         x.level = get_stack_optional<LogLevel>(j, "level");
+        x.max_age_days = get_stack_optional<int64_t>(j, "max_age_days");
+        x.max_file_bytes = get_stack_optional<int64_t>(j, "max_file_bytes");
+        x.nfqws_age_limit_enabled = get_stack_optional<bool>(j, "nfqws_age_limit_enabled");
+        x.nfqws_max_age_days = get_stack_optional<int64_t>(j, "nfqws_max_age_days");
+        x.nfqws_max_file_bytes = get_stack_optional<int64_t>(j, "nfqws_max_file_bytes");
+        x.nfqws_size_limit_enabled = get_stack_optional<bool>(j, "nfqws_size_limit_enabled");
+        x.size_limit_enabled = get_stack_optional<bool>(j, "size_limit_enabled");
     }
 
     inline void to_json(json & j, const LogSettingsRequest & x) {
         j = json::object();
+        j["age_limit_enabled"] = x.age_limit_enabled;
         j["file_enabled"] = x.file_enabled;
         j["level"] = x.level;
+        j["max_age_days"] = x.max_age_days;
+        j["max_file_bytes"] = x.max_file_bytes;
+        j["nfqws_age_limit_enabled"] = x.nfqws_age_limit_enabled;
+        j["nfqws_max_age_days"] = x.nfqws_max_age_days;
+        j["nfqws_max_file_bytes"] = x.nfqws_max_file_bytes;
+        j["nfqws_size_limit_enabled"] = x.nfqws_size_limit_enabled;
+        j["size_limit_enabled"] = x.size_limit_enabled;
     }
 
     inline void from_json(const json & j, LogSettingsResult& x) {
@@ -5350,6 +6421,68 @@ namespace api {
         j["version"] = x.version;
     }
 
+    inline void from_json(const json & j, NotificationDismissRequest& x) {
+        x.log_ids = get_stack_optional<std::vector<std::string>>(j, "log_ids");
+        x.update_ids = get_stack_optional<std::vector<std::string>>(j, "update_ids");
+    }
+
+    inline void to_json(json & j, const NotificationDismissRequest & x) {
+        j = json::object();
+        j["log_ids"] = x.log_ids;
+        j["update_ids"] = x.update_ids;
+    }
+
+    inline void from_json(const json & j, NotificationDismissalState& x) {
+        x.log_ids = j.at("log_ids").get<std::vector<std::string>>();
+        x.revision = j.at("revision").get<int64_t>();
+        x.update_ids = j.at("update_ids").get<std::vector<std::string>>();
+    }
+
+    inline void to_json(json & j, const NotificationDismissalState & x) {
+        j = json::object();
+        j["log_ids"] = x.log_ids;
+        j["revision"] = x.revision;
+        j["update_ids"] = x.update_ids;
+    }
+
+    inline void from_json(const json & j, SubscriptionNoticeElement& x) {
+        x.count = get_stack_optional<int64_t>(j, "count");
+        x.days = get_stack_optional<int64_t>(j, "days");
+        x.id = j.at("id").get<std::string>();
+        x.kind = j.at("kind").get<Kind>();
+        x.name = j.at("name").get<std::string>();
+        x.remaining_percent = get_stack_optional<int64_t>(j, "remaining_percent");
+        x.subscription_id = j.at("subscription_id").get<std::string>();
+    }
+
+    inline void to_json(json & j, const SubscriptionNoticeElement & x) {
+        j = json::object();
+        j["count"] = x.count;
+        j["days"] = x.days;
+        j["id"] = x.id;
+        j["kind"] = x.kind;
+        j["name"] = x.name;
+        j["remaining_percent"] = x.remaining_percent;
+        j["subscription_id"] = x.subscription_id;
+    }
+
+    inline void from_json(const json & j, NotificationsResponse& x) {
+        x.line_ids = j.at("line_ids").get<std::vector<std::string>>();
+        x.lines = j.at("lines").get<std::vector<std::string>>();
+        x.state = j.at("state").get<NotificationDismissalState>();
+        x.subscription_notices = get_stack_optional<std::vector<SubscriptionNoticeElement>>(j, "subscription_notices");
+        x.subscription_notices_error = get_stack_optional<bool>(j, "subscription_notices_error");
+    }
+
+    inline void to_json(json & j, const NotificationsResponse & x) {
+        j = json::object();
+        j["line_ids"] = x.line_ids;
+        j["lines"] = x.lines;
+        j["state"] = x.state;
+        j["subscription_notices"] = x.subscription_notices;
+        j["subscription_notices_error"] = x.subscription_notices_error;
+    }
+
     inline void from_json(const json & j, OkResponse& x) {
         x.ok = j.at("ok").get<bool>();
     }
@@ -5361,6 +6494,7 @@ namespace api {
 
     inline void from_json(const json & j, PeriodicTaskMetricsEntry& x) {
         x.abandoned = j.at("abandoned").get<int64_t>();
+        x.consecutive_failures = get_stack_optional<int64_t>(j, "consecutive_failures");
         x.failure = j.at("failure").get<int64_t>();
         x.in_flight = j.at("in_flight").get<int64_t>();
         x.label = j.at("label").get<std::string>();
@@ -5371,8 +6505,10 @@ namespace api {
         x.last_outcome = get_stack_optional<LastOutcome>(j, "last_outcome");
         x.last_started_at_unix_ms = get_stack_optional<int64_t>(j, "last_started_at_unix_ms");
         x.max_duration_ms = j.at("max_duration_ms").get<int64_t>();
+        x.next_run_at_unix_ms = get_stack_optional<int64_t>(j, "next_run_at_unix_ms");
         x.noop = j.at("noop").get<int64_t>();
         x.runs = j.at("runs").get<int64_t>();
+        x.scheduling_state = get_stack_optional<std::string>(j, "scheduling_state");
         x.skipped = j.at("skipped").get<int64_t>();
         x.success = j.at("success").get<int64_t>();
         x.total_duration_ms = j.at("total_duration_ms").get<int64_t>();
@@ -5381,6 +6517,7 @@ namespace api {
     inline void to_json(json & j, const PeriodicTaskMetricsEntry & x) {
         j = json::object();
         j["abandoned"] = x.abandoned;
+        j["consecutive_failures"] = x.consecutive_failures;
         j["failure"] = x.failure;
         j["in_flight"] = x.in_flight;
         j["label"] = x.label;
@@ -5391,8 +6528,10 @@ namespace api {
         j["last_outcome"] = x.last_outcome;
         j["last_started_at_unix_ms"] = x.last_started_at_unix_ms;
         j["max_duration_ms"] = x.max_duration_ms;
+        j["next_run_at_unix_ms"] = x.next_run_at_unix_ms;
         j["noop"] = x.noop;
         j["runs"] = x.runs;
+        j["scheduling_state"] = x.scheduling_state;
         j["skipped"] = x.skipped;
         j["success"] = x.success;
         j["total_duration_ms"] = x.total_duration_ms;
@@ -5524,7 +6663,7 @@ namespace api {
         x.error = get_stack_optional<std::string>(j, "error");
         x.ips = get_stack_optional<std::vector<std::string>>(j, "ips");
         x.organisation = get_stack_optional<std::string>(j, "organisation");
-        x.reason = get_stack_optional<Reason>(j, "reason");
+        x.reason = get_stack_optional<RegistryCheckResponseReason>(j, "reason");
         x.rkn_domain = get_stack_optional<std::string>(j, "rkn_domain");
         x.service = j.at("service").get<std::string>();
         x.target = get_stack_optional<std::string>(j, "target");
@@ -5776,6 +6915,39 @@ namespace api {
         j["vendor"] = x.vendor;
     }
 
+    inline void from_json(const json & j, RouterMetrics& x) {
+        x.conntrack_free = get_stack_optional<int64_t>(j, "conntrack_free");
+        x.conntrack_total = get_stack_optional<int64_t>(j, "conntrack_total");
+        x.cpu_load_percent = get_stack_optional<int64_t>(j, "cpu_load_percent");
+        x.cpu_model = get_stack_optional<std::string>(j, "cpu_model");
+        x.cpu_temperature_c = get_stack_optional<double>(j, "cpu_temperature_c");
+        x.disk_total_mb = get_stack_optional<int64_t>(j, "disk_total_mb");
+        x.disk_used_mb = get_stack_optional<int64_t>(j, "disk_used_mb");
+        x.disk_used_percent = get_stack_optional<int64_t>(j, "disk_used_percent");
+        x.load_average = get_stack_optional<std::vector<double>>(j, "load_average");
+        x.memory_total_mb = get_stack_optional<int64_t>(j, "memory_total_mb");
+        x.memory_used_mb = get_stack_optional<int64_t>(j, "memory_used_mb");
+        x.memory_used_percent = get_stack_optional<int64_t>(j, "memory_used_percent");
+        x.uptime_seconds = get_stack_optional<int64_t>(j, "uptime_seconds");
+    }
+
+    inline void to_json(json & j, const RouterMetrics & x) {
+        j = json::object();
+        j["conntrack_free"] = x.conntrack_free;
+        j["conntrack_total"] = x.conntrack_total;
+        j["cpu_load_percent"] = x.cpu_load_percent;
+        j["cpu_model"] = x.cpu_model;
+        j["cpu_temperature_c"] = x.cpu_temperature_c;
+        j["disk_total_mb"] = x.disk_total_mb;
+        j["disk_used_mb"] = x.disk_used_mb;
+        j["disk_used_percent"] = x.disk_used_percent;
+        j["load_average"] = x.load_average;
+        j["memory_total_mb"] = x.memory_total_mb;
+        j["memory_used_mb"] = x.memory_used_mb;
+        j["memory_used_percent"] = x.memory_used_percent;
+        j["uptime_seconds"] = x.uptime_seconds;
+    }
+
     inline void from_json(const json & j, RoutingHealthErrorResponse& x) {
         x.error = j.at("error").get<std::string>();
         x.overall = j.at("overall").get<RoutingHealthErrorResponseOverall>();
@@ -5818,6 +6990,92 @@ namespace api {
         j["ttl_bypass_state"] = x.ttl_bypass_state;
     }
 
+    inline void from_json(const json & j, RoutingTestConnection& x) {
+        x.destination = j.at("destination").get<std::string>();
+        x.destination_port = j.at("destination_port").get<int64_t>();
+        x.last_seen = j.at("last_seen").get<int64_t>();
+        x.mark = j.at("mark").get<int64_t>();
+        x.protocol = j.at("protocol").get<std::string>();
+        x.source = j.at("source").get<std::string>();
+        x.source_port = j.at("source_port").get<int64_t>();
+        x.state = j.at("state").get<std::string>();
+    }
+
+    inline void to_json(json & j, const RoutingTestConnection & x) {
+        j = json::object();
+        j["destination"] = x.destination;
+        j["destination_port"] = x.destination_port;
+        j["last_seen"] = x.last_seen;
+        j["mark"] = x.mark;
+        j["protocol"] = x.protocol;
+        j["source"] = x.source;
+        j["source_port"] = x.source_port;
+        j["state"] = x.state;
+    }
+
+    inline void from_json(const json & j, RoutingTestConnections& x) {
+        x.items = j.at("items").get<std::vector<RoutingTestConnection>>();
+        x.snapshot_at = j.at("snapshot_at").get<int64_t>();
+        x.snapshot_available = j.at("snapshot_available").get<bool>();
+        x.total = j.at("total").get<int64_t>();
+        x.truncated = j.at("truncated").get<bool>();
+    }
+
+    inline void to_json(json & j, const RoutingTestConnections & x) {
+        j = json::object();
+        j["items"] = x.items;
+        j["snapshot_at"] = x.snapshot_at;
+        j["snapshot_available"] = x.snapshot_available;
+        j["total"] = x.total;
+        j["truncated"] = x.truncated;
+    }
+
+    inline void from_json(const json & j, RoutingTestFirewallCounterElement& x) {
+        x.action = j.at("action").get<RoutingTestFirewallCounterAction>();
+        x.bytes = j.at("bytes").get<std::string>();
+        x.chain = j.at("chain").get<std::string>();
+        x.family = j.at("family").get<Family>();
+        x.fwmark = get_stack_optional<int64_t>(j, "fwmark");
+        x.fwmask = get_stack_optional<int64_t>(j, "fwmask");
+        x.packets = j.at("packets").get<std::string>();
+        x.position = j.at("position").get<int64_t>();
+        x.set_name = j.at("set_name").get<std::string>();
+        x.table = j.at("table").get<std::string>();
+    }
+
+    inline void to_json(json & j, const RoutingTestFirewallCounterElement & x) {
+        j = json::object();
+        j["action"] = x.action;
+        j["bytes"] = x.bytes;
+        j["chain"] = x.chain;
+        j["family"] = x.family;
+        j["fwmark"] = x.fwmark;
+        j["fwmask"] = x.fwmask;
+        j["packets"] = x.packets;
+        j["position"] = x.position;
+        j["set_name"] = x.set_name;
+        j["table"] = x.table;
+    }
+
+    inline void from_json(const json & j, FirewallCounters& x) {
+        x.rules = j.at("rules").get<std::vector<RoutingTestFirewallCounterElement>>();
+        x.scope = j.at("scope").get<RoutingTestFirewallCountersScope>();
+        x.snapshot_at = j.at("snapshot_at").get<int64_t>();
+        x.status = j.at("status").get<RoutingTestFirewallCountersStatus>();
+        x.total = j.at("total").get<int64_t>();
+        x.truncated = j.at("truncated").get<bool>();
+    }
+
+    inline void to_json(json & j, const FirewallCounters & x) {
+        j = json::object();
+        j["rules"] = x.rules;
+        j["scope"] = x.scope;
+        j["snapshot_at"] = x.snapshot_at;
+        j["status"] = x.status;
+        j["total"] = x.total;
+        j["truncated"] = x.truncated;
+    }
+
     inline void from_json(const json & j, KernelRoute& x) {
         x.detail = j.at("detail").get<std::string>();
         x.fwmark = get_stack_optional<int64_t>(j, "fwmark");
@@ -5846,27 +7104,108 @@ namespace api {
         j["via"] = x.via;
     }
 
+    inline void from_json(const json & j, RoutingTestPolicyRuleElement& x) {
+        x.details_complete = j.at("details_complete").get<bool>();
+        x.family = j.at("family").get<Family>();
+        x.fwmark = j.at("fwmark").get<int64_t>();
+        x.fwmask = j.at("fwmask").get<int64_t>();
+        x.priority = j.at("priority").get<int64_t>();
+        x.table = j.at("table").get<int64_t>();
+    }
+
+    inline void to_json(json & j, const RoutingTestPolicyRuleElement & x) {
+        j = json::object();
+        j["details_complete"] = x.details_complete;
+        j["family"] = x.family;
+        j["fwmark"] = x.fwmark;
+        j["fwmask"] = x.fwmask;
+        j["priority"] = x.priority;
+        j["table"] = x.table;
+    }
+
+    inline void from_json(const json & j, PolicyRules& x) {
+        x.rules = j.at("rules").get<std::vector<RoutingTestPolicyRuleElement>>();
+        x.snapshot_at = j.at("snapshot_at").get<int64_t>();
+        x.status = j.at("status").get<RoutingTestPolicyRulesStatus>();
+        x.total = j.at("total").get<int64_t>();
+        x.truncated = j.at("truncated").get<bool>();
+    }
+
+    inline void to_json(json & j, const PolicyRules & x) {
+        j = json::object();
+        j["rules"] = x.rules;
+        j["snapshot_at"] = x.snapshot_at;
+        j["status"] = x.status;
+        j["total"] = x.total;
+        j["truncated"] = x.truncated;
+    }
+
     inline void from_json(const json & j, RoutingTestEntry& x) {
         x.actual_outbound = j.at("actual_outbound").get<std::string>();
+        x.actual_rule_index = get_stack_optional<int64_t>(j, "actual_rule_index");
         x.evaluation = j.at("evaluation").get<Evaluation>();
         x.expected_outbound = j.at("expected_outbound").get<std::string>();
+        x.expected_rule_index = get_stack_optional<int64_t>(j, "expected_rule_index");
+        x.firewall_counters = get_stack_optional<FirewallCounters>(j, "firewall_counters");
         x.ip = j.at("ip").get<std::string>();
         x.kernel_route = j.at("kernel_route").get<KernelRoute>();
         x.list_match = get_stack_optional<ListMatch>(j, "list_match");
         x.ok = j.at("ok").get<bool>();
+        x.policy_rules = get_stack_optional<PolicyRules>(j, "policy_rules");
         x.unknown_conditions = j.at("unknown_conditions").get<std::vector<RoutingTestUnknownConditionElement>>();
     }
 
     inline void to_json(json & j, const RoutingTestEntry & x) {
         j = json::object();
         j["actual_outbound"] = x.actual_outbound;
+        j["actual_rule_index"] = x.actual_rule_index;
         j["evaluation"] = x.evaluation;
         j["expected_outbound"] = x.expected_outbound;
+        j["expected_rule_index"] = x.expected_rule_index;
+        j["firewall_counters"] = x.firewall_counters;
         j["ip"] = x.ip;
         j["kernel_route"] = x.kernel_route;
         j["list_match"] = x.list_match;
         j["ok"] = x.ok;
+        j["policy_rules"] = x.policy_rules;
         j["unknown_conditions"] = x.unknown_conditions;
+    }
+
+    inline void from_json(const json & j, RoutingTestHttpProbe& x) {
+        x.attempted_at = j.at("attempted_at").get<int64_t>();
+        x.connect_ms = get_stack_optional<int64_t>(j, "connect_ms");
+        x.connected_ip = get_stack_optional<std::string>(j, "connected_ip");
+        x.elapsed_ms = get_stack_optional<int64_t>(j, "elapsed_ms");
+        x.fwmark = get_stack_optional<int64_t>(j, "fwmark");
+        x.http_status = get_stack_optional<int64_t>(j, "http_status");
+        x.interface = j.at("interface").get<std::string>();
+        x.ip = j.at("ip").get<std::string>();
+        x.method = j.at("method").get<Method>();
+        x.reason = j.at("reason").get<RoutingTestHttpProbeReason>();
+        x.scope = j.at("scope").get<RoutingTestHttpProbeScope>();
+        x.status = j.at("status").get<RoutingTestHttpProbeStatus>();
+        x.table = get_stack_optional<int64_t>(j, "table");
+        x.tls_ms = get_stack_optional<int64_t>(j, "tls_ms");
+        x.url = j.at("url").get<std::string>();
+    }
+
+    inline void to_json(json & j, const RoutingTestHttpProbe & x) {
+        j = json::object();
+        j["attempted_at"] = x.attempted_at;
+        j["connect_ms"] = x.connect_ms;
+        j["connected_ip"] = x.connected_ip;
+        j["elapsed_ms"] = x.elapsed_ms;
+        j["fwmark"] = x.fwmark;
+        j["http_status"] = x.http_status;
+        j["interface"] = x.interface;
+        j["ip"] = x.ip;
+        j["method"] = x.method;
+        j["reason"] = x.reason;
+        j["scope"] = x.scope;
+        j["status"] = x.status;
+        j["table"] = x.table;
+        j["tls_ms"] = x.tls_ms;
+        j["url"] = x.url;
     }
 
     inline void from_json(const json & j, RoutingTestNfqwsMatchElement& x) {
@@ -5902,11 +7241,13 @@ namespace api {
     }
 
     inline void from_json(const json & j, RoutingTestRequest& x) {
+        x.http_probe_ip = get_stack_optional<std::string>(j, "http_probe_ip");
         x.target = j.at("target").get<std::string>();
     }
 
     inline void to_json(json & j, const RoutingTestRequest & x) {
         j = json::object();
+        j["http_probe_ip"] = x.http_probe_ip;
         j["target"] = x.target;
     }
 
@@ -5952,7 +7293,12 @@ namespace api {
 
     inline void from_json(const json & j, RoutingTestResponse& x) {
         x.config_scope = j.at("config_scope").get<ConfigScope>();
+        x.connections = get_stack_optional<RoutingTestConnections>(j, "connections");
         x.dns_error = get_stack_optional<std::string>(j, "dns_error");
+        x.dns_server = get_stack_optional<std::string>(j, "dns_server");
+        x.dns_source = get_stack_optional<std::string>(j, "dns_source");
+        x.fwmark_mask = get_stack_optional<int64_t>(j, "fwmark_mask");
+        x.http_probe = get_stack_optional<RoutingTestHttpProbe>(j, "http_probe");
         x.is_domain = j.at("is_domain").get<bool>();
         x.nfqws = get_stack_optional<RoutingTestNfqws>(j, "nfqws");
         x.no_matching_rule = j.at("no_matching_rule").get<bool>();
@@ -5967,7 +7313,12 @@ namespace api {
     inline void to_json(json & j, const RoutingTestResponse & x) {
         j = json::object();
         j["config_scope"] = x.config_scope;
+        j["connections"] = x.connections;
         j["dns_error"] = x.dns_error;
+        j["dns_server"] = x.dns_server;
+        j["dns_source"] = x.dns_source;
+        j["fwmark_mask"] = x.fwmark_mask;
+        j["http_probe"] = x.http_probe;
         j["is_domain"] = x.is_domain;
         j["nfqws"] = x.nfqws;
         j["no_matching_rule"] = x.no_matching_rule;
@@ -6143,13 +7494,19 @@ namespace api {
         x.error = get_stack_optional<std::string>(j, "error");
         x.expires_at = get_stack_optional<int64_t>(j, "expires_at");
         x.id = j.at("id").get<std::string>();
+        x.last_sync_error = get_stack_optional<std::string>(j, "last_sync_error");
         x.name = j.at("name").get<std::string>();
+        x.next_check_at = get_stack_optional<int64_t>(j, "next_check_at");
         x.node_count = get_stack_optional<int64_t>(j, "node_count");
+        x.pending_new_servers_count = get_stack_optional<int64_t>(j, "pending_new_servers_count");
+        x.pending_servers_revision = get_stack_optional<std::string>(j, "pending_servers_revision");
+        x.refresh_interval_seconds = get_stack_optional<int64_t>(j, "refresh_interval_seconds");
         x.source_host = j.at("source_host").get<std::string>();
         x.total_bytes = get_stack_optional<int64_t>(j, "total_bytes");
         x.transport_tags = j.at("transport_tags").get<std::vector<std::string>>();
         x.updated_at = get_stack_optional<int64_t>(j, "updated_at");
         x.upload_bytes = get_stack_optional<int64_t>(j, "upload_bytes");
+        x.usage_cycle = get_stack_optional<int64_t>(j, "usage_cycle");
     }
 
     inline void to_json(json & j, const SavedSubscription & x) {
@@ -6159,13 +7516,19 @@ namespace api {
         j["error"] = x.error;
         j["expires_at"] = x.expires_at;
         j["id"] = x.id;
+        j["last_sync_error"] = x.last_sync_error;
         j["name"] = x.name;
+        j["next_check_at"] = x.next_check_at;
         j["node_count"] = x.node_count;
+        j["pending_new_servers_count"] = x.pending_new_servers_count;
+        j["pending_servers_revision"] = x.pending_servers_revision;
+        j["refresh_interval_seconds"] = x.refresh_interval_seconds;
         j["source_host"] = x.source_host;
         j["total_bytes"] = x.total_bytes;
         j["transport_tags"] = x.transport_tags;
         j["updated_at"] = x.updated_at;
         j["upload_bytes"] = x.upload_bytes;
+        j["usage_cycle"] = x.usage_cycle;
     }
 
     inline void from_json(const json & j, SingBoxInstallCapability& x) {
@@ -6258,6 +7621,17 @@ namespace api {
         j["type"] = x.type;
     }
 
+    inline void from_json(const json & j, StatusEventNotificationState& x) {
+        x.data = j.at("data").get<NotificationDismissalState>();
+        x.type = j.at("type").get<StatusEventNotificationStateType>();
+    }
+
+    inline void to_json(json & j, const StatusEventNotificationState & x) {
+        j = json::object();
+        j["data"] = x.data;
+        j["type"] = x.type;
+    }
+
     inline void from_json(const json & j, StatusEventOutbounds& x) {
         x.data = j.at("data").get<RuntimeOutboundsResponse>();
         x.type = j.at("type").get<StatusEventOutboundsType>();
@@ -6291,6 +7665,15 @@ namespace api {
         j["type"] = x.type;
     }
 
+    inline void from_json(const json & j, StatusEventSubscriptions& x) {
+        x.type = j.at("type").get<StatusEventSubscriptionsType>();
+    }
+
+    inline void to_json(json & j, const StatusEventSubscriptions & x) {
+        j = json::object();
+        j["type"] = x.type;
+    }
+
     inline void from_json(const json & j, SubscriptionApplySelectionElement& x) {
         x.line = j.at("line").get<int64_t>();
         x.tag = get_stack_optional<std::string>(j, "tag");
@@ -6316,6 +7699,7 @@ namespace api {
     }
 
     inline void from_json(const json & j, SubscriptionApplyResultElement& x) {
+        x.code = get_stack_optional<std::string>(j, "code");
         x.error = get_stack_optional<std::string>(j, "error");
         x.interface = get_stack_optional<std::string>(j, "interface");
         x.line = j.at("line").get<int64_t>();
@@ -6325,6 +7709,7 @@ namespace api {
 
     inline void to_json(json & j, const SubscriptionApplyResultElement & x) {
         j = json::object();
+        j["code"] = x.code;
         j["error"] = x.error;
         j["interface"] = x.interface;
         j["line"] = x.line;
@@ -6375,12 +7760,16 @@ namespace api {
 
     inline void from_json(const json & j, SubscriptionPreviewRequest& x) {
         x.document = get_stack_optional<std::string>(j, "document");
+        x.pending_only = get_stack_optional<bool>(j, "pending_only");
+        x.subscription_id = get_stack_optional<std::string>(j, "subscription_id");
         x.url = get_stack_optional<std::string>(j, "url");
     }
 
     inline void to_json(json & j, const SubscriptionPreviewRequest & x) {
         j = json::object();
         j["document"] = x.document;
+        j["pending_only"] = x.pending_only;
+        j["subscription_id"] = x.subscription_id;
         j["url"] = x.url;
     }
 
@@ -6410,6 +7799,17 @@ namespace api {
         j = json::object();
         j["id"] = x.id;
         j["name"] = x.name;
+    }
+
+    inline void from_json(const json & j, SubscriptionSettingsRequest& x) {
+        x.id = j.at("id").get<std::string>();
+        x.refresh_interval_seconds = j.at("refresh_interval_seconds").get<int64_t>();
+    }
+
+    inline void to_json(json & j, const SubscriptionSettingsRequest & x) {
+        j = json::object();
+        j["id"] = x.id;
+        j["refresh_interval_seconds"] = x.refresh_interval_seconds;
     }
 
     inline void from_json(const json & j, SubscriptionSourceRequest& x) {
@@ -6685,6 +8085,32 @@ namespace api {
         j["verdict"] = x.verdict;
     }
 
+    inline void from_json(const json & j, TransportGeoUpdate& x) {
+        x.country = j.at("country").get<std::string>();
+        x.country_code = j.at("country_code").get<std::string>();
+        x.expected_interface = j.at("expected_interface").get<std::string>();
+        x.tag = j.at("tag").get<std::string>();
+    }
+
+    inline void to_json(json & j, const TransportGeoUpdate & x) {
+        j = json::object();
+        j["country"] = x.country;
+        j["country_code"] = x.country_code;
+        j["expected_interface"] = x.expected_interface;
+        j["tag"] = x.tag;
+    }
+
+    inline void from_json(const json & j, TransportGeoUpdateResponse& x) {
+        x.config_revision = j.at("config_revision").get<std::string>();
+        x.updated = j.at("updated").get<bool>();
+    }
+
+    inline void to_json(json & j, const TransportGeoUpdateResponse & x) {
+        j = json::object();
+        j["config_revision"] = x.config_revision;
+        j["updated"] = x.updated;
+    }
+
     inline void from_json(const json & j, TransportManagerSettings& x) {
         x.restart_required = j.at("restart_required").get<bool>();
         x.running_sing_box_process_mode = j.at("running_sing_box_process_mode").get<SingBoxProcessMode>();
@@ -6795,22 +8221,49 @@ namespace api {
         j["host"] = x.host;
     }
 
+    inline void from_json(const json & j, TunnelProbeHostReview& x) {
+        x.direct_successes = j.at("direct_successes").get<int64_t>();
+        x.host = j.at("host").get<std::string>();
+        x.last_checked_unix_ms = get_stack_optional<int64_t>(j, "last_checked_unix_ms");
+        x.next_check_unix_ms = get_stack_optional<int64_t>(j, "next_check_unix_ms");
+        x.required_successes = j.at("required_successes").get<int64_t>();
+        x.suggested = j.at("suggested").get<bool>();
+    }
+
+    inline void to_json(json & j, const TunnelProbeHostReview & x) {
+        j = json::object();
+        j["direct_successes"] = x.direct_successes;
+        j["host"] = x.host;
+        j["last_checked_unix_ms"] = x.last_checked_unix_ms;
+        j["next_check_unix_ms"] = x.next_check_unix_ms;
+        j["required_successes"] = x.required_successes;
+        j["suggested"] = x.suggested;
+    }
+
     inline void from_json(const json & j, TunnelProbeHostsResponse& x) {
         x.available = j.at("available").get<bool>();
+        x.config_is_draft = get_stack_optional<bool>(j, "config_is_draft");
         x.exclude_file = get_stack_optional<std::string>(j, "exclude_file");
         x.excluded = j.at("excluded").get<std::vector<std::string>>();
         x.list_file = get_stack_optional<std::string>(j, "list_file");
         x.list_name = get_stack_optional<std::string>(j, "list_name");
+        x.review_available = get_stack_optional<bool>(j, "review_available");
+        x.review_limited = get_stack_optional<bool>(j, "review_limited");
+        x.reviews = get_stack_optional<std::vector<TunnelProbeHostReview>>(j, "reviews");
         x.routed = j.at("routed").get<std::vector<std::string>>();
     }
 
     inline void to_json(json & j, const TunnelProbeHostsResponse & x) {
         j = json::object();
         j["available"] = x.available;
+        j["config_is_draft"] = x.config_is_draft;
         j["exclude_file"] = x.exclude_file;
         j["excluded"] = x.excluded;
         j["list_file"] = x.list_file;
         j["list_name"] = x.list_name;
+        j["review_available"] = x.review_available;
+        j["review_limited"] = x.review_limited;
+        j["reviews"] = x.reviews;
         j["routed"] = x.routed;
     }
 
@@ -6923,16 +8376,30 @@ namespace api {
         x.lifecycle_operation = get_stack_optional<LifecycleOperation>(j, "LifecycleOperation");
         x.lifecycle_operation_stage = get_stack_optional<LifecycleOperationStageElement>(j, "LifecycleOperationStage");
         x.list_config = get_stack_optional<ListConfigValue>(j, "ListConfig");
+        x.list_content_import_request = get_stack_optional<ListContentImportRequest>(j, "ListContentImportRequest");
+        x.list_content_import_response = get_stack_optional<ListContentImportResponse>(j, "ListContentImportResponse");
         x.list_delete_stage_request = get_stack_optional<ListDeleteStageRequest>(j, "ListDeleteStageRequest");
         x.list_delete_stage_response = get_stack_optional<ListDeleteStageResponse>(j, "ListDeleteStageResponse");
         x.list_delete_stage_summary = get_stack_optional<ListDeleteStageSummaryClass>(j, "ListDeleteStageSummary");
         x.list_delete_target = get_stack_optional<ListDeleteTargetElement>(j, "ListDeleteTarget");
+        x.list_page = get_stack_optional<ListPage>(j, "ListPage");
+        x.list_page_item = get_stack_optional<ListPageItem>(j, "ListPageItem");
+        x.list_query_request = get_stack_optional<ListQueryRequest>(j, "ListQueryRequest");
+        x.list_query_sort = get_stack_optional<Sort>(j, "ListQuerySort");
         x.list_refresh_config = get_stack_optional<ListRefresh>(j, "ListRefreshConfig");
         x.list_refresh_detour_mode = get_stack_optional<RefreshDetourMode>(j, "ListRefreshDetourMode");
         x.list_refresh_request = get_stack_optional<ListRefreshRequest>(j, "ListRefreshRequest");
         x.list_refresh_response = get_stack_optional<ListRefreshResponse>(j, "ListRefreshResponse");
         x.list_refresh_state = get_stack_optional<ListRefreshStateValue>(j, "ListRefreshState");
         x.lists_autoupdate_config = get_stack_optional<ListsAutoupdate>(j, "ListsAutoupdateConfig");
+        x.list_shrink_acceptance = get_stack_optional<AcceptShrink>(j, "ListShrinkAcceptance");
+        x.list_shrink_rejection = get_stack_optional<LastRefreshShrinkRejection>(j, "ListShrinkRejection");
+        x.list_source_format = get_stack_optional<std::string>(j, "ListSourceFormat");
+        x.list_source_preview_entry = get_stack_optional<ListSourcePreviewEntry>(j, "ListSourcePreviewEntry");
+        x.list_source_preview_error = get_stack_optional<ListSourcePreviewErrorElement>(j, "ListSourcePreviewError");
+        x.list_source_preview_request = get_stack_optional<ListSourcePreviewRequest>(j, "ListSourcePreviewRequest");
+        x.list_source_preview_response = get_stack_optional<ListSourcePreviewResponse>(j, "ListSourcePreviewResponse");
+        x.list_source_shrink_policy = get_stack_optional<ShrinkPolicy>(j, "ListSourceShrinkPolicy");
         x.log_level = get_stack_optional<LogLevel>(j, "LogLevel");
         x.log_settings = get_stack_optional<LogSettings>(j, "LogSettings");
         x.log_settings_request = get_stack_optional<LogSettingsRequest>(j, "LogSettingsRequest");
@@ -6996,6 +8463,9 @@ namespace api {
         x.nfqws_action_result = get_stack_optional<NfqwsActionResult>(j, "NfqwsActionResult");
         x.nfqws_file_entry = get_stack_optional<NfqwsFileEntryElement>(j, "NfqwsFileEntry");
         x.nfqws_status = get_stack_optional<NfqwsStatus>(j, "NfqwsStatus");
+        x.notification_dismissal_state = get_stack_optional<NotificationDismissalState>(j, "NotificationDismissalState");
+        x.notification_dismiss_request = get_stack_optional<NotificationDismissRequest>(j, "NotificationDismissRequest");
+        x.notifications_response = get_stack_optional<NotificationsResponse>(j, "NotificationsResponse");
         x.ok_response = get_stack_optional<OkResponse>(j, "OkResponse");
         x.outbound = get_stack_optional<OutboundElement>(j, "Outbound");
         x.outbound_group = get_stack_optional<OutboundGroupElement>(j, "OutboundGroup");
@@ -7025,17 +8495,25 @@ namespace api {
         x.retry_config = get_stack_optional<Retry>(j, "RetryConfig");
         x.route_config = get_stack_optional<Route>(j, "RouteConfig");
         x.router_info = get_stack_optional<RouterInfo>(j, "RouterInfo");
+        x.router_metrics = get_stack_optional<RouterMetrics>(j, "RouterMetrics");
         x.route_rule = get_stack_optional<RouteRuleElement>(j, "RouteRule");
         x.route_table_check = get_stack_optional<RouteTableCheck>(j, "RouteTableCheck");
         x.routing_health_error_response = get_stack_optional<RoutingHealthErrorResponse>(j, "RoutingHealthErrorResponse");
         x.routing_health_response = get_stack_optional<RoutingHealthResponse>(j, "RoutingHealthResponse");
+        x.routing_test_connection = get_stack_optional<RoutingTestConnection>(j, "RoutingTestConnection");
+        x.routing_test_connections = get_stack_optional<RoutingTestConnections>(j, "RoutingTestConnections");
         x.routing_test_entry = get_stack_optional<RoutingTestEntry>(j, "RoutingTestEntry");
         x.routing_test_evaluation = get_stack_optional<Evaluation>(j, "RoutingTestEvaluation");
+        x.routing_test_firewall_counter = get_stack_optional<RoutingTestFirewallCounterElement>(j, "RoutingTestFirewallCounter");
+        x.routing_test_firewall_counters = get_stack_optional<FirewallCounters>(j, "RoutingTestFirewallCounters");
+        x.routing_test_http_probe = get_stack_optional<RoutingTestHttpProbe>(j, "RoutingTestHttpProbe");
         x.routing_test_kernel_route = get_stack_optional<KernelRoute>(j, "RoutingTestKernelRoute");
         x.routing_test_kernel_route_status = get_stack_optional<RouteStatus>(j, "RoutingTestKernelRouteStatus");
         x.routing_test_list_match = get_stack_optional<ListMatch>(j, "RoutingTestListMatch");
         x.routing_test_nfqws = get_stack_optional<RoutingTestNfqws>(j, "RoutingTestNfqws");
         x.routing_test_nfqws_match = get_stack_optional<RoutingTestNfqwsMatchElement>(j, "RoutingTestNfqwsMatch");
+        x.routing_test_policy_rule = get_stack_optional<RoutingTestPolicyRuleElement>(j, "RoutingTestPolicyRule");
+        x.routing_test_policy_rules = get_stack_optional<PolicyRules>(j, "RoutingTestPolicyRules");
         x.routing_test_request = get_stack_optional<RoutingTestRequest>(j, "RoutingTestRequest");
         x.routing_test_response = get_stack_optional<RoutingTestResponse>(j, "RoutingTestResponse");
         x.routing_test_rule_diagnostic = get_stack_optional<RoutingTestRuleDiagnosticElement>(j, "RoutingTestRuleDiagnostic");
@@ -7064,18 +8542,23 @@ namespace api {
         x.status_event_connections = get_stack_optional<StatusEventConnections>(j, "StatusEventConnections");
         x.status_event_interfaces = get_stack_optional<StatusEventInterfaces>(j, "StatusEventInterfaces");
         x.status_event_interface_traffic = get_stack_optional<StatusEventInterfaceTraffic>(j, "StatusEventInterfaceTraffic");
+        x.status_event_notification_state = get_stack_optional<StatusEventNotificationState>(j, "StatusEventNotificationState");
         x.status_event_outbounds = get_stack_optional<StatusEventOutbounds>(j, "StatusEventOutbounds");
         x.status_event_service = get_stack_optional<StatusEventService>(j, "StatusEventService");
         x.status_event_snapshot = get_stack_optional<StatusEventSnapshot>(j, "StatusEventSnapshot");
+        x.status_event_subscriptions = get_stack_optional<StatusEventSubscriptions>(j, "StatusEventSubscriptions");
         x.subscription_apply_request = get_stack_optional<SubscriptionApplyRequest>(j, "SubscriptionApplyRequest");
         x.subscription_apply_response = get_stack_optional<SubscriptionApplyResponse>(j, "SubscriptionApplyResponse");
         x.subscription_apply_result = get_stack_optional<SubscriptionApplyResultElement>(j, "SubscriptionApplyResult");
         x.subscription_apply_selection = get_stack_optional<SubscriptionApplySelectionElement>(j, "SubscriptionApplySelection");
         x.subscription_id_request = get_stack_optional<SubscriptionIdRequest>(j, "SubscriptionIdRequest");
+        x.subscription_notice = get_stack_optional<SubscriptionNoticeElement>(j, "SubscriptionNotice");
+        x.subscription_notice_kind = get_stack_optional<Kind>(j, "SubscriptionNoticeKind");
         x.subscription_preview_candidate = get_stack_optional<SubscriptionPreviewCandidate>(j, "SubscriptionPreviewCandidate");
         x.subscription_preview_request = get_stack_optional<SubscriptionPreviewRequest>(j, "SubscriptionPreviewRequest");
         x.subscription_preview_response = get_stack_optional<SubscriptionPreviewResponse>(j, "SubscriptionPreviewResponse");
         x.subscription_rename_request = get_stack_optional<SubscriptionRenameRequest>(j, "SubscriptionRenameRequest");
+        x.subscription_settings_request = get_stack_optional<SubscriptionSettingsRequest>(j, "SubscriptionSettingsRequest");
         x.subscription_source_request = get_stack_optional<SubscriptionSourceRequest>(j, "SubscriptionSourceRequest");
         x.system_update_local_status = get_stack_optional<SystemUpdateLocalStatus>(j, "SystemUpdateLocalStatus");
         x.system_update_status = get_stack_optional<SystemUpdateStatus>(j, "SystemUpdateStatus");
@@ -7088,6 +8571,8 @@ namespace api {
         x.transport_exit_check_probe = get_stack_optional<TransportExitCheckProbe>(j, "TransportExitCheckProbe");
         x.transport_exit_check_request = get_stack_optional<TransportExitCheckRequest>(j, "TransportExitCheckRequest");
         x.transport_exit_check_response = get_stack_optional<TransportExitCheckResponse>(j, "TransportExitCheckResponse");
+        x.transport_geo_update = get_stack_optional<TransportGeoUpdate>(j, "TransportGeoUpdate");
+        x.transport_geo_update_response = get_stack_optional<TransportGeoUpdateResponse>(j, "TransportGeoUpdateResponse");
         x.transport_linked_outbound_ensure = get_stack_optional<LinkedOutbound>(j, "TransportLinkedOutboundEnsure");
         x.transport_manager_settings = get_stack_optional<TransportManagerSettings>(j, "TransportManagerSettings");
         x.transport_path = get_stack_optional<TransportPath>(j, "TransportPath");
@@ -7097,6 +8582,7 @@ namespace api {
         x.transport_status = get_stack_optional<TransportStatus>(j, "TransportStatus");
         x.tunnel_probe_config = get_stack_optional<TunnelProbe>(j, "TunnelProbeConfig");
         x.tunnel_probe_host_request = get_stack_optional<TunnelProbeHostRequest>(j, "TunnelProbeHostRequest");
+        x.tunnel_probe_host_review = get_stack_optional<TunnelProbeHostReview>(j, "TunnelProbeHostReview");
         x.tunnel_probe_hosts_response = get_stack_optional<TunnelProbeHostsResponse>(j, "TunnelProbeHostsResponse");
         x.tunnel_probe_state_response = get_stack_optional<TunnelProbeStateResponse>(j, "TunnelProbeStateResponse");
         x.ui_preferences_config = get_stack_optional<UiPreferences>(j, "UiPreferencesConfig");
@@ -7181,16 +8667,30 @@ namespace api {
         j["LifecycleOperation"] = x.lifecycle_operation;
         j["LifecycleOperationStage"] = x.lifecycle_operation_stage;
         j["ListConfig"] = x.list_config;
+        j["ListContentImportRequest"] = x.list_content_import_request;
+        j["ListContentImportResponse"] = x.list_content_import_response;
         j["ListDeleteStageRequest"] = x.list_delete_stage_request;
         j["ListDeleteStageResponse"] = x.list_delete_stage_response;
         j["ListDeleteStageSummary"] = x.list_delete_stage_summary;
         j["ListDeleteTarget"] = x.list_delete_target;
+        j["ListPage"] = x.list_page;
+        j["ListPageItem"] = x.list_page_item;
+        j["ListQueryRequest"] = x.list_query_request;
+        j["ListQuerySort"] = x.list_query_sort;
         j["ListRefreshConfig"] = x.list_refresh_config;
         j["ListRefreshDetourMode"] = x.list_refresh_detour_mode;
         j["ListRefreshRequest"] = x.list_refresh_request;
         j["ListRefreshResponse"] = x.list_refresh_response;
         j["ListRefreshState"] = x.list_refresh_state;
         j["ListsAutoupdateConfig"] = x.lists_autoupdate_config;
+        j["ListShrinkAcceptance"] = x.list_shrink_acceptance;
+        j["ListShrinkRejection"] = x.list_shrink_rejection;
+        j["ListSourceFormat"] = x.list_source_format;
+        j["ListSourcePreviewEntry"] = x.list_source_preview_entry;
+        j["ListSourcePreviewError"] = x.list_source_preview_error;
+        j["ListSourcePreviewRequest"] = x.list_source_preview_request;
+        j["ListSourcePreviewResponse"] = x.list_source_preview_response;
+        j["ListSourceShrinkPolicy"] = x.list_source_shrink_policy;
         j["LogLevel"] = x.log_level;
         j["LogSettings"] = x.log_settings;
         j["LogSettingsRequest"] = x.log_settings_request;
@@ -7254,6 +8754,9 @@ namespace api {
         j["NfqwsActionResult"] = x.nfqws_action_result;
         j["NfqwsFileEntry"] = x.nfqws_file_entry;
         j["NfqwsStatus"] = x.nfqws_status;
+        j["NotificationDismissalState"] = x.notification_dismissal_state;
+        j["NotificationDismissRequest"] = x.notification_dismiss_request;
+        j["NotificationsResponse"] = x.notifications_response;
         j["OkResponse"] = x.ok_response;
         j["Outbound"] = x.outbound;
         j["OutboundGroup"] = x.outbound_group;
@@ -7283,17 +8786,25 @@ namespace api {
         j["RetryConfig"] = x.retry_config;
         j["RouteConfig"] = x.route_config;
         j["RouterInfo"] = x.router_info;
+        j["RouterMetrics"] = x.router_metrics;
         j["RouteRule"] = x.route_rule;
         j["RouteTableCheck"] = x.route_table_check;
         j["RoutingHealthErrorResponse"] = x.routing_health_error_response;
         j["RoutingHealthResponse"] = x.routing_health_response;
+        j["RoutingTestConnection"] = x.routing_test_connection;
+        j["RoutingTestConnections"] = x.routing_test_connections;
         j["RoutingTestEntry"] = x.routing_test_entry;
         j["RoutingTestEvaluation"] = x.routing_test_evaluation;
+        j["RoutingTestFirewallCounter"] = x.routing_test_firewall_counter;
+        j["RoutingTestFirewallCounters"] = x.routing_test_firewall_counters;
+        j["RoutingTestHttpProbe"] = x.routing_test_http_probe;
         j["RoutingTestKernelRoute"] = x.routing_test_kernel_route;
         j["RoutingTestKernelRouteStatus"] = x.routing_test_kernel_route_status;
         j["RoutingTestListMatch"] = x.routing_test_list_match;
         j["RoutingTestNfqws"] = x.routing_test_nfqws;
         j["RoutingTestNfqwsMatch"] = x.routing_test_nfqws_match;
+        j["RoutingTestPolicyRule"] = x.routing_test_policy_rule;
+        j["RoutingTestPolicyRules"] = x.routing_test_policy_rules;
         j["RoutingTestRequest"] = x.routing_test_request;
         j["RoutingTestResponse"] = x.routing_test_response;
         j["RoutingTestRuleDiagnostic"] = x.routing_test_rule_diagnostic;
@@ -7322,18 +8833,23 @@ namespace api {
         j["StatusEventConnections"] = x.status_event_connections;
         j["StatusEventInterfaces"] = x.status_event_interfaces;
         j["StatusEventInterfaceTraffic"] = x.status_event_interface_traffic;
+        j["StatusEventNotificationState"] = x.status_event_notification_state;
         j["StatusEventOutbounds"] = x.status_event_outbounds;
         j["StatusEventService"] = x.status_event_service;
         j["StatusEventSnapshot"] = x.status_event_snapshot;
+        j["StatusEventSubscriptions"] = x.status_event_subscriptions;
         j["SubscriptionApplyRequest"] = x.subscription_apply_request;
         j["SubscriptionApplyResponse"] = x.subscription_apply_response;
         j["SubscriptionApplyResult"] = x.subscription_apply_result;
         j["SubscriptionApplySelection"] = x.subscription_apply_selection;
         j["SubscriptionIdRequest"] = x.subscription_id_request;
+        j["SubscriptionNotice"] = x.subscription_notice;
+        j["SubscriptionNoticeKind"] = x.subscription_notice_kind;
         j["SubscriptionPreviewCandidate"] = x.subscription_preview_candidate;
         j["SubscriptionPreviewRequest"] = x.subscription_preview_request;
         j["SubscriptionPreviewResponse"] = x.subscription_preview_response;
         j["SubscriptionRenameRequest"] = x.subscription_rename_request;
+        j["SubscriptionSettingsRequest"] = x.subscription_settings_request;
         j["SubscriptionSourceRequest"] = x.subscription_source_request;
         j["SystemUpdateLocalStatus"] = x.system_update_local_status;
         j["SystemUpdateStatus"] = x.system_update_status;
@@ -7346,6 +8862,8 @@ namespace api {
         j["TransportExitCheckProbe"] = x.transport_exit_check_probe;
         j["TransportExitCheckRequest"] = x.transport_exit_check_request;
         j["TransportExitCheckResponse"] = x.transport_exit_check_response;
+        j["TransportGeoUpdate"] = x.transport_geo_update;
+        j["TransportGeoUpdateResponse"] = x.transport_geo_update_response;
         j["TransportLinkedOutboundEnsure"] = x.transport_linked_outbound_ensure;
         j["TransportManagerSettings"] = x.transport_manager_settings;
         j["TransportPath"] = x.transport_path;
@@ -7355,6 +8873,7 @@ namespace api {
         j["TransportStatus"] = x.transport_status;
         j["TunnelProbeConfig"] = x.tunnel_probe_config;
         j["TunnelProbeHostRequest"] = x.tunnel_probe_host_request;
+        j["TunnelProbeHostReview"] = x.tunnel_probe_host_review;
         j["TunnelProbeHostsResponse"] = x.tunnel_probe_hosts_response;
         j["TunnelProbeStateResponse"] = x.tunnel_probe_state_response;
         j["UiPreferencesConfig"] = x.ui_preferences_config;
@@ -7584,6 +9103,22 @@ namespace api {
             case OutboundType::TABLE: j = "table"; break;
             case OutboundType::URLTEST: j = "urltest"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"OutboundType\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, FailurePolicy & x) {
+        if (j == "block") x = FailurePolicy::BLOCK;
+        else if (j == "fallback") x = FailurePolicy::FALLBACK;
+        else if (j == "inherit") x = FailurePolicy::INHERIT;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"FailurePolicy\""); }
+    }
+
+    inline void to_json(json & j, const FailurePolicy & x) {
+        switch (x) {
+            case FailurePolicy::BLOCK: j = "block"; break;
+            case FailurePolicy::FALLBACK: j = "fallback"; break;
+            case FailurePolicy::INHERIT: j = "inherit"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"FailurePolicy\": " + std::to_string(static_cast<int>(x)));
         }
     }
 
@@ -7882,6 +9417,58 @@ namespace api {
             case CatalogStatus::STALE: j = "stale"; break;
             case CatalogStatus::UNAVAILABLE: j = "unavailable"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"CatalogStatus\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, Sort & x) {
+        if (j == "id") x = Sort::ID;
+        else if (j == "name") x = Sort::NAME;
+        else if (j == "source") x = Sort::SOURCE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"Sort\""); }
+    }
+
+    inline void to_json(json & j, const Sort & x) {
+        switch (x) {
+            case Sort::ID: j = "id"; break;
+            case Sort::NAME: j = "name"; break;
+            case Sort::SOURCE: j = "source"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"Sort\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, ListSourcePreviewEntryType & x) {
+        if (j == "domain") x = ListSourcePreviewEntryType::DOMAIN;
+        else if (j == "ipv4") x = ListSourcePreviewEntryType::IPV4;
+        else if (j == "ipv6") x = ListSourcePreviewEntryType::IPV6;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"ListSourcePreviewEntryType\""); }
+    }
+
+    inline void to_json(json & j, const ListSourcePreviewEntryType & x) {
+        switch (x) {
+            case ListSourcePreviewEntryType::DOMAIN: j = "domain"; break;
+            case ListSourcePreviewEntryType::IPV4: j = "ipv4"; break;
+            case ListSourcePreviewEntryType::IPV6: j = "ipv6"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"ListSourcePreviewEntryType\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, ListSourcePreviewResponseStatus & x) {
+        if (j == "download_failed") x = ListSourcePreviewResponseStatus::DOWNLOAD_FAILED;
+        else if (j == "ok") x = ListSourcePreviewResponseStatus::OK;
+        else if (j == "route_unavailable") x = ListSourcePreviewResponseStatus::ROUTE_UNAVAILABLE;
+        else if (j == "too_large") x = ListSourcePreviewResponseStatus::TOO_LARGE;
+        else if (j == "unsupported_format") x = ListSourcePreviewResponseStatus::UNSUPPORTED_FORMAT;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"ListSourcePreviewResponseStatus\""); }
+    }
+
+    inline void to_json(json & j, const ListSourcePreviewResponseStatus & x) {
+        switch (x) {
+            case ListSourcePreviewResponseStatus::DOWNLOAD_FAILED: j = "download_failed"; break;
+            case ListSourcePreviewResponseStatus::OK: j = "ok"; break;
+            case ListSourcePreviewResponseStatus::ROUTE_UNAVAILABLE: j = "route_unavailable"; break;
+            case ListSourcePreviewResponseStatus::TOO_LARGE: j = "too_large"; break;
+            case ListSourcePreviewResponseStatus::UNSUPPORTED_FORMAT: j = "unsupported_format"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"ListSourcePreviewResponseStatus\": " + std::to_string(static_cast<int>(x)));
         }
     }
 
@@ -9095,6 +10682,28 @@ namespace api {
         }
     }
 
+    inline void from_json(const json & j, Kind & x) {
+        if (j == "expired") x = Kind::EXPIRED;
+        else if (j == "expires_soon") x = Kind::EXPIRES_SOON;
+        else if (j == "new_servers") x = Kind::NEW_SERVERS;
+        else if (j == "sync_failed") x = Kind::SYNC_FAILED;
+        else if (j == "traffic_exhausted") x = Kind::TRAFFIC_EXHAUSTED;
+        else if (j == "traffic_low") x = Kind::TRAFFIC_LOW;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"Kind\""); }
+    }
+
+    inline void to_json(json & j, const Kind & x) {
+        switch (x) {
+            case Kind::EXPIRED: j = "expired"; break;
+            case Kind::EXPIRES_SOON: j = "expires_soon"; break;
+            case Kind::NEW_SERVERS: j = "new_servers"; break;
+            case Kind::SYNC_FAILED: j = "sync_failed"; break;
+            case Kind::TRAFFIC_EXHAUSTED: j = "traffic_exhausted"; break;
+            case Kind::TRAFFIC_LOW: j = "traffic_low"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"Kind\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
     inline void from_json(const json & j, LastOutcome & x) {
         if (j == "abandoned") x = LastOutcome::ABANDONED;
         else if (j == "failure") x = LastOutcome::FAILURE;
@@ -9153,19 +10762,19 @@ namespace api {
         }
     }
 
-    inline void from_json(const json & j, Reason & x) {
-        if (j == "lookup_failed") x = Reason::LOOKUP_FAILED;
-        else if (j == "registry_lookup_disabled") x = Reason::REGISTRY_LOOKUP_DISABLED;
-        else if (j == "unreadable_response") x = Reason::UNREADABLE_RESPONSE;
-        else { throw std::runtime_error("Cannot deserialize to enumeration \"Reason\""); }
+    inline void from_json(const json & j, RegistryCheckResponseReason & x) {
+        if (j == "lookup_failed") x = RegistryCheckResponseReason::LOOKUP_FAILED;
+        else if (j == "registry_lookup_disabled") x = RegistryCheckResponseReason::REGISTRY_LOOKUP_DISABLED;
+        else if (j == "unreadable_response") x = RegistryCheckResponseReason::UNREADABLE_RESPONSE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"RegistryCheckResponseReason\""); }
     }
 
-    inline void to_json(json & j, const Reason & x) {
+    inline void to_json(json & j, const RegistryCheckResponseReason & x) {
         switch (x) {
-            case Reason::LOOKUP_FAILED: j = "lookup_failed"; break;
-            case Reason::REGISTRY_LOOKUP_DISABLED: j = "registry_lookup_disabled"; break;
-            case Reason::UNREADABLE_RESPONSE: j = "unreadable_response"; break;
-            default: throw std::runtime_error("Unexpected value in enumeration \"Reason\": " + std::to_string(static_cast<int>(x)));
+            case RegistryCheckResponseReason::LOOKUP_FAILED: j = "lookup_failed"; break;
+            case RegistryCheckResponseReason::REGISTRY_LOOKUP_DISABLED: j = "registry_lookup_disabled"; break;
+            case RegistryCheckResponseReason::UNREADABLE_RESPONSE: j = "unreadable_response"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"RegistryCheckResponseReason\": " + std::to_string(static_cast<int>(x)));
         }
     }
 
@@ -9291,6 +10900,66 @@ namespace api {
         }
     }
 
+    inline void from_json(const json & j, RoutingTestFirewallCounterAction & x) {
+        if (j == "drop") x = RoutingTestFirewallCounterAction::DROP;
+        else if (j == "mark") x = RoutingTestFirewallCounterAction::MARK;
+        else if (j == "pass") x = RoutingTestFirewallCounterAction::PASS;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"RoutingTestFirewallCounterAction\""); }
+    }
+
+    inline void to_json(json & j, const RoutingTestFirewallCounterAction & x) {
+        switch (x) {
+            case RoutingTestFirewallCounterAction::DROP: j = "drop"; break;
+            case RoutingTestFirewallCounterAction::MARK: j = "mark"; break;
+            case RoutingTestFirewallCounterAction::PASS: j = "pass"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"RoutingTestFirewallCounterAction\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, Family & x) {
+        if (j == "ipv4") x = Family::IPV4;
+        else if (j == "ipv6") x = Family::IPV6;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"Family\""); }
+    }
+
+    inline void to_json(json & j, const Family & x) {
+        switch (x) {
+            case Family::IPV4: j = "ipv4"; break;
+            case Family::IPV6: j = "ipv6"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"Family\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, RoutingTestFirewallCountersScope & x) {
+        if (j == "prerouting") x = RoutingTestFirewallCountersScope::PREROUTING;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"RoutingTestFirewallCountersScope\""); }
+    }
+
+    inline void to_json(json & j, const RoutingTestFirewallCountersScope & x) {
+        switch (x) {
+            case RoutingTestFirewallCountersScope::PREROUTING: j = "prerouting"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"RoutingTestFirewallCountersScope\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, RoutingTestFirewallCountersStatus & x) {
+        if (j == "ambiguous") x = RoutingTestFirewallCountersStatus::AMBIGUOUS;
+        else if (j == "not_applicable") x = RoutingTestFirewallCountersStatus::NOT_APPLICABLE;
+        else if (j == "observed") x = RoutingTestFirewallCountersStatus::OBSERVED;
+        else if (j == "unavailable") x = RoutingTestFirewallCountersStatus::UNAVAILABLE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"RoutingTestFirewallCountersStatus\""); }
+    }
+
+    inline void to_json(json & j, const RoutingTestFirewallCountersStatus & x) {
+        switch (x) {
+            case RoutingTestFirewallCountersStatus::AMBIGUOUS: j = "ambiguous"; break;
+            case RoutingTestFirewallCountersStatus::NOT_APPLICABLE: j = "not_applicable"; break;
+            case RoutingTestFirewallCountersStatus::OBSERVED: j = "observed"; break;
+            case RoutingTestFirewallCountersStatus::UNAVAILABLE: j = "unavailable"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"RoutingTestFirewallCountersStatus\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
     inline void from_json(const json & j, RouteStatus & x) {
         if (j == "not_applicable") x = RouteStatus::NOT_APPLICABLE;
         else if (j == "resolved") x = RouteStatus::RESOLVED;
@@ -9306,6 +10975,22 @@ namespace api {
             case RouteStatus::UNAVAILABLE: j = "unavailable"; break;
             case RouteStatus::UNROUTABLE: j = "unroutable"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"RouteStatus\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, RoutingTestPolicyRulesStatus & x) {
+        if (j == "not_applicable") x = RoutingTestPolicyRulesStatus::NOT_APPLICABLE;
+        else if (j == "observed") x = RoutingTestPolicyRulesStatus::OBSERVED;
+        else if (j == "unavailable") x = RoutingTestPolicyRulesStatus::UNAVAILABLE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"RoutingTestPolicyRulesStatus\""); }
+    }
+
+    inline void to_json(json & j, const RoutingTestPolicyRulesStatus & x) {
+        switch (x) {
+            case RoutingTestPolicyRulesStatus::NOT_APPLICABLE: j = "not_applicable"; break;
+            case RoutingTestPolicyRulesStatus::OBSERVED: j = "observed"; break;
+            case RoutingTestPolicyRulesStatus::UNAVAILABLE: j = "unavailable"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"RoutingTestPolicyRulesStatus\": " + std::to_string(static_cast<int>(x)));
         }
     }
 
@@ -9338,6 +11023,84 @@ namespace api {
             case RoutingTestUnknownConditionElement::SOURCE_ADDRESS: j = "source_address"; break;
             case RoutingTestUnknownConditionElement::SOURCE_PORT: j = "source_port"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"RoutingTestUnknownConditionElement\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, Method & x) {
+        if (j == "HEAD") x = Method::HEAD;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"Method\""); }
+    }
+
+    inline void to_json(json & j, const Method & x) {
+        switch (x) {
+            case Method::HEAD: j = "HEAD"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"Method\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, RoutingTestHttpProbeReason & x) {
+        if (j == "binding_failed") x = RoutingTestHttpProbeReason::BINDING_FAILED;
+        else if (j == "blocked_route") x = RoutingTestHttpProbeReason::BLOCKED_ROUTE;
+        else if (j == "budget_exhausted") x = RoutingTestHttpProbeReason::BUDGET_EXHAUSTED;
+        else if (j == "connection_failed") x = RoutingTestHttpProbeReason::CONNECTION_FAILED;
+        else if (j == "context_required") x = RoutingTestHttpProbeReason::CONTEXT_REQUIRED;
+        else if (j == "destination_changed") x = RoutingTestHttpProbeReason::DESTINATION_CHANGED;
+        else if (j == "http_response") x = RoutingTestHttpProbeReason::HTTP_RESPONSE;
+        else if (j == "no_route") x = RoutingTestHttpProbeReason::NO_ROUTE;
+        else if (j == "response_limit") x = RoutingTestHttpProbeReason::RESPONSE_LIMIT;
+        else if (j == "timeout") x = RoutingTestHttpProbeReason::TIMEOUT;
+        else if (j == "tls_error") x = RoutingTestHttpProbeReason::TLS_ERROR;
+        else if (j == "transport_error") x = RoutingTestHttpProbeReason::TRANSPORT_ERROR;
+        else if (j == "unsupported_target") x = RoutingTestHttpProbeReason::UNSUPPORTED_TARGET;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"RoutingTestHttpProbeReason\""); }
+    }
+
+    inline void to_json(json & j, const RoutingTestHttpProbeReason & x) {
+        switch (x) {
+            case RoutingTestHttpProbeReason::BINDING_FAILED: j = "binding_failed"; break;
+            case RoutingTestHttpProbeReason::BLOCKED_ROUTE: j = "blocked_route"; break;
+            case RoutingTestHttpProbeReason::BUDGET_EXHAUSTED: j = "budget_exhausted"; break;
+            case RoutingTestHttpProbeReason::CONNECTION_FAILED: j = "connection_failed"; break;
+            case RoutingTestHttpProbeReason::CONTEXT_REQUIRED: j = "context_required"; break;
+            case RoutingTestHttpProbeReason::DESTINATION_CHANGED: j = "destination_changed"; break;
+            case RoutingTestHttpProbeReason::HTTP_RESPONSE: j = "http_response"; break;
+            case RoutingTestHttpProbeReason::NO_ROUTE: j = "no_route"; break;
+            case RoutingTestHttpProbeReason::RESPONSE_LIMIT: j = "response_limit"; break;
+            case RoutingTestHttpProbeReason::TIMEOUT: j = "timeout"; break;
+            case RoutingTestHttpProbeReason::TLS_ERROR: j = "tls_error"; break;
+            case RoutingTestHttpProbeReason::TRANSPORT_ERROR: j = "transport_error"; break;
+            case RoutingTestHttpProbeReason::UNSUPPORTED_TARGET: j = "unsupported_target"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"RoutingTestHttpProbeReason\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, RoutingTestHttpProbeScope & x) {
+        if (j == "router") x = RoutingTestHttpProbeScope::ROUTER;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"RoutingTestHttpProbeScope\""); }
+    }
+
+    inline void to_json(json & j, const RoutingTestHttpProbeScope & x) {
+        switch (x) {
+            case RoutingTestHttpProbeScope::ROUTER: j = "router"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"RoutingTestHttpProbeScope\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, RoutingTestHttpProbeStatus & x) {
+        if (j == "answered") x = RoutingTestHttpProbeStatus::ANSWERED;
+        else if (j == "failed") x = RoutingTestHttpProbeStatus::FAILED;
+        else if (j == "not_applicable") x = RoutingTestHttpProbeStatus::NOT_APPLICABLE;
+        else if (j == "unavailable") x = RoutingTestHttpProbeStatus::UNAVAILABLE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"RoutingTestHttpProbeStatus\""); }
+    }
+
+    inline void to_json(json & j, const RoutingTestHttpProbeStatus & x) {
+        switch (x) {
+            case RoutingTestHttpProbeStatus::ANSWERED: j = "answered"; break;
+            case RoutingTestHttpProbeStatus::FAILED: j = "failed"; break;
+            case RoutingTestHttpProbeStatus::NOT_APPLICABLE: j = "not_applicable"; break;
+            case RoutingTestHttpProbeStatus::UNAVAILABLE: j = "unavailable"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"RoutingTestHttpProbeStatus\": " + std::to_string(static_cast<int>(x)));
         }
     }
 
@@ -9559,6 +11322,18 @@ namespace api {
         }
     }
 
+    inline void from_json(const json & j, StatusEventNotificationStateType & x) {
+        if (j == "notification_state") x = StatusEventNotificationStateType::NOTIFICATION_STATE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"StatusEventNotificationStateType\""); }
+    }
+
+    inline void to_json(json & j, const StatusEventNotificationStateType & x) {
+        switch (x) {
+            case StatusEventNotificationStateType::NOTIFICATION_STATE: j = "notification_state"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"StatusEventNotificationStateType\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
     inline void from_json(const json & j, StatusEventOutboundsType & x) {
         if (j == "outbounds") x = StatusEventOutboundsType::OUTBOUNDS;
         else { throw std::runtime_error("Cannot deserialize to enumeration \"StatusEventOutboundsType\""); }
@@ -9592,6 +11367,18 @@ namespace api {
         switch (x) {
             case StatusEventSnapshotType::SNAPSHOT: j = "snapshot"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"StatusEventSnapshotType\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, StatusEventSubscriptionsType & x) {
+        if (j == "subscriptions") x = StatusEventSubscriptionsType::SUBSCRIPTIONS;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"StatusEventSubscriptionsType\""); }
+    }
+
+    inline void to_json(json & j, const StatusEventSubscriptionsType & x) {
+        switch (x) {
+            case StatusEventSubscriptionsType::SUBSCRIPTIONS: j = "subscriptions"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"StatusEventSubscriptionsType\": " + std::to_string(static_cast<int>(x)));
         }
     }
 
@@ -9986,4 +11773,617 @@ namespace nlohmann {
             default: throw std::runtime_error("Input JSON does not conform to schema!");
         }
     }
+}
+
+// Remove absent known values for persistent configuration only. Unknown JSON
+// payloads are opaque, including their nulls, empty objects and array entries.
+namespace keen_pbr3 {
+namespace api {
+    inline bool prune_config_json_for_persistence(json & j, const ConfigObject & x);
+    inline bool prune_config_json_for_persistence(json & j, const ApiConfig & x);
+    inline bool prune_config_json_for_persistence(json & j, const Daemon & x);
+    inline bool prune_config_json_for_persistence(json & j, const Dns & x);
+    inline bool prune_config_json_for_persistence(json & j, const ClientDnsEnforcement & x);
+    inline bool prune_config_json_for_persistence(json & j, const DnsTestServer & x);
+    inline bool prune_config_json_for_persistence(json & j, const DnsRuleElement & x);
+    inline bool prune_config_json_for_persistence(json & j, const DnsServerElement & x);
+    inline bool prune_config_json_for_persistence(json & j, const SystemResolver & x);
+    inline bool prune_config_json_for_persistence(json & j, const Fwmark & x);
+    inline bool prune_config_json_for_persistence(json & j, const Iproute & x);
+    inline bool prune_config_json_for_persistence(json & j, const ListRefresh & x);
+    inline bool prune_config_json_for_persistence(json & j, const ListConfigValue & x);
+    inline bool prune_config_json_for_persistence(json & j, const ShrinkPolicy & x);
+    inline bool prune_config_json_for_persistence(json & j, const ListsAutoupdate & x);
+    inline bool prune_config_json_for_persistence(json & j, const OutboundElement & x);
+    inline bool prune_config_json_for_persistence(json & j, const CircuitBreakerConfig & x);
+    inline bool prune_config_json_for_persistence(json & j, const OutboundGroupElement & x);
+    inline bool prune_config_json_for_persistence(json & j, const Retry & x);
+    inline bool prune_config_json_for_persistence(json & j, const Route & x);
+    inline bool prune_config_json_for_persistence(json & j, const InternalVpnServerElement & x);
+    inline bool prune_config_json_for_persistence(json & j, const InternalVpnServiceElement & x);
+    inline bool prune_config_json_for_persistence(json & j, const RouteRuleElement & x);
+    inline bool prune_config_json_for_persistence(json & j, const TunnelProbe & x);
+    inline bool prune_config_json_for_persistence(json & j, const UiPreferences & x);
+    inline bool prune_config_json_for_persistence(json & j, const PlainDnsTemplateElement & x);
+
+    template <typename T>
+    inline bool prune_config_json_for_persistence(json & j, const T &) {
+        return j.is_null();
+    }
+
+    // Raw JSON is an opaque value even when a future config field names it.
+    inline bool prune_config_json_for_persistence(json &, const json &) {
+        return false;
+    }
+
+    template <typename T>
+    inline bool prune_config_json_for_persistence(json & j, const std::optional<T> & x);
+    template <typename T>
+    inline bool prune_config_json_for_persistence(json & j, const std::vector<T> & x);
+    template <typename T>
+    inline bool prune_config_json_for_persistence(json & j, const std::map<std::string, T> & x);
+
+    template <typename T>
+    inline bool prune_config_json_for_persistence(json & j, const std::optional<T> & x) {
+        return !x || prune_config_json_for_persistence(j, *x);
+    }
+
+    template <typename T>
+    inline bool prune_config_json_for_persistence(json & j, const std::vector<T> & x) {
+        if (!j.is_array()) return j.is_null();
+        for (std::size_t i = 0; i < x.size() && i < j.size(); ++i) {
+            (void)prune_config_json_for_persistence(j[i], x[i]);
+        }
+        return false;
+    }
+
+    template <typename T>
+    inline bool prune_config_json_for_persistence(json & j, const std::map<std::string, T> & x) {
+        if (!j.is_object()) return j.is_null();
+        for (const auto & entry : x) {
+            if (auto it = j.find(entry.first); it != j.end()) {
+                if (prune_config_json_for_persistence(*it, entry.second)) j.erase(it);
+            }
+        }
+        return j.empty();
+    }
+
+    inline bool prune_config_json_for_persistence(json & j, const ConfigObject & x) {
+        if (!j.is_object()) return j.is_null();
+        if (auto it = j.find("api"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.api)) j.erase(it);
+        }
+        if (auto it = j.find("daemon"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.daemon)) j.erase(it);
+        }
+        if (auto it = j.find("dns"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.dns)) j.erase(it);
+        }
+        if (auto it = j.find("fwmark"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.fwmark)) j.erase(it);
+        }
+        if (auto it = j.find("iproute"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.iproute)) j.erase(it);
+        }
+        if (auto it = j.find("list_refresh"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.list_refresh)) j.erase(it);
+        }
+        if (auto it = j.find("lists"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.lists)) j.erase(it);
+        }
+        if (auto it = j.find("lists_autoupdate"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.lists_autoupdate)) j.erase(it);
+        }
+        if (auto it = j.find("outbounds"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.outbounds)) j.erase(it);
+        }
+        if (auto it = j.find("route"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.route)) j.erase(it);
+        }
+        if (auto it = j.find("schema_version"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.schema_version)) j.erase(it);
+        }
+        if (auto it = j.find("tunnel_probe"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.tunnel_probe)) j.erase(it);
+        }
+        if (auto it = j.find("ui_preferences"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.ui_preferences)) j.erase(it);
+        }
+        return j.empty();
+    }
+
+    inline bool prune_config_json_for_persistence(json & j, const ApiConfig & x) {
+        if (!j.is_object()) return j.is_null();
+        if (auto it = j.find("enabled"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.enabled)) j.erase(it);
+        }
+        if (auto it = j.find("listen"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.listen)) j.erase(it);
+        }
+        return j.empty();
+    }
+
+    inline bool prune_config_json_for_persistence(json & j, const Daemon & x) {
+        if (!j.is_object()) return j.is_null();
+        if (auto it = j.find("cache_dir"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.cache_dir)) j.erase(it);
+        }
+        if (auto it = j.find("clear_dynamic_sets_on_apply"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.clear_dynamic_sets_on_apply)) j.erase(it);
+        }
+        if (auto it = j.find("firewall_backend"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.firewall_backend)) j.erase(it);
+        }
+        if (auto it = j.find("firewall_verify_max_bytes"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.firewall_verify_max_bytes)) j.erase(it);
+        }
+        if (auto it = j.find("ipset_hashsize"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.ipset_hashsize)) j.erase(it);
+        }
+        if (auto it = j.find("ipset_maxelem"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.ipset_maxelem)) j.erase(it);
+        }
+        if (auto it = j.find("ipv6_enabled"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.ipv6_enabled)) j.erase(it);
+        }
+        if (auto it = j.find("max_file_size_bytes"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.max_file_size_bytes)) j.erase(it);
+        }
+        if (auto it = j.find("meta_udp443_policy"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.meta_udp443_policy)) j.erase(it);
+        }
+        if (auto it = j.find("pid_file"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.pid_file)) j.erase(it);
+        }
+        if (auto it = j.find("ppe_deoffload_mode"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.ppe_deoffload_mode)) j.erase(it);
+        }
+        if (auto it = j.find("ppe_deoffload_quic_enabled"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.ppe_deoffload_quic_enabled)) j.erase(it);
+        }
+        if (auto it = j.find("reconnect_owned_flows_on_routing_change_lists"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.reconnect_owned_flows_on_routing_change_lists)) j.erase(it);
+        }
+        if (auto it = j.find("reconnect_unmarked_flows_on_routing_change"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.reconnect_unmarked_flows_on_routing_change)) j.erase(it);
+        }
+        if (auto it = j.find("reuse_static_sets_on_runtime_refresh"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.reuse_static_sets_on_runtime_refresh)) j.erase(it);
+        }
+        if (auto it = j.find("skip_marked_packets"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.skip_marked_packets)) j.erase(it);
+        }
+        if (auto it = j.find("strict_enforcement"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.strict_enforcement)) j.erase(it);
+        }
+        if (auto it = j.find("ttl_bypass_enabled"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.ttl_bypass_enabled)) j.erase(it);
+        }
+        return j.empty();
+    }
+
+    inline bool prune_config_json_for_persistence(json & j, const Dns & x) {
+        if (!j.is_object()) return j.is_null();
+        if (auto it = j.find("client_dns_enforcement"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.client_dns_enforcement)) j.erase(it);
+        }
+        if (auto it = j.find("dns_test_server"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.dns_test_server)) j.erase(it);
+        }
+        if (auto it = j.find("fallback"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.fallback)) j.erase(it);
+        }
+        if (auto it = j.find("firefox_doh_canary"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.firefox_doh_canary)) j.erase(it);
+        }
+        if (auto it = j.find("rules"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.rules)) j.erase(it);
+        }
+        if (auto it = j.find("servers"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.servers)) j.erase(it);
+        }
+        if (auto it = j.find("system_resolver"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.system_resolver)) j.erase(it);
+        }
+        return j.empty();
+    }
+
+    inline bool prune_config_json_for_persistence(json & j, const ClientDnsEnforcement & x) {
+        if (!j.is_object()) return j.is_null();
+        if (auto it = j.find("block_dot"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.block_dot)) j.erase(it);
+        }
+        if (auto it = j.find("enabled"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.enabled)) j.erase(it);
+        }
+        return j.empty();
+    }
+
+    inline bool prune_config_json_for_persistence(json & j, const DnsTestServer & x) {
+        if (!j.is_object()) return j.is_null();
+        if (auto it = j.find("answer_ipv4"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.answer_ipv4)) j.erase(it);
+        }
+        if (auto it = j.find("listen"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.listen)) j.erase(it);
+        }
+        return j.empty();
+    }
+
+    inline bool prune_config_json_for_persistence(json & j, const DnsRuleElement & x) {
+        if (!j.is_object()) return j.is_null();
+        if (auto it = j.find("allow_domain_rebinding"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.allow_domain_rebinding)) j.erase(it);
+        }
+        if (auto it = j.find("display_name"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.display_name)) j.erase(it);
+        }
+        if (auto it = j.find("enabled"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.enabled)) j.erase(it);
+        }
+        if (auto it = j.find("id"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.id)) j.erase(it);
+        }
+        if (auto it = j.find("list"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.list)) j.erase(it);
+        }
+        if (auto it = j.find("server"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.server)) j.erase(it);
+        }
+        return j.empty();
+    }
+
+    inline bool prune_config_json_for_persistence(json & j, const DnsServerElement & x) {
+        if (!j.is_object()) return j.is_null();
+        if (auto it = j.find("address"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.address)) j.erase(it);
+        }
+        if (auto it = j.find("detour"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.detour)) j.erase(it);
+        }
+        if (auto it = j.find("display_name"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.display_name)) j.erase(it);
+        }
+        if (auto it = j.find("domains"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.domains)) j.erase(it);
+        }
+        if (auto it = j.find("tag"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.tag)) j.erase(it);
+        }
+        if (auto it = j.find("type"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.type)) j.erase(it);
+        }
+        return j.empty();
+    }
+
+    inline bool prune_config_json_for_persistence(json & j, const SystemResolver & x) {
+        if (!j.is_object()) return j.is_null();
+        if (auto it = j.find("address"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.address)) j.erase(it);
+        }
+        return j.empty();
+    }
+
+    inline bool prune_config_json_for_persistence(json & j, const Fwmark & x) {
+        if (!j.is_object()) return j.is_null();
+        if (auto it = j.find("mask"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.mask)) j.erase(it);
+        }
+        if (auto it = j.find("start"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.start)) j.erase(it);
+        }
+        return j.empty();
+    }
+
+    inline bool prune_config_json_for_persistence(json & j, const Iproute & x) {
+        if (!j.is_object()) return j.is_null();
+        if (auto it = j.find("table_start"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.table_start)) j.erase(it);
+        }
+        return j.empty();
+    }
+
+    inline bool prune_config_json_for_persistence(json & j, const ListRefresh & x) {
+        if (!j.is_object()) return j.is_null();
+        if (auto it = j.find("detour"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.detour)) j.erase(it);
+        }
+        if (auto it = j.find("fallback_detours"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.fallback_detours)) j.erase(it);
+        }
+        return j.empty();
+    }
+
+    inline bool prune_config_json_for_persistence(json & j, const ListConfigValue & x) {
+        if (!j.is_object()) return j.is_null();
+        if (auto it = j.find("catalog_identity"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.catalog_identity)) j.erase(it);
+        }
+        if (auto it = j.find("detour"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.detour)) j.erase(it);
+        }
+        if (auto it = j.find("display_name"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.display_name)) j.erase(it);
+        }
+        if (auto it = j.find("domains"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.domains)) j.erase(it);
+        }
+        if (auto it = j.find("fallback_detours"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.fallback_detours)) j.erase(it);
+        }
+        if (auto it = j.find("file"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.file)) j.erase(it);
+        }
+        if (auto it = j.find("ip_cidrs"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.ip_cidrs)) j.erase(it);
+        }
+        if (auto it = j.find("refresh_detour_mode"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.refresh_detour_mode)) j.erase(it);
+        }
+        if (auto it = j.find("shrink_policy"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.shrink_policy)) j.erase(it);
+        }
+        if (auto it = j.find("source_format"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.source_format)) j.erase(it);
+        }
+        if (auto it = j.find("ttl_ms"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.ttl_ms)) j.erase(it);
+        }
+        if (auto it = j.find("url"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.url)) j.erase(it);
+        }
+        return j.empty();
+    }
+
+    inline bool prune_config_json_for_persistence(json & j, const ShrinkPolicy & x) {
+        if (!j.is_object()) return j.is_null();
+        if (auto it = j.find("min_previous_entries"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.min_previous_entries)) j.erase(it);
+        }
+        if (auto it = j.find("min_retained_fraction"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.min_retained_fraction)) j.erase(it);
+        }
+        return j.empty();
+    }
+
+    inline bool prune_config_json_for_persistence(json & j, const ListsAutoupdate & x) {
+        if (!j.is_object()) return j.is_null();
+        if (auto it = j.find("cron"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.cron)) j.erase(it);
+        }
+        if (auto it = j.find("enabled"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.enabled)) j.erase(it);
+        }
+        return j.empty();
+    }
+
+    inline bool prune_config_json_for_persistence(json & j, const OutboundElement & x) {
+        if (!j.is_object()) return j.is_null();
+        if (auto it = j.find("circuit_breaker"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.circuit_breaker)) j.erase(it);
+        }
+        if (auto it = j.find("conntrack_on_switch"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.conntrack_on_switch)) j.erase(it);
+        }
+        if (auto it = j.find("display_name"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.display_name)) j.erase(it);
+        }
+        if (auto it = j.find("gateway"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.gateway)) j.erase(it);
+        }
+        if (auto it = j.find("gateway6"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.gateway6)) j.erase(it);
+        }
+        if (auto it = j.find("interface"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.interface)) j.erase(it);
+        }
+        if (auto it = j.find("interval_ms"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.interval_ms)) j.erase(it);
+        }
+        if (auto it = j.find("outbound_groups"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.outbound_groups)) j.erase(it);
+        }
+        if (auto it = j.find("probe_timeout_ms"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.probe_timeout_ms)) j.erase(it);
+        }
+        if (auto it = j.find("retry"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.retry)) j.erase(it);
+        }
+        if (auto it = j.find("selection_mode"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.selection_mode)) j.erase(it);
+        }
+        if (auto it = j.find("strict_enforcement"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.strict_enforcement)) j.erase(it);
+        }
+        if (auto it = j.find("table"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.table)) j.erase(it);
+        }
+        if (auto it = j.find("tag"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.tag)) j.erase(it);
+        }
+        if (auto it = j.find("tolerance_ms"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.tolerance_ms)) j.erase(it);
+        }
+        if (auto it = j.find("type"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.type)) j.erase(it);
+        }
+        if (auto it = j.find("url"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.url)) j.erase(it);
+        }
+        return j.empty();
+    }
+
+    inline bool prune_config_json_for_persistence(json & j, const CircuitBreakerConfig & x) {
+        if (!j.is_object()) return j.is_null();
+        if (auto it = j.find("failure_threshold"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.failure_threshold)) j.erase(it);
+        }
+        if (auto it = j.find("half_open_max_requests"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.half_open_max_requests)) j.erase(it);
+        }
+        if (auto it = j.find("success_threshold"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.success_threshold)) j.erase(it);
+        }
+        if (auto it = j.find("timeout_ms"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.timeout_ms)) j.erase(it);
+        }
+        return j.empty();
+    }
+
+    inline bool prune_config_json_for_persistence(json & j, const OutboundGroupElement & x) {
+        if (!j.is_object()) return j.is_null();
+        if (auto it = j.find("outbounds"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.outbounds)) j.erase(it);
+        }
+        if (auto it = j.find("weight"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.weight)) j.erase(it);
+        }
+        return j.empty();
+    }
+
+    inline bool prune_config_json_for_persistence(json & j, const Retry & x) {
+        if (!j.is_object()) return j.is_null();
+        if (auto it = j.find("attempts"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.attempts)) j.erase(it);
+        }
+        if (auto it = j.find("interval_ms"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.interval_ms)) j.erase(it);
+        }
+        return j.empty();
+    }
+
+    inline bool prune_config_json_for_persistence(json & j, const Route & x) {
+        if (!j.is_object()) return j.is_null();
+        if (auto it = j.find("inbound_interfaces"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.inbound_interfaces)) j.erase(it);
+        }
+        if (auto it = j.find("internal_vpn_servers"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.internal_vpn_servers)) j.erase(it);
+        }
+        if (auto it = j.find("internal_vpn_services"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.internal_vpn_services)) j.erase(it);
+        }
+        if (auto it = j.find("rules"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.rules)) j.erase(it);
+        }
+        return j.empty();
+    }
+
+    inline bool prune_config_json_for_persistence(json & j, const InternalVpnServerElement & x) {
+        if (!j.is_object()) return j.is_null();
+        if (auto it = j.find("interface"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.interface)) j.erase(it);
+        }
+        if (auto it = j.find("ndms_id"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.ndms_id)) j.erase(it);
+        }
+        if (auto it = j.find("process_clients"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.process_clients)) j.erase(it);
+        }
+        return j.empty();
+    }
+
+    inline bool prune_config_json_for_persistence(json & j, const InternalVpnServiceElement & x) {
+        if (!j.is_object()) return j.is_null();
+        if (auto it = j.find("process_clients"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.process_clients)) j.erase(it);
+        }
+        if (auto it = j.find("service_id"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.service_id)) j.erase(it);
+        }
+        return j.empty();
+    }
+
+    inline bool prune_config_json_for_persistence(json & j, const RouteRuleElement & x) {
+        if (!j.is_object()) return j.is_null();
+        if (auto it = j.find("dest_addr"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.dest_addr)) j.erase(it);
+        }
+        if (auto it = j.find("dest_port"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.dest_port)) j.erase(it);
+        }
+        if (auto it = j.find("display_name"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.display_name)) j.erase(it);
+        }
+        if (auto it = j.find("dscp"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.dscp)) j.erase(it);
+        }
+        if (auto it = j.find("enabled"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.enabled)) j.erase(it);
+        }
+        if (auto it = j.find("failure_policy"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.failure_policy)) j.erase(it);
+        }
+        if (auto it = j.find("fallback_outbound"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.fallback_outbound)) j.erase(it);
+        }
+        if (auto it = j.find("id"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.id)) j.erase(it);
+        }
+        if (auto it = j.find("list"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.list)) j.erase(it);
+        }
+        if (auto it = j.find("outbound"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.outbound)) j.erase(it);
+        }
+        if (auto it = j.find("proto"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.proto)) j.erase(it);
+        }
+        if (auto it = j.find("src_addr"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.src_addr)) j.erase(it);
+        }
+        if (auto it = j.find("src_port"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.src_port)) j.erase(it);
+        }
+        return j.empty();
+    }
+
+    inline bool prune_config_json_for_persistence(json & j, const TunnelProbe & x) {
+        if (!j.is_object()) return j.is_null();
+        if (auto it = j.find("enabled"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.enabled)) j.erase(it);
+        }
+        if (auto it = j.find("interval_ms"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.interval_ms)) j.erase(it);
+        }
+        if (auto it = j.find("list"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.list)) j.erase(it);
+        }
+        if (auto it = j.find("max_probes_per_pass"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.max_probes_per_pass)) j.erase(it);
+        }
+        if (auto it = j.find("outbound"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.outbound)) j.erase(it);
+        }
+        if (auto it = j.find("require_registry_confirmation"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.require_registry_confirmation)) j.erase(it);
+        }
+        return j.empty();
+    }
+
+    inline bool prune_config_json_for_persistence(json & j, const UiPreferences & x) {
+        if (!j.is_object()) return j.is_null();
+        if (auto it = j.find("hidden_native_interface_ids"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.hidden_native_interface_ids)) j.erase(it);
+        }
+        if (auto it = j.find("plain_dns_templates"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.plain_dns_templates)) j.erase(it);
+        }
+        return j.empty();
+    }
+
+    inline bool prune_config_json_for_persistence(json & j, const PlainDnsTemplateElement & x) {
+        if (!j.is_object()) return j.is_null();
+        if (auto it = j.find("name"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.name)) j.erase(it);
+        }
+        if (auto it = j.find("primary_ipv4"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.primary_ipv4)) j.erase(it);
+        }
+        if (auto it = j.find("secondary_ipv4"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.secondary_ipv4)) j.erase(it);
+        }
+        return j.empty();
+    }
+}
 }

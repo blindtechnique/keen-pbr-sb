@@ -41,7 +41,7 @@ export function OutboundName({
   outbound: Outbound
   protocol?: string
   /**
-   * Подписать интерфейс под именем — но только если он от имени отличается.
+   * Подписать понятное имя интерфейса, если оно отличается от имени маршрута.
    * У большинства туннелей имя и есть имя интерфейса, и строчка «интерфейс
    * sddvpn mooo AWG» под заголовком «sddvpn mooo AWG» не сообщает ничего.
    */
@@ -51,18 +51,22 @@ export function OutboundName({
   const { labelFor } = useInterfaceDisplayNames()
   const name = getOutboundDisplayName(outbound)
   const interfaceLabel = withInterface ? labelFor(outbound.interface ?? "") : ""
+  const referenceLabel = [
+    getOutboundReferenceLabel(outbound),
+    outbound.interface !== outbound.tag ? outbound.interface : undefined,
+  ]
+    .filter(Boolean)
+    .join(" · ")
   const showInterface =
     Boolean(interfaceLabel) &&
+    interfaceLabel.trim() !== outbound.interface?.trim() &&
     interfaceLabel.trim().toLocaleLowerCase() !==
       name.trim().toLocaleLowerCase()
 
   return (
     <div className="min-w-0">
       <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-        <span
-          className="min-w-0 truncate font-medium"
-          title={getOutboundReferenceLabel(outbound)}
-        >
+        <span className="min-w-0 truncate font-medium" title={referenceLabel}>
           {name}
         </span>
         {protocol ? (

@@ -1,6 +1,7 @@
 #include "list_service.hpp"
 
 #include "../log/logger.hpp"
+#include "../lists/list_source_decoder.hpp"
 
 #include <chrono>
 #include <sstream>
@@ -21,7 +22,8 @@ std::string refresh_flight_key(const Config& config,
                                bool only_uncached,
                                const std::set<std::string>* relevant_lists,
                                const std::set<std::string>* target_lists,
-                               const std::set<std::string>* dns_relevant_lists) {
+                               const std::set<std::string>* dns_relevant_lists,
+                               const RemoteListRefreshControl& control) {
     nlohmann::json key;
     key["config"] = config;
     key["marks"] = outbound_marks;
@@ -30,6 +32,9 @@ std::string refresh_flight_key(const Config& config,
     key["targets"] = target_lists ? nlohmann::json(*target_lists) : nlohmann::json(nullptr);
     key["dns_relevant"] = dns_relevant_lists ? nlohmann::json(*dns_relevant_lists)
                                                : nlohmann::json(nullptr);
+    key["force_refresh"] = control.force_refresh || control.accept_shrink.has_value();
+    key["accept_shrink"] = control.accept_shrink ? nlohmann::json(*control.accept_shrink)
+                                                : nlohmann::json(nullptr);
     return key.dump();
 }
 
@@ -171,7 +176,7 @@ std::string format_list_names(const std::vector<std::string>& list_names) {
 
 bool remote_list_sources_changed(const Config& current, const Config& next) {
     using RemoteListSource =
-        std::tuple<std::string, std::vector<std::string>>;
+        std::tuple<std::string, std::string, std::vector<std::string>>;
     const auto sources = [](const Config& config) {
         std::map<std::string, RemoteListSource> result;
         for (const auto& [name, list] : config_lists(config)) {
@@ -182,6 +187,7 @@ bool remote_list_sources_changed(const Config& current, const Config& next) {
                 name,
                 RemoteListSource{
                     *list.url,
+                    list.source_format.value_or("text"),
                     effective_list_refresh_detours(config, list)});
         }
         return result;
@@ -207,8 +213,12 @@ std::map<std::string, api::ListRefreshStateValue> build_list_refresh_state_map(
 
         api::ListRefreshStateValue state;
         const auto metadata = cache_manager.load_metadata(name);
+        const auto source_format = list_cfg.source_format.value_or("text");
         if (metadata.url.has_value() &&
-            *metadata.url == *list_cfg.url) {
+            *metadata.url == *list_cfg.url &&
+            metadata.source_format.value_or("text") == source_format &&
+            (source_format == "text" ||
+             metadata.source_decoder_revision == kListSourceDecoderRevision)) {
             state.last_updated = metadata.download_time;
         }
         if (metadata.last_refresh_url.has_value() &&
@@ -216,6 +226,7 @@ std::map<std::string, api::ListRefreshStateValue> build_list_refresh_state_map(
             state.last_attempt = metadata.last_refresh_attempt;
             state.last_error = metadata.last_refresh_error;
             state.last_detour = metadata.last_refresh_detour;
+            state.shrink_rejection = metadata.last_refresh_shrink_rejection;
         }
         refresh_state.emplace(name, std::move(state));
     }
@@ -272,7 +283,7 @@ RemoteListsRefreshResult ListService::download_remote_lists(const Config& config
     // paths are never shared by API, scheduled, and startup refreshes.
     std::string flight_key =
         refresh_flight_key(config, outbound_marks, only_uncached, relevant_lists, target_lists,
-                           dns_relevant_lists);
+                           dns_relevant_lists, control);
     // A cancellable task owns its flight. Otherwise cancelling an IPC task
     // would propagate the owner's exception into an unrelated API/startup
     // caller that happened to request the same scope.
@@ -327,8 +338,9 @@ RemoteListsRefreshResult ListService::download_remote_lists(const Config& config
                 continue;
             }
             throw_if_cancelled(control);
+            const auto source_format = list_cfg.source_format.value_or("text");
             if (only_uncached &&
-                cache_manager_.has_current_cache(name, *list_cfg.url)) {
+                cache_manager_.has_current_cache(name, *list_cfg.url, source_format)) {
                 result.cached_lists.push_back(name);
                 report_progress(control, ++progress_completed, progress_total,
                                 name, RemoteListRefreshProgressStatus::Cached);
@@ -358,14 +370,24 @@ RemoteListsRefreshResult ListService::download_remote_lists(const Config& config
                 }
 
                 attempted = true;
+                CacheDownloadOptions options;
+                options.fwmark = fwmark;
+                options.detour = detour;
+                options.cancellation = control.cancellation;
+                options.commit = control.cache_commit;
+                options.force_refresh = control.force_refresh;
+                options.accept_shrink = control.accept_shrink;
+                if (list_cfg.shrink_policy) {
+                    options.shrink_policy.min_previous_entries =
+                        list_cfg.shrink_policy->min_previous_entries.value_or(50);
+                    options.shrink_policy.min_retained_fraction =
+                        list_cfg.shrink_policy->min_retained_fraction.value_or(0.5);
+                }
                 download_result = cache_manager_.download(
                     name,
                     *list_cfg.url,
-                    CacheDownloadOptions{
-                        fwmark,
-                        detour,
-                        control.cancellation,
-                        control.cache_commit});
+                    options,
+                    source_format);
                 if (download_result.cancelled()) {
                     throw RemoteListRefreshCancelled();
                 }
@@ -420,7 +442,7 @@ RemoteListsRefreshResult ListService::download_remote_lists(const Config& config
                 }
                 if (only_uncached &&
                     cache_manager_.has_usable_same_source_cache(
-                        name, *list_cfg.url)) {
+                        name, *list_cfg.url, source_format)) {
                     result.cached_lists.push_back(name);
                     result.legacy_cached_lists.push_back(name);
                     report_progress(

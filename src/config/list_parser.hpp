@@ -11,6 +11,13 @@ namespace keen_pbr3 {
 
 class ListParser {
 public:
+    enum class IpCidrError {
+        none,
+        leading_zeros,
+        invalid_address,
+        invalid_prefix,
+    };
+
     struct ParseContext {
         bool log_invalid_entries{true};
         std::size_t invalid_entry_count{0};
@@ -35,11 +42,11 @@ public:
     // trailing root dot are removed from the returned value.
     static std::optional<std::string> normalize_domain(std::string_view domain);
 
-private:
-    static bool is_ipv4(std::string_view s);
-    static bool is_ipv6(std::string_view s);
-    static bool is_cidr_v4(std::string_view s);
-    static bool is_cidr_v6(std::string_view s);
+    // Canonical host/network text. CIDRs lose host bits; /32 and /128 become
+    // bare hosts. /0 and private/special addresses remain valid syntax.
+    static std::optional<std::string> normalize_ip_or_cidr(
+        std::string_view entry, IpCidrError* error = nullptr);
+    static const char* ip_cidr_error_message(IpCidrError error) noexcept;
 };
 
 } // namespace keen_pbr3

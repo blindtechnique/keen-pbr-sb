@@ -80,7 +80,7 @@ ApiContext make_subscriptions_test_context(
         []() {},
         []() {},
         []() {},
-        [](std::optional<std::string>) {
+        [](const api::ListRefreshRequest&) {
             return ListRefreshOperationResult{};
         },
     };
@@ -610,6 +610,9 @@ TEST_CASE("preview refuses to plan without the manager") {
         "application/json");
     REQUIRE(response != nullptr);
     CHECK(response->status == 503);
+    const auto body = nlohmann::json::parse(response->body);
+    CHECK(body.at("code") == "service_unavailable");
+    CHECK(body.at("error") == "transport manager is unavailable");
     CHECK(harness.fetch_calls == 0U);
 }
 
@@ -693,6 +696,7 @@ TEST_CASE("apply atomically creates a selected transport and linked route") {
     CHECK(second.at("results")[0].at("tag") == "fresh_nl");
     CHECK(second.at("results")[0].at("interface") == "vless2");
     CHECK(second.at("results")[0].at("error").is_null());
+    CHECK(second.at("results")[0].value("code", nlohmann::json{}).is_null());
     CHECK(harness.manager->created.size() == 1U);
     CHECK(harness.manager->batch_create_calls.load() == 1);
     CHECK(harness.apply_calls == 1U);
@@ -769,9 +773,12 @@ TEST_CASE("one rejected item does not block valid subscription selections") {
     REQUIRE(failed != results.end());
     REQUIRE(created != results.end());
     CHECK(failed->at("outcome") == "failed");
+    CHECK(failed->at("code") == "invalid_connection");
+    CHECK(failed->at("error") == "connection data was not accepted");
     CHECK(failed->at("tag").is_null());
     CHECK(failed->at("interface").is_null());
     CHECK(created->at("outcome") == "created");
+    CHECK(created->value("code", nlohmann::json{}).is_null());
     CHECK(harness.manager->item_validate_calls.load() == 1);
     CHECK(harness.manager->batch_validate_calls.load() == 1);
     CHECK(harness.manager->batch_create_calls.load() == 1);
@@ -814,6 +821,7 @@ TEST_CASE("duplicate selected names fail one item without blocking the batch") {
     REQUIRE(failed != results.end());
     CHECK(failed->at("outcome") == "failed");
     CHECK(failed->at("error") == "name is already in use");
+    CHECK(failed->at("code") == "name_in_use");
     REQUIRE(harness.manager->created.size() == 1U);
     CHECK(harness.manager->created[0].at("tag") == "same_name");
     CHECK(harness.apply_calls == 1U);
@@ -1130,6 +1138,10 @@ TEST_CASE("apply refuses what the preview did not offer") {
         "application/json");
     REQUIRE(gone != nullptr);
     CHECK(gone->status == 410);
+    const auto gone_body = nlohmann::json::parse(gone->body);
+    CHECK(gone_body.at("code") == "preview_expired");
+    CHECK(gone_body.at("error") ==
+          "the subscription preview has expired; fetch it again");
 
     CHECK(harness.manager->created.empty());
 
@@ -1235,6 +1247,45 @@ TEST_CASE("URL import remembers its subscription source on successful apply") {
     CHECK(records[0].at("name") == "My subscription");
     CHECK(records[0].at("transport_tags")[0] == "new_sub_vpn");
     CHECK(harness.apply_calls == 1);
+}
+
+TEST_CASE("saved subscription settings and pending preview use a private source id") {
+    SubscriptionsHarness harness(19883);
+    harness.fetch_body = kConfiguredLink;
+    httplib::Client client("127.0.0.1", 19883);
+    const auto saved = client.Post("/api/subscriptions",
+        R"({"url":"https://provider.example/sub/private-token","name":"Plan"})", "application/json");
+    REQUIRE(saved != nullptr);
+    REQUIRE(saved->status == 200);
+    const auto id = nlohmann::json::parse(saved->body).at("id");
+    const auto settings = client.Post("/api/subscriptions/settings",
+        nlohmann::json{{"id", id}, {"refresh_interval_seconds", 3600}}.dump(), "application/json");
+    REQUIRE(settings != nullptr);
+    REQUIRE(settings->status == 200);
+    CHECK(nlohmann::json::parse(settings->body).at("refresh_interval_seconds") == 3600);
+    const auto invalid = client.Post("/api/subscriptions/settings",
+        nlohmann::json{{"id", id}, {"refresh_interval_seconds", 10}}.dump(), "application/json");
+    REQUIRE(invalid != nullptr);
+    CHECK(invalid->status == 400);
+    harness.fetch_body = kConfiguredLink + "\nvless://new-private-key@new.example:443#New";
+    const auto refreshed = client.Post("/api/subscriptions/refresh",
+        nlohmann::json{{"id", id}}.dump(), "application/json");
+    REQUIRE(refreshed != nullptr);
+    REQUIRE(refreshed->status == 200);
+    CHECK(nlohmann::json::parse(refreshed->body).at("pending_new_servers_count") == 1);
+    const auto preview = client.Post("/api/subscriptions/preview",
+        nlohmann::json{{"subscription_id", id}, {"pending_only", true}}.dump(), "application/json");
+    REQUIRE(preview != nullptr);
+    REQUIRE(preview->status == 200);
+    const auto result = nlohmann::json::parse(preview->body);
+    REQUIRE(result.at("candidates").size() == 1);
+    CHECK(result.at("candidates")[0].at("line") == 2);
+    CHECK(result.at("candidates")[0].at("remark") == "New");
+    CHECK(preview->body.find("private-token") == std::string::npos);
+    CHECK(preview->body.find("new-private-key") == std::string::npos);
+    CHECK(preview->body.find("fingerprint") == std::string::npos);
+    CHECK(harness.apply_calls == 0);
+    CHECK(harness.manager->created.empty());
 }
 
 TEST_CASE("the production fetcher carries the destination policy") {

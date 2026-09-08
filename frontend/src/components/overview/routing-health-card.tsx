@@ -16,6 +16,7 @@ import {
 } from "@/components/overview/ppe-deoffload-status-model"
 import {
   localizeFirewallAction,
+  localizeRouteType,
   localizeRoutingHealthDetail,
   localizeRoutingHealthStatus,
 } from "@/components/overview/routing-health-detail-model"
@@ -59,9 +60,7 @@ export function RoutingHealthCard({
   return (
     <div className="flex flex-1 flex-col space-y-4">
       <div className="flex flex-wrap items-center gap-2">
-        <StatusBadge tone={mapCheckTone(routingHealth.overall)}>
-          {localizeRoutingHealthStatus(routingHealth.overall, t)}
-        </StatusBadge>
+        <RoutingStatusBadge status={routingHealth.overall} />
         <Badge size="xs" variant="outline">
           {routingHealth.firewall_backend}
         </Badge>
@@ -115,15 +114,18 @@ export function RoutingHealthCard({
                   <span className="font-mono text-[12px] sm:text-sm">
                     {rule.set_name}
                   </span>
-                  <InlineMeta>{localizeFirewallAction(rule.action, t)}</InlineMeta>
+                  <InlineMeta>
+                    {localizeFirewallAction(rule.action, t)}
+                  </InlineMeta>
+                  {!["mark", "drop", "pass"].includes(rule.action) ? (
+                    <TechnicalDetail detail={rule.action} />
+                  ) : null}
                   {renderFirewallMark(
                     rule.expected_fwmark,
                     rule.actual_fwmark,
                     t
                   )}
-                  {renderInlineDetail(
-                    localizeRoutingHealthDetail(rule.detail, t)
-                  )}
+                  {renderBackendDetail(rule.detail, t)}
                 </>
               }
               status={rule.status}
@@ -152,13 +154,22 @@ export function RoutingHealthCard({
                         })}
                       </InlineMeta>
                       <InlineMeta>
-                        {table.expected_destination ??
-                          t("overview.routing.defaultRoute")}
+                        {!table.expected_destination ||
+                        table.expected_destination === "default"
+                          ? t("overview.routing.defaultRoute")
+                          : table.expected_destination}
                       </InlineMeta>
                       <InlineMeta>
                         {formatRouteExpectation(table, t)}
                       </InlineMeta>
+                      {table.expected_route_type &&
+                      !["unicast", "blackhole", "unreachable"].includes(
+                        table.expected_route_type
+                      ) ? (
+                        <TechnicalDetail detail={table.expected_route_type} />
+                      ) : null}
                       {renderInlineDetail(getRouteMismatchDetail(table, t))}
+                      {renderBackendDetail(table.detail, t)}
                     </>
                   }
                   status={table.status}
@@ -203,9 +214,7 @@ export function RoutingHealthCard({
                     yesLabel={t("overview.routing.yes")}
                     noLabel={t("overview.routing.no")}
                   />
-                  {renderInlineDetail(
-                    localizeRoutingHealthDetail(policy.detail, t)
-                  )}
+                  {renderBackendDetail(policy.detail, t)}
                 </>
               }
               status={policy.status}
@@ -255,10 +264,6 @@ function PpeDeoffloadStatus({ health }: { health: PpeDeoffloadHealth }) {
   const quicApplied = formatPpePorts(health.quic.applied_ports) ?? noPorts
   const lastReconcile = formatPpeTimestamp(health.last_reconcile_ts)
   const observedAt = formatPpeTimestamp(health.observed_at)
-  const diagnosticDetail = localizeRoutingHealthDetail(
-    health.detail ?? health.reason,
-    t
-  )
 
   return (
     <section className="space-y-2">
@@ -315,11 +320,9 @@ function PpeDeoffloadStatus({ health }: { health: PpeDeoffloadHealth }) {
               {t("overview.routing.ppe.observedAt", { value: observedAt })}
             </InlineMeta>
           ) : null}
-          {diagnosticDetail ? (
-            <span className="basis-full text-xs text-muted-foreground">
-              {diagnosticDetail}
-            </span>
-          ) : null}
+          <div className="basis-full text-xs text-muted-foreground">
+            {renderBackendDetail(health.detail ?? health.reason, t)}
+          </div>
           {health.prerouting || health.forward ? (
             <span className="basis-full text-xs text-muted-foreground">
               {t("overview.routing.ppe.counterCaveat")}
@@ -385,17 +388,13 @@ function CompactDiagnosticRow({
   primary: ReactNode
   status: string
 }) {
-  const { t } = useTranslation()
-
   return (
     <div className="rounded-md border border-border/70 bg-muted/20 px-3 py-1.5">
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
           {primary}
         </div>
-        <StatusBadge tone={mapCheckTone(status)}>
-          {localizeRoutingHealthStatus(status, t)}
-        </StatusBadge>
+        <RoutingStatusBadge status={status} />
       </div>
     </div>
   )
@@ -485,6 +484,47 @@ function renderInlineDetail(detail?: string | null) {
   return <InlineMeta>{detail}</InlineMeta>
 }
 
+function TechnicalDetail({ detail }: { detail: string }) {
+  const { t } = useTranslation()
+
+  return (
+    <details className="basis-full text-xs text-muted-foreground">
+      <summary className="cursor-pointer">
+        {t("overview.routing.technicalDetails")}
+      </summary>
+      <p className="mt-1 font-mono break-words whitespace-pre-wrap">{detail}</p>
+    </details>
+  )
+}
+
+function renderBackendDetail(
+  detail: string | null | undefined,
+  t: (key: string, options?: Record<string, unknown>) => string
+) {
+  const localized = localizeRoutingHealthDetail(detail, t)
+  if (!localized) return null
+  return localized === detail ? (
+    <TechnicalDetail detail={localized} />
+  ) : (
+    <InlineMeta>{localized}</InlineMeta>
+  )
+}
+
+function RoutingStatusBadge({ status }: { status: string }) {
+  const { t } = useTranslation()
+
+  return (
+    <div className="flex shrink-0 flex-col items-end gap-1">
+      <StatusBadge tone={mapCheckTone(status)}>
+        {localizeRoutingHealthStatus(status, t)}
+      </StatusBadge>
+      {!["ok", "degraded", "error", "missing", "mismatch"].includes(status) ? (
+        <TechnicalDetail detail={status} />
+      ) : null}
+    </div>
+  )
+}
+
 function groupRouteTables(routeTables: RouteTableCheck[]) {
   const groups = new Map<
     string,
@@ -532,7 +572,9 @@ function formatRouteExpectation(
   t: (key: string, options?: Record<string, unknown>) => string
 ) {
   const parts = [
-    table.expected_route_type ?? t("overview.routing.routeTypeFallback"),
+    table.expected_route_type
+      ? localizeRouteType(table.expected_route_type, t)
+      : t("overview.routing.routeTypeFallback"),
   ]
 
   if (table.expected_interface) {
@@ -582,7 +624,7 @@ function getRouteMismatchDetail(
     return issues.join(", ")
   }
 
-  return localizeRoutingHealthDetail(table.detail, t)
+  return null
 }
 
 function mapCheckTone(status: string): StatusTone {

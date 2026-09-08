@@ -143,6 +143,18 @@ TEST_CASE("shrink guard: every kind of entry counts, not just domains") {
     CHECK(decision.retained_fraction == doctest::Approx(0.1));
 }
 
+TEST_CASE("shrink guard: zero fractional threshold still requires approval for an empty source") {
+    ListShrinkPolicy policy;
+    policy.min_previous_entries = 0;
+    policy.min_retained_fraction = 0.0;
+    CHECK(decide_list_shrink(domains(200), domains(1), policy).verdict ==
+          ListShrinkVerdict::publish);
+    CHECK(decide_list_shrink(domains(200), domains(0), policy).verdict ==
+          ListShrinkVerdict::refuse);
+    CHECK(decide_list_shrink(domains(0), domains(0), policy).verdict ==
+          ListShrinkVerdict::publish);
+}
+
 TEST_CASE("shrink guard: a shape change that keeps the total is published") {
     // The same source may legitimately move entries between kinds - a
     // generator that starts emitting suffixes instead of exact names, say.

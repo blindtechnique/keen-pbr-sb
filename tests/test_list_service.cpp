@@ -5,6 +5,7 @@
 #include "../src/log/logger.hpp"
 #include "../src/http/curl_runtime.hpp"
 #include "../src/lists/srs_decoder.hpp"
+#include "../src/lists/list_source_decoder.hpp"
 
 #include <zlib.h>
 
@@ -94,12 +95,15 @@ public:
         ++calls;
         HttpTransportResponse response;
         response.status_code = 200;
-        response.body = "example.com\n";
+        response.body = body;
+        if (!etag.empty()) response.headers["etag"] = etag;
         return response;
     }
 
     HttpTransportRequest last_request;
     size_t calls{0};
+    std::string body{"example.com\n"};
+    std::string etag;
 };
 
 class CancelThenSucceedHttpTransport final : public HttpTransport {
@@ -637,6 +641,9 @@ TEST_CASE("build_list_refresh_state_map ignores metadata from an old URL") {
     metadata.last_refresh_url = "https://old.example/list.txt";
     metadata.last_refresh_attempt = "2026-04-06T12:00:00Z";
     metadata.last_refresh_error = "HTTP 403";
+    metadata.last_refresh_shrink_rejection.emplace();
+    metadata.last_refresh_shrink_rejection->previous_entries = 200;
+    metadata.last_refresh_shrink_rejection->candidate_entries = 3;
     cache_manager.save_metadata("remote", metadata);
 
     ListConfig remote;
@@ -651,6 +658,7 @@ TEST_CASE("build_list_refresh_state_map ignores metadata from an old URL") {
     CHECK_FALSE(refresh_state.at("remote").last_updated.has_value());
     CHECK_FALSE(refresh_state.at("remote").last_attempt.has_value());
     CHECK_FALSE(refresh_state.at("remote").last_error.has_value());
+    CHECK_FALSE(refresh_state.at("remote").shrink_rejection.has_value());
 
     std::filesystem::remove_all(temp_dir);
 }
@@ -1598,4 +1606,223 @@ TEST_CASE("collect_relevant_list_names: ignores disabled route and dns rules") {
     CHECK(dns_relevant_lists.count("route_enabled") == 0);
     CHECK(dns_relevant_lists.count("dns_disabled") == 0);
     CHECK(dns_relevant_lists.count("dns_enabled") == 1);
+}
+
+namespace {
+
+std::string refresh_test_hosts(std::size_t count) {
+    std::string body;
+    for (std::size_t index = 0; index < count; ++index) {
+        body += "host" + std::to_string(index) + ".example\n";
+    }
+    return body;
+}
+
+bool refresh_request_has_header(const HttpTransportRequest& request,
+                                const std::string& header) {
+    return std::find(request.headers.begin(), request.headers.end(), header) !=
+           request.headers.end();
+}
+
+} // namespace
+
+TEST_CASE("list service applies each source threshold and publishes typed shrink state") {
+    const auto temp_dir = make_temp_dir();
+    auto transport = std::make_shared<StaticHttpTransport>();
+    ListService service(temp_dir, kDefaultMaxFileSizeBytes, transport);
+    service.ensure_dir();
+    ListConfig ordinary;
+    ordinary.url = "https://example.test/ordinary.txt";
+    ListConfig lenient;
+    lenient.url = "https://example.test/lenient.txt";
+    lenient.shrink_policy.emplace();
+    lenient.shrink_policy->min_retained_fraction = 0.2;
+    Config config;
+    config.lists = std::map<std::string, ListConfig>{
+        {"ordinary", ordinary}, {"lenient", lenient}};
+    const std::set<std::string> relevant{"ordinary", "lenient"};
+    transport->body = refresh_test_hosts(200);
+    transport->etag = "full";
+    REQUIRE(service.refresh_remote_lists(config, {}).failed_lists.empty());
+    const auto previous_state = build_list_refresh_state_map(config, service.cache_manager());
+
+    transport->body = refresh_test_hosts(60);
+    transport->etag = "smaller";
+    const auto result = service.refresh_remote_lists(config, {}, &relevant);
+    CHECK(result.changed_lists == std::vector<std::string>{"lenient"});
+    CHECK(result.failed_lists == std::vector<std::string>{"ordinary"});
+    CHECK(result.relevant_changed_lists == std::vector<std::string>{"lenient"});
+    const auto state = build_list_refresh_state_map(config, service.cache_manager());
+    REQUIRE(state.at("ordinary").shrink_rejection.has_value());
+    const auto& rejection = *state.at("ordinary").shrink_rejection;
+    CHECK(rejection.previous_entries == 200);
+    CHECK(rejection.candidate_entries == 60);
+    CHECK(rejection.min_previous_entries == 50);
+    CHECK(rejection.min_retained_fraction == doctest::Approx(0.5));
+    CHECK(rejection.previous_sha256.size() == 64);
+    CHECK(rejection.candidate_sha256.size() == 64);
+    CHECK(state.at("ordinary").last_error.has_value());
+    CHECK(state.at("ordinary").last_attempt.has_value());
+    CHECK(state.at("ordinary").last_updated == previous_state.at("ordinary").last_updated);
+    CHECK(service.cache_manager().load_metadata("ordinary").etag == "full");
+    CHECK_FALSE(state.at("lenient").shrink_rejection.has_value());
+    CHECK_FALSE(state.at("lenient").last_error.has_value());
+    CHECK(service.cache_manager().load_metadata("lenient").domains == 60);
+    std::filesystem::remove_all(temp_dir);
+}
+
+TEST_CASE("list service forwards the per-source minimum baseline count") {
+    const auto temp_dir = make_temp_dir();
+    auto transport = std::make_shared<StaticHttpTransport>();
+    ListService service(temp_dir, kDefaultMaxFileSizeBytes, transport);
+    service.ensure_dir();
+    ListConfig remote;
+    remote.url = "https://example.test/tiny.txt";
+    remote.shrink_policy.emplace();
+    remote.shrink_policy->min_previous_entries = 2;
+    remote.shrink_policy->min_retained_fraction = 0.9;
+    Config config;
+    config.lists = std::map<std::string, ListConfig>{{"tiny", remote}};
+    transport->body = refresh_test_hosts(3);
+    REQUIRE(service.refresh_remote_lists(config, {}).failed_lists.empty());
+    transport->body = refresh_test_hosts(1);
+    CHECK(service.refresh_remote_lists(config, {}).failed_lists ==
+          std::vector<std::string>{"tiny"});
+    const auto state = build_list_refresh_state_map(config, service.cache_manager());
+    REQUIRE(state.at("tiny").shrink_rejection.has_value());
+    CHECK(state.at("tiny").shrink_rejection->previous_entries == 3);
+    CHECK(state.at("tiny").shrink_rejection->candidate_entries == 1);
+    CHECK(state.at("tiny").shrink_rejection->min_previous_entries == 2);
+    CHECK(state.at("tiny").shrink_rejection->min_retained_fraction == doctest::Approx(0.9));
+    std::filesystem::remove_all(temp_dir);
+}
+
+TEST_CASE("list service force still refuses shrink and exact acceptance applies it once") {
+    const auto temp_dir = make_temp_dir();
+    auto transport = std::make_shared<StaticHttpTransport>();
+    ListService service(temp_dir, kDefaultMaxFileSizeBytes, transport);
+    service.ensure_dir();
+    ListConfig remote;
+    remote.url = "https://example.test/remote.txt";
+    Config config;
+    config.lists = std::map<std::string, ListConfig>{{"remote", remote}};
+    const std::set<std::string> selected{"remote"};
+    transport->body = refresh_test_hosts(200);
+    transport->etag = "full";
+    REQUIRE(service.refresh_remote_lists(config, {}).failed_lists.empty());
+    RemoteListRefreshControl force;
+    force.force_refresh = true;
+    transport->body = refresh_test_hosts(60);
+    transport->etag = "small";
+    const auto refusal = service.refresh_remote_lists(
+        config, {}, &selected, &selected, nullptr, force);
+    CHECK(refusal.failed_lists == std::vector<std::string>{"remote"});
+    CHECK_FALSE(should_reload_runtime_after_list_refresh(true, refusal));
+    CHECK_FALSE(refresh_request_has_header(transport->last_request, "If-None-Match: full"));
+    const auto state = build_list_refresh_state_map(config, service.cache_manager());
+    REQUIRE(state.at("remote").shrink_rejection.has_value());
+    RemoteListRefreshControl accept;
+    accept.accept_shrink.emplace();
+    accept.accept_shrink->previous_sha256 = state.at("remote").shrink_rejection->previous_sha256;
+    accept.accept_shrink->candidate_sha256 = state.at("remote").shrink_rejection->candidate_sha256;
+    const auto accepted = service.refresh_remote_lists(
+        config, {}, &selected, &selected, nullptr, accept);
+    CHECK(accepted.failed_lists.empty());
+    CHECK(accepted.changed_lists == std::vector<std::string>{"remote"});
+    CHECK(should_reload_runtime_after_list_refresh(true, accepted));
+    CHECK_FALSE(refresh_request_has_header(transport->last_request, "If-None-Match: full"));
+    const auto updated_state = build_list_refresh_state_map(config, service.cache_manager());
+    CHECK_FALSE(updated_state.at("remote").shrink_rejection.has_value());
+    CHECK_FALSE(updated_state.at("remote").last_error.has_value());
+    CHECK(service.cache_manager().load_metadata("remote").domains == 60);
+
+    transport->body = refresh_test_hosts(1);
+    transport->etag = "smaller";
+    const auto next = service.refresh_remote_lists(config, {});
+    CHECK(next.failed_lists == std::vector<std::string>{"remote"});
+    CHECK(refresh_request_has_header(transport->last_request, "If-None-Match: small"));
+    CHECK(service.cache_manager().load_metadata("remote").domains == 60);
+    std::filesystem::remove_all(temp_dir);
+}
+
+TEST_CASE("download_uncached refreshes the same URL when its explicit source format changes") {
+    const auto temp_dir = make_temp_dir();
+    auto transport = std::make_shared<StaticHttpTransport>();
+    ListService service(temp_dir, kDefaultMaxFileSizeBytes, transport);
+    service.ensure_dir();
+    ListConfig remote;
+    remote.url = "https://example.test/remote.txt";
+    Config config;
+    config.lists = std::map<std::string, ListConfig>{{"remote", remote}};
+    transport->body = "old.example\n";
+    transport->etag = "text-etag";
+    REQUIRE(service.download_uncached(config, {}).failed_lists.empty());
+    REQUIRE(transport->calls == 1U);
+
+    const Config text_config = config;
+    config.lists->at("remote").source_format = "text";
+    CHECK_FALSE(remote_list_sources_changed(text_config, config));
+    config.lists->at("remote").source_format = "json-array";
+    CHECK(remote_list_sources_changed(text_config, config));
+    CHECK_FALSE(build_list_refresh_state_map(config, service.cache_manager())
+                    .at("remote").last_updated.has_value());
+    transport->body = R"(["new.example","new.example"] )";
+    transport->etag = "json-etag";
+    const auto changed = service.download_uncached(config, {});
+    CHECK(changed.failed_lists.empty());
+    CHECK(changed.changed_lists == std::vector<std::string>{"remote"});
+    CHECK(changed.cached_lists.empty());
+    CHECK(transport->calls == 2U);
+    CHECK_FALSE(refresh_request_has_header(transport->last_request, "If-None-Match: text-etag"));
+    const auto metadata = service.cache_manager().load_metadata("remote");
+    CHECK(metadata.source_format == "json-array");
+    CHECK(metadata.source_decoder_revision == kListSourceDecoderRevision);
+    CHECK(metadata.domains == 1);
+    CHECK_FALSE(service.cache_manager().has_current_cache("remote", *remote.url));
+    CHECK(service.cache_manager().has_current_cache("remote", *remote.url, "json-array"));
+    CHECK(build_list_refresh_state_map(config, service.cache_manager())
+              .at("remote").last_updated.has_value());
+
+    const auto cached = service.download_uncached(config, {});
+    CHECK(cached.cached_lists == std::vector<std::string>{"remote"});
+    CHECK(cached.changed_lists.empty());
+    CHECK(transport->calls == 2U);
+    config.lists->at("remote").source_format = "yaml-payload";
+    transport->body = "payload:\n  - yaml.example\n";
+    const auto yaml = service.download_uncached(config, {});
+    CHECK(yaml.failed_lists.empty());
+    CHECK(yaml.changed_lists == std::vector<std::string>{"remote"});
+    CHECK(transport->calls == 3U);
+    CHECK(service.cache_manager().has_current_cache("remote", *remote.url, "yaml-payload"));
+    CHECK_FALSE(refresh_request_has_header(transport->last_request, "If-None-Match: json-etag"));
+    std::filesystem::remove_all(temp_dir);
+}
+
+TEST_CASE("failed structured refresh cannot fall back to a differently interpreted cache") {
+    const auto temp_dir = make_temp_dir();
+    auto transport = std::make_shared<StaticHttpTransport>();
+    ListService service(temp_dir, kDefaultMaxFileSizeBytes, transport);
+    service.ensure_dir();
+    ListConfig remote;
+    remote.url = "https://example.test/remote.txt";
+    Config config;
+    config.lists = std::map<std::string, ListConfig>{{"remote", remote}};
+    transport->body = "old.example\n";
+    REQUIRE(service.download_uncached(config, {}).failed_lists.empty());
+    const auto before = service.cache_manager().load_metadata("remote");
+    config.lists->at("remote").source_format = "json-array";
+    transport->body = R"(["valid-prefix.example", false])";
+    const auto failed = service.download_uncached(config, {});
+    CHECK(failed.failed_lists == std::vector<std::string>{"remote"});
+    CHECK(failed.cached_lists.empty());
+    CHECK(failed.legacy_cached_lists.empty());
+    CHECK(failed.changed_lists.empty());
+    CHECK(transport->calls == 2U);
+    const auto after = service.cache_manager().load_metadata("remote");
+    CHECK(after.current->filename == before.current->filename);
+    CHECK(after.source_format.value_or("text") == "text");
+    CHECK_FALSE(service.cache_manager().has_usable_same_source_cache(
+        "remote", *remote.url, "json-array"));
+    CHECK(service.cache_manager().has_current_cache("remote", *remote.url));
+    std::filesystem::remove_all(temp_dir);
 }

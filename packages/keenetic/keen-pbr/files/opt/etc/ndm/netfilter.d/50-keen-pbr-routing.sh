@@ -6,7 +6,9 @@ case "$type" in
 esac
 
 case "$table" in
-    mangle)
+    # Native VPN forwarding is in filter. A reconnect can rebuild that table
+    # after the link event, so restore it through the same coalesced refresh.
+    mangle|filter)
         refresh_action=reapply-firewall
         ;;
     nat)
@@ -85,7 +87,7 @@ hook_stopping_marker_authorizes_suppression() {
 }
 
 # Before mutation, the hook persists refresh work behind the stop lease. After
-# the atomic mutating boundary, mangle/nat churn belongs to teardown and is
+# the atomic mutating boundary, mangle/nat/filter churn belongs to teardown and is
 # suppressed even if the stop controller dies.
 if hook_stopping_marker_authorizes_suppression; then
     logger -t "keen-pbr" \

@@ -8,7 +8,33 @@
 import type { LogLevel } from './logLevel';
 
 export interface LogSettings {
-  /** When false the daemon writes nothing to its log file. A quiet log then says nothing about the daemon's health, and rotation never runs either, so the file also stops changing size.
+  size_limit_enabled?: boolean;
+  age_limit_enabled?: boolean;
+  /**
+     * @minimum 1
+     * @maximum 365
+     */
+  max_age_days?: number;
+  nfqws_size_limit_enabled?: boolean;
+  nfqws_age_limit_enabled?: boolean;
+  /**
+     * @minimum 1
+     * @maximum 365
+     */
+  nfqws_max_age_days?: number;
+  /**
+     * Size bound per keen-pbr log generation; one previous generation is retained.
+     * @minimum 65536
+     * @maximum 16777216
+     */
+  max_file_bytes?: number;
+  /**
+     * Per-file nfqws limit checked by daemon maintenance; temporary overshoot is possible.
+     * @minimum 65536
+     * @maximum 16777216
+     */
+  nfqws_max_file_bytes?: number;
+  /** When false the daemon writes nothing to its log file. A quiet log then says nothing about the daemon's health. Enabled age cleanup continues even while new file logging is disabled.
    */
   file_enabled: boolean;
   level: LogLevel & unknown;

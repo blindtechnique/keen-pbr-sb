@@ -8,6 +8,9 @@ LOG_FILE=/opt/var/log/keen-pbr-self-update.log
 STATE_FILE=/opt/var/run/keen-pbr-self-update.json
 LOCK_HELPER=/opt/var/lib/keen-pbr/rescue/update-lock.sh
 RELEASE_API=https://api.github.com/repos/blindtechnique/keen-pbr-sb/releases/latest
+RELEASE_REPOSITORY=blindtechnique/keen-pbr-sb
+RELEASE_VERIFIER=/opt/usr/lib/keen-pbr/release-verify.sh
+RELEASE_PUBLIC_KEY=/opt/etc/keen-pbr/keys/release-public.pem
 
 LOCK_OWNER_PID=$$
 LOCK_TOKEN=
@@ -111,6 +114,15 @@ fetch_url() {
     fi
 }
 
+if [ ! -r "$RELEASE_VERIFIER" ] || [ ! -r "$RELEASE_PUBLIC_KEY" ]; then
+    echo "ОШИБКА: не найдены средства проверки подписи. Обновление не началось; восстановите файлы установленного пакета."
+    exit 1
+fi
+if ! command -v openssl >/dev/null 2>&1 && [ ! -x /opt/bin/openssl ]; then
+    echo "ОШИБКА: не найден OpenSSL. Установите пакет Entware openssl-util и повторите обновление."
+    exit 1
+fi
+
 fetch_url "$RELEASE_JSON" "$RELEASE_API"
 write_state release 15 "Проверяю выпуск GitHub" null true
 # The GitHub API may answer with pretty-printed or compact JSON. Splitting on
@@ -122,12 +134,22 @@ release_tag=$(tr ',' '\n' < "$RELEASE_JSON" \
 case "$release_tag" in
     ""|*[!A-Za-z0-9._-]*) echo "ОШИБКА: GitHub вернул некорректный тег выпуска"; exit 1 ;;
 esac
-INSTALLER_URL="https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/$release_tag/install.sh"
+RELEASE_BASE="https://github.com/$RELEASE_REPOSITORY/releases/download/$release_tag"
+INSTALLER_URL="$RELEASE_BASE/install.sh"
 fetch_url "$INSTALLER" "$INSTALLER_URL"
-write_state installer 30 "Установщик загружен" null true
+fetch_url "$WORK_DIR/release-manifest.tsv" "$RELEASE_BASE/release-manifest.tsv"
+fetch_url "$WORK_DIR/release-manifest.sig" "$RELEASE_BASE/release-manifest.sig"
+if ! /bin/sh "$RELEASE_VERIFIER" "$WORK_DIR/release-manifest.tsv" \
+    "$WORK_DIR/release-manifest.sig" "$RELEASE_PUBLIC_KEY" \
+    "$RELEASE_REPOSITORY" stable "$release_tag" installer any any install.sh "$INSTALLER"; then
+    echo "ОШИБКА: подпись установщика не подтверждена. Обновление не началось; установленная версия не изменена."
+    exit 1
+fi
+write_state installer 30 "Подпись установщика проверена" null true
 
 write_state installing 40 "Устанавливаю пакет keen-pbr-sb" null true
-KEEN_PBR_UPDATE_LOCK_TRANSFER=1 /bin/sh "$INSTALLER" --update
+KEEN_PBR_UPDATE_RELEASE_TAG="$release_tag" \
+    KEEN_PBR_UPDATE_LOCK_TRANSFER=1 /bin/sh "$INSTALLER" --update
 write_state installed 90 "Пакет установлен, службы перезапущены" null true
 
 # postinst starts keen-pbr through S80keen-pbr. That init script activates the

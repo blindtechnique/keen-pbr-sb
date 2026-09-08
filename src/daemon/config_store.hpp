@@ -32,6 +32,23 @@ struct StagedConfigSnapshot {
     std::string active_revision;
 };
 
+// A scoped edit applies to committed routing and independently removes the
+// same target from a visible draft, without applying the draft's other edits.
+struct ConfigDraftRebase {
+    std::optional<StagedConfigSnapshot> expected;
+    Config config;
+    std::string serialized;
+    // Only exact compensation sets the original draft's base explicitly.
+    std::optional<std::string> base_revision_override;
+};
+
+struct PreparedStagedConfigRebase {
+    std::optional<std::string> expected_base_revision;
+    std::optional<Config> config;
+    std::optional<std::string> serialized;
+    std::optional<std::string> base_revision;
+};
+
 // Everything that can allocate for an active-config publication is prepared
 // before ConfigStore takes its publication lock. The base handle is an exact
 // generation identity, rather than a digest that could be recomputed from a
@@ -41,6 +58,9 @@ struct PreparedActiveConfigCommit {
     ActiveConfigSnapshotHandle candidate;
     // A direct commit (for example VPN + route creation) has no panel draft.
     std::optional<std::string> staged_serialized;
+    // Values are allocated before publication; the existing active-base CAS
+    // makes their swap a one-shot part of the same active/draft publication.
+    std::shared_ptr<PreparedStagedConfigRebase> draft_rebase;
 };
 
 enum class PreparedActiveConfigCommitResult {
@@ -106,6 +126,10 @@ public:
         Config candidate_config,
         OutboundMarkMap candidate_outbound_marks,
         std::optional<std::string> staged_serialized);
+    static PreparedActiveConfigCommit prepare_active_commit(
+        ActiveConfigSnapshotHandle base,
+        ActiveConfigSnapshotHandle candidate,
+        ConfigDraftRebase draft_rebase);
     static PreparedActiveRuntimeReloadCommit
     prepare_active_runtime_reload_commit(
         ActiveConfigSnapshotHandle base,
@@ -138,18 +162,28 @@ public:
         }
         if (staged_config_json_ != prepared.staged_serialized ||
             staged_config_.has_value() !=
-                prepared.staged_serialized.has_value()) {
+                prepared.staged_serialized.has_value() ||
+            (prepared.draft_rebase &&
+             staged_base_revision_ !=
+                 prepared.draft_rebase->expected_base_revision)) {
             return PreparedActiveConfigCommitResult::staged_mismatch;
         }
 
         publication();
-        // shared_ptr assignment and optional reset do not allocate. The
+        // shared_ptr assignment and prepared optional swaps/resets do not
+        // allocate or throw. The
         // prepared base retains the old generation until after this lock is
         // released, so replacing active_snapshot_ cannot destroy it here.
         active_snapshot_ = prepared.candidate;
-        staged_config_.reset();
-        staged_config_json_.reset();
-        staged_base_revision_.reset();
+        if (prepared.draft_rebase) {
+            staged_config_.swap(prepared.draft_rebase->config);
+            staged_config_json_.swap(prepared.draft_rebase->serialized);
+            staged_base_revision_.swap(prepared.draft_rebase->base_revision);
+        } else {
+            staged_config_.reset();
+            staged_config_json_.reset();
+            staged_base_revision_.reset();
+        }
         return PreparedActiveConfigCommitResult::committed;
     }
 

@@ -247,6 +247,180 @@ TEST_CASE("router info cold failure is stale while its retry refreshes") {
     CHECK(retry->get().at("generation") == 2);
 }
 
+TEST_CASE("router info invalidation is lazy and event bursts coalesce") {
+    ManualClock clock;
+    int calls = 0;
+    int clock_reads = 0;
+    RouterInfoCache cache(
+        [&] { return accepted(++calls); },
+        30s,
+        10s,
+        [&] {
+            ++clock_reads;
+            return clock.now();
+        });
+
+    cache.invalidate();
+    CHECK(calls == 0);
+    CHECK(clock_reads == 0);
+    CHECK(cache.get().at("generation") == 1);
+    const auto reads_before_events = clock_reads;
+    for (int event = 0; event < 100; ++event) cache.invalidate();
+    CHECK(calls == 1);
+    CHECK(clock_reads == reads_before_events);
+    CHECK(cache.get().at("generation") == 2);
+    CHECK(cache.get().at("generation") == 2);
+    CHECK(calls == 2);
+}
+
+TEST_CASE("router info event cooldown retains one pending refresh without sliding on bursts") {
+    ManualClock clock;
+    int calls = 0;
+    RouterInfoCache cache(
+        [&] { return accepted(++calls); },
+        30s,
+        10s,
+        [&] { return clock.now(); },
+        5s);
+
+    CHECK(cache.get().at("generation") == 1);
+    for (int second = 0; second < 5; ++second) {
+        for (int event = 0; event < 100; ++event) cache.invalidate();
+        CHECK(cache.get().at("generation") == 1);
+        clock.advance(1s);
+    }
+    CHECK(calls == 1);
+    CHECK(cache.get().at("generation") == 2);
+    CHECK(calls == 2);
+
+    cache.invalidate();
+    clock.advance(4s);
+    CHECK(cache.get().at("generation") == 2);
+    cache.invalidate();
+    clock.advance(1s);
+    CHECK(cache.get().at("generation") == 3);
+    clock.advance(5s);
+    CHECK(cache.get().at("generation") == 3);
+    CHECK(calls == 3);
+}
+
+TEST_CASE("router info invalidation during a fetch survives successful TTL publication") {
+    ManualClock clock;
+    std::atomic<int> calls{0};
+    std::promise<void> refresh_started;
+    auto refresh_started_future = refresh_started.get_future();
+    std::promise<void> release_refresh;
+    const auto release_signal = release_refresh.get_future().share();
+    RouterInfoCache cache(
+        [&] {
+            const int call = calls.fetch_add(1, std::memory_order_acq_rel) + 1;
+            if (call == 2) {
+                refresh_started.set_value();
+                release_signal.wait();
+            }
+            return accepted(call);
+        },
+        30s,
+        10s,
+        [&] { return clock.now(); },
+        5s);
+    std::optional<std::future<nlohmann::json>> refresh;
+    PromiseRelease release_refresh_guard(release_refresh);
+
+    CHECK(cache.get().at("generation") == 1);
+    cache.invalidate();
+    clock.advance(5s);
+    refresh.emplace(std::async(std::launch::async, [&] { return cache.get(); }));
+    REQUIRE(refresh_started_future.wait_for(2s) == std::future_status::ready);
+    for (int event = 0; event < 100; ++event) cache.invalidate();
+    CHECK(cache.get().at("generation") == 1);
+    CHECK(calls.load(std::memory_order_acquire) == 2);
+    clock.advance(2s);
+    release_refresh_guard.release();
+    CHECK(refresh->get().at("generation") == 2);
+
+    // The cooldown starts at completion (t=7), but the event remains pending.
+    clock.advance(4s);
+    CHECK(cache.get().at("generation") == 2);
+    clock.advance(1s);
+    CHECK(cache.get().at("generation") == 3);
+    CHECK(cache.get().at("generation") == 3);
+    CHECK(calls.load(std::memory_order_acquire) == 3);
+}
+
+TEST_CASE("router info failed event refresh respects retry even while normal TTL stays fresh") {
+    ManualClock clock;
+    int calls = 0;
+    bool more_events = false;
+    SUBCASE("failed event remains pending without another event") {}
+    SUBCASE("new events cannot bypass failure retry") { more_events = true; }
+    RouterInfoCache cache(
+        [&] {
+            ++calls;
+            return calls == 2 ? failed(calls) : accepted(calls);
+        },
+        100s,
+        10s,
+        [&] { return clock.now(); },
+        5s);
+
+    CHECK(cache.get().at("generation") == 1);
+    cache.invalidate();
+    clock.advance(5s);
+    CHECK(cache.get().at("generation") == 1);
+    CHECK(calls == 2);
+    for (int second = 0; second < 10; ++second) {
+        if (more_events) cache.invalidate();
+        CHECK(cache.get().at("generation") == 1);
+        CHECK(calls == 2);
+        clock.advance(1s);
+    }
+    CHECK(cache.get().at("generation") == 3);
+    CHECK(cache.get().at("generation") == 3);
+    CHECK(calls == 3);
+}
+
+TEST_CASE("router info invalidation does not accelerate cold failure retry") {
+    ManualClock clock;
+    int calls = 0;
+    RouterInfoCache cache(
+        [&] {
+            ++calls;
+            return calls == 1 ? failed(calls) : accepted(calls);
+        },
+        30s,
+        10s,
+        [&] { return clock.now(); });
+
+    CHECK(cache.get().at("available") == false);
+    for (int second = 0; second < 10; ++second) {
+        cache.invalidate();
+        CHECK(cache.get().at("generation") == 1);
+        CHECK(calls == 1);
+        clock.advance(1s);
+    }
+    CHECK(cache.get().at("generation") == 2);
+    CHECK(cache.get().at("available") == true);
+    CHECK(calls == 2);
+}
+
+TEST_CASE("router info event cooldown does not delay ordinary TTL refresh") {
+    ManualClock clock;
+    int calls = 0;
+    RouterInfoCache cache(
+        [&] { return accepted(++calls); },
+        3s,
+        10s,
+        [&] { return clock.now(); },
+        5s);
+
+    CHECK(cache.get().at("generation") == 1);
+    cache.invalidate();
+    clock.advance(3s);
+    CHECK(cache.get().at("generation") == 2);
+    CHECK(calls == 2);
+}
+
 TEST_CASE("router info clock exception after fetch cannot strand refresh") {
     ManualClock clock;
     std::atomic<int> calls{0};

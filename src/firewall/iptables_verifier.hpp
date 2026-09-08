@@ -3,6 +3,7 @@
 #include "firewall_verifier.hpp"
 
 #include <cstdint>
+#include <chrono>
 #include <memory>
 #include <optional>
 #include <string>
@@ -33,6 +34,15 @@ struct ParsedIptablesState {
 // Parse the stdout of `iptables -t mangle -S <chain>` / `ip6tables -t mangle -S <chain>`.
 // Returns the parsed state of the KeenPbrTable chain.
 ParsedIptablesState parse_iptables_s(const std::string& output);
+
+// Optional diagnostic projection only. Reuses the verifier's existing family,
+// selector, action and logical/physical set-name matching without changing it.
+// Each row returns unique matching config indices; multiple indices are NOT
+// assigned to one owner by this helper.
+std::vector<std::vector<std::size_t>> match_iptables_counter_rules(
+    const std::vector<ParsedIptablesRule>& actual,
+    const std::vector<RuleState>& expected, std::uint32_t fwmark_mask,
+    std::chrono::steady_clock::time_point deadline);
 
 // FirewallVerifier implementation for the iptables/ip6tables backend.
 class IptablesFirewallVerifier : public FirewallVerifier {

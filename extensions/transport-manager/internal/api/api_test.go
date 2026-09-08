@@ -559,6 +559,138 @@ func TestConditionalTransportUpdateUsesRevision(t *testing.T) {
 	}
 }
 
+func TestConditionalTransportDeleteRejectsStaleAndMalformedRevisionWithoutMutation(t *testing.T) {
+	handler, admin, manager, path := newConditionalAdminHandler(t)
+	staleRevision := admin.Revision()
+	if err := admin.Create(context.Background(), transport.TransportSpec{
+		Tag: "native_one", Type: "native", Interface: "nwg1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	revision := admin.Revision()
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name       string
+		ifMatch    string
+		wantStatus int
+	}{
+		{"stale", staleRevision, http.StatusPreconditionFailed},
+		{"malformed", "not-a-revision", http.StatusBadRequest},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := authenticatedRequest(http.MethodDelete, "/v1/config/transports/native_one", "")
+			request.Header.Set("If-Match", test.ifMatch)
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, request)
+			if recorder.Code != test.wantStatus {
+				t.Fatalf("delete returned %d: %s", recorder.Code, recorder.Body.String())
+			}
+			if test.wantStatus == http.StatusPreconditionFailed {
+				var response map[string]string
+				if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+					t.Fatal(err)
+				}
+				if response["config_revision"] != revision || recorder.Header().Get("ETag") != `"`+revision+`"` {
+					t.Fatalf("stale response lost current revision: %#v", response)
+				}
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(after) != string(before) || admin.Revision() != revision || len(admin.Specs()) != 1 {
+				t.Fatal("rejected delete mutated durable or in-memory config")
+			}
+			if _, exists := manager.Get("native_one"); !exists {
+				t.Fatal("rejected delete removed the runtime transport")
+			}
+		})
+	}
+}
+
+func TestTransportDeleteReturnsExactCommittedRevision(t *testing.T) {
+	for _, conditional := range []bool{false, true} {
+		t.Run(fmt.Sprintf("conditional=%v", conditional), func(t *testing.T) {
+			handler, admin, manager, path := newConditionalAdminHandler(t)
+			if err := admin.Create(context.Background(), transport.TransportSpec{
+				Tag: "native_one", Type: "native", Interface: "nwg1",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			revision := admin.Revision()
+			request := authenticatedRequest(http.MethodDelete, "/v1/config/transports/native_one", "")
+			if conditional {
+				request.Header.Set("If-Match", `"`+revision+`"`)
+			}
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("delete returned %d: %s", recorder.Code, recorder.Body.String())
+			}
+			var response map[string]string
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			stored, storedRevision, err := configpkg.LoadWithRevision(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response["status"] != "deleted" || response["tag"] != "native_one" ||
+				response["config_revision"] != storedRevision || storedRevision == revision ||
+				recorder.Header().Get("ETag") != `"`+storedRevision+`"` {
+				t.Fatalf("delete did not return committed revision: %#v", response)
+			}
+			if len(stored.Transports) != 0 || len(admin.Specs()) != 0 || admin.Revision() != storedRevision {
+				t.Fatal("delete did not persist the empty transport inventory")
+			}
+			if _, exists := manager.Get("native_one"); exists {
+				t.Fatal("delete left the runtime transport registered")
+			}
+		})
+	}
+}
+
+func TestConditionalTransportDeleteErrorReturnsUnchangedRevision(t *testing.T) {
+	handler, admin, _, path := newConditionalAdminHandler(t)
+	revision := admin.Revision()
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := authenticatedRequest(http.MethodDelete, "/v1/config/transports/missing", "")
+	request.Header.Set("If-Match", revision)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("missing delete returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response map[string]string
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response["config_revision"] != revision || admin.Revision() != revision || string(after) != string(before) {
+		t.Fatal("failed delete changed or omitted the current revision")
+	}
+}
+
+func TestConditionalTransportDeleteDoesNotFallBackToUnconditionalAdmin(t *testing.T) {
+	admin := &recordingAdminStub{specs: []transport.TransportSpec{{Tag: "native_one"}}}
+	request := authenticatedRequest(http.MethodDelete, "/v1/config/transports/native_one", "")
+	request.Header.Set("If-Match", strings.Repeat("a", 64))
+	recorder := httptest.NewRecorder()
+	New(transport.NewManager(), "secret", admin).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusServiceUnavailable || len(admin.Specs()) != 1 {
+		t.Fatalf("conditional delete silently used unconditional admin: %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestTransportValidationHasNoSideEffects(t *testing.T) {
 	handler, admin, manager, path := newConditionalAdminHandler(t)
 	before, err := os.ReadFile(path)

@@ -2,7 +2,10 @@
 
 #include "rescue_integrity.hpp"
 
+#include <algorithm>
 #include <fstream>
+#include <set>
+#include <sstream>
 #include <stdexcept>
 #include <system_error>
 #include <vector>
@@ -12,6 +15,67 @@ namespace keen_pbr3 {
 namespace fs = std::filesystem;
 
 namespace {
+
+// Script preparation and member inventory both use only the store's private
+// scratch directory. Every ordinary exit removes those unpacked bytes.
+struct StagingCleanup {
+    fs::path stage;
+    ~StagingCleanup() {
+        std::error_code error;
+        fs::remove_all(stage, error);
+    }
+};
+
+PackagePathList parse_candidate_data_paths(const std::string& listing) {
+    PackagePathList result;
+    constexpr auto maximum_bytes =
+        kComponentMaxPathCount * (kComponentMaxPathLength + 3U);
+    if (listing.size() > maximum_bytes) {
+        result.error = "candidate data inventory exceeds the size limit";
+        return result;
+    }
+    std::set<std::string> paths;
+    std::istringstream input(listing);
+    std::string member;
+    while (std::getline(input, member)) {
+        if (member.empty() ||
+            std::any_of(member.begin(), member.end(), [](unsigned char ch) {
+                // tar implementations may quote control bytes with a
+                // backslash; treating that spelling as a real path would
+                // turn an incomplete inventory into a false complete one.
+                return ch < 0x20U || ch == 0x7fU || ch == '\\';
+            })) {
+            result.error = "candidate data inventory contains an unsafe path";
+            return result;
+        }
+        if (member == "." || member == "./" || member == "/") continue;
+        const bool directory = member.back() == '/';
+        if (member.rfind("./", 0) == 0) member.erase(0, 2U);
+        if (directory) member.pop_back();
+        if (member.empty() || member.front() != '/') member.insert(0, 1U, '/');
+        const fs::path path(member);
+        if (member.size() > kComponentMaxPathLength ||
+            path.lexically_normal().string() != member ||
+            (member != "/opt" && member.rfind("/opt/", 0) != 0) ||
+            (!directory && member == "/opt")) {
+            result.error = "candidate data inventory contains an unsafe path";
+            return result;
+        }
+        if (directory) continue;
+        paths.insert(member);
+        if (paths.size() > kComponentMaxPathCount) {
+            result.error = "candidate data inventory exceeds the path-count limit";
+            return result;
+        }
+    }
+    if (paths.empty()) {
+        result.error = "candidate data inventory is empty";
+        return result;
+    }
+    result.complete = true;
+    result.paths.assign(paths.begin(), paths.end());
+    return result;
+}
 
 // Bounded read: at most `limit` bytes, and a refusal (nullopt) when the file
 // is larger, so a runaway file can never be read "mostly".
@@ -424,6 +488,51 @@ ComponentPackagePreparation ComponentPackageTransaction::prepare_impl(
     return preparation;
 }
 
+PackagePathList ComponentPackageTransaction::candidate_data_paths() {
+    PackagePathList result;
+    try {
+        const auto candidate = store_.inspect(IpkSlot::candidate);
+        if (candidate.state != IpkSlotState::usable) {
+            result.error =
+                std::string("candidate inventory requires a verified package (slot is ") +
+                ipk_slot_state_name(candidate.state) + ")";
+            return result;
+        }
+        const auto stage = store_.staging_directory();
+        const StagingCleanup cleanup{stage};
+        const auto command_ok = [](const ExecCaptureResult& command) {
+            return command.exit_code == 0 && !command.truncated &&
+                   !command.timed_out && !command.termination_uncertain;
+        };
+        const auto outer = run_(
+            {options_.scripted.tar, "-xzf",
+             store_.ipk_path(IpkSlot::candidate).string(), "-C", stage.string()},
+            options_.timeouts, {});
+        if (!command_ok(outer)) {
+            result.error =
+                "candidate archive could not be opened completely for inventory";
+            return result;
+        }
+        const auto data = stage / "data.tar.gz";
+        if (!rescue_integrity::regular_file(data)) {
+            result.error = "candidate archive holds no regular data.tar.gz";
+            return result;
+        }
+        const auto listing = run_(
+            {options_.scripted.tar, "-tzf", data.string()}, options_.timeouts, {});
+        if (!command_ok(listing)) {
+            result.error = "candidate data archive could not be listed completely";
+            return result;
+        }
+        return parse_candidate_data_paths(listing.stdout_output);
+    } catch (const std::exception& error) {
+        result.error = std::string("candidate data inventory failed: ") + error.what();
+    } catch (...) {
+        result.error = "candidate data inventory failed with an unknown error";
+    }
+    return result;
+}
+
 ExecCaptureResult ComponentPackageTransaction::install_candidate() {
     const auto candidate = store_.inspect(IpkSlot::candidate);
     if (candidate.state != IpkSlotState::usable) {
@@ -495,21 +604,6 @@ void ComponentPackageTransaction::scripted_reinstall_current(
                      {"--force-downgrade", "--force-reinstall"},
                      /*upgrade=*/true, report, stop_service, note);
 }
-
-namespace {
-
-// The extraction scratch holds the whole IPK - the multi-arch data.tar.gz
-// included - so it is removed on every exit, early returns and unwinding
-// alike, not only on the straight-through path.
-struct StagingCleanup {
-    fs::path stage;
-    ~StagingCleanup() {
-        std::error_code error;
-        fs::remove_all(stage, error);
-    }
-};
-
-} // namespace
 
 void ComponentPackageTransaction::scripted_install(
     IpkSlot slot, const std::vector<std::string>& extra_install_flags,

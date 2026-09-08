@@ -11,6 +11,7 @@ import type { BackupDocumentDataLists } from './backupDocumentDataLists';
 import type { BackupDocumentDataNfqws } from './backupDocumentDataNfqws';
 import type { BackupDocumentDataOutboundsItem } from './backupDocumentDataOutboundsItem';
 import type { BackupDocumentDataRoute } from './backupDocumentDataRoute';
+import type { BackupDocumentDataSubscriptionsItem } from './backupDocumentDataSubscriptionsItem';
 import type { BackupDocumentDataTransports } from './backupDocumentDataTransports';
 
 /**
@@ -20,6 +21,12 @@ import type { BackupDocumentDataTransports } from './backupDocumentDataTransport
 export type BackupDocumentData = {
   general?: BackupDocumentDataGeneral;
   transports?: BackupDocumentDataTransports;
+  /**
+     * Private subscription metadata, including credential-bearing source URLs, schedules and bindings. Exported with transports. Never show source URLs in restore previews. Omission in an older archive keeps current sources and reconciles their bindings with restored VPNs; an explicit empty array restores an empty source list. No provider download or VPN import occurs during restore. The section is limited to 4 MiB and is validated before writes.
+
+     * @maxItems 64
+     */
+  subscriptions?: BackupDocumentDataSubscriptionsItem[];
   /** Serialized outbound objects from the selected configuration. */
   outbounds?: BackupDocumentDataOutboundsItem[];
   dns?: BackupDocumentDataDns;

@@ -13,6 +13,23 @@ import type { SubscriptionApplySelection } from "@/api/generated/model"
 
 const TAG_PATTERN = /^[a-z][a-z0-9_]{0,23}$/
 
+// A future backend reason is diagnostic text, not an i18n key.
+export function getSubscriptionPreviewRefusalReason(error: unknown) {
+  if (!error || typeof error !== "object" || !("details" in error)) return null
+  const details = error.details
+  if (!details || typeof details !== "object" || !("reason" in details))
+    return null
+  switch (details.reason) {
+    case "scheme_not_allowed":
+    case "credentials_in_url":
+    case "destination_not_permitted":
+    case "malformed":
+      return details.reason
+    default:
+      return null
+  }
+}
+
 // Isolated mode is the backwards-compatible default and runs one sing-box
 // process per selected connection. Keep one accidental click from turning a
 // large provider catalogue into hundreds of router processes.
@@ -57,6 +74,20 @@ export function initialSelectedLines(
     }
   }
   return new Set()
+}
+
+// The explicit "new servers" action already narrows the preview on the
+// daemon. Preselect its ready entries up to the existing batch limit, while
+// keeping rename conflicts an explicit choice as in the ordinary importer.
+export function initialNewServerLines(
+  candidates: SubscriptionPreviewCandidate[]
+): Set<number> {
+  return new Set(
+    candidates
+      .filter((candidate) => candidate.disposition === "importable")
+      .slice(0, MAXIMUM_SUBSCRIPTION_SELECTION)
+      .map((candidate) => candidate.line)
+  )
 }
 
 export function toggleSelectedLine(

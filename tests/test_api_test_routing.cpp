@@ -65,6 +65,9 @@ ApiContext make_test_api_context(SseBroadcaster& broadcaster) {
             TestRoutingResult result;
             result.target = target;
             result.unapplied_draft = true;
+            result.dns_source = "configured_resolver";
+            result.dns_server = "127.0.0.1:5353";
+            result.fwmark_mask = 0x00ff0000U;
             TestRoutingEntry entry;
             entry.ip = "203.0.113.7";
             entry.expected_outbound = "(unknown)";
@@ -87,6 +90,8 @@ ApiContext make_test_api_context(SseBroadcaster& broadcaster) {
             resolved.actual_outbound = "vpn";
             resolved.ok = true;
             resolved.evaluation = RoutingMatchEvaluation::Matched;
+            resolved.expected_rule_index = 0;
+            resolved.actual_rule_index = 1;
             resolved.fib.verdict = RoutingFibVerdict::Resolved;
             resolved.fib.fwmark = 0x00040000U;
             resolved.fib.table = 152U;
@@ -117,7 +122,7 @@ ApiContext make_test_api_context(SseBroadcaster& broadcaster) {
         []() {},
         []() {},
         []() {},
-        [](std::optional<std::string>) { return ListRefreshOperationResult{}; },
+        [](const api::ListRefreshRequest&) { return ListRefreshOperationResult{}; },
     };
 }
 
@@ -168,7 +173,18 @@ TEST_CASE("register_test_routing_handler: exposes active scope and honest per-IP
     const auto body = nlohmann::json::parse(response->body);
     CHECK(body.at("config_scope") == "active");
     CHECK(body.at("unapplied_draft") == true);
+    CHECK(body.at("dns_source") == "configured_resolver");
+    CHECK(body.at("dns_server") == "127.0.0.1:5353");
+    CHECK(body.at("fwmark_mask") == 0x00ff0000U);
+    CHECK_FALSE(body.contains("http_probe"));
+    REQUIRE(body.at("connections").is_object());
+    CHECK(body.at("connections").at("snapshot_available").is_boolean());
+    CHECK(body.at("connections").at("items").size() <= 64);
     REQUIRE(body.at("results").size() == 2);
+    CHECK_FALSE(body.at("results")[0].contains("expected_rule_index"));
+    CHECK_FALSE(body.at("results")[0].contains("actual_rule_index"));
+    CHECK(body.at("results")[1].at("expected_rule_index") == 0);
+    CHECK(body.at("results")[1].at("actual_rule_index") == 1);
     CHECK(body.at("results")[0].at("evaluation") ==
           "insufficient_context");
     CHECK(body.at("results")[0].at("unknown_conditions") ==
@@ -192,6 +208,78 @@ TEST_CASE("register_test_routing_handler: exposes active scope and honest per-IP
     CHECK(row.at("in_lists") == true);
     CHECK(row.at("list_match").at("list") == "work");
     CHECK(row.at("evaluation") == "insufficient_context");
+}
+
+TEST_CASE("routing HTTP is an additive explicit callback and serializes optional evidence") {
+    SseBroadcaster broadcaster;
+    ApiConfig api_config;
+    api_config.listen = std::string(kApiListen);
+    ApiServer server(api_config);
+    auto ctx = make_test_api_context(broadcaster);
+    int explicit_calls = 0;
+    SUBCASE("old target-only callback remains offline and returns unavailable HTTP") {}
+    SUBCASE("explicit callback receives only target and selected IP") {
+        const auto old_callback = ctx.compute_test_routing_fn;
+        ctx.compute_test_routing_with_http_fn = [&, old_callback](const std::string& target, const std::string& ip) {
+            ++explicit_calls;
+            CHECK(target == "example.com");
+            CHECK(ip == "203.0.113.8");
+            auto result = old_callback(target);
+            RoutingHttpProbe probe;
+            probe.status = RoutingHttpProbeStatus::Answered;
+            probe.reason = RoutingHttpProbeReason::HttpResponse;
+            probe.ip = ip;
+            probe.url = "https://example.com/";
+            probe.interface = "nwg1";
+            probe.attempted_at = 123;
+            probe.fwmark = 0xffffffffU;
+            probe.table = 0xffffffffU;
+            probe.http_status = 403;
+            probe.elapsed_ms = 34;
+            probe.connect_ms = 12;
+            probe.tls_ms = 22;
+            probe.connected_ip = ip;
+            result.http_probe = std::move(probe);
+            return result;
+        };
+    }
+    register_test_routing_handler(server, ctx);
+    server.start();
+    httplib::Client client("127.0.0.1", 18190);
+    const auto response = client.Post("/api/routing/test",
+        R"({"target":"example.com","http_probe_ip":"203.0.113.8","fwmark":1,"interface":"attacker"})",
+        "application/json");
+    server.stop();
+    REQUIRE(response != nullptr);
+    REQUIRE(response->status == 200);
+    const auto body = nlohmann::json::parse(response->body);
+    REQUIRE(body.contains("http_probe"));
+    const auto& probe = body.at("http_probe");
+    CHECK(probe.at("ip") == "203.0.113.8");
+    CHECK(probe.at("method") == "HEAD");
+    CHECK(probe.at("scope") == "router");
+    CHECK(body.at("results").size() == 2);
+    if (ctx.compute_test_routing_with_http_fn) {
+        CHECK(explicit_calls == 1);
+        CHECK(probe.at("status") == "answered");
+        CHECK(probe.at("reason") == "http_response");
+        CHECK(probe.at("fwmark") == 0xffffffffU);
+        CHECK(probe.at("table") == 0xffffffffU);
+        CHECK(probe.at("http_status") == 403);
+        CHECK(probe.at("interface") == "nwg1");
+        CHECK(probe.at("connect_ms") == 12);
+        CHECK(probe.at("tls_ms") == 22);
+    } else {
+        CHECK(explicit_calls == 0);
+        CHECK(probe.at("status") == "unavailable");
+        CHECK(probe.at("reason") == "transport_error");
+        CHECK(probe.at("attempted_at") == 0);
+        for (const auto* key : {"fwmark", "table", "http_status", "elapsed_ms", "connect_ms", "tls_ms", "connected_ip"}) {
+            CHECK_FALSE(probe.contains(key));
+        }
+    }
+    const auto roundtrip = probe.get<api::RoutingTestHttpProbe>();
+    CHECK(roundtrip.ip == "203.0.113.8");
 }
 
 TEST_CASE("nfqws list paths are exact direct children of the fixed root") {

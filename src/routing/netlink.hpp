@@ -226,6 +226,16 @@ struct DumpedRule {
     bool exact_identity_representable{true};
 };
 
+namespace netlink_detail {
+
+// A dedicated read-only socket; never acquires a routing writer lease. The
+// complete dump is bounded to 4096 rules and a one-second overall deadline.
+// Incomplete, interrupted, timed-out or oversized dumps throw without returning
+// partial evidence. Mutation/verification inventories retain their own defaults.
+std::vector<DumpedRule> dump_policy_rules_read_only(int family);
+
+} // namespace netlink_detail
+
 // A network interface dumped from the kernel (read-only snapshot)
 struct DumpedInterface {
     std::string name;                   // Interface name (e.g. "eth0")

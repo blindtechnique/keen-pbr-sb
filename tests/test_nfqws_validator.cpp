@@ -1,5 +1,9 @@
 #include "../src/util/nfqws_validator.hpp"
 
+#ifdef WITH_API
+#include "../src/api/config_validation_json.hpp"
+#endif
+
 #include <doctest/doctest.h>
 
 #include <algorithm>
@@ -55,6 +59,226 @@ TEST_CASE("nfqws validator: candidate accepts a structurally sound Keenetic prof
     const auto issues = validate_nfqws_candidate(
         kValid, allow_paths({"/opt/lua/base.lua"}));
     CHECK(issues.empty());
+}
+
+TEST_CASE("nfqws config migration preserves owned Lua and operator settings byte for byte") {
+    const std::string previous =
+        "# Operator-selected strategy; do not replace with the package preset.\n"
+        "CONFIG_VERSION=5\n"
+        "ISP_INTERFACE='eth3 ppp0'\n"
+        "TCP_PORTS=80,443,8443\nUDP_PORTS=443\nIPV6_ENABLED=0\n"
+        "NFQUEUE_NUM=411\nUSER=daemon\nLOG_LEVEL=0\n"
+        "POLICY_NAME='my-provider'\nPOLICY_EXCLUDE=1\n"
+        "MODE_LIST='--hostlist=/opt/etc/nfqws2/lists/user.list'\n"
+        "NFQWS_EXTRA_ARGS=\"$MODE_LIST\"\n"
+        "NFQWS_BASE_ARGS='--lua-init=@/opt/var/lib/keen-pbr/nfqws-rotator-telemetry-v1.lua "
+        "--writable=/var/run/keen-pbr-nfqws'\n"
+        "NFQWS_ARGS=\"--filter-tcp=80,443,8443 \\\n"
+        "--lua-desync=fake:strategy=1\"\n"
+        "NFQWS_ARGS_QUIC='--filter-udp=443 --lua-desync=fake:strategy=2'\n";
+    const std::string defaults =
+        "CONFIG_VERSION=6\nISP_INTERFACE=eth0\n"
+        "TCP_PORTS=443\nUDP_PORTS=443,500\nIPV6_ENABLED=1\n"
+        "NFQUEUE_NUM=300\nUSER=nobody\nLOG_LEVEL=1\n"
+        "POLICY_NAME=package\nPOLICY_EXCLUDE=0\nMODE_LIST=''\n"
+        "NFQWS_EXTRA_ARGS=''\nNFQWS_BASE_ARGS=''\n"
+        "NFQWS_ARGS='--filter-tcp=443 --dpi-desync=fake'\n"
+        "NFQWS_ARGS_QUIC=''\n";
+    const auto migrated = migrate_nfqws_config_preserving_settings(previous, defaults);
+    REQUIRE(migrated.has_value());
+    auto expected = previous;
+    expected.replace(expected.find("CONFIG_VERSION=5"),
+                     std::string("CONFIG_VERSION=5").size(), "CONFIG_VERSION=6");
+    CHECK(*migrated == expected);
+    const auto resolver = allow_paths({
+        "/opt/etc/nfqws2/lists/user.list",
+        "/opt/var/lib/keen-pbr/nfqws-rotator-telemetry-v1.lua",
+    });
+    CHECK(validate_nfqws_candidate(*migrated, resolver).empty());
+    CHECK(build_nfqws_dry_run_args(*migrated, 300, resolver) ==
+          build_nfqws_dry_run_args(previous, 300, resolver));
+}
+
+TEST_CASE("nfqws config migration adds resolved missing defaults without replacing existing empty values") {
+    const std::string previous =
+        "CONFIG_VERSION=1\nNFQUEUE_NUM=411\nMODE_ALL=''\n"
+        "MODE_LIST='--hostlist=/opt/operator.list'\n";
+    const std::string defaults =
+        "CONFIG_VERSION='0002'\nNFQUEUE_NUM=300\nUSER=nobody\n"
+        "MODE_ALL='--filter-tcp=80'\n"
+        "MODE_LIST='--hostlist=/opt/package-default.list'\n"
+        "NFQWS_EXTRA_ARGS=\"$MODE_LIST\"\n"
+        "NFQWS_ARGS='--filter-tcp=443 --lua-desync=fake'\n";
+    const auto migrated = migrate_nfqws_config_preserving_settings(previous, defaults);
+    REQUIRE(migrated.has_value());
+    CHECK(migrated->find("CONFIG_VERSION=2\n") != std::string::npos);
+    CHECK(migrated->find("NFQUEUE_NUM=411\n") != std::string::npos);
+    CHECK(migrated->find("MODE_ALL=''\n") != std::string::npos);
+    CHECK(migrated->find("MODE_LIST='--hostlist=/opt/operator.list'\n") != std::string::npos);
+    CHECK(migrated->find("USER='nobody'\n") != std::string::npos);
+    CHECK(migrated->find("NFQWS_EXTRA_ARGS='--hostlist=/opt/package-default.list'\n") !=
+          std::string::npos);
+    const auto resolver = allow_paths({"/opt/package-default.list", "/opt/operator.list"});
+    CHECK(validate_nfqws_candidate(*migrated, resolver).empty());
+    const auto args = build_nfqws_dry_run_args(*migrated, 300, resolver);
+    CHECK(position_of(args, "--qnum=411") != std::string::npos);
+    CHECK(position_of(args, "--hostlist=/opt/package-default.list") != std::string::npos);
+    CHECK(position_of(args, "--hostlist=/opt/operator.list") == std::string::npos);
+}
+
+TEST_CASE("nfqws config migration quotes literal dollars backticks and apostrophes without expansion") {
+    const std::string previous = "CONFIG_VERSION=1\nNFQUEUE_NUM=300\n";
+    const std::string backtick(1, '\x60');
+    const std::string literal =
+        "/opt/log/$MISSING-" + backtick + "never_run" + backtick +
+        "-$(never_run)-'tail.log";
+    const std::string defaults =
+        "CONFIG_VERSION=2\nLOG_LEVEL=1\n"
+        "LOG_DEBUG_PATH='/opt/log/$MISSING-" + backtick + "never_run" +
+        backtick + "-$(never_run)-'\\''tail.log'\n"
+        "POLICY_NAME='provider'\\''s-$CONFIG_VERSION-policy'\n";
+    const auto migrated = migrate_nfqws_config_preserving_settings(previous, defaults);
+    REQUIRE(migrated.has_value());
+    const auto args = build_nfqws_dry_run_args(*migrated);
+    CHECK(position_of(args, "--debug=" + literal) != std::string::npos);
+    CHECK(migrated->find("POLICY_NAME='provider'\\''s-$CONFIG_VERSION-policy'\n") !=
+          std::string::npos);
+    // A second real parse must still see literals, not newly introduced shell code.
+    const auto repeated = migrate_nfqws_config_preserving_settings(*migrated, defaults);
+    REQUIRE(repeated.has_value());
+    CHECK(*repeated == *migrated);
+}
+
+TEST_CASE("nfqws config migration normalizes real duplicate versions but preserves quoted lookalikes") {
+    const std::string quoted_profile =
+        "NFQWS_ARGS=\"--filter-tcp=443\n"
+        "CONFIG_VERSION=777\n"
+        "--lua-desync=fake\"\n";
+    const std::string previous =
+        "# CONFIG_VERSION=900 is a comment, not metadata.\n"
+        "CONFIG_VERSION='001'\n" + quoted_profile +
+        "CONFIG_VERSION=\"003\" # newest real assignment\n"
+        "NFQUEUE_NUM=300\n";
+    const std::string defaults = "CONFIG_VERSION=\"000006\"\nNFQUEUE_NUM=999\n";
+    const auto migrated = migrate_nfqws_config_preserving_settings(previous, defaults);
+    REQUIRE(migrated.has_value());
+    CHECK(migrated->find(quoted_profile) != std::string::npos);
+    CHECK(migrated->find("# CONFIG_VERSION=900 is a comment, not metadata.\n") !=
+          std::string::npos);
+    CHECK(migrated->find("# newest real assignment") != std::string::npos);
+    CHECK(migrated->find("CONFIG_VERSION=6") != std::string::npos);
+    CHECK(migrated->find("CONFIG_VERSION='001'") == std::string::npos);
+    CHECK(migrated->find("CONFIG_VERSION=\"003\"") == std::string::npos);
+    std::size_t count = 0;
+    for (std::size_t at = 0;
+         (at = migrated->find("CONFIG_VERSION=", at)) != std::string::npos;
+         at += std::string("CONFIG_VERSION=").size()) {
+        ++count;
+    }
+    CHECK(count == 3U); // One real assignment, one comment, one quoted argument.
+    CHECK(build_nfqws_dry_run_args(*migrated) == build_nfqws_dry_run_args(previous));
+}
+
+TEST_CASE("nfqws config migration rejects missing malformed and overflowing versions in either input") {
+    const std::vector<std::string> invalid{
+        "NFQUEUE_NUM=300\n",
+        "NFQWS_ARGS='CONFIG_VERSION=2'\n",
+        "CONFIG_VERSION=\n",
+        "CONFIG_VERSION=-1\n",
+        "CONFIG_VERSION=+2\n",
+        "CONFIG_VERSION=0x2\n",
+        "CONFIG_VERSION=1.5\n",
+        "CONFIG_VERSION=' 2 '\n",
+        "CONFIG_VERSION=18446744073709551616\n",
+        "CONFIG_VERSION=$UNDEFINED\n",
+    };
+    for (const auto& content : invalid) {
+        CAPTURE(content);
+        CHECK_FALSE(migrate_nfqws_config_preserving_settings(
+            content, "CONFIG_VERSION=2\n").has_value());
+        CHECK_FALSE(migrate_nfqws_config_preserving_settings(
+            "CONFIG_VERSION=1\n", content).has_value());
+    }
+}
+
+TEST_CASE("nfqws config migration refuses unsupported new variables commands and expansions") {
+    const std::string backtick(1, '\x60');
+    const std::vector<std::string> invalid_suffixes{
+        "NEW_PACKAGE_OPTION=1\n",
+        "PATH=/not-used\n",
+        ". /not-used\n",
+        "echo not-a-config\n",
+        "USER=$(never_run)\n",
+        "USER=" + backtick + "never_run" + backtick + "\n",
+        "USER=\"$" "{USER:-nobody}\"\n",
+        "LOG_DEBUG_PATH=\"$UNKNOWN\"\n",
+        "USER=nobody;never_run\n",
+        "USER= nobody\n",
+        "POLICY_NAME=\"unterminated\n",
+    };
+    for (const auto& suffix : invalid_suffixes) {
+        CAPTURE(suffix);
+        CHECK_FALSE(migrate_nfqws_config_preserving_settings(
+            "CONFIG_VERSION=1\n" + suffix, "CONFIG_VERSION=2\n").has_value());
+        CHECK_FALSE(migrate_nfqws_config_preserving_settings(
+            "CONFIG_VERSION=1\n", "CONFIG_VERSION=2\n" + suffix).has_value());
+    }
+}
+
+TEST_CASE("nfqws config migration refuses changed version dependencies but preserves literal references") {
+    for (const auto& dependent : {
+             std::string("POLICY_NAME=\"$CONFIG_VERSION\"\n"),
+             std::string("NFQUEUE_NUM=$CONFIG_VERSION\n"),
+             std::string("MODE_LIST=\"v$CONFIG_VERSION\"\nPOLICY_NAME=\"$MODE_LIST\"\n"),
+             std::string("POLICY_NAME=\"$CONFIG_VERSION\"\nCONFIG_VERSION=2\n"),
+         }) {
+        CAPTURE(dependent);
+        CHECK_FALSE(migrate_nfqws_config_preserving_settings(
+            "CONFIG_VERSION=1\n" + dependent, "CONFIG_VERSION=3\n").has_value());
+    }
+    const std::string previous =
+        "CONFIG_VERSION=1\nPOLICY_NAME='literal-$CONFIG_VERSION'\n";
+    const auto migrated = migrate_nfqws_config_preserving_settings(
+        previous, "CONFIG_VERSION=3\n");
+    REQUIRE(migrated.has_value());
+    CHECK(migrated->find("POLICY_NAME='literal-$CONFIG_VERSION'\n") != std::string::npos);
+}
+
+TEST_CASE("nfqws config migration leaves its inputs unchanged and is idempotent after appending defaults") {
+    const std::string previous = "CONFIG_VERSION=1\nUSER='daemon'";
+    const std::string defaults = "CONFIG_VERSION=2\nUSER=nobody\nNFQUEUE_NUM=411\n";
+    const auto previous_copy = previous;
+    const auto defaults_copy = defaults;
+    const auto migrated = migrate_nfqws_config_preserving_settings(previous, defaults);
+    REQUIRE(migrated.has_value());
+    CHECK(previous == previous_copy);
+    CHECK(defaults == defaults_copy);
+    CHECK(migrated->find("USER='daemon'\n") != std::string::npos);
+    CHECK(migrated->find("NFQUEUE_NUM='411'\n") != std::string::npos);
+    const auto repeated = migrate_nfqws_config_preserving_settings(*migrated, defaults);
+    REQUIRE(repeated.has_value());
+    CHECK(*repeated == *migrated);
+    CHECK(migrate_nfqws_config_preserving_settings(previous, defaults) == migrated);
+}
+
+TEST_CASE("nfqws config identity ignores only genuine independent version metadata") {
+    const std::string profile =
+        "# CONFIG_VERSION=700 must remain visible in the identity.\n"
+        "NFQWS_ARGS='--filter-tcp=443\nCONFIG_VERSION=800\n--lua-desync=fake'\n";
+    const auto first = nfqws_config_without_version_metadata("CONFIG_VERSION=1\n" + profile);
+    const auto second = nfqws_config_without_version_metadata("CONFIG_VERSION='002'\n" + profile);
+    CHECK(first == second);
+    CHECK(first.find(profile) != std::string::npos);
+    CHECK(first.find("CONFIG_VERSION=1") == std::string::npos);
+    CHECK(nfqws_config_without_version_metadata(first) == first);
+    for (const auto& input : {
+             std::string("CONFIG_VERSION=1\nNEW_OPTION=1\n"),
+             std::string("CONFIG_VERSION=1\nPOLICY_NAME=\"$CONFIG_VERSION\"\n"),
+             std::string("CONFIG_VERSION=1\nUSER=$(never_run)\n"),
+         }) {
+        CAPTURE(input);
+        CHECK(nfqws_config_without_version_metadata(input) == input);
+    }
 }
 
 TEST_CASE("nfqws PPE contract canonicalizes validated TCP and admits only QUIC UDP 443") {
@@ -492,5 +716,152 @@ TEST_CASE("nfqws validator: dry-run capability refuses a binary that changes dur
     CHECK(cache.detect("/opt/nfqws2", reader, probe) ==
           NfqwsDryRunCapability::unavailable);
 }
+
+TEST_CASE("nfqws validation codes cover every emitted cause with unchanged paths and messages") {
+    struct Case {
+        const char* suffix;
+        const char* path;
+        const char* message;
+        const char* code;
+    };
+    const Case cases[] = {
+        {"POLICY_NAME=\"$(id)\"\n", "POLICY_NAME", "command substitution is not allowed in an nfqws candidate", "nfqws.shell.command_substitution"},
+        {"POLICY_NAME=\"${USER:-nobody}\"\n", "POLICY_NAME", "only simple ${NAME} expansion is allowed in an nfqws candidate", "nfqws.shell.expansion_syntax"},
+        {"POLICY_NAME=\"$UNDEFINED\"\n", "POLICY_NAME", "undefined variable $UNDEFINED must not depend on the service environment", "nfqws.shell.undefined_variable"},
+        {"1NAME=value\n", "nfqws2.conf", "only shell variable assignments and comments are allowed", "nfqws.shell.assignments_only"},
+        {"PATH=/not-used\n", "PATH", "unsupported assignment in nfqws2.conf", "nfqws.shell.unsupported_assignment"},
+        {"POLICY_NAME value\n", "POLICY_NAME", "only NAME=value assignments are allowed", "nfqws.shell.assignment_syntax"},
+        {"POLICY_NAME= value\n", "POLICY_NAME", "whitespace after '=' would execute a shell command instead of assigning the value", "nfqws.shell.whitespace_after_equals"},
+        {"POLICY_NAME=value extra\n", "POLICY_NAME", "unquoted whitespace would execute a shell command", "nfqws.shell.unquoted_whitespace"},
+        {"POLICY_NAME=value;\n", "POLICY_NAME", "shell commands and control operators are not allowed in an nfqws candidate", "nfqws.shell.control_operator"},
+        {"POLICY_NAME=\"unterminated", "POLICY_NAME", "unterminated quoted assignment", "nfqws.shell.unterminated_quote"},
+        {"NFQWS_ARGS=\"--filter-tcp=-1 --lua-desync=fake\"\n", "NFQWS_ARGS/--filter-tcp", "empty port", "nfqws.port.empty"},
+        {"NFQWS_ARGS=\"--filter-tcp=word --lua-desync=fake\"\n", "NFQWS_ARGS/--filter-tcp", "port 'word' is not a number", "nfqws.port.number"},
+        {"NFQWS_ARGS=\"--filter-tcp=65536 --lua-desync=fake\"\n", "NFQWS_ARGS/--filter-tcp", "port 65536 is out of range 1-65535", "nfqws.port.range"},
+        {"NFQWS_ARGS=\"--filter-tcp= --lua-desync=fake\"\n", "NFQWS_ARGS/--filter-tcp", "port filter must not be empty", "nfqws.port.filter_empty"},
+        {"NFQWS_ARGS=\"--filter-tcp=1,,2 --lua-desync=fake\"\n", "NFQWS_ARGS/--filter-tcp", "port filter contains an empty item", "nfqws.port.empty_item"},
+        {"NFQWS_ARGS=\"--filter-tcp=1-2-3 --lua-desync=fake\"\n", "NFQWS_ARGS/--filter-tcp", "port range '1-2-3' is malformed", "nfqws.port.range_malformed"},
+        {"NFQWS_ARGS=\"--filter-tcp=2-1 --lua-desync=fake\"\n", "NFQWS_ARGS/--filter-tcp", "port range 2-1 is inverted (low > high)", "nfqws.port.range_inverted"},
+        {"NFQWS_BASE_ARGS=\"--writable=/tmp/not-owned\"\n", "NFQWS_BASE_ARGS/--writable", "only the package-owned nfqws rotator writable directory is allowed", "nfqws.writable.owned_only"},
+        {"NFQWS_EXTRA_ARGS='$USER'\n", "NFQWS_EXTRA_ARGS", "literal shell variable reference would reach nfqws2; single-quoted values are not expanded", "nfqws.shell.literal_variable"},
+        {"NFQWS_EXTRA_ARGS='*'\n", "NFQWS_EXTRA_ARGS", "shell wildcard is not allowed because the init script would expand it differently from the dry run", "nfqws.shell.wildcard"},
+        {"NFQWS_EXTRA_ARGS=\"--hostlist=\"\n", "NFQWS_EXTRA_ARGS/--hostlist", "empty file path", "nfqws.path.empty"},
+        {"NFQWS_EXTRA_ARGS=\"--hostlist=/missing/list\"\n", "NFQWS_EXTRA_ARGS/--hostlist", "referenced file does not exist: /missing/list", "nfqws.path.missing"},
+        {"NFQWS_ARGS=\"--filter-tcp=443 --new --lua-desync=fake\"\n", "NFQWS_ARGS", "--new is not allowed here; use NFQWS_ARGS_CUSTOM for additional profiles", "nfqws.profile.new_forbidden"},
+        {"NFQWS_BASE_ARGS=\"--writable=/var/run/keen-pbr-nfqws --writable=/var/run/keen-pbr-nfqws\"\n", "NFQWS_BASE_ARGS/--writable", "the package-owned writable directory may be declared only once", "nfqws.writable.duplicate"},
+        {"NFQWS_ARGS_CUSTOM=\"--new --filter-tcp=443 --lua-desync=fake\"\n", "NFQWS_ARGS_CUSTOM", "--new must separate two non-empty custom profiles", "nfqws.profile.empty_boundary"},
+        {"NFQWS_ARGS_CUSTOM=\"--filter-tcp=80 --lua-desync=fake --new= --filter-tcp=443 --lua-desync=fake\"\n", "NFQWS_ARGS_CUSTOM", "a named --new boundary must have a name", "nfqws.profile.boundary_name_required"},
+        {"NFQWS_ARGS_CUSTOM=\"--filter-tcp=80 --lua-desync=fake --new --new=two --filter-tcp=443 --lua-desync=fake\"\n", "NFQWS_ARGS_CUSTOM", "consecutive --new tokens create an empty custom profile", "nfqws.profile.consecutive_boundaries"},
+        {"NFQWS_ARGS=\"--filter-tcp=443\"\n", "NFQWS_ARGS", "profile has no supported action (--lua-desync= or --dpi-desync=); filters and selectors alone do not process traffic", "nfqws.profile.action_required"},
+        {"NFQWS_ARGS_CUSTOM=\"--filter-tcp=80 --lua-desync=fake --new=webrtc_passthrough --filter-udp=49153-65535 --filter-l7=stun\"\n", "NFQWS_ARGS_CUSTOM", "webrtc_passthrough must contain exactly --filter-udp=49152-65535 and --filter-l7=stun", "nfqws.profile.webrtc_passthrough"},
+        {"NFQWS_ARGS_CUSTOM=\"--filter-tcp=443\"\n", "NFQWS_ARGS_CUSTOM", "custom profile 1 has no supported action (--lua-desync= or --dpi-desync=)", "nfqws.profile.custom_action_required"},
+        {"NFQWS_ARGS=\"\"\nNFQWS_ARGS_QUIC=\"\"\n", "NFQWS_ARGS", "the candidate has no strategy profile; IPSET and mode selectors alone do not process traffic", "nfqws.profile.required"},
+        {"NFQUEUE_NUM=65536\n", "NFQUEUE_NUM", "queue number must be an integer from 0 to 65535", "nfqws.queue.range"},
+        {"USER='bad/name'\n", "USER", "nfqws user name contains unsafe characters", "nfqws.user.unsafe"},
+    };
+    std::set<std::string> covered_codes;
+    for (const auto& item : cases) {
+        CAPTURE(item.code);
+        const auto issues = validate_nfqws_candidate(std::string(kValid) + item.suffix,
+                                                     allow_paths({"/opt/lua/base.lua"}));
+        REQUIRE(issues.size() == 1U);
+        CHECK(issues[0].path == item.path);
+        CHECK(issues[0].message == item.message);
+        CHECK(issues[0].code == item.code);
+        CHECK(issues[0].params.empty());
+        CHECK(covered_codes.insert(issues[0].code).second);
+    }
+    CHECK(covered_codes.size() == 33U);
+}
+
+TEST_CASE("nfqws validation codes preserve issue order and PPE legacy failure diagnostics") {
+    const std::string content =
+        "PATH=/not-used\n"
+        "NFQWS_BASE_ARGS='--writable=/tmp/not-owned'\n"
+        "NFQWS_ARGS='--filter-tcp=,word,70000,2-1 --lua-desync=fake'\n"
+        "NFQUEUE_NUM=65536\nUSER='bad/name'\n";
+    const std::vector<ConfigValidationIssue> expected{
+        {"PATH", "unsupported assignment in nfqws2.conf", "nfqws.shell.unsupported_assignment", {}},
+        {"NFQWS_BASE_ARGS/--writable", "only the package-owned nfqws rotator writable directory is allowed", "nfqws.writable.owned_only", {}},
+        {"NFQWS_ARGS/--filter-tcp", "port filter contains an empty item", "nfqws.port.empty_item", {}},
+        {"NFQWS_ARGS/--filter-tcp", "port 'word' is not a number", "nfqws.port.number", {}},
+        {"NFQWS_ARGS/--filter-tcp", "port 70000 is out of range 1-65535", "nfqws.port.range", {}},
+        {"NFQWS_ARGS/--filter-tcp", "port range 2-1 is inverted (low > high)", "nfqws.port.range_inverted", {}},
+        {"NFQUEUE_NUM", "queue number must be an integer from 0 to 65535", "nfqws.queue.range", {}},
+        {"USER", "nfqws user name contains unsafe characters", "nfqws.user.unsafe", {}},
+    };
+    const auto issues = validate_nfqws_candidate(content);
+    REQUIRE(issues.size() == expected.size());
+    for (std::size_t index = 0; index < issues.size(); ++index) {
+        CHECK(issues[index].path == expected[index].path);
+        CHECK(issues[index].message == expected[index].message);
+        CHECK(issues[index].code == expected[index].code);
+        CHECK(issues[index].params.empty());
+    }
+    const auto ppe = extract_nfqws_ppe_port_contract(content);
+    CHECK_FALSE(ppe.available);
+    CHECK(ppe.reason == "candidate validation failed at PATH: unsupported assignment in nfqws2.conf");
+    CHECK(ppe.queue_number == 300);
+    const auto backticks = validate_nfqws_candidate(std::string(kValid) + "POLICY_NAME=\"`id`\"\n");
+    REQUIRE(backticks.size() == 2U);
+    for (const auto& issue : backticks) {
+        CHECK(issue.path == "POLICY_NAME");
+        CHECK(issue.message == "command substitution is not allowed in an nfqws candidate");
+        CHECK(issue.code == "nfqws.shell.command_substitution");
+    }
+}
+
+TEST_CASE("nfqws validation metadata leaves accepted expansions argv and PPE derivation unchanged") {
+    const std::string content =
+        "# accepted shell assignments only\n"
+        "USER=daemon\nNFQUEUE_NUM=0\nLOG_LEVEL=1\n"
+        "ISP_INTERFACE='eth0 eth1'\nIPV6_ENABLED=1\nTCP_PORTS=1:65535\n"
+        "POLICY_NAME=foo#bar # a comment\n"
+        "MODE_LIST=\"--hostlist=/opt/list\"\n"
+        "NFQWS_EXTRA_ARGS=\"${MODE_LIST}\"\n"
+        "NFQWS_BASE_ARGS=\"--writable=/var/run/keen-pbr-nfqws\"\n"
+        "NFQWS_ARGS=\"--filter-tcp=1-65535 \\\n--lua-desync=fake\"\n";
+    const auto resolver = allow_paths({"/opt/list"});
+    CHECK(validate_nfqws_candidate(content, resolver).empty());
+    const std::vector<std::string> expected{
+        "--dry-run", "--debug=syslog", "--user=daemon", "--qnum=0",
+        "--bind-fix4", "--bind-fix6", "--filter-tcp=1-65535", "--lua-desync=fake", "--hostlist=/opt/list"};
+    CHECK(build_nfqws_dry_run_args(content, 300, resolver) == expected);
+    const auto ppe = extract_nfqws_ppe_port_contract(content, resolver);
+    REQUIRE(ppe.available);
+    CHECK(ppe.queue_number == 0);
+    CHECK(ppe.reason.empty());
+    CHECK(ppe.tcp_ranges == std::vector<NfqwsPpePortRange>{{1, 65535}});
+    CHECK_FALSE(ppe.quic_udp_443);
+    for (const char* queue : {"0", "65535", ""}) {
+        CHECK(validate_nfqws_candidate(std::string(kValid) + "NFQUEUE_NUM=" + queue + "\n").empty());
+    }
+}
+
+#ifdef WITH_API
+TEST_CASE("nfqws validation source codes survive the existing JSON and generated DTO wire path") {
+    const auto issues = validate_nfqws_candidate(
+        "NFQWS_ARGS='--filter-tcp=word --lua-desync=fake'\nNFQUEUE_NUM=65536\n");
+    REQUIRE(issues.size() == 2U);
+    const auto encoded = serialize_config_validation_issues(issues);
+    const auto wire = nlohmann::json::parse(encoded.dump());
+    REQUIRE(wire.size() == issues.size());
+    for (std::size_t index = 0; index < issues.size(); ++index) {
+        const auto dto = wire.at(index).get<api::ValidationErrorElement>();
+        CHECK(dto.path == issues[index].path);
+        CHECK(dto.message == issues[index].message);
+        CHECK(dto.code == issues[index].code);
+        CHECK_FALSE(dto.params.has_value());
+        CHECK_FALSE(wire.at(index).contains("params"));
+        const auto roundtrip = nlohmann::json(dto).get<api::ValidationErrorElement>();
+        CHECK(roundtrip.path == dto.path);
+        CHECK(roundtrip.message == dto.message);
+        CHECK(roundtrip.code == dto.code);
+    }
+    CHECK(wire.at(0).at("message") == "port 'word' is not a number");
+    CHECK(wire.at(0).at("code") == "nfqws.port.number");
+    CHECK(wire.at(1).at("code") == "nfqws.queue.range");
+}
+#endif
 
 } // namespace keen_pbr3

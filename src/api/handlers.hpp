@@ -74,6 +74,7 @@ struct ListRefreshOperationResult {
 };
 
 // Context struct holding thread-safe accessors to daemon runtime state.
+class SubscriptionRefreshService;
 struct ApiContext {
     // Own the path. Tests and embedders often construct the context from a
     // temporary path string; retaining a reference here would leave the API
@@ -103,7 +104,7 @@ struct ApiContext {
     std::function<void()> start_runtime_fn;
     std::function<void()> stop_runtime_fn;
     std::function<void()> restart_runtime_fn;
-    std::function<ListRefreshOperationResult(std::optional<std::string>)> refresh_lists_fn;
+    std::function<ListRefreshOperationResult(const api::ListRefreshRequest&)> refresh_lists_fn;
     StatusStream* status_stream{nullptr};
     LifecycleOperationCoordinator* lifecycle_operations{nullptr};
     std::function<void(std::string, std::vector<std::string>)>
@@ -238,6 +239,14 @@ struct ApiContext {
     std::function<void(RuntimeMutationAdmission::Lease)>
         start_runtime_with_lease_fn;
 
+    // Host-list edits act on the running automation, not a settings draft.
+    // Kept at the aggregate tail for existing embedders.
+    std::function<Config()> get_tunnel_probe_active_config_fn;
+    // Additive read-only callback: old embedders keep the target-only callback
+    // and must not silently start networking when explicitly asked for HTTP.
+    std::function<TestRoutingResult(const std::string&, const std::string&)>
+        compute_test_routing_with_http_fn;
+
     Config get_visible_config() const {
         return get_visible_config_fn();
     }
@@ -344,8 +353,18 @@ struct ApiContext {
         return get_list_refresh_state_map_fn(config);
     }
 
-    TestRoutingResult compute_test_routing(const std::string& target) const {
-        return compute_test_routing_fn(target);
+    TestRoutingResult compute_test_routing(const std::string& target,
+        const std::optional<std::string>& http_probe_ip = std::nullopt) const {
+        if (http_probe_ip && compute_test_routing_with_http_fn) {
+            return compute_test_routing_with_http_fn(target, *http_probe_ip);
+        }
+        auto result = compute_test_routing_fn(target);
+        if (http_probe_ip) {
+            RoutingHttpProbe observation;
+            observation.ip = *http_probe_ip;
+            result.http_probe = std::move(observation);
+        }
+        return result;
     }
 
     void begin_save_operation() const {
@@ -441,8 +460,8 @@ struct ApiContext {
     }
 
     ListRefreshOperationResult refresh_lists(
-        const std::optional<std::string>& requested_name) const {
-        return refresh_lists_fn(requested_name);
+        const api::ListRefreshRequest& request) const {
+        return refresh_lists_fn(request);
     }
 
     void replace_interface_traffic_targets(
@@ -516,6 +535,16 @@ struct ApiContext {
         stop_runtime_with_lease_fn;
     std::function<void(RuntimeMutationAdmission::Lease&)>
         emergency_quiesce_runtime_with_lease_return_fn;
+    std::shared_ptr<SubscriptionRefreshService> subscription_refresh_service;
+    // Additive targeted-edit adapter; ordinary Save retains its existing
+    // three-argument callback and consumes only its matching draft.
+    std::function<ConfigApplyResult(
+        Config,
+        std::string,
+        ConfigDraftRebase,
+        RuntimeMutationAdmission::Lease&)>
+        enqueue_apply_validated_config_with_draft_rebase_fn;
+    std::function<Config()> get_active_config_fn;
 };
 
 // Request-scoped compatibility wrapper.  Production owns an unforgeable
@@ -549,6 +578,25 @@ public:
 
         context_.begin_save_operation();
         legacy_active_ = true;
+    }
+
+    // A composite native edit temporarily hands its already-held writer to
+    // the same config transaction. Return that exact writer to its caller.
+    ApiRuntimeMutationGuard(
+        ApiContext& context,
+        RuntimeMutationAdmission::Lease& borrowed_lease)
+        : context_(context) {
+        validate_returned_lease_fn_ =
+            context_.validate_runtime_mutation_lease_fn;
+        if (!borrowed_lease || !validate_returned_lease_fn_ ||
+            !validate_returned_lease_fn_(borrowed_lease)) {
+            throw std::logic_error("Borrowed runtime mutation lease is invalid");
+        }
+        production_lease_token_ = borrowed_lease.token();
+        borrowed_destination_ = &borrowed_lease;
+        lease_.emplace(std::move(borrowed_lease));
+        production_state_ = ProductionState::production_owned;
+        production_admission_ = true;
     }
 
     ~ApiRuntimeMutationGuard() noexcept {
@@ -611,7 +659,11 @@ public:
     void finish() {
         if (production_state_ == ProductionState::production_owned) {
             if (lease_.has_value()) {
-                lease_->release();
+                if (borrowed_destination_) {
+                    *borrowed_destination_ = std::move(*lease_);
+                } else {
+                    lease_->release();
+                }
                 lease_.reset();
             }
             production_state_ = ProductionState::finished;
@@ -686,6 +738,7 @@ private:
     }
 
     ApiContext& context_;
+    RuntimeMutationAdmission::Lease* borrowed_destination_{nullptr};
     std::optional<RuntimeMutationAdmission::Lease> lease_;
     std::optional<RuntimeMutationAdmission::HandoffGate>
         handoff_gate_;
@@ -704,6 +757,7 @@ private:
 //   POST /api/service/stop    - stop routing runtime and deactivate dnsmasq hook
 //   POST /api/service/restart - restart routing runtime and activate dnsmasq hook
 //   POST /api/lists/refresh   - refresh one or all URL-backed lists
+//   POST /api/lists/query     - read-only filtered page of visible list summaries
 //   GET  /api/config          - return current config and draft status
 //   POST /api/config          - validate + stage config in memory
 //   POST /api/config/dependencies - analyze references before mutation

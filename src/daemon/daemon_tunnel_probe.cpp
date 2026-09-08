@@ -14,10 +14,12 @@
 #include "../health/differential_probe.hpp"
 #include "../health/nfqws_scan_source.hpp"
 #include "../health/tunnel_probe_report.hpp"
+#include "../health/tunnel_probe_review.hpp"
 #include "../http/http_transport.hpp"
 #include "../log/logger.hpp"
 
 #include <chrono>
+#include <cerrno>
 #include <fstream>
 #include <memory>
 #include <utility>
@@ -78,6 +80,32 @@ void Daemon::run_tunnel_probe_pass(const Config& config) noexcept {
             TunnelProbeTask::Io io;
             io.read_file = [](const std::string& path) {
                 return read_whole_file(path);
+            };
+            io.read_limited_file = [](const std::string& path,
+                                      std::size_t limit) -> std::optional<std::string> {
+                errno = 0;
+                std::ifstream file(path, std::ios::binary);
+                if (!file.is_open()) {
+                    return errno == ENOENT ? std::optional<std::string>{std::string{}}
+                                          : std::nullopt;
+                }
+                std::string text(limit + 1U, '\0');
+                file.read(text.data(), static_cast<std::streamsize>(text.size()));
+                const auto size = static_cast<std::size_t>(file.gcount());
+                if (file.bad() || size > limit) return std::nullopt;
+                text.resize(size);
+                return text;
+            };
+            io.clock_unix_ms = []() {
+                return static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count());
+            };
+            io.load_review = load_tunnel_probe_review;
+            io.save_review = save_tunnel_probe_review;
+            io.current_setup = [this]() {
+                const auto active = config_store_.pin_active_snapshot();
+                return resolve_tunnel_probe_setup(active->config).setup;
             };
             io.stat_log = [](const std::string& path,
                              std::uint64_t& size,

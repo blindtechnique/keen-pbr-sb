@@ -56,10 +56,16 @@ import type {
   GrantedResponse,
   HealthResponse,
   InterfaceNames,
+  ListContentImportRequest,
+  ListContentImportResponse,
   ListDeleteStageRequest,
   ListDeleteStageResponse,
+  ListPage,
+  ListQueryRequest,
   ListRefreshRequest,
   ListRefreshResponse,
+  ListSourcePreviewRequest,
+  ListSourcePreviewResponse,
   LogSettings,
   LogSettingsRequest,
   LogSettingsResult,
@@ -72,6 +78,9 @@ import type {
   NfqwsActionRequest,
   NfqwsActionResult,
   NfqwsStatus,
+  NotificationDismissRequest,
+  NotificationDismissalState,
+  NotificationsResponse,
   OkResponse,
   PeriodicTaskMetricsResponse,
   PostSingBoxInstallCancel200,
@@ -86,6 +95,7 @@ import type {
   RemoteAccessResult,
   RemoteAccessState,
   RouterInfo,
+  RouterMetrics,
   RoutingHealthErrorResponse,
   RoutingHealthResponse,
   RoutingTestRequest,
@@ -103,6 +113,7 @@ import type {
   SubscriptionPreviewRequest,
   SubscriptionPreviewResponse,
   SubscriptionRenameRequest,
+  SubscriptionSettingsRequest,
   SubscriptionSourceRequest,
   SystemUpdateLocalStatus,
   SystemUpdateStatus,
@@ -114,6 +125,8 @@ import type {
   TransportConfigResponse,
   TransportExitCheckRequest,
   TransportExitCheckResponse,
+  TransportGeoUpdate,
+  TransportGeoUpdateResponse,
   TransportManagerSettings,
   TransportProcessModeRequest,
   TransportSpec,
@@ -495,6 +508,366 @@ export const usePostServiceRestart = <TError = unknown,
         TContext
       > => {
       return useMutation(getPostServiceRestartMutationOptions(options), queryClient);
+    }
+
+/**
+ * Schedules the installed Keenetic service scripts after the HTTP reply. Managed sing-box connections restart too. nfqws is not restarted.
+
+ * @summary Restart keen-pbr and transport-manager processes
+ */
+export type postServiceRestartProcessesResponse200 = {
+  data: ReloadResponse
+  status: 200
+}
+
+export type postServiceRestartProcessesResponseSuccess = (postServiceRestartProcessesResponse200) & {
+  headers: Headers;
+};
+;
+
+export type postServiceRestartProcessesResponse = (postServiceRestartProcessesResponseSuccess)
+
+export const getPostServiceRestartProcessesUrl = () => {
+
+
+
+
+  return `/api/service/restart-processes`
+}
+
+export const postServiceRestartProcesses = async ( options?: RequestInit): Promise<postServiceRestartProcessesResponse> => {
+
+  return apiFetch<postServiceRestartProcessesResponse>(getPostServiceRestartProcessesUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+export const getPostServiceRestartProcessesMutationOptions = <TError = unknown,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postServiceRestartProcesses>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postServiceRestartProcesses>>, TError,void, TContext> => {
+
+const mutationKey = ['postServiceRestartProcesses'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postServiceRestartProcesses>>, void> = () => {
+
+
+          return  postServiceRestartProcesses(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostServiceRestartProcessesMutationResult = NonNullable<Awaited<ReturnType<typeof postServiceRestartProcesses>>>
+
+    export type PostServiceRestartProcessesMutationError = unknown
+
+    /**
+ * @summary Restart keen-pbr and transport-manager processes
+ */
+export const usePostServiceRestartProcesses = <TError = unknown,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postServiceRestartProcesses>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postServiceRestartProcesses>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getPostServiceRestartProcessesMutationOptions(options), queryClient);
+    }
+
+/**
+ * Read-only filtering and sorting of the current editable configuration, preferring its staged draft when present. Each request uses one visible configuration snapshot; no server-side cursor or saved query is created. Search terms are case-insensitive and must all match across list names, source paths/URLs and the names of dependent routing/DNS rules or exits. Inline domain/IP arrays are never returned by this endpoint.
+
+ * @summary Query a page of configured list summaries
+ */
+export type queryListsResponse200 = {
+  data: ListPage
+  status: 200
+}
+
+export type queryListsResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type queryListsResponseSuccess = (queryListsResponse200) & {
+  headers: Headers;
+};
+export type queryListsResponseError = (queryListsResponse400) & {
+  headers: Headers;
+};
+
+export type queryListsResponse = (queryListsResponseSuccess | queryListsResponseError)
+
+export const getQueryListsUrl = () => {
+
+
+
+
+  return `/api/lists/query`
+}
+
+export const queryLists = async (listQueryRequest: ListQueryRequest, options?: RequestInit): Promise<queryListsResponse> => {
+
+  return apiFetch<queryListsResponse>(getQueryListsUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      listQueryRequest,)
+  }
+);}
+
+
+
+
+export const getQueryListsMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof queryLists>>, TError,{data: ListQueryRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof queryLists>>, TError,{data: ListQueryRequest}, TContext> => {
+
+const mutationKey = ['queryLists'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof queryLists>>, {data: ListQueryRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  queryLists(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type QueryListsMutationResult = NonNullable<Awaited<ReturnType<typeof queryLists>>>
+    export type QueryListsMutationBody = ListQueryRequest
+    export type QueryListsMutationError = ErrorResponse
+
+    /**
+ * @summary Query a page of configured list summaries
+ */
+export const useQueryLists = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof queryLists>>, TError,{data: ListQueryRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof queryLists>>,
+        TError,
+        {data: ListQueryRequest},
+        TContext
+      > => {
+      return useMutation(getQueryListsMutationOptions(options), queryClient);
+    }
+
+/**
+ * Authenticated read-only preview using the runtime list parser. Exactly one of url or text is required. Downloads use the active configuration's list download chain unless an override is explicitly supplied. No cache, configuration draft, firewall, or service state is changed. This optional preview never becomes a prerequisite for saving or applying a list. Input is limited to 2 MiB and analysis to 50000 physical lines. A raw line over the runtime reader's 4096-byte limit stops the analysis. Counts describe only the analyzed prefix when complete is false. Only the first 50 normalized unique entries and 50 errors are returned. Samples omitted from the response do not make full-input counts incomplete.
+
+ * @summary Preview a remote or inline list in an explicitly selected format
+ */
+export type postListSourcePreviewResponse200 = {
+  data: ListSourcePreviewResponse
+  status: 200
+}
+
+export type postListSourcePreviewResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postListSourcePreviewResponseSuccess = (postListSourcePreviewResponse200) & {
+  headers: Headers;
+};
+export type postListSourcePreviewResponseError = (postListSourcePreviewResponse400) & {
+  headers: Headers;
+};
+
+export type postListSourcePreviewResponse = (postListSourcePreviewResponseSuccess | postListSourcePreviewResponseError)
+
+export const getPostListSourcePreviewUrl = () => {
+
+
+
+
+  return `/api/lists/preview`
+}
+
+export const postListSourcePreview = async (listSourcePreviewRequest: ListSourcePreviewRequest, options?: RequestInit): Promise<postListSourcePreviewResponse> => {
+
+  return apiFetch<postListSourcePreviewResponse>(getPostListSourcePreviewUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      listSourcePreviewRequest,)
+  }
+);}
+
+
+
+
+export const getPostListSourcePreviewMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postListSourcePreview>>, TError,{data: ListSourcePreviewRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postListSourcePreview>>, TError,{data: ListSourcePreviewRequest}, TContext> => {
+
+const mutationKey = ['postListSourcePreview'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postListSourcePreview>>, {data: ListSourcePreviewRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postListSourcePreview(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostListSourcePreviewMutationResult = NonNullable<Awaited<ReturnType<typeof postListSourcePreview>>>
+    export type PostListSourcePreviewMutationBody = ListSourcePreviewRequest
+    export type PostListSourcePreviewMutationError = ErrorResponse
+
+    /**
+ * @summary Preview a remote or inline list in an explicitly selected format
+ */
+export const usePostListSourcePreview = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postListSourcePreview>>, TError,{data: ListSourcePreviewRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postListSourcePreview>>,
+        TError,
+        {data: ListSourcePreviewRequest},
+        TContext
+      > => {
+      return useMutation(getPostListSourcePreviewMutationOptions(options), queryClient);
+    }
+
+/**
+ * Parses text, a JSON string array, or a YAML payload block sequence. Returns all normalized entries only if the entire input is valid. Does not create a draft or change configuration, caches, or routing. Limited to 2 MiB, 50000 entries and 4096 bytes per scalar. This is not a general Clash or sing-box configuration importer.
+
+ * @summary Normalize list contents for a local editor without saving
+ */
+export type postListContentImportResponse200 = {
+  data: ListContentImportResponse
+  status: 200
+}
+
+export type postListContentImportResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postListContentImportResponseSuccess = (postListContentImportResponse200) & {
+  headers: Headers;
+};
+export type postListContentImportResponseError = (postListContentImportResponse400) & {
+  headers: Headers;
+};
+
+export type postListContentImportResponse = (postListContentImportResponseSuccess | postListContentImportResponseError)
+
+export const getPostListContentImportUrl = () => {
+
+
+
+
+  return `/api/lists/import`
+}
+
+export const postListContentImport = async (listContentImportRequest: ListContentImportRequest, options?: RequestInit): Promise<postListContentImportResponse> => {
+
+  return apiFetch<postListContentImportResponse>(getPostListContentImportUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      listContentImportRequest,)
+  }
+);}
+
+
+
+
+export const getPostListContentImportMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postListContentImport>>, TError,{data: ListContentImportRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postListContentImport>>, TError,{data: ListContentImportRequest}, TContext> => {
+
+const mutationKey = ['postListContentImport'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postListContentImport>>, {data: ListContentImportRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postListContentImport(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostListContentImportMutationResult = NonNullable<Awaited<ReturnType<typeof postListContentImport>>>
+    export type PostListContentImportMutationBody = ListContentImportRequest
+    export type PostListContentImportMutationError = ErrorResponse
+
+    /**
+ * @summary Normalize list contents for a local editor without saving
+ */
+export const usePostListContentImport = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postListContentImport>>, TError,{data: ListContentImportRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postListContentImport>>,
+        TError,
+        {data: ListContentImportRequest},
+        TContext
+      > => {
+      return useMutation(getPostListContentImportMutationOptions(options), queryClient);
     }
 
 /**
@@ -4509,6 +4882,103 @@ export const usePostTransportConfig = <TError = ErrorResponse,
     }
 
 /**
+ * Updates country metadata only, without applying runtime configuration. The manager merges into the current definition atomically and returns updated=false if the transport is no longer native, no longer uses automatic country lookup, or its interface changed.
+
+ * @summary Complete an automatic native transport country lookup
+ */
+export type postTransportGeoResponse200 = {
+  data: TransportGeoUpdateResponse
+  status: 200
+}
+
+export type postTransportGeoResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postTransportGeoResponse503 = {
+  data: ErrorResponse
+  status: 503
+}
+
+export type postTransportGeoResponseSuccess = (postTransportGeoResponse200) & {
+  headers: Headers;
+};
+export type postTransportGeoResponseError = (postTransportGeoResponse400 | postTransportGeoResponse503) & {
+  headers: Headers;
+};
+
+export type postTransportGeoResponse = (postTransportGeoResponseSuccess | postTransportGeoResponseError)
+
+export const getPostTransportGeoUrl = () => {
+
+
+
+
+  return `/api/transports/geo`
+}
+
+export const postTransportGeo = async (transportGeoUpdate: TransportGeoUpdate, options?: RequestInit): Promise<postTransportGeoResponse> => {
+
+  return apiFetch<postTransportGeoResponse>(getPostTransportGeoUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      transportGeoUpdate,)
+  }
+);}
+
+
+
+
+export const getPostTransportGeoMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postTransportGeo>>, TError,{data: TransportGeoUpdate}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postTransportGeo>>, TError,{data: TransportGeoUpdate}, TContext> => {
+
+const mutationKey = ['postTransportGeo'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postTransportGeo>>, {data: TransportGeoUpdate}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postTransportGeo(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostTransportGeoMutationResult = NonNullable<Awaited<ReturnType<typeof postTransportGeo>>>
+    export type PostTransportGeoMutationBody = TransportGeoUpdate
+    export type PostTransportGeoMutationError = ErrorResponse
+
+    /**
+ * @summary Complete an automatic native transport country lookup
+ */
+export const usePostTransportGeo = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postTransportGeo>>, TError,{data: TransportGeoUpdate}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postTransportGeo>>,
+        TError,
+        {data: TransportGeoUpdate},
+        TContext
+      > => {
+      return useMutation(getPostTransportGeoMutationOptions(options), queryClient);
+    }
+
+/**
  * Creates one managed transport and the interface outbound that exposes it to keen-pbr as a single durable transaction. The server derives the outbound tag and interface from the transport, rejects an existing configuration draft or ownership collision, and rolls both resources back when either runtime cannot be committed. This endpoint currently supports creation with `linked_outbound.mode=ensure` only.
 
  * @summary Atomically create a transport and its linked outgoing route
@@ -4739,6 +5209,216 @@ export function useGetTransportConfigExport<TData = Awaited<ReturnType<typeof ge
 
 
 
+
+/**
+ * Last 200 log lines with stable identities and router-owned dismissals. Dismissing a notice does not delete logs.
+
+ * @summary Current shared notification feed
+ */
+export type getNotificationsResponse200 = {
+  data: NotificationsResponse
+  status: 200
+}
+
+export type getNotificationsResponseSuccess = (getNotificationsResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getNotificationsResponse = (getNotificationsResponseSuccess)
+
+export const getGetNotificationsUrl = () => {
+
+
+
+
+  return `/api/notifications`
+}
+
+export const getNotifications = async ( options?: RequestInit): Promise<getNotificationsResponse> => {
+
+  return apiFetch<getNotificationsResponse>(getGetNotificationsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetNotificationsQueryKey = () => {
+    return [
+    `/api/notifications`
+    ] as const;
+    }
+
+
+export const getGetNotificationsQueryOptions = <TData = Awaited<ReturnType<typeof getNotifications>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getNotifications>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetNotificationsQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getNotifications>>> = ({ signal }) => getNotifications({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getNotifications>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetNotificationsQueryResult = NonNullable<Awaited<ReturnType<typeof getNotifications>>>
+export type GetNotificationsQueryError = unknown
+
+
+export function useGetNotifications<TData = Awaited<ReturnType<typeof getNotifications>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getNotifications>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getNotifications>>,
+          TError,
+          Awaited<ReturnType<typeof getNotifications>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetNotifications<TData = Awaited<ReturnType<typeof getNotifications>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getNotifications>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getNotifications>>,
+          TError,
+          Awaited<ReturnType<typeof getNotifications>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetNotifications<TData = Awaited<ReturnType<typeof getNotifications>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getNotifications>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Current shared notification feed
+ */
+
+export function useGetNotifications<TData = Awaited<ReturnType<typeof getNotifications>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getNotifications>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetNotificationsQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
+ * Merges identities into bounded state stored beside the configuration. No runtime restart or additional login is needed. New notices not in this request stay visible. The notification_state SSE event publishes shared state on connection and after dismissal on the existing stream.
+
+ * @summary Dismiss the supplied notifications on every device
+ */
+export type dismissNotificationsResponse200 = {
+  data: NotificationDismissalState
+  status: 200
+}
+
+export type dismissNotificationsResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type dismissNotificationsResponse500 = {
+  data: ErrorResponse
+  status: 500
+}
+
+export type dismissNotificationsResponseSuccess = (dismissNotificationsResponse200) & {
+  headers: Headers;
+};
+export type dismissNotificationsResponseError = (dismissNotificationsResponse400 | dismissNotificationsResponse500) & {
+  headers: Headers;
+};
+
+export type dismissNotificationsResponse = (dismissNotificationsResponseSuccess | dismissNotificationsResponseError)
+
+export const getDismissNotificationsUrl = () => {
+
+
+
+
+  return `/api/notifications/dismiss`
+}
+
+export const dismissNotifications = async (notificationDismissRequest: NotificationDismissRequest, options?: RequestInit): Promise<dismissNotificationsResponse> => {
+
+  return apiFetch<dismissNotificationsResponse>(getDismissNotificationsUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      notificationDismissRequest,)
+  }
+);}
+
+
+
+
+export const getDismissNotificationsMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof dismissNotifications>>, TError,{data: NotificationDismissRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof dismissNotifications>>, TError,{data: NotificationDismissRequest}, TContext> => {
+
+const mutationKey = ['dismissNotifications'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof dismissNotifications>>, {data: NotificationDismissRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  dismissNotifications(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type DismissNotificationsMutationResult = NonNullable<Awaited<ReturnType<typeof dismissNotifications>>>
+    export type DismissNotificationsMutationBody = NotificationDismissRequest
+    export type DismissNotificationsMutationError = ErrorResponse
+
+    /**
+ * @summary Dismiss the supplied notifications on every device
+ */
+export const useDismissNotifications = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof dismissNotifications>>, TError,{data: NotificationDismissRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof dismissNotifications>>,
+        TError,
+        {data: NotificationDismissRequest},
+        TContext
+      > => {
+      return useMutation(getDismissNotificationsMutationOptions(options), queryClient);
+    }
 
 /**
  * The router runs keen-pbr from an init script that discards stderr, so without this the only way to read a startup failure is over SSH.
@@ -5065,7 +5745,120 @@ export const usePostLogSettings = <TError = unknown,
     }
 
 /**
- * Served from a 5-second cache, so polling it costs nothing extra.
+ * Read-only kernel and filesystem observations, cached for one second. This endpoint never calls RCI or waits for firmware observations. Every field is optional: absent means unavailable, not zero. CPU utilization is measured between samples and is absent on the first sample or when the kernel counters cannot be compared.
+
+ * @summary Local router resource metrics
+ */
+export type getSystemMetricsResponse200 = {
+  data: RouterMetrics
+  status: 200
+}
+
+export type getSystemMetricsResponseSuccess = (getSystemMetricsResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getSystemMetricsResponse = (getSystemMetricsResponseSuccess)
+
+export const getGetSystemMetricsUrl = () => {
+
+
+
+
+  return `/api/system/metrics`
+}
+
+export const getSystemMetrics = async ( options?: RequestInit): Promise<getSystemMetricsResponse> => {
+
+  return apiFetch<getSystemMetricsResponse>(getGetSystemMetricsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetSystemMetricsQueryKey = () => {
+    return [
+    `/api/system/metrics`
+    ] as const;
+    }
+
+
+export const getGetSystemMetricsQueryOptions = <TData = Awaited<ReturnType<typeof getSystemMetrics>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemMetrics>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetSystemMetricsQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getSystemMetrics>>> = ({ signal }) => getSystemMetrics({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getSystemMetrics>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetSystemMetricsQueryResult = NonNullable<Awaited<ReturnType<typeof getSystemMetrics>>>
+export type GetSystemMetricsQueryError = unknown
+
+
+export function useGetSystemMetrics<TData = Awaited<ReturnType<typeof getSystemMetrics>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemMetrics>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getSystemMetrics>>,
+          TError,
+          Awaited<ReturnType<typeof getSystemMetrics>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetSystemMetrics<TData = Awaited<ReturnType<typeof getSystemMetrics>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemMetrics>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getSystemMetrics>>,
+          TError,
+          Awaited<ReturnType<typeof getSystemMetrics>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetSystemMetrics<TData = Awaited<ReturnType<typeof getSystemMetrics>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemMetrics>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Local router resource metrics
+ */
+
+export function useGetSystemMetrics<TData = Awaited<ReturnType<typeof getSystemMetrics>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemMetrics>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetSystemMetricsQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
+ * Firmware facts use the shared version cache. WAN and client counts use independent 60-second caches, retaining their last known-good observations on errors. Local metrics remain in this response for compatibility; frequent resource polling should use system/metrics.
 
 Every field is optional and present only when this router could be asked: absent means "not known here", never zero. A missing `cpu_temperature_c` is a router without that sensor, and rendering it as 0 would invent a reading.
 
@@ -8180,7 +8973,7 @@ export const usePostSubscriptionSource = <TError = unknown,
     }
 
 /**
- * @summary Refresh provider metadata without changing nodes or routing
+ * @summary Refresh subscription and apply changed parameters of linked VPNs
  */
 export type postSubscriptionRefreshResponse200 = {
   data: SavedSubscription
@@ -8249,7 +9042,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     export type PostSubscriptionRefreshMutationError = unknown
 
     /**
- * @summary Refresh provider metadata without changing nodes or routing
+ * @summary Refresh subscription and apply changed parameters of linked VPNs
  */
 export const usePostSubscriptionRefresh = <TError = unknown,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSubscriptionRefresh>>, TError,{data: SubscriptionIdRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
@@ -8260,6 +9053,89 @@ export const usePostSubscriptionRefresh = <TError = unknown,
         TContext
       > => {
       return useMutation(getPostSubscriptionRefreshMutationOptions(options), queryClient);
+    }
+
+/**
+ * @summary Set the daemon-side automatic refresh interval of a subscription
+ */
+export type postSubscriptionSettingsResponse200 = {
+  data: SavedSubscription
+  status: 200
+}
+
+export type postSubscriptionSettingsResponseSuccess = (postSubscriptionSettingsResponse200) & {
+  headers: Headers;
+};
+;
+
+export type postSubscriptionSettingsResponse = (postSubscriptionSettingsResponseSuccess)
+
+export const getPostSubscriptionSettingsUrl = () => {
+
+
+
+
+  return `/api/subscriptions/settings`
+}
+
+export const postSubscriptionSettings = async (subscriptionSettingsRequest: SubscriptionSettingsRequest, options?: RequestInit): Promise<postSubscriptionSettingsResponse> => {
+
+  return apiFetch<postSubscriptionSettingsResponse>(getPostSubscriptionSettingsUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      subscriptionSettingsRequest,)
+  }
+);}
+
+
+
+
+export const getPostSubscriptionSettingsMutationOptions = <TError = unknown,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSubscriptionSettings>>, TError,{data: SubscriptionSettingsRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postSubscriptionSettings>>, TError,{data: SubscriptionSettingsRequest}, TContext> => {
+
+const mutationKey = ['postSubscriptionSettings'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postSubscriptionSettings>>, {data: SubscriptionSettingsRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postSubscriptionSettings(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostSubscriptionSettingsMutationResult = NonNullable<Awaited<ReturnType<typeof postSubscriptionSettings>>>
+    export type PostSubscriptionSettingsMutationBody = SubscriptionSettingsRequest
+    export type PostSubscriptionSettingsMutationError = unknown
+
+    /**
+ * @summary Set the daemon-side automatic refresh interval of a subscription
+ */
+export const usePostSubscriptionSettings = <TError = unknown,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSubscriptionSettings>>, TError,{data: SubscriptionSettingsRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postSubscriptionSettings>>,
+        TError,
+        {data: SubscriptionSettingsRequest},
+        TContext
+      > => {
+      return useMutation(getPostSubscriptionSettingsMutationOptions(options), queryClient);
     }
 
 /**

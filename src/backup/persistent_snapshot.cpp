@@ -24,6 +24,21 @@ namespace fs = std::filesystem;
 
 constexpr const char* kBase64Encoding = "base64";
 
+fs::path subscriptions_path(const PersistentLayout& layout) {
+    return layout.subscriptions.empty()
+               ? layout.config.parent_path() / "subscriptions.json"
+               : layout.subscriptions;
+}
+
+std::size_t target_content_limit(PersistentTargetKind kind) {
+    if (kind == PersistentTargetKind::subscriptions)
+        return kMaxSubscriptionFileBytes;
+    return kind == PersistentTargetKind::config ||
+                   kind == PersistentTargetKind::transports
+               ? kMaxSnapshotBytes
+               : kMaxManagedFileBytes;
+}
+
 [[noreturn]] void fail(
     PersistentSnapshotErrorKind kind,
     std::string message) {
@@ -871,6 +886,8 @@ void add_scope_tombstones(
         snapshot.entries.push_back(
             {"transports", false, {}, 0600, 0, 0});
     }
+    // Older schema-1 snapshots had the transports scope but no subscriptions
+    // entry. Only an explicit subscriptions tombstone may remove this file.
     std::sort(
         snapshot.entries.begin(),
         snapshot.entries.end(),
@@ -940,6 +957,7 @@ const char* persistent_scope_for_kind(
     case PersistentTargetKind::config:
         return "config";
     case PersistentTargetKind::transports:
+    case PersistentTargetKind::subscriptions:
         return "transports";
     case PersistentTargetKind::nfqws_config:
         return "nfqws_config";
@@ -959,6 +977,9 @@ PersistentTargetKind classify_persistent_target(
     }
     if (target == "transports") {
         return PersistentTargetKind::transports;
+    }
+    if (target == "subscriptions") {
+        return PersistentTargetKind::subscriptions;
     }
 
     const fs::path relative(target);
@@ -994,6 +1015,9 @@ ResolvedPersistentTarget resolve_persistent_target(
             layout.transports, std::nullopt, kind,
         };
     }
+    if (kind == PersistentTargetKind::subscriptions) {
+        return {subscriptions_path(layout), std::nullopt, kind};
+    }
 
     const fs::path relative(target);
     const auto first = *relative.begin();
@@ -1022,6 +1046,9 @@ std::string logical_target_for_path(
     }
     if (normalized == layout.transports.lexically_normal()) {
         return "transports";
+    }
+    if (normalized == subscriptions_path(layout).lexically_normal()) {
+        return "subscriptions";
     }
     for (const auto& [root, prefix] :
          std::vector<std::pair<fs::path, std::string>>{
@@ -1269,12 +1296,7 @@ nlohmann::json make_persistent_snapshot(
         };
         if (snapshot.existed) {
             total_bytes += snapshot.content.size();
-            const auto target_limit =
-                kind == PersistentTargetKind::config ||
-                        kind ==
-                            PersistentTargetKind::transports
-                    ? kMaxSnapshotBytes
-                    : kMaxManagedFileBytes;
+            const auto target_limit = target_content_limit(kind);
             if (snapshot.content.size() > target_limit ||
                 total_bytes > kMaxSnapshotBytes) {
                 fail(
@@ -1522,12 +1544,7 @@ PersistentRollbackSnapshot parse_persistent_snapshot(
                     PersistentSnapshotErrorKind::invalid_document,
                     "invalid rollback file encoding");
             }
-            const auto target_limit =
-                kind == PersistentTargetKind::config ||
-                        kind ==
-                            PersistentTargetKind::transports
-                    ? kMaxSnapshotBytes
-                    : kMaxManagedFileBytes;
+            const auto target_limit = target_content_limit(kind);
             if (entry.content.size() != declared_size ||
                 entry.content.size() > target_limit ||
                 Sha256::hex(entry.content) !=
@@ -1631,6 +1648,14 @@ nlohmann::json make_full_snapshot(
             kMaxSnapshotBytes,
             &budget),
     });
+    snapshots.push_back({
+        "subscriptions",
+        capture_file(
+            subscriptions_path(layout),
+            std::nullopt,
+            kMaxSubscriptionFileBytes,
+            &budget),
+    });
     collect_full_tree(
         snapshots,
         layout.nfqws,
@@ -1673,10 +1698,7 @@ FileMutationPlan prepare_persistent_restore(
                 ? static_cast<mode_t>(0700)
                 : static_cast<mode_t>(0755);
         replacement.remove = !entry.existed;
-        replacement.max_content_bytes =
-            resolved.confinement_root.has_value()
-                ? kMaxManagedFileBytes
-                : kMaxSnapshotBytes;
+        replacement.max_content_bytes = target_content_limit(resolved.kind);
         if (entry.existed) {
             replacement.mode_override = entry.mode;
             replacement.owner_override = entry.owner;

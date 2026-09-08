@@ -260,6 +260,9 @@ TEST_CASE("foreground mutation atomically follows the exact background owner") {
     });
     std::this_thread::sleep_for(std::chrono::milliseconds{10});
     background->release();
+    // The next timer turn must not take the newly idle slot while the API
+    // waiter is waking. This remains false if foreground already acquired it.
+    CHECK_FALSE(admission.try_acquire("runtime-firewall-worker").has_value());
     waiter.join();
 
     REQUIRE(foreground.has_value());
@@ -285,6 +288,99 @@ TEST_CASE("foreground mutation does not wait behind another foreground owner") {
     CHECK_FALSE(foreground.has_value());
     CHECK(elapsed < std::chrono::milliseconds{100});
     CHECK(admission.owns(*blocker));
+}
+
+TEST_CASE("foreground waits through the exact background handoff") {
+    for (const bool lease_already_released : {true, false}) {
+        CAPTURE(lease_already_released);
+        RuntimeMutationAdmission admission;
+        auto background = admission.try_acquire("runtime-firewall-worker");
+        REQUIRE(background.has_value());
+        auto handoff = admission.try_acquire_handoff_gate(*background);
+        REQUIRE(handoff.has_value());
+        if (lease_already_released) background->release();
+
+        std::optional<RuntimeMutationAdmission::Lease> foreground;
+        std::atomic<bool> waiter_finished{false};
+        std::thread waiter([&] {
+            foreground = admission.try_acquire_after_for(
+                "save-config", "runtime-firewall-worker",
+                std::chrono::seconds{1});
+            waiter_finished.store(true, std::memory_order_release);
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+        if (!lease_already_released) background->release();
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+        CHECK_FALSE(waiter_finished.load(std::memory_order_acquire));
+        CHECK_FALSE(admission.try_acquire("runtime-firewall-worker").has_value());
+        handoff->release();
+        waiter.join();
+        REQUIRE(foreground.has_value());
+        CHECK(admission.owns(*foreground));
+    }
+}
+
+TEST_CASE("foreground does not wait through another foreground handoff") {
+    RuntimeMutationAdmission admission;
+    auto other = admission.try_acquire("other-user-request");
+    REQUIRE(other.has_value());
+    auto handoff = admission.try_acquire_handoff_gate(*other);
+    REQUIRE(handoff.has_value());
+    other->release();
+    const auto started = std::chrono::steady_clock::now();
+    CHECK_FALSE(admission.try_acquire_after_for(
+        "save-config", "runtime-firewall-worker",
+        std::chrono::seconds{1}).has_value());
+    CHECK(std::chrono::steady_clock::now() - started <
+          std::chrono::milliseconds{100});
+}
+
+TEST_CASE("one foreground timeout does not cancel another waiter's priority") {
+    RuntimeMutationAdmission admission;
+    auto background = admission.try_acquire("runtime-firewall-worker");
+    REQUIRE(background.has_value());
+    std::optional<RuntimeMutationAdmission::Lease> foreground;
+    std::thread waiter([&] {
+        foreground = admission.try_acquire_after_for(
+            "save-config", "runtime-firewall-worker",
+            std::chrono::seconds{1});
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    CHECK_FALSE(admission.try_acquire_after_for(
+        "other-save", "runtime-firewall-worker",
+        std::chrono::milliseconds{10}).has_value());
+    background->release();
+    CHECK_FALSE(admission.try_acquire("runtime-firewall-worker").has_value());
+    waiter.join();
+    REQUIRE(foreground.has_value());
+    CHECK(admission.owns(*foreground));
+    foreground->release();
+    CHECK(admission.try_acquire("runtime-firewall-worker").has_value());
+}
+
+TEST_CASE("waiting foregrounds never revoke the winner's lease") {
+    RuntimeMutationAdmission admission;
+    auto background = admission.try_acquire("runtime-firewall-worker");
+    REQUIRE(background.has_value());
+    std::optional<RuntimeMutationAdmission::Lease> first;
+    std::optional<RuntimeMutationAdmission::Lease> second;
+    std::thread first_waiter([&] {
+        first = admission.try_acquire_after_for(
+            "first-save", "runtime-firewall-worker", std::chrono::seconds{1});
+    });
+    std::thread second_waiter([&] {
+        second = admission.try_acquire_after_for(
+            "second-save", "runtime-firewall-worker", std::chrono::seconds{1});
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    background->release();
+    first_waiter.join();
+    second_waiter.join();
+    REQUIRE(first.has_value() != second.has_value());
+    auto& winner = first ? first : second;
+    CHECK(admission.owns(*winner));
+    winner->release();
+    CHECK(admission.try_acquire("runtime-firewall-worker").has_value());
 }
 
 TEST_CASE("VPN import waits for an in-flight URLTEST selection") {
@@ -318,6 +414,8 @@ TEST_CASE("foreground background wait stops at timeout and shutdown") {
 
         CHECK_FALSE(foreground.has_value());
         CHECK(admission.owns(*background));
+        background->release();
+        CHECK(admission.try_acquire("runtime-firewall-worker").has_value());
     }
 
     SUBCASE("shutdown") {
@@ -338,6 +436,95 @@ TEST_CASE("foreground background wait stops at timeout and shutdown") {
 
         CHECK_FALSE(foreground.has_value());
         CHECK(admission.owns(*background));
+    }
+}
+
+TEST_CASE("foreground follows explicitly classified backgrounds regardless of label") {
+    for (const char* label : {"resolver-recovery", "list-refresh-completion",
+                              "conntrack-cleanup", "unlisted-background-task"}) {
+        CAPTURE(label);
+        for (const bool release_before_wait : {false, true}) {
+            CAPTURE(release_before_wait);
+            RuntimeMutationAdmission admission;
+            auto background = admission.try_acquire(
+                label, RuntimeMutationAdmission::Kind::Background);
+            REQUIRE(background.has_value());
+            auto handoff = admission.try_acquire_handoff_gate(*background);
+            REQUIRE(handoff.has_value());
+            if (release_before_wait) background->release();
+
+            std::optional<RuntimeMutationAdmission::Lease> foreground;
+            std::atomic<bool> finished{false};
+            std::thread waiter([&] {
+                foreground = admission.try_acquire_after_background_for(
+                    "save-config", std::chrono::seconds{1});
+                finished.store(true, std::memory_order_release);
+            });
+            std::this_thread::sleep_for(std::chrono::milliseconds{10});
+            CHECK_FALSE(finished.load(std::memory_order_acquire));
+            if (!release_before_wait) background->release();
+            CHECK_FALSE(admission.try_acquire(
+                "background-successor", RuntimeMutationAdmission::Kind::Background));
+            handoff->release();
+            waiter.join();
+            REQUIRE(foreground.has_value());
+            CHECK(admission.owns(*foreground));
+            CHECK(admission.active()->label == "save-config");
+        }
+    }
+}
+
+TEST_CASE("background-looking labels do not make a foreground owner waitable") {
+    for (const bool release_before_wait : {false, true}) {
+        CAPTURE(release_before_wait);
+        RuntimeMutationAdmission admission;
+        auto foreground = admission.try_acquire("runtime-firewall-worker");
+        REQUIRE(foreground.has_value());
+        auto handoff = admission.try_acquire_handoff_gate(*foreground);
+        REQUIRE(handoff.has_value());
+        if (release_before_wait) foreground->release();
+        const auto started = std::chrono::steady_clock::now();
+        CHECK_FALSE(admission.try_acquire_after_background_for(
+            "save-config", std::chrono::seconds{1}));
+        CHECK(std::chrono::steady_clock::now() - started <
+              std::chrono::milliseconds{100});
+    }
+}
+
+TEST_CASE("typed background wait preserves timeout shutdown and foreground priority") {
+    RuntimeMutationAdmission admission;
+    auto background = admission.try_acquire(
+        "keenetic-dns-refresh", RuntimeMutationAdmission::Kind::Background);
+    REQUIRE(background.has_value());
+    CHECK_FALSE(admission.try_acquire_after_background_for(
+        "timed-out-save", std::chrono::milliseconds{10}));
+    CHECK(admission.owns(*background));
+
+    std::optional<RuntimeMutationAdmission::Lease> foreground;
+    std::thread waiter([&] {
+        foreground = admission.try_acquire_after_background_for(
+            "save-config", std::chrono::seconds{1});
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    SUBCASE("foreground wins before another background") {
+        background->release();
+        CHECK_FALSE(admission.try_acquire(
+            "other-background", RuntimeMutationAdmission::Kind::Background));
+        waiter.join();
+        REQUIRE(foreground.has_value());
+        CHECK(admission.owns(*foreground));
+        // The successor acquired by a waiting API is itself foreground.
+        CHECK_FALSE(admission.try_acquire_after_background_for(
+            "second-save", std::chrono::milliseconds{10}));
+    }
+    SUBCASE("shutdown wakes the foreground without revoking background") {
+        admission.shutdown();
+        waiter.join();
+        CHECK_FALSE(foreground.has_value());
+        CHECK(admission.owns(*background));
+        background->release();
+        CHECK_FALSE(admission.try_acquire_after_background_for(
+            "after-shutdown", std::chrono::milliseconds{10}));
     }
 }
 

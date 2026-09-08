@@ -12,6 +12,9 @@ import {
   usePostConfigMutation,
 } from "@/api/mutations"
 import { useGetConfig } from "@/api/queries"
+import { selectConfigIsDraft } from "@/api/selectors"
+import { useCatalogNavigation } from "@/hooks/use-catalog-navigation"
+import { CatalogReturnHint } from "@/components/shared/catalog-return-hint"
 import { KeenPencilIcon, KeenTrashIcon } from "@/components/shared/keen-icons"
 import {
   formatDnsServerNames,
@@ -57,6 +60,7 @@ export function DnsServersPage() {
   return (
     <DnsServersEditor
       config={config}
+      configIsDraft={selectConfigIsDraft(configQuery.data)}
       configError={configQuery.isError}
       configLoading={configQuery.isLoading}
       key={editorKey}
@@ -66,15 +70,18 @@ export function DnsServersPage() {
 
 function DnsServersEditor({
   config,
+  configIsDraft,
   configError,
   configLoading,
 }: {
   config?: ConfigObject
+  configIsDraft: boolean
   configError: boolean
   configLoading: boolean
 }) {
   const { t } = useTranslation()
   const [, navigate] = useLocation()
+  const catalogNavigation = useCatalogNavigation()
   const [deleteRequest, setDeleteRequest] = useState<{
     tags: string[]
     impact: DnsServerDeleteImpact
@@ -122,9 +129,11 @@ function DnsServersEditor({
   const [search, setSearch] = useState("")
   const visibleServers = filterBySearchQuery(dnsServers, search, (server) => [
     server.tag,
+    server.display_name,
     server.address,
     findDnsPresetByAddress(server.address)?.name,
     server.detour,
+    ...(server.domains ?? []),
   ])
   const { sorted: sortedServers, sort } = useTableSort(visibleServers, [
     {
@@ -184,11 +193,20 @@ function DnsServersEditor({
         description={t("pages.dnsServers.description")}
         title={t("pages.dnsServers.title")}
       />
+      <CatalogReturnHint
+        busy={configMutationPending}
+        needsApply={configIsDraft || fallbackSession.isDirty}
+      />
       <PageActionBar
         primary={
           <Button
             disabled={configMutationPending || fallbackSession.isDirty}
-            onClick={() => navigate("/dns-servers/create")}
+            onClick={() =>
+              navigate(
+                "/dns-servers/create",
+                catalogNavigation.navigationOptions
+              )
+            }
           >
             <Plus className="mr-1 h-4 w-4" />
             {t("pages.dnsServers.actions.add")}
@@ -313,6 +331,13 @@ function DnsServersEditor({
                 {server.display_name ??
                   findDnsPresetByAddress(server.address)?.name ??
                   server.tag}
+                {server.domains?.length ? (
+                  <div className="mt-1 max-w-sm text-xs font-normal break-words text-muted-foreground">
+                    {t("pages.dnsServers.domainBindings", {
+                      domains: server.domains.join(", "),
+                    })}
+                  </div>
+                ) : null}
               </div>,
               <span
                 className="text-sm text-muted-foreground"
@@ -338,7 +363,8 @@ function DnsServersEditor({
                     label: t("common.edit"),
                     onClick: () =>
                       navigate(
-                        `/dns-servers/${encodeURIComponent(server.tag)}/edit`
+                        `/dns-servers/${encodeURIComponent(server.tag)}/edit`,
+                        catalogNavigation.navigationOptions
                       ),
                   },
                 ]}

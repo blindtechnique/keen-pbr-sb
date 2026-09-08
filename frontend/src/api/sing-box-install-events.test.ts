@@ -131,8 +131,17 @@ describe("sing-box install status events", () => {
   // the string, which the dispatch branch below satisfies by itself. Deleting
   // the list entry - the edit that makes the feature inert - left it green.
   it("is named in the bridge's subscription list, not just mentioned", () => {
-    const bridge = readFileSync(
+    const hook = readFileSync(
       join(import.meta.dir, "status-event-bridge.tsx"),
+      "utf8"
+    )
+    // The authenticated bridge delegates its effect to the session lifecycle;
+    // checking that link keeps an orphaned helper from passing this guard.
+    expect(hook).toContain(
+      "() => mountStatusEventSession(queryClient, lastConfigResyncOperationRef)"
+    )
+    const bridge = readFileSync(
+      join(import.meta.dir, "status-event-session.ts"),
       "utf8"
     )
     const start = bridge.indexOf("const STATUS_EVENT_NAMES = [")
@@ -156,7 +165,7 @@ describe("sing-box install status events", () => {
     // This also keeps resetSingBoxInstallProgress from being what it was when
     // it was written: an exported function with no production caller.
     const bridge = readFileSync(
-      join(import.meta.dir, "status-event-bridge.tsx"),
+      join(import.meta.dir, "status-event-session.ts"),
       "utf8"
     )
     const open = bridge.indexOf("source.onopen")
@@ -238,7 +247,7 @@ describe("sing-box install status events", () => {
   })
   it("is routed to this module by the bridge", () => {
     const bridge = readFileSync(
-      join(import.meta.dir, "status-event-bridge.tsx"),
+      join(import.meta.dir, "status-event-session.ts"),
       "utf8"
     )
     // Subscribing without dispatching would be just as inert as the reverse.

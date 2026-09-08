@@ -216,6 +216,30 @@ InternalVpnServerGeneration select_internal_vpn_server_generation(
     std::vector<InternalVpnServer> selected;
     std::set<std::string> selected_identities;
     std::set<std::string> selected_interfaces;
+    std::set<std::string> conflicted_interfaces;
+    for (const auto& issue : candidate.issues) {
+        if (issue.error ==
+            InternalVpnServerResolutionError::duplicate_kernel_interface) {
+            conflicted_interfaces.insert(issue.interface);
+        }
+    }
+    // An unrelated resolution failure does not invalidate a freshly verified
+    // row, including an explicit bypass. Seed these before retained bindings
+    // or saved-name fallbacks, which must not shadow the current observation.
+    // Unverified stable rows never enter effective_servers in the resolver.
+    // A duplicate can be discovered after its first row entered that vector;
+    // do not promote the conflicting row to a bypass in a partial generation.
+    for (const auto& server : candidate.effective_servers) {
+        if ((!server.process_clients &&
+             conflicted_interfaces.count(server.interface) != 0U) ||
+            selected_identities.count(policy_identity(server)) != 0U ||
+            selected_interfaces.count(server.interface) != 0U) {
+            continue;
+        }
+        selected_identities.insert(policy_identity(server));
+        selected_interfaces.insert(server.interface);
+        selected.push_back(server);
+    }
     bool retained_verified_include = false;
     for (const auto& previous : previous_effective) {
         if (!previous.process_clients || !previous.ndms_id.has_value() ||
@@ -223,6 +247,8 @@ InternalVpnServerGeneration select_internal_vpn_server_generation(
                 configured_includes.end() ||
             retainable_stable_identities.find(policy_identity(previous)) ==
                 retainable_stable_identities.end() ||
+            selected_identities.find(policy_identity(previous)) !=
+                selected_identities.end() ||
             selected_interfaces.find(previous.interface) !=
                 selected_interfaces.end()) {
             continue;

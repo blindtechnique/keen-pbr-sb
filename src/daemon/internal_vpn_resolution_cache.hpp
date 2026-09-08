@@ -49,6 +49,13 @@ inline bool internal_vpn_resolution_requires_catalog_refresh(
            state != InternalVpnRuntimeResolutionState::verified;
 }
 
+// A queued catalogue pins NDMS service pools, not ephemeral OpenConnect peer
+// links. Recheck only those links on the caller's mutable copy immediately
+// before deriving DNS/firewall inputs; other native VPN targets stay intact.
+void refresh_prepared_openconnect_service_ingress(
+    InternalVpnServiceRuntimeResolution& resolution,
+    const std::vector<DumpedInterface>& live_interfaces);
+
 class InternalVpnResolutionError : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;

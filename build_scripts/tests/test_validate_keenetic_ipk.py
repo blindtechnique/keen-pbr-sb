@@ -152,7 +152,7 @@ def make_ipk(
     transport_binary: bytes | None = None,
     outer_tar: bool = False,
     data_root_name: str | None = None,
-    control_depends: str = "conntrack, dnsmasq",
+    control_depends: str = "conntrack, dnsmasq, openssl-util",
     catalog: bytes | None = None,
     binary_commit: str | None = None,
     control_commit: str | None = None,
@@ -162,6 +162,7 @@ def make_ipk(
     active_frontend_version: str | None = None,
     compressed_frontend_version: str | None = None,
     compressed_index_content: bytes | None = None,
+    binary_extra: bytes = b"",
 ) -> None:
     executable = 0o755
     config = json.dumps(
@@ -181,7 +182,9 @@ def make_ipk(
     files["opt/usr/bin/keen-pbr"] = (
         elf()
         + f"{binary_package_version} (build {binary_build}, commit ".encode()
-        + (binary_commit.encode("ascii") if binary_commit else b""),
+        + (binary_commit.encode("ascii") if binary_commit else b"unknown")
+        + b")\0"
+        + binary_extra,
         executable,
     )
     files["opt/usr/bin/transport-manager"] = (
@@ -201,6 +204,10 @@ def make_ipk(
     compressed_content = f'const version="{compressed_frontend_version}";'.encode()
     files.update(
         {
+            "opt/etc/keen-pbr/keys/release-public.pem": (
+                b"-----BEGIN PUBLIC KEY-----\ntest-only-fixture\n-----END PUBLIC KEY-----\n",
+                0o644,
+            ),
             "opt/etc/keen-pbr/config.json": (b"{}", 0o600),
             "opt/etc/keen-pbr/transports.json": (config, 0o600),
             "opt/usr/share/keen-pbr/catalog.json": (
@@ -349,13 +356,70 @@ class ValidateKeeneticIpkTest(unittest.TestCase):
     def test_accepts_matching_build_identity_in_binary_and_control(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             package = Path(directory) / "keen-pbr.ipk"
-            commit = "0123456789ab-dirty"
+            for commit in ("0123456789ab", "0123456789ab-dirty", "unknown"):
+                with self.subTest(commit=commit):
+                    make_ipk(
+                        package,
+                        binary_commit=commit,
+                        control_commit=commit,
+                    )
+                    VALIDATOR.validate(package, "aarch64", commit)
+
+    def test_rejects_commit_prefix_match_with_fresh_control(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "keen-pbr.ipk"
+            commit = "0123456789ab"
+            for binary_commit in (commit + "-dirty", commit + "cdef", commit + "other"):
+                with self.subTest(binary_commit=binary_commit):
+                    make_ipk(
+                        package,
+                        binary_commit=binary_commit,
+                        control_commit=commit,
+                    )
+                    with self.assertRaisesRegex(
+                        VALIDATOR.ValidationError,
+                        "expected build commit.*package build identity",
+                    ):
+                        VALIDATOR.validate(package, "aarch64", commit)
+
+    def test_rejects_commit_present_outside_current_build_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "keen-pbr.ipk"
+            commit = "0123456789ab"
+            for binary_extra in (
+                commit.encode() + b"\0",
+                f"3.3.0 (build 20260827010101, commit {commit})\0".encode(),
+            ):
+                with self.subTest(binary_extra=binary_extra):
+                    make_ipk(
+                        package,
+                        package_version="3.3.0-20260827020202",
+                        binary_commit="abcdef012345",
+                        control_commit=commit,
+                        binary_extra=binary_extra,
+                    )
+                    with self.assertRaisesRegex(
+                        VALIDATOR.ValidationError,
+                        "expected build commit.*package build identity",
+                    ):
+                        VALIDATOR.validate(package, "aarch64", commit)
+
+    def test_rejects_suffix_version_match_with_fresh_control(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "keen-pbr.ipk"
+            commit = "0123456789ab"
             make_ipk(
                 package,
+                package_version="3.3.0-20260827020202",
+                binary_version="13.3.0-20260827020202",
                 binary_commit=commit,
                 control_commit=commit,
             )
-            VALIDATOR.validate(package, "aarch64", commit)
+            with self.assertRaisesRegex(
+                VALIDATOR.ValidationError,
+                "binary build identity does not match package Version",
+            ):
+                VALIDATOR.validate(package, "aarch64", commit)
 
     def test_rejects_legacy_frontend_version(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -539,6 +603,34 @@ class ValidateKeeneticIpkTest(unittest.TestCase):
             ):
                 VALIDATOR.validate(package, "aarch64")
 
+    def test_rejects_package_without_release_verification_dependency(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "keen-pbr.ipk"
+            make_ipk(package, control_depends="conntrack, dnsmasq")
+            with self.assertRaisesRegex(
+                VALIDATOR.ValidationError,
+                "missing package dependencies: openssl-util",
+            ):
+                VALIDATOR.validate(package, "aarch64")
+
+    def test_rejects_package_without_installed_release_trust_files(self) -> None:
+        for missing in ("opt/usr/lib/keen-pbr/release-verify.sh",
+                        "opt/etc/keen-pbr/keys/release-public.pem"):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as directory:
+                package = Path(directory) / "keen-pbr.ipk"
+                make_ipk(package)
+                members = VALIDATOR.read_ar(package)
+                with tarfile.open(fileobj=io.BytesIO(members["data.tar.gz"]), mode="r:*") as source:
+                    files = {
+                        VALIDATOR.normalized(item.name): (source.extractfile(item).read(), item.mode)
+                        for item in source.getmembers()
+                        if item.isfile() and VALIDATOR.normalized(item.name) != missing
+                    }
+                members["data.tar.gz"] = tar_archive(files)
+                package.write_bytes(ar_archive(members))
+                with self.assertRaisesRegex(VALIDATOR.ValidationError, missing):
+                    VALIDATOR.validate(package, "aarch64")
+
     def test_rejects_catalog_without_telegram_ip_companion(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             package = Path(directory) / "keen-pbr.ipk"
@@ -566,6 +658,84 @@ class ValidateKeeneticIpkTest(unittest.TestCase):
                 "Kartina.TV IP source has incomplete CIDRs",
             ):
                 VALIDATOR.validate(package, "aarch64")
+
+
+class FirstInstallConfigTests(unittest.TestCase):
+    """Package seeds are clean; opkg retains ownership of existing conffiles."""
+
+    package_root = Path(__file__).parents[2] / "packages/keenetic/keen-pbr"
+    config_root = package_root / "files/opt/etc/keen-pbr"
+
+    def configs(self):
+        for variant in ("full", "headless"):
+            path = self.config_root / f"config.{variant}.example.json"
+            yield variant, json.loads(path.read_text(encoding="utf-8"))
+
+    def test_fresh_install_has_no_demo_lists_or_routing_rules(self):
+        for variant, config in self.configs():
+            with self.subTest(variant=variant):
+                self.assertEqual(config["lists"], {})
+                self.assertEqual(config["route"]["rules"], [])
+                self.assertNotIn("example.com", json.dumps(config))
+                self.assertNotIn("local_list", json.dumps(config))
+
+    def test_keenetic_network_defaults_stay_intact(self):
+        for variant, config in self.configs():
+            with self.subTest(variant=variant):
+                self.assertEqual(config["route"]["inbound_interfaces"], ["br0"])
+                self.assertFalse(config["daemon"]["strict_enforcement"])
+                self.assertEqual(config["dns"]["fallback"], ["keenetic_dns"])
+                self.assertIn(
+                    {"tag": "keenetic_dns", "type": "keenetic"},
+                    config["dns"]["servers"],
+                )
+
+    def test_builtin_ids_are_stable_and_do_not_pin_a_ui_language(self):
+        for variant, config in self.configs():
+            with self.subTest(variant=variant):
+                self.assertEqual(config["outbounds"], [
+                    {"type": "table", "tag": "wan", "table": 254},
+                    {"type": "blackhole", "tag": "block"},
+                ])
+
+    def test_full_seed_exposes_panel_and_has_no_demo_transports(self):
+        configs = dict(self.configs())
+        self.assertEqual(configs["full"]["api"], {
+            "enabled": True, "listen": "0.0.0.0:12121",
+        })
+        self.assertNotIn("api", configs["headless"])
+        transports = json.loads(
+            (self.config_root / "transports.example.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(transports["transports"], [])
+
+    def test_optional_local_list_starts_empty(self):
+        content = (self.config_root / "local.lst").read_text(encoding="utf-8")
+        entries = [
+            line for line in content.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        self.assertEqual(entries, [])
+
+    def test_both_packages_ship_seeds_as_preserved_conffiles(self):
+        makefile = (self.package_root / "Makefile").read_text(encoding="utf-8")
+        for variant, package in (("FULL", "keen-pbr"), ("HEADLESS", "keen-pbr-headless")):
+            with self.subTest(package=package):
+                conffiles = makefile.split(f"define Package/{package}/conffiles\n", 1)[1]
+                conffiles = conffiles.split("endef", 1)[0].splitlines()
+                self.assertIn("/opt/etc/keen-pbr/config.json", conffiles)
+                self.assertIn("/opt/etc/keen-pbr/local.lst", conffiles)
+                install = makefile.split(f"define Package/{package}/install\n", 1)[1]
+                install = install.split("endef", 1)[0]
+                self.assertIn(
+                    f"$(INSTALL_CONF) $(KEEN_PBR_{variant}_CONFIG) $(1)/opt/etc/keen-pbr/config.json",
+                    install,
+                )
+                self.assertIn(
+                    "$(INSTALL_CONF) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/etc/keen-pbr/local.lst $(1)/opt/etc/keen-pbr/local.lst",
+                    install,
+                )
+                self.assertNotIn("packages/common/local.lst", install)
 
 
 if __name__ == "__main__":

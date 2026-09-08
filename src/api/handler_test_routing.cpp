@@ -1,6 +1,9 @@
 #ifdef WITH_API
 
 #include "handler_test_routing.hpp"
+#include "handler_connections.hpp"
+#include "routing_policy_evidence_view.hpp"
+#include "routing_firewall_evidence_view.hpp"
 #include "../cmd/test_routing.hpp"
 #include "../nfqws/list_match.hpp"
 #include "../util/nfqws_validator.hpp"
@@ -23,6 +26,45 @@
 namespace keen_pbr3 {
 
 namespace {
+
+api::RoutingTestHttpProbe to_api_http_probe(const RoutingHttpProbe& observation) {
+    api::RoutingTestHttpProbe result;
+    result.ip = observation.ip;
+    result.url = observation.url;
+    result.interface = observation.interface;
+    result.attempted_at = observation.attempted_at;
+    result.method = api::Method::HEAD;
+    result.scope = api::RoutingTestHttpProbeScope::ROUTER;
+    switch (observation.status) {
+        case RoutingHttpProbeStatus::Answered: result.status = api::RoutingTestHttpProbeStatus::ANSWERED; break;
+        case RoutingHttpProbeStatus::Failed: result.status = api::RoutingTestHttpProbeStatus::FAILED; break;
+        case RoutingHttpProbeStatus::NotApplicable: result.status = api::RoutingTestHttpProbeStatus::NOT_APPLICABLE; break;
+        case RoutingHttpProbeStatus::Unavailable: result.status = api::RoutingTestHttpProbeStatus::UNAVAILABLE; break;
+    }
+    switch (observation.reason) {
+        case RoutingHttpProbeReason::HttpResponse: result.reason = api::RoutingTestHttpProbeReason::HTTP_RESPONSE; break;
+        case RoutingHttpProbeReason::ContextRequired: result.reason = api::RoutingTestHttpProbeReason::CONTEXT_REQUIRED; break;
+        case RoutingHttpProbeReason::NoRoute: result.reason = api::RoutingTestHttpProbeReason::NO_ROUTE; break;
+        case RoutingHttpProbeReason::DestinationChanged: result.reason = api::RoutingTestHttpProbeReason::DESTINATION_CHANGED; break;
+        case RoutingHttpProbeReason::BlockedRoute: result.reason = api::RoutingTestHttpProbeReason::BLOCKED_ROUTE; break;
+        case RoutingHttpProbeReason::BindingFailed: result.reason = api::RoutingTestHttpProbeReason::BINDING_FAILED; break;
+        case RoutingHttpProbeReason::TlsError: result.reason = api::RoutingTestHttpProbeReason::TLS_ERROR; break;
+        case RoutingHttpProbeReason::Timeout: result.reason = api::RoutingTestHttpProbeReason::TIMEOUT; break;
+        case RoutingHttpProbeReason::ConnectionFailed: result.reason = api::RoutingTestHttpProbeReason::CONNECTION_FAILED; break;
+        case RoutingHttpProbeReason::UnsupportedTarget: result.reason = api::RoutingTestHttpProbeReason::UNSUPPORTED_TARGET; break;
+        case RoutingHttpProbeReason::TransportError: result.reason = api::RoutingTestHttpProbeReason::TRANSPORT_ERROR; break;
+        case RoutingHttpProbeReason::BudgetExhausted: result.reason = api::RoutingTestHttpProbeReason::BUDGET_EXHAUSTED; break;
+        case RoutingHttpProbeReason::ResponseLimit: result.reason = api::RoutingTestHttpProbeReason::RESPONSE_LIMIT; break;
+    }
+    if (observation.fwmark) result.fwmark = static_cast<int64_t>(*observation.fwmark);
+    if (observation.table) result.table = static_cast<int64_t>(*observation.table);
+    if (observation.http_status) result.http_status = static_cast<int64_t>(*observation.http_status);
+    result.elapsed_ms = observation.elapsed_ms;
+    result.connect_ms = observation.connect_ms;
+    result.tls_ms = observation.tls_ms;
+    result.connected_ip = observation.connected_ip;
+    return result;
+}
 
 api::Evaluation to_api_evaluation(RoutingMatchEvaluation evaluation) {
     switch (evaluation) {
@@ -618,31 +660,48 @@ void register_test_routing_handler(ApiServer& server, ApiContext& ctx) {
             throw ApiError("Field 'target' must not be empty", 400, payload.dump());
         }
 
-        auto result = ctx.compute_test_routing(req.target);
+        auto result = ctx.compute_test_routing(req.target, req.http_probe_ip);
 
         api::RoutingTestResponse resp;
         resp.target       = result.target;
         resp.is_domain    = result.is_domain;
+        resp.dns_source   = result.dns_source;
+        resp.dns_server   = result.dns_server;
+        resp.fwmark_mask  = static_cast<int64_t>(result.fwmark_mask);
         resp.config_scope = api::ConfigScope::ACTIVE;
         resp.unapplied_draft = result.unapplied_draft;
         resp.dns_error    = result.dns_error;
         resp.no_matching_rule = result.no_matching_rule;
         resp.resolved_ips = result.resolved_ips;
         resp.warnings     = result.warnings;
+        if (result.http_probe) resp.http_probe = to_api_http_probe(*result.http_probe);
         // A separate question with a separate answer: nfqws can be handling a
         // target the routing rules never touch, and the reverse.
         resp.nfqws        = nfqws_coverage(result);
 
-        for (const auto& entry : result.entries) {
+        const auto policy_evidence = collect_routing_policy_evidence(
+            result.entries, system_policy_rule_snapshot);
+        for (std::size_t index = 0; index < result.entries.size(); ++index) {
+            const auto& entry = result.entries[index];
             api::RoutingTestEntry e;
             e.ip                = entry.ip;
             e.expected_outbound = entry.expected_outbound;
             e.actual_outbound   = entry.actual_outbound;
+            if (entry.expected_rule_index) {
+                e.expected_rule_index = static_cast<int64_t>(*entry.expected_rule_index);
+            }
+            if (entry.actual_rule_index) {
+                e.actual_rule_index = static_cast<int64_t>(*entry.actual_rule_index);
+            }
             e.ok                = entry.ok;
             e.evaluation = to_api_evaluation(entry.evaluation);
             e.unknown_conditions =
                 to_api_unknown_conditions(entry.unknown_conditions);
             e.kernel_route = to_api_kernel_route(entry.fib);
+            e.policy_rules = to_api_routing_policy_evidence(policy_evidence[index]);
+            if (entry.firewall_counters) {
+                e.firewall_counters = to_api_routing_firewall_evidence(*entry.firewall_counters);
+            }
             if (entry.list_match) {
                 e.list_match = to_api_list_match(*entry.list_match);
             }
@@ -681,8 +740,64 @@ void register_test_routing_handler(ApiServer& server, ApiContext& ctx) {
             resp.rule_diagnostics.push_back(std::move(rd));
         }
 
+        // Reuse the bounded kernel snapshot, without device discovery, DNS log
+        // reads or a new background collector. Visible config supplies only
+        // labels to the shared history; route evidence below uses raw tuples
+        // and marks, with the mask from the active routing-test snapshot.
+        std::vector<std::string> destinations;
+        destinations.reserve(result.entries.size());
+        for (const auto& entry : result.entries) destinations.push_back(entry.ip);
+        api::RoutingTestConnections connections;
+        try {
+            const auto snapshot = get_routing_connections(ctx.get_visible_config(), destinations);
+            connections.snapshot_available = snapshot.snapshot_available;
+            connections.snapshot_at = snapshot.snapshot_at;
+            connections.total = static_cast<int64_t>(snapshot.total);
+            connections.truncated = snapshot.truncated;
+            for (const auto& row : snapshot.rows) {
+                api::RoutingTestConnection item;
+                item.protocol = row.protocol;
+                item.state = row.state;
+                item.source = row.source;
+                item.source_port = row.source_port;
+                item.destination = row.destination;
+                item.destination_port = row.destination_port;
+                item.mark = row.mark;
+                item.last_seen = row.last_seen;
+                connections.items.push_back(std::move(item));
+            }
+        } catch (const std::exception&) {
+            // Optional observation must not discard a completed DNS/FIB check.
+            connections = api::RoutingTestConnections{};
+        }
+        resp.connections = std::move(connections);
+
         nlohmann::json out;
         api::to_json(out, resp);
+        // These additive fields are optional, not nullable. Keep old-client
+        // responses free of invented indices and an unqueried DNS server.
+        if (!resp.dns_server) out.erase("dns_server");
+        if (!resp.http_probe) {
+            out.erase("http_probe");
+        } else {
+            auto& http = out.at("http_probe");
+            for (const auto* key : {"fwmark", "table", "http_status", "elapsed_ms",
+                                   "connect_ms", "tls_ms", "connected_ip"}) {
+                if (http.at(key).is_null()) http.erase(key);
+            }
+        }
+        for (auto& entry : out.at("results")) {
+            for (const auto* key : {"expected_rule_index", "actual_rule_index", "firewall_counters"}) {
+                if (entry.at(key).is_null()) entry.erase(key);
+            }
+            if (entry.contains("firewall_counters")) {
+                for (auto& row : entry.at("firewall_counters").at("rules")) {
+                    for (const auto* key : {"fwmark", "fwmask"}) {
+                        if (row.at(key).is_null()) row.erase(key);
+                    }
+                }
+            }
+        }
         return out.dump();
     });
 }

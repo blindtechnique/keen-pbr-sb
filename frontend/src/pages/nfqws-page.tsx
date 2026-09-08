@@ -29,6 +29,11 @@ import { toast } from "sonner"
 
 import { KeenPencilIcon, KeenTrashIcon } from "@/components/shared/keen-icons"
 import { NfqwsProfileCards } from "@/components/nfqws/profile-cards"
+import { NfqwsValidationErrorMessage } from "@/components/nfqws/validation-error-message"
+import {
+  NfqwsFileContent,
+  type NfqwsFileContentResponse,
+} from "@/components/nfqws/file-content"
 import { StrategyBreakdown } from "@/components/nfqws/strategy-breakdown"
 import { DataTable } from "@/components/shared/data-table"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
@@ -38,8 +43,8 @@ import { HelpHint } from "@/components/shared/help-hint"
 import { SectionHeading } from "@/components/shared/section-heading"
 import { SegmentedControl } from "@/components/shared/segmented-control"
 import { TableSkeleton } from "@/components/shared/table-skeleton"
-import { Skeleton } from "@/components/ui/skeleton"
 import { KeeneticStatus } from "@/components/shared/keenetic-status"
+import { OperationErrorMessage } from "@/components/shared/operation-error-message"
 import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
@@ -71,6 +76,24 @@ import { Label } from "@/components/ui/label"
 import { Checkbox } from "@/components/ui/checkbox"
 import { CodeEditor } from "@/components/shared/code-editor"
 import {
+  Field,
+  FieldContent,
+  FieldHint,
+  FieldLabel,
+} from "@/components/shared/field"
+import {
+  DEFAULT_LOG_FILE_BYTES,
+  DEFAULT_LOG_MAX_AGE_DAYS,
+  LOG_SETTINGS_QUERY_KEY,
+  loadLogSettings,
+  logFileSizeChoices,
+  logAgeChoices,
+  logSizeUnit,
+  saveLogSettings,
+  updateLogSettingsDraft,
+} from "@/lib/log-settings"
+import type { LogSettingsRequest } from "@/api/generated/model"
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -80,9 +103,14 @@ import {
 } from "@/components/ui/dialog"
 import {
   formatNfqwsConfig,
+  nfqwsConfigChanged,
   parseNfqwsConfig,
   type NfqwsConfigForm,
 } from "@/lib/nfqws-config"
+import {
+  ANDROID_CONNECTIVITY_DOMAINS,
+  androidConnectivityEnabled,
+} from "@/lib/nfqws-connectivity"
 import { formatDownloadTimestamp } from "@/lib/download"
 import {
   InvalidNfqwsBackupError,
@@ -107,6 +135,8 @@ import {
   classifyNfqwsUpdateNotice,
   nfqwsAction,
   nfqwsUpdateQueryOptions,
+  saveNfqwsConnectivityExclusions,
+  nfqwsConnectivityListWasSaved,
   type NfqwsActionResult,
   type NfqwsRotatorState,
   type NfqwsUpdateStatus,
@@ -184,6 +214,8 @@ type OperationState = {
   success?: boolean
   title: string
   output: string
+  error?: unknown
+  errorSummary?: string
 }
 
 type DraftFile = {
@@ -195,7 +227,8 @@ type DraftFile = {
 type RunOperation = (
   title: string,
   operation: () => Promise<NfqwsActionResult>,
-  successMessage: string
+  successMessage: string,
+  errorSummary?: string
 ) => Promise<boolean>
 
 export function NfqwsPage() {
@@ -263,7 +296,12 @@ export function NfqwsPage() {
     updateQuery.isFetching
   )
 
-  const runOperation: RunOperation = async (title, execute, successMessage) => {
+  const runOperation: RunOperation = async (
+    title,
+    execute,
+    successMessage,
+    errorSummary
+  ) => {
     setOperation({
       open: true,
       pending: true,
@@ -293,7 +331,8 @@ export function NfqwsPage() {
         pending: false,
         success: false,
         title,
-        output: message,
+        output: errorSummary ? "" : message,
+        ...(errorSummary ? { error, errorSummary } : {}),
       })
       return false
     }
@@ -329,7 +368,9 @@ export function NfqwsPage() {
           pending: false,
           success: false,
           title: t("nfqws.upgrade"),
-          output: error instanceof Error ? error.message : String(error),
+          output: "",
+          error,
+          errorSummary: t("configTransfer.exportFailed"),
         })
         return
       }
@@ -337,7 +378,8 @@ export function NfqwsPage() {
     const completed = await runOperation(
       t("nfqws.upgrade"),
       () => nfqwsAction({ action: "upgrade" }),
-      t("nfqws.operationCompleted")
+      t("nfqws.operationCompleted"),
+      t("nfqws.operationFailed")
     )
     if (completed) {
       try {
@@ -359,7 +401,8 @@ export function NfqwsPage() {
     await runOperation(
       t("nfqws.install"),
       () => nfqwsAction({ action: "install" }),
-      t("nfqws.operationCompleted")
+      t("nfqws.operationCompleted"),
+      t("nfqws.operationFailed")
     )
     // Success or failure, the page's idea of "installed" may have changed;
     // runOperation already invalidated the status query.
@@ -393,7 +436,10 @@ export function NfqwsPage() {
         queryKey: NFQWS_UPDATE_QUERY_KEY,
       })
       toast.error(
-        error instanceof Error ? error.message : t("nfqws.operationFailed"),
+        <OperationErrorMessage
+          error={error}
+          fallbackSummary={t("pages.settings.softwareUpdate.checkFailed")}
+        />,
         { richColors: true }
       )
     } finally {
@@ -407,7 +453,8 @@ export function NfqwsPage() {
     const completed = await runOperation(
       restart ? t("nfqws.saveAndRestart") : t("nfqws.saveDrafts"),
       () => nfqwsAction({ action: "save_files", files, restart }),
-      t("nfqws.saved")
+      t("nfqws.saved"),
+      t("nfqws.settingsSaveFailed")
     )
     if (completed) {
       setDrafts({})
@@ -440,9 +487,10 @@ export function NfqwsPage() {
       toast.success(t("nfqws.backup.downloaded"))
     } catch (error) {
       toast.error(
-        error instanceof Error
-          ? error.message
-          : t("configTransfer.exportFailed"),
+        <OperationErrorMessage
+          error={error}
+          fallbackSummary={t("configTransfer.exportFailed")}
+        />,
         { richColors: true }
       )
     } finally {
@@ -504,24 +552,35 @@ export function NfqwsPage() {
       const completed = await runOperation(
         t("nfqws.backup.restoreTitle"),
         execute,
-        t("nfqws.backup.restored")
+        t("nfqws.backup.restored"),
+        t("nfqws.operationFailed")
       )
       if (completed) {
         await queryClient.invalidateQueries({ queryKey: ["nfqws", "file"] })
         setBackupRevision((revision) => revision + 1)
       }
     } catch (error) {
-      const message =
+      const summary =
         error instanceof NfqwsBackupScopeMissingError
           ? t("nfqws.backup.scopeMissing")
           : error instanceof InvalidBackupBundleError ||
               error instanceof InvalidNfqwsBackupError ||
               error instanceof SyntaxError
             ? t("configTransfer.invalidFormat")
-            : error instanceof Error
-              ? error.message
-              : t("configTransfer.invalidFormat")
-      toast.error(message, { richColors: true })
+            : undefined
+      if (summary) {
+        // SyntaxError can include an excerpt of the uploaded backup. Keep
+        // known local format/scope errors as the existing localized message.
+        toast.error(summary, { richColors: true })
+      } else {
+        toast.error(
+          <OperationErrorMessage
+            error={error}
+            fallbackSummary={t("nfqws.operationFailed")}
+          />,
+          { richColors: true }
+        )
+      }
     } finally {
       setBackupPending(null)
       if (backupImportRef.current) backupImportRef.current.value = ""
@@ -939,7 +998,8 @@ export function NfqwsPage() {
               void runOperation(
                 t("nfqws.restoreComponent"),
                 () => nfqwsAction({ action: "restore_component" }),
-                t("nfqws.operationCompleted")
+                t("nfqws.operationCompleted"),
+                t("nfqws.operationFailed")
               )
             }}
             open={restoreOpen}
@@ -1050,7 +1110,16 @@ function NfqwsOperationDialog({
           {operation.pending ? (
             <LoaderCircleIcon className="mr-2 inline size-4 animate-spin" />
           ) : null}
-          {operation.output}
+          {operation.errorSummary ? (
+            <div className="font-sans text-sm whitespace-normal">
+              <NfqwsValidationErrorMessage
+                error={operation.error}
+                fallbackSummary={operation.errorSummary}
+              />
+            </div>
+          ) : (
+            operation.output
+          )}
         </div>
         <DialogFooter>
           <Button
@@ -1354,7 +1423,7 @@ function NotInstalled({
 }
 
 async function readFile(file: NfqwsFile) {
-  return nfqwsAction<{ content: string }>({
+  return nfqwsAction<NfqwsFileContentResponse>({
     action: "read_file",
     category: file.category,
     name: file.name,
@@ -1378,23 +1447,61 @@ function SettingsEditor({
   const [source, setSource] = useState("")
   const [form, setForm] = useState<NfqwsConfigForm | null>(null)
   const [baselineForm, setBaselineForm] = useState<NfqwsConfigForm | null>(null)
+  const [connectivityEnabled, setConnectivityEnabled] = useState(false)
+  const [baselineConnectivity, setBaselineConnectivity] = useState(false)
+  const [loadRevision, setLoadRevision] = useState(0)
+  const [loadError, setLoadError] = useState<unknown>(null)
+  const [saveError, setSaveError] = useState<unknown>(null)
+  const [saving, setSaving] = useState(false)
+  const [connectivityApplyPending, setConnectivityApplyPending] =
+    useState(false)
+  const savingRef = useRef(false)
+  const excludeExists = status.files.some(
+    (item) => item.category === "list" && item.name === "exclude.list"
+  )
   useEffect(() => {
-    if (fileName)
-      void nfqwsAction<{ content: string }>({
-        action: "read_file",
-        category: "config",
-        name: fileName,
-      }).then(({ content }) => {
-        const parsed = parseNfqwsConfig(content)
-        setSource(content)
-        setForm(parsed)
-        setBaselineForm(parsed)
-      })
-  }, [fileName])
-  const dirty =
-    form !== null &&
-    baselineForm !== null &&
-    JSON.stringify(form) !== JSON.stringify(baselineForm)
+    let cancelled = false
+    if (fileName) {
+      setLoadError(null)
+      void Promise.all([
+        nfqwsAction<{ content: string }>({
+          action: "read_file",
+          category: "config",
+          name: fileName,
+        }),
+        excludeExists
+          ? nfqwsAction<{ content: string }>({
+              action: "read_file",
+              category: "list",
+              name: "exclude.list",
+            })
+          : Promise.resolve({ content: "" }),
+      ])
+        .then(([{ content }, exclusions]) => {
+          if (cancelled) return
+          const parsed = parseNfqwsConfig(content)
+          setSource(content)
+          setForm(parsed)
+          setBaselineForm(parsed)
+          const enabled = androidConnectivityEnabled(exclusions.content)
+          setConnectivityEnabled(enabled)
+          setBaselineConnectivity(enabled)
+        })
+        .catch((error: unknown) => {
+          if (!cancelled) setLoadError(error)
+        })
+    }
+    return () => {
+      cancelled = true
+    }
+    // A status refresh must not replace edits in the open form.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fileName, loadRevision])
+  const configDirty = nfqwsConfigChanged(form, baselineForm)
+  const connectivityDirty = connectivityEnabled !== baselineConnectivity
+  const dirty = configDirty || connectivityDirty
+  const restartOnSave =
+    (connectivityDirty && status.process_running) || connectivityApplyPending
   useEffect(() => {
     onDirtyChange(dirty)
   }, [dirty, onDirtyChange])
@@ -1405,22 +1512,74 @@ function SettingsEditor({
     [onDirtyChange]
   )
   const save = async () => {
-    if (!file || !form) return
-    const nextSource = formatNfqwsConfig(source, form)
-    await nfqwsAction({
-      action: "save_file",
-      category: "config",
-      name: file.name,
-      content: nextSource,
-    })
-    setSource(nextSource)
-    setBaselineForm(form)
-    toast.success(t("nfqws.saved"))
-    refresh()
+    if (
+      !file ||
+      !form ||
+      (!dirty && !connectivityApplyPending) ||
+      savingRef.current
+    )
+      return
+    savingRef.current = true
+    setSaving(true)
+    setSaveError(null)
+    try {
+      if (configDirty) {
+        const nextSource = formatNfqwsConfig(source, form)
+        await nfqwsAction({
+          action: "save_file",
+          category: "config",
+          name: file.name,
+          content: nextSource,
+        })
+        setSource(nextSource)
+        setBaselineForm(form)
+      }
+      if (connectivityDirty) {
+        await saveNfqwsConnectivityExclusions({
+          enabled: connectivityEnabled,
+          existingFile: excludeExists,
+          restart: restartOnSave,
+        })
+        setBaselineConnectivity(connectivityEnabled)
+      } else if (connectivityApplyPending) {
+        // The list was saved but the previous restart failed: retry only
+        // the existing service action, without sending the file again.
+        await nfqwsAction({ action: "service", command: "restart" })
+      }
+      setConnectivityApplyPending(false)
+      toast.success(t("nfqws.saved"))
+    } catch (error) {
+      if (connectivityDirty && nfqwsConnectivityListWasSaved(error)) {
+        setBaselineConnectivity(connectivityEnabled)
+        setConnectivityApplyPending(true)
+      }
+      setSaveError(error)
+    } finally {
+      savingRef.current = false
+      setSaving(false)
+      refresh()
+    }
   }
   // Форма ещё грузится — это не «файла нет». Раньше обе ситуации показывали
   // одну и ту же красную мысль «nfqws2.conf не найден», и она мигала при
   // каждом нормальном открытии вкладки.
+  if (loadError)
+    return (
+      <Alert variant="destructive">
+        <AlertDescription className="space-y-3">
+          <OperationErrorMessage
+            error={loadError}
+            fallbackSummary={t("nfqws.settingsLoadFailed")}
+          />
+          <Button
+            variant="outline"
+            onClick={() => setLoadRevision((value) => value + 1)}
+          >
+            {t("common.retry")}
+          </Button>
+        </AlertDescription>
+      </Alert>
+    )
   if (file && !form) return <TableSkeleton />
   if (!file)
     return (
@@ -1460,7 +1619,7 @@ function SettingsEditor({
   )
 
   return (
-    <div className="space-y-6">
+    <fieldset className="min-w-0 space-y-6" disabled={saving}>
       <SectionHeading
         description={t("nfqws.settingsDescription")}
         title={t("nfqws.settingsTitle")}
@@ -1482,6 +1641,46 @@ function SettingsEditor({
         {field("POLICY_NAME")}
         {toggle("POLICY_EXCLUDE")}
         {toggle("IPV6_ENABLED")}
+        <div className="max-w-[480px] space-y-2">
+          <label className="flex min-h-10 cursor-pointer items-start gap-3 py-1">
+            <Checkbox
+              checked={connectivityEnabled}
+              className="mt-0.5"
+              onCheckedChange={(checked) =>
+                setConnectivityEnabled(checked === true)
+              }
+            />
+            <span className="min-w-0">
+              <span className="block text-sm">
+                {t("nfqws.connectivity.label")}
+              </span>
+              <span className="block text-xs text-muted-foreground">
+                {t("nfqws.connectivity.hint")}
+              </span>
+            </span>
+          </label>
+          <details className="ml-7 text-xs text-muted-foreground">
+            <summary className="cursor-pointer rounded-sm focus-visible:outline-2 focus-visible:outline-ring">
+              {t("nfqws.connectivity.domains")}
+            </summary>
+            <p className="mt-2">{t("nfqws.connectivity.scope")}</p>
+            <ul className="mt-2 space-y-1">
+              {ANDROID_CONNECTIVITY_DOMAINS.map((domain) => (
+                <li key={domain} className="font-mono break-all">
+                  {domain}
+                </li>
+              ))}
+            </ul>
+            <p className="mt-2">{t("nfqws.connectivity.preserve")}</p>
+          </details>
+          {connectivityDirty ? (
+            <p className="ml-7 text-xs text-muted-foreground">
+              {restartOnSave
+                ? t("nfqws.connectivity.applyRunning")
+                : t("nfqws.connectivity.applyStopped")}
+            </p>
+          ) : null}
+        </div>
       </div>
 
       <div className="space-y-4">
@@ -1540,13 +1739,41 @@ function SettingsEditor({
         {toggle("LOG_LEVEL")}
       </div>
 
+      {saveError ? (
+        <Alert variant="destructive">
+          <AlertDescription>
+            <NfqwsValidationErrorMessage
+              error={saveError}
+              summary={
+                connectivityApplyPending
+                  ? t("nfqws.connectivity.savedRestartFailed")
+                  : undefined
+              }
+              fallbackSummary={t("nfqws.settingsSaveFailed")}
+            />
+          </AlertDescription>
+        </Alert>
+      ) : null}
       <div className="flex justify-end">
-        <Button onClick={() => void save()}>
-          <SaveIcon />
-          {t("nfqws.save")}
+        <Button
+          disabled={(!dirty && !connectivityApplyPending) || saving}
+          onClick={() => void save()}
+        >
+          {saving ? (
+            <LoaderCircleIcon className="animate-spin" />
+          ) : (
+            <SaveIcon />
+          )}
+          {saving
+            ? t("common.saving")
+            : connectivityApplyPending && !dirty
+              ? t("nfqws.connectivity.retryApply")
+              : restartOnSave
+                ? t("nfqws.saveAndRestart")
+                : t("nfqws.save")}
         </Button>
       </div>
-    </div>
+    </fieldset>
   )
 }
 
@@ -1759,7 +1986,8 @@ function StrategiesEditor({
             name,
             content: contentOf(name),
           }),
-        t("nfqws.strategyAppliedAndRestarted")
+        t("nfqws.strategyAppliedAndRestarted"),
+        t("nfqws.settingsSaveFailed")
       )
       if (completed) {
         // nfqws2.conf теперь другой — снимок для «Сохранить текущую» должен
@@ -2280,7 +2508,6 @@ function FilesEditor({
     queryFn: () => readFile(current!),
     enabled: current !== undefined,
   })
-  const content = drafts[currentKey]?.content ?? fileQuery.data?.content ?? ""
   const editableCategory = category === "list" || category === "lua"
   const draftCount = Object.keys(drafts).length
   const [creating, setCreating] = useState(false)
@@ -2314,6 +2541,7 @@ function FilesEditor({
         description={t(`nfqws.fileSections.${tabKey}`)}
         title={t(`nfqws.tabs.${tabKey}`)}
       />
+      {category === "log" ? <NfqwsLogLimitSettings /> : null}
       {!readonly ? (
         <PageActionBar
           primary={
@@ -2440,20 +2668,18 @@ function FilesEditor({
             size="compact"
             title={t("nfqws.fileEditorTitle", { name: current.name })}
           />
-          {fileQuery.isLoading ? (
-            <Skeleton className="h-[40vh] max-h-[36rem] min-h-[16rem] w-full" />
-          ) : (
-            <CodeEditor
-              className="h-[50vh] max-h-[40rem] min-h-[18rem]"
-              onChange={(next) => {
-                if (category === "list" || category === "lua")
-                  onDraftChange({ category, name: current.name, content: next })
-              }}
-              readOnly={readonly}
-              syntax={readonly ? "log" : "nfqws"}
-              value={content}
-            />
-          )}
+          <NfqwsFileContent
+            data={fileQuery.data}
+            draftContent={drafts[currentKey]?.content}
+            error={fileQuery.error}
+            loading={fileQuery.isLoading}
+            onChange={(next) => {
+              if (category === "list" || category === "lua")
+                onDraftChange({ category, name: current.name, content: next })
+            }}
+            onRetry={() => void fileQuery.refetch()}
+            readonly={readonly}
+          />
           {!readonly ? (
             <div className="flex flex-wrap items-center justify-end gap-2">
               {draftCount > 0 ? (
@@ -2530,6 +2756,172 @@ function formatFileSize(bytes: number) {
 
 /** Имя новой стратегии или файла — вместо window.prompt, который выглядит как
  *  системное окно браузера и не умеет ни подсказки, ни примера. */
+export function NfqwsLogLimitSettings() {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+  const query = useQuery({
+    queryKey: LOG_SETTINGS_QUERY_KEY,
+    queryFn: loadLogSettings,
+  })
+  const [draft, setDraft] = useState<LogSettingsRequest>({})
+  const baseline = {
+    nfqws_max_file_bytes:
+      query.data?.nfqws_max_file_bytes ?? DEFAULT_LOG_FILE_BYTES,
+    nfqws_size_limit_enabled: query.data?.nfqws_size_limit_enabled ?? true,
+    nfqws_age_limit_enabled: query.data?.nfqws_age_limit_enabled ?? false,
+    nfqws_max_age_days:
+      query.data?.nfqws_max_age_days ?? DEFAULT_LOG_MAX_AGE_DAYS,
+  }
+  const value = draft.nfqws_max_file_bytes ?? baseline.nfqws_max_file_bytes
+  const sizeEnabled =
+    draft.nfqws_size_limit_enabled ?? baseline.nfqws_size_limit_enabled
+  const ageEnabled =
+    draft.nfqws_age_limit_enabled ?? baseline.nfqws_age_limit_enabled
+  const maximumAge = draft.nfqws_max_age_days ?? baseline.nfqws_max_age_days
+  const updateDraft = (patch: LogSettingsRequest) =>
+    setDraft(updateLogSettingsDraft(draft, patch, baseline))
+  const mutation = useMutation({
+    mutationFn: () => saveLogSettings(draft),
+    onSuccess: (settings) => {
+      queryClient.setQueryData(LOG_SETTINGS_QUERY_KEY, settings)
+      setDraft({})
+      toast.success(t("nfqws.logLimitSaved"))
+    },
+  })
+  const sizeLabel = (bytes: number) => {
+    const unit = logSizeUnit(bytes)
+    return unit.key === "pages.settings.logging.sizeKiB"
+      ? t("pages.settings.logging.sizeKiB", { size: unit.size })
+      : t("pages.settings.logging.sizeMiB", { size: unit.size })
+  }
+  if (query.isError) {
+    return (
+      <Alert variant="destructive">
+        <AlertDescription>
+          <OperationErrorMessage
+            error={query.error}
+            fallbackSummary={t("nfqws.logLimitLoadFailed")}
+          />
+        </AlertDescription>
+      </Alert>
+    )
+  }
+  return (
+    <div className="space-y-3 rounded-[4px] border p-4">
+      <div className="flex items-center gap-3">
+        <Checkbox
+          id="nfqws-log-size-enabled"
+          checked={sizeEnabled}
+          disabled={query.isPending || mutation.isPending}
+          onCheckedChange={(checked) =>
+            updateDraft({ nfqws_size_limit_enabled: checked === true })
+          }
+        />
+        <Label htmlFor="nfqws-log-size-enabled">
+          {t("pages.settings.logging.sizeLimitEnabled")}
+        </Label>
+      </div>
+      <Field width="short">
+        <FieldLabel htmlFor="nfqws-log-max-bytes">
+          {t("nfqws.logLimitLabel")}
+        </FieldLabel>
+        <FieldContent>
+          <Select
+            disabled={!sizeEnabled || query.isPending || mutation.isPending}
+            value={String(value)}
+            onValueChange={(selected) => {
+              if (selected !== null)
+                updateDraft({ nfqws_max_file_bytes: Number(selected) })
+            }}
+          >
+            <SelectTrigger id="nfqws-log-max-bytes">
+              <SelectValue>{() => sizeLabel(value)}</SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              {logFileSizeChoices(value).map((size) => (
+                <SelectItem key={size} value={String(size)}>
+                  {sizeLabel(size)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <FieldHint description={t("nfqws.logLimitHint")} />
+        </FieldContent>
+      </Field>
+      <div className="flex items-center gap-3">
+        <Checkbox
+          id="nfqws-log-age-enabled"
+          checked={ageEnabled}
+          disabled={query.isPending || mutation.isPending}
+          onCheckedChange={(checked) =>
+            updateDraft({ nfqws_age_limit_enabled: checked === true })
+          }
+        />
+        <Label htmlFor="nfqws-log-age-enabled">
+          {t("pages.settings.logging.ageLimitEnabled")}
+        </Label>
+      </div>
+      <Field width="short">
+        <FieldLabel htmlFor="nfqws-log-max-age">
+          {t("pages.settings.logging.maxAgeDays")}
+        </FieldLabel>
+        <FieldContent>
+          <Select
+            disabled={!ageEnabled || query.isPending || mutation.isPending}
+            value={String(maximumAge)}
+            onValueChange={(selected) => {
+              if (selected !== null)
+                updateDraft({ nfqws_max_age_days: Number(selected) })
+            }}
+          >
+            <SelectTrigger id="nfqws-log-max-age">
+              <SelectValue>{() => String(maximumAge)}</SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              {logAgeChoices(maximumAge).map((days) => (
+                <SelectItem key={days} value={String(days)}>
+                  {days}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <FieldHint description={t("nfqws.logAgeHint")} />
+        </FieldContent>
+      </Field>
+      {!sizeEnabled && !ageEnabled ? (
+        <p className="text-xs text-muted-foreground">
+          {t("pages.settings.logging.retentionDisabled")}
+        </p>
+      ) : null}
+      {mutation.error ? (
+        <Alert variant="destructive">
+          <AlertDescription>
+            <OperationErrorMessage
+              error={mutation.error}
+              fallbackSummary={t("nfqws.settingsSaveFailed")}
+            />
+          </AlertDescription>
+        </Alert>
+      ) : null}
+      <Button
+        disabled={
+          query.isPending ||
+          Object.keys(draft).length === 0 ||
+          mutation.isPending
+        }
+        onClick={() => mutation.mutate()}
+      >
+        {mutation.isPending ? (
+          <LoaderCircleIcon className="animate-spin" />
+        ) : (
+          <SaveIcon />
+        )}
+        {mutation.isPending ? t("common.saving") : t("common.save")}
+      </Button>
+    </div>
+  )
+}
+
 function NfqwsNameDialog({
   confirmLabel,
   description,

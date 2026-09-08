@@ -48,7 +48,8 @@ std::vector<L4Proto> expand_l4_protos(L4Proto proto) {
 }
 
 bool needs_family_specific_rule(const FirewallRuleCriteria& criteria) {
-    return criteria.dst_set_name.has_value()
+    return criteria.family != AF_UNSPEC
+        || criteria.dst_set_name.has_value()
         || criteria.src_udp_peer_set_name.has_value()
         || criteria.dscp.has_value()
         || !criteria.src_addr.empty()
@@ -574,6 +575,7 @@ void NftablesFirewall::append_rules_for_family(int family,
                                                uint32_t fwmark,
                                                const FirewallRuleCriteria& criteria,
                                                bool output_scope) {
+    if (criteria.family != AF_UNSPEC && criteria.family != family) return;
     if (family == AF_INET6 && !ipv6_enabled()) {
         return;
     }
@@ -1337,6 +1339,13 @@ nlohmann::json NftablesFirewall::build_rule_add_commands(
             // unique owned mark so both packet-mark and ctmark foreign bits
             // survive without a register-to-register merge.
             std::set<uint32_t> owned_marks;
+            // A healthy group switch changes classifiers, not established
+            // flows. Restore every still-configured leaf in both chains,
+            // even when it no longer has a current route or DNS classifier.
+            for (const uint32_t mark : prefilter.configured_outbound_marks) {
+                const uint32_t owned_mark = mark & mask;
+                if (owned_mark != 0) owned_marks.insert(owned_mark);
+            }
             for (const auto& rule : rules) {
                 if (rule.output != output_scope ||
                     rule.action != PendingRule::Mark) {
@@ -1581,6 +1590,13 @@ nlohmann::json NftablesFirewall::build_mark_rule_json(
     std::string ip_proto = (pr.family == AF_INET6) ? "ip6" : "ip";
     nlohmann::json expr = nlohmann::json::array();
     append_named_set_match(expr, ip_proto, pr.criteria);
+    if (pr.criteria.family != AF_UNSPEC) {
+        expr.push_back({{"match", {
+            {"op", "=="},
+            {"left", {{"meta", {{"key", "nfproto"}}}}},
+            {"right", pr.family == AF_INET6 ? "ipv6" : "ipv4"}
+        }}});
+    }
     for (const auto& e : build_dscp_match_exprs(ip_proto, pr.criteria.dscp)) {
         expr.push_back(e);
     }

@@ -7,6 +7,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -59,6 +60,15 @@ struct HttpTransportRequest {
     // Called from curl's transfer thread, frequently. A caller that publishes
     // somewhere has to decide how often to actually do it.
     std::function<void(std::uint64_t received, std::uint64_t total)> progress;
+
+    // Optional per-request hostname:port:address entries. The original URL
+    // still supplies the HTTP Host and TLS server name/certificate identity.
+    std::vector<std::string> resolve_entries;
+    bool head_only{false};
+    bool follow_redirects{true};
+    // Total wire header bytes, including status/interim/redirect blocks.
+    // Zero preserves the existing unrestricted-header download behavior.
+    size_t max_header_size{0};
 };
 
 struct HttpTransportResponse {
@@ -67,11 +77,21 @@ struct HttpTransportResponse {
     // Lower-case names; values belong only to the final response after redirects.
     std::map<std::string, std::string> headers;
     std::chrono::milliseconds elapsed{0};
+    std::optional<std::string> primary_ip;
+    // Cumulative times from transfer start; not individual phase durations.
+    std::optional<std::chrono::milliseconds> connect_elapsed;
+    std::optional<std::chrono::milliseconds> tls_elapsed;
 };
 
 class HttpTransportError : public std::runtime_error {
 public:
-    explicit HttpTransportError(const std::string& message) : std::runtime_error(message) {}
+    enum class Reason { other, timeout, tls, connect, resolve, response_limit, mark };
+    explicit HttpTransportError(const std::string& message, Reason reason = Reason::other)
+        : std::runtime_error(message), reason_(reason) {}
+    Reason reason() const noexcept { return reason_; }
+
+private:
+    Reason reason_;
 };
 
 class HttpTransportCancelled : public HttpTransportError {

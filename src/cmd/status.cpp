@@ -782,20 +782,28 @@ int run_status_command(const Config& config, const std::string& config_path) {
     PolicyRuleManager rules(netlink, true);
     const Ipv6SupportDecision ipv6_decision = resolve_ipv6_support(config);
     log_ipv6_support_decision_once(ipv6_decision);
+    const auto main_table_routes = netlink.dump_routes_in_table(254);
+    OutboundFamilyReachabilitySnapshot family_reachability;
+    for (const auto& outbound : config.outbounds.value_or(std::vector<Outbound>{})) {
+        if (outbound.type == OutboundType::INTERFACE) {
+            family_reachability.emplace(outbound.tag,
+                interface_outbound_family_reachability(outbound, main_table_routes));
+        }
+    }
     populate_routing_state(
         config,
         marks,
         routes,
         rules,
-        [&netlink](const Outbound& outbound) {
-            return is_interface_outbound_reachable(outbound, netlink);
-        },
+        {},
         &urltest_selections,
-        ipv6_decision.enabled);
+        ipv6_decision.enabled,
+        &family_reachability);
 
     CacheManager cache(cache_dir, max_file_size_bytes(config));
     ListStreamer list_streamer(cache);
-    auto fw_rules = build_fw_rule_states(config, marks, &urltest_selections);
+    auto fw_rules = build_fw_rule_states(
+        config, marks, &urltest_selections, nullptr, &family_reachability);
     prune_fw_rule_states_to_realized_sets(
         config,
         fw_rules,
@@ -841,10 +849,16 @@ int run_status_command(const nlohmann::json& response) {
             result.at("routing_runtime_active").get<bool>(),
         };
         return render_status_report(
-            result.at("config").get<Config>(),
+            parse_config(result.at("config").dump()),
             result.value("config_path", KEEN_PBR_DEFAULT_CONFIG_PATH),
             routing_health_report_from_json(result.at("routing_health")),
             std::move(runtime));
+    } catch (const ConfigError& error) {
+        std::cerr
+            << "keen-pbr status: incompatible daemon configuration: "
+            << error.what()
+            << "; restart keen-pbr after upgrading the package\n";
+        return 1;
     } catch (const nlohmann::json::exception& error) {
         std::cerr
             << "keen-pbr status: incompatible daemon response: "

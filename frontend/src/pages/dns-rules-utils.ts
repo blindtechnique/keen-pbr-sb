@@ -2,8 +2,13 @@ import type { ConfigObject } from "@/api/generated/model/configObject"
 import type { DnsRule } from "@/api/generated/model/dnsRule"
 import i18n from "@/i18n"
 import { makeTechnicalId } from "@/lib/technical-id"
+import { configKnownFields } from "@/lib/config-known-fields.generated"
+import {
+  toConfigUnknownFieldsDraft,
+  type ConfigUnknownFieldsDraft,
+} from "@/lib/config-unknown-fields"
 
-export type DnsRuleDraft = {
+export type DnsRuleDraft = ConfigUnknownFieldsDraft & {
   id: string
   displayName: string
   enabled: boolean
@@ -35,6 +40,7 @@ export function createDnsRuleDraft(
 
 export function getRuleDraft(rule?: DnsRule): DnsRuleDraft {
   return {
+    ...toConfigUnknownFieldsDraft(rule, configKnownFields.DnsRule),
     id: rule?.id ?? "",
     displayName: rule?.display_name ?? "",
     enabled: rule?.enabled ?? true,
@@ -48,6 +54,7 @@ export function normalizeDnsRuleDraft(rule: DnsRuleDraft): DnsRule {
   const normalizedId = rule.id.trim()
   const normalizedDisplayName = rule.displayName.trim()
   return {
+    ...rule.unknownFields,
     ...(normalizedId ? { id: normalizedId } : {}),
     ...(normalizedDisplayName ? { display_name: normalizedDisplayName } : {}),
     enabled: rule.enabled,

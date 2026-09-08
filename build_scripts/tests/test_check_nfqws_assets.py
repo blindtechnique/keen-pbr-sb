@@ -4,6 +4,7 @@ import hashlib
 import os
 import re
 import runpy
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -513,6 +514,89 @@ class NfqwsAssetsGateFixture(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("nfqws assets gate: OK", result.stdout)
+
+
+class LegacyUdpRotationFixture(unittest.TestCase):
+    def setUp(self) -> None:
+        self.generator = runpy.run_path(str(
+            REPO_ROOT / "build_scripts/build-nfqws-strategies.py"
+        ))
+        self.gate = runpy.run_path(str(SCRIPT))
+        self.strategies = (
+            REPO_ROOT / "packages/keenetic/keen-pbr/files/opt/usr/share/"
+            "keen-pbr/nfqws-strategies"
+        )
+        self.pools = self.generator["legacy_rotation_pools"]()
+
+    def test_exact_ten_pool_assignments_match_generator_and_preserve_slot_one(self) -> None:
+        expected_profiles = {"default", "ver1", "ver1 (alt)", "ver2", "ver3 safe", "ver4"}
+        self.assertEqual(set(self.pools), expected_profiles)
+        keys = []
+        count = 0
+        for profile, assignments in self.pools.items():
+            actual = self.gate["parse_shell_assignments"](
+                (self.strategies / profile / "nfqws2.conf").read_text(encoding="utf-8")
+            )
+            for variable, generated in assignments.items():
+                count += 1
+                with self.subTest(profile=profile, variable=variable):
+                    self.assertEqual(actual[variable].split(), generated.split())
+                    keys.append(re.search(r":key=([^\s]+)", generated).group(1))
+                    actions = re.findall(r"--lua-desync=(fake:[^\s]+)", generated)
+                    if variable == "NFQWS_ARGS_QUIC":
+                        expected = "fake:blob=quic_initial:repeats=11"
+                    elif profile == "ver1 (alt)":
+                        expected = "fake:blob=0x00000000000000000000000000000000:repeats=2"
+                    else:
+                        expected = "fake:blob=quic_initial:repeats=6"
+                    self.assertEqual(actions[0], expected + ":strategy=1")
+                    self.assertEqual(len(actions), 2)
+                    self.assertNotEqual(actions[0].rsplit(":strategy=", 1)[0],
+                                        actions[1].rsplit(":strategy=", 1)[0])
+                    self.assertNotIn("--new", generated)
+        self.assertEqual(count, 10)
+        self.assertEqual(len(set(keys)), 10)
+
+    def test_fallbacks_reuse_existing_actions_without_new_ports_or_payloads(self) -> None:
+        for profile, assignments in self.pools.items():
+            for variable, generated in assignments.items():
+                with self.subTest(profile=profile, variable=variable):
+                    tokens = generated.split()
+                    actions = [token for token in tokens if token.startswith("--lua-desync=fake:")]
+                    if variable == "NFQWS_ARGS_QUIC":
+                        fallback = self.generator["QUIC_TIERS"][1][0]
+                        expected_ports = "--filter-udp=443"
+                        expected_l7 = "--filter-l7=quic"
+                        expected_payload = "--payload=quic_initial"
+                    else:
+                        source = "ver2" if profile == "ver1 (alt)" else "ver1 (alt)"
+                        source_pool = self.pools[source]["NFQWS_ARGS_UDP"]
+                        fallback = re.search(r"--lua-desync=(fake:[^\s]+):strategy=1", source_pool).group(1)
+                        expected_ports = "--filter-udp=" + self.generator["FILTER_UDP_MAIN"]
+                        expected_l7 = "--filter-l7=wireguard,stun,discord,mtproto"
+                        expected_payload = ("--payload=wireguard_initiation,wireguard_response,"
+                                            "wireguard_cookie,stun,discord_ip_discovery,mtproto_initial")
+                    self.assertEqual(actions[1], "--lua-desync=" + fallback + ":strategy=2")
+                    self.assertEqual(tokens[:2], [expected_ports, expected_l7])
+                    self.assertEqual([token for token in tokens if token.startswith("--payload=")],
+                                     ["--payload=all", expected_payload])
+
+    def test_parity_gate_rejects_a_detector_cutoff_that_prevents_rotation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            copied = Path(temporary) / "strategies"
+            shutil.copytree(self.strategies, copied)
+            path = copied / "ver2/nfqws2.conf"
+            contents = path.read_text(encoding="utf-8")
+            self.assertIn("--out-range=-n4", contents)
+            path.write_text(contents.replace("--out-range=-n4", "--out-range=-n3", 1),
+                            encoding="utf-8")
+            check = self.gate["check_generated_profile_parity"]
+            check.__globals__["STRATEGIES"] = copied
+            check()
+            self.assertTrue(any(
+                "ver2/NFQWS_ARGS_UDP: legacy pool" in problem
+                for problem in check.__globals__["problems"]
+            ))
 
 
 if __name__ == "__main__":

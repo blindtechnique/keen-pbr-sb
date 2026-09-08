@@ -24,15 +24,20 @@ export type BackupWireSelection = BackupSelection & {
   nfqws: boolean
 }
 
+export type BackupData = Record<string, unknown> & {
+  /** Sensitive source records, kept opaque and restored with the VPN group. */
+  subscriptions?: Record<string, unknown>[]
+}
+
 export type BackupBundle = {
   format: "keen-pbr-sb-backup"
   schema: 1
+  /** Source configuration schema, independent of the archive format version. */
+  config_schema_version?: number
   created_at: number
   groups: BackupWireSelection
-  data: Record<string, unknown>
+  data: BackupData
 }
-
-type ApiErrorBody = { error?: string }
 
 export class InvalidBackupBundleError extends Error {
   constructor() {
@@ -93,12 +98,23 @@ export function downloadBackup(
 export function parseBackupBundle(value: unknown): BackupBundle {
   if (!isRecord(value)) throw new InvalidBackupBundleError()
   const { created_at: createdAt, data, format, groups, schema } = value
+  const configSchemaVersion = value.config_schema_version
   if (
     format !== "keen-pbr-sb-backup" ||
     schema !== 1 ||
     typeof createdAt !== "number" ||
     !isRecord(groups) ||
-    !isRecord(data)
+    !isBackupData(data)
+  ) {
+    throw new InvalidBackupBundleError()
+  }
+  // Keep the source version even in a DNS-only archive. The daemon chooses
+  // the migration; the panel must not turn a future archive into legacy input.
+  if (
+    Object.hasOwn(value, "config_schema_version") &&
+    (typeof configSchemaVersion !== "number" ||
+      !Number.isSafeInteger(configSchemaVersion) ||
+      configSchemaVersion <= 0)
   ) {
     throw new InvalidBackupBundleError()
   }
@@ -131,6 +147,9 @@ export function parseBackupBundle(value: unknown): BackupBundle {
   return {
     format: "keen-pbr-sb-backup",
     schema: 1,
+    ...(typeof configSchemaVersion === "number"
+      ? { config_schema_version: configSchemaVersion }
+      : {}),
     created_at: createdAt,
     groups: normalizedGroups,
     data,
@@ -150,6 +169,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
+function isBackupData(value: unknown): value is BackupData {
+  if (!isRecord(value)) return false
+  // Absence is a legacy archive; an explicit empty array restores an empty
+  // subscription store. Preserve that distinction and every opaque field.
+  if (!Object.hasOwn(value, "subscriptions")) return true
+  const records = value.subscriptions
+  return (
+    Array.isArray(records) &&
+    records.length <= 64 &&
+    records.every(isRecord) &&
+    new TextEncoder().encode(JSON.stringify(records)).byteLength <=
+      4 * 1024 * 1024
+  )
+}
+
 async function apiJson<T = unknown>(
   url: string,
   init?: RequestInit
@@ -158,7 +192,18 @@ async function apiJson<T = unknown>(
   // operations the server puts behind a step-up, so a private fetch here would
   // opt the most privileged screen in the panel out of answering it.
   const response = await fetchWithStepUp(url, init)
-  const body = (await response.json().catch(() => ({}))) as T & ApiErrorBody
-  if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`)
-  return body
+  const body: unknown = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    const message =
+      isRecord(body) && typeof body.error === "string"
+        ? body.error
+        : `HTTP ${response.status}`
+    // Preserve Error/message for existing callers and retain the original API
+    // details for the shared localized summary and collapsed diagnostics.
+    throw Object.assign(new Error(message), {
+      status: response.status,
+      details: body,
+    })
+  }
+  return body as T
 }

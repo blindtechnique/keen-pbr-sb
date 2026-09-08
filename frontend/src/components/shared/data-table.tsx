@@ -1,5 +1,5 @@
 import type { ReactNode } from "react"
-import { Fragment } from "react"
+import { Fragment, useMemo } from "react"
 import { GripVerticalIcon } from "lucide-react"
 
 import { Checkbox } from "@/components/ui/checkbox"
@@ -8,6 +8,8 @@ import {
   type DataTableMobileLayout,
 } from "@/components/shared/data-table-mobile-layout"
 import { usePointerSortable } from "@/hooks/use-pointer-sortable"
+import { useVirtualRows } from "@/hooks/use-virtual-rows"
+import { canVirtualizeDataTable } from "@/hooks/virtual-rows-model"
 import type { TableSortDirection, TableSortState } from "@/hooks/use-table-sort"
 import { cn } from "@/lib/utils"
 import {
@@ -122,6 +124,8 @@ export function DataTable({
   reorder,
   sort,
   mobileLayout,
+  virtualize = false,
+  desktopOnly = false,
 }: {
   headers?: string[]
   rows: ReactNode[][]
@@ -150,6 +154,10 @@ export function DataTable({
   selection?: DataTableSelection
   reorder?: DataTableReorder
   mobileLayout?: DataTableMobileLayout
+  /** Opt-in windowing; requires stable selection keys and plain, non-draggable rows. */
+  virtualize?: boolean
+  /** A page with its own mobile cards need not mount duplicate hidden cards. */
+  desktopOnly?: boolean
   // Сортировку считает страница: DataTable получает уже отрисованные ячейки и
   // сравнивать их не может. Здесь только заголовок-кнопка и aria-sort.
   sort?: TableSortState
@@ -201,6 +209,29 @@ export function DataTable({
   const allVisibleSelected =
     visibleRowIds.length > 0 &&
     visibleRowIds.every((rowId) => selection!.selectedIds.has(rowId))
+  const rowIds = hasSelection ? selection!.rowIds : undefined
+  const virtualKeys = useMemo(
+    () => rowIds ?? rows.map((_, index) => String(index)),
+    [rowIds, rows]
+  )
+  const virtualRows = useVirtualRows({
+    enabled: canVirtualizeDataTable({
+      requested: virtualize,
+      count: rows.length,
+      hasStableKeys: hasSelection,
+      hasReorder,
+      hasGroups: Boolean(groupHeadings),
+      hasDetails: Boolean(rowDetails),
+    }),
+    keys: virtualKeys,
+    estimateSize: compact ? 52 : 84,
+  })
+  const renderedOrder = virtualRows.virtualized
+    ? virtualRows.items.map((item) => ({
+        rowIndex: item.index,
+        paddingBefore: item.paddingBefore,
+      }))
+    : currentOrder.map((rowIndex) => ({ rowIndex, paddingBefore: 0 }))
 
   function sortableHeader(headerIndex: number) {
     return Boolean(sort && sort.sortable.includes(headerIndex - leadingColumns))
@@ -290,7 +321,14 @@ export function DataTable({
             : "overflow-x-auto"
         )}
       >
-        <Table className={cn("w-full text-sm", fixedLayout && "table-fixed")}>
+        <Table
+          aria-rowcount={
+            virtualRows.virtualized
+              ? rows.length + (headersWithSelection ? 1 : 0)
+              : undefined
+          }
+          className={cn("w-full text-sm", fixedLayout && "table-fixed")}
+        >
           {/* KeeneticOS column headers: 14px bold in sentence case on the muted
               band, not small caps. --muted is #fafafa light / #2f3745 dark and
               --foreground #202020 / #c2c2c2 — the same pair the firmware uses,
@@ -371,8 +409,11 @@ export function DataTable({
               </TableRow>
             </TableHeader>
           )}
-          <TableBody {...getContainerProps()}>
-            {currentOrder.map((rowIndex, position) => {
+          <TableBody
+            {...getContainerProps()}
+            ref={virtualRows.virtualized ? virtualRows.containerRef : undefined}
+          >
+            {renderedOrder.map(({ rowIndex, paddingBefore }, position) => {
               const row = rows[rowIndex] ?? []
               const rowId = hasSelection
                 ? (selection!.rowIds[rowIndex] ?? "")
@@ -384,6 +425,14 @@ export function DataTable({
                 <Fragment
                   key={hasSelection ? rowId || rowIndex : `group-${rowIndex}`}
                 >
+                  {paddingBefore > 0 ? (
+                    <TableRow aria-hidden="true" className="border-0">
+                      <TableCell
+                        colSpan={totalColumns}
+                        style={{ height: paddingBefore, padding: 0, border: 0 }}
+                      />
+                    </TableRow>
+                  ) : null}
                   {heading ? (
                     <TableRow className="hover:bg-transparent">
                       {/* Отступы одинаковые сверху и снизу: при 16px сверху и
@@ -403,6 +452,11 @@ export function DataTable({
                     </TableRow>
                   ) : null}
                   <TableRow
+                    aria-rowindex={
+                      virtualRows.virtualized
+                        ? rowIndex + (headersWithSelection ? 2 : 1)
+                        : undefined
+                    }
                     className={cn(
                       "group/row transition-[background-color,box-shadow,opacity] duration-150",
                       // Строка и её подробности читаются как один блок, поэтому
@@ -414,12 +468,15 @@ export function DataTable({
                         "keen-row-dragging relative z-10"
                     )}
                     data-sortable-table-row
+                    data-index={virtualRows.virtualized ? rowIndex : undefined}
                     key={
                       hasSelection ? rowId || rowIndex : `${row[0]}-${rowIndex}`
                     }
-                    ref={(element) => {
-                      setItemRef(position, element)
-                    }}
+                    ref={
+                      virtualRows.virtualized
+                        ? virtualRows.measureElement
+                        : (element) => setItemRef(position, element)
+                    }
                   >
                     {hasReorder ? (
                       <TableCell className={cellClass(0)}>
@@ -486,133 +543,147 @@ export function DataTable({
                 </Fragment>
               )
             })}
+            {virtualRows.paddingAfter > 0 ? (
+              <TableRow aria-hidden="true" className="border-0">
+                <TableCell
+                  colSpan={totalColumns}
+                  style={{
+                    height: virtualRows.paddingAfter,
+                    padding: 0,
+                    border: 0,
+                  }}
+                />
+              </TableRow>
+            ) : null}
           </TableBody>
         </Table>
       </div>
 
       {/* Narrow screens get one block per row instead of a table that would have
         to be scrolled sideways to read. */}
-      <div className="divide-y border-y md:hidden">
-        {rows.map((row, index) => {
-          const rowId = hasSelection ? (selection!.rowIds[index] ?? "") : ""
-          const actionsCell = headers ? row[row.length - 1] : undefined
-          const bodyCells = headers ? row.slice(0, -1) : row
-          const mobileColumns = getDataTableMobileColumnLayout(
-            headers?.slice(0, -1),
-            bodyCells.length,
-            mobileLayout
-          )
-          const controlCells = mobileColumns.controlIndices.map(
-            (cellIndex) => bodyCells[cellIndex]
-          )
-          const titleCell =
-            mobileColumns.titleIndex === undefined
-              ? undefined
-              : bodyCells[mobileColumns.titleIndex]
-          const restCells = mobileColumns.detailIndices.map((cellIndex) => ({
-            cell: bodyCells[cellIndex],
-            label: headers?.[cellIndex],
-          }))
+      {!desktopOnly ? (
+        <div className="divide-y border-y md:hidden">
+          {rows.map((row, index) => {
+            const rowId = hasSelection ? (selection!.rowIds[index] ?? "") : ""
+            const actionsCell = headers ? row[row.length - 1] : undefined
+            const bodyCells = headers ? row.slice(0, -1) : row
+            const mobileColumns = getDataTableMobileColumnLayout(
+              headers?.slice(0, -1),
+              bodyCells.length,
+              mobileLayout
+            )
+            const controlCells = mobileColumns.controlIndices.map(
+              (cellIndex) => bodyCells[cellIndex]
+            )
+            const titleCell =
+              mobileColumns.titleIndex === undefined
+                ? undefined
+                : bodyCells[mobileColumns.titleIndex]
+            const restCells = mobileColumns.detailIndices.map((cellIndex) => ({
+              cell: bodyCells[cellIndex],
+              label: headers?.[cellIndex],
+            }))
 
-          return (
-            <Fragment key={hasSelection ? rowId || index : `mobile-${index}`}>
-              {groupHeadings?.[index] ? (
-                <div className="py-2">{groupHeadings[index]}</div>
-              ) : null}
-              <div className="space-y-2 py-3">
-                {/* Галочка, имя и действия — одной строкой, как в шапке
+            return (
+              <Fragment key={hasSelection ? rowId || index : `mobile-${index}`}>
+                {groupHeadings?.[index] ? (
+                  <div className="py-2">{groupHeadings[index]}</div>
+                ) : null}
+                <div className="space-y-2 py-3">
+                  {/* Галочка, имя и действия — одной строкой, как в шапке
                     карточки. Карандаш стоял отдельной строкой под именем, и
                     чтобы понять, что он правит, приходилось возвращаться
                     глазом наверх. */}
-                <div className="flex items-center gap-2">
-                  {hasReorder ? (
-                    <button
-                      aria-label={reorder!.handleLabel ?? "Reorder row"}
-                      className="shrink-0 cursor-grab text-muted-foreground disabled:opacity-40"
-                      disabled={reorder!.disabled}
-                      type="button"
-                    >
-                      <GripVerticalIcon className="h-4 w-4" />
-                    </button>
-                  ) : null}
-                  {hasSelection ? (
-                    <Checkbox
-                      aria-label={
-                        rowId
-                          ? selection!.getRowLabel(rowId)
-                          : (selection!.selectAllLabel ?? "Select row")
-                      }
-                      checked={
-                        rowId ? selection!.selectedIds.has(rowId) : false
-                      }
-                      className="shrink-0"
-                      disabled={selection!.disabled || !rowId}
-                      onCheckedChange={() => {
-                        if (rowId) selection!.onToggle(rowId)
-                      }}
-                    />
-                  ) : null}
-                  {titleCell ? (
-                    <div className="min-w-0 flex-1 text-[15px] font-medium">
-                      {titleCell}
-                    </div>
-                  ) : null}
-                  <div className="ml-auto shrink-0">{actionsCell}</div>
-                </div>
-                {/* Колонка без названия — это не данные, а управление:
+                  <div className="flex items-center gap-2">
+                    {hasReorder ? (
+                      <button
+                        aria-label={reorder!.handleLabel ?? "Reorder row"}
+                        className="shrink-0 cursor-grab text-muted-foreground disabled:opacity-40"
+                        disabled={reorder!.disabled}
+                        type="button"
+                      >
+                        <GripVerticalIcon className="h-4 w-4" />
+                      </button>
+                    ) : null}
+                    {hasSelection ? (
+                      <Checkbox
+                        aria-label={
+                          rowId
+                            ? selection!.getRowLabel(rowId)
+                            : (selection!.selectAllLabel ?? "Select row")
+                        }
+                        checked={
+                          rowId ? selection!.selectedIds.has(rowId) : false
+                        }
+                        className="shrink-0"
+                        disabled={selection!.disabled || !rowId}
+                        onCheckedChange={() => {
+                          if (rowId) selection!.onToggle(rowId)
+                        }}
+                      />
+                    ) : null}
+                    {titleCell ? (
+                      <div className="min-w-0 flex-1 text-[15px] font-medium">
+                        {titleCell}
+                      </div>
+                    ) : null}
+                    <div className="ml-auto shrink-0">{actionsCell}</div>
+                  </div>
+                  {/* Колонка без названия — это не данные, а управление:
                     выключатель, перезапуск. Ему отдельная строка под именем:
                     в одну строку с действиями получалось шесть кнопок подряд. */}
-                {controlCells.length > 0 ? (
-                  <div className="flex items-center gap-2">
-                    {controlCells.map((cell, cellIndex) => (
-                      <div className="min-w-0" key={`control-${cellIndex}`}>
-                        {cell}
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
+                  {controlCells.length > 0 ? (
+                    <div className="flex items-center gap-2">
+                      {controlCells.map((cell, cellIndex) => (
+                        <div className="min-w-0" key={`control-${cellIndex}`}>
+                          {cell}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
 
-                {restCells.map(({ cell, label }, cellIndex) => {
-                  if (!label) {
+                  {restCells.map(({ cell, label }, cellIndex) => {
+                    if (!label) {
+                      return (
+                        <div className="min-w-0" key={cellIndex}>
+                          {cell}
+                        </div>
+                      )
+                    }
+
                     return (
-                      <div className="min-w-0" key={cellIndex}>
-                        {cell}
+                      <div
+                        // 9rem, а не 7.5: «ГДЕ ИСПОЛЬЗУЕТСЯ» в верхнем регистре
+                        // занимает 124 px и в 120 переносилось на вторую строку,
+                        // из-за чего ряд переставал читаться рядом. Та же ширина,
+                        // что у подписей в подробностях, поэтому обе колонки на
+                        // странице стоят в линию.
+                        //
+                        // items-center, а не items-start: значение здесь — бейдж
+                        // или плашка выше строки подписи, и при выравнивании по
+                        // верху текст оказывался на пару пикселей ниже подписи.
+                        className="grid grid-cols-[minmax(0,9rem)_minmax(0,1fr)] items-center gap-2 text-sm"
+                        key={cellIndex}
+                      >
+                        <span className="text-xs text-muted-foreground uppercase">
+                          {label}
+                        </span>
+                        <div className="min-w-0 break-words">{cell}</div>
                       </div>
                     )
-                  }
+                  })}
 
-                  return (
-                    <div
-                      // 9rem, а не 7.5: «ГДЕ ИСПОЛЬЗУЕТСЯ» в верхнем регистре
-                      // занимает 124 px и в 120 переносилось на вторую строку,
-                      // из-за чего ряд переставал читаться рядом. Та же ширина,
-                      // что у подписей в подробностях, поэтому обе колонки на
-                      // странице стоят в линию.
-                      //
-                      // items-center, а не items-start: значение здесь — бейдж
-                      // или плашка выше строки подписи, и при выравнивании по
-                      // верху текст оказывался на пару пикселей ниже подписи.
-                      className="grid grid-cols-[minmax(0,9rem)_minmax(0,1fr)] items-center gap-2 text-sm"
-                      key={cellIndex}
-                    >
-                      <span className="text-xs text-muted-foreground uppercase">
-                        {label}
-                      </span>
-                      <div className="min-w-0 break-words">{cell}</div>
+                  {rowDetails?.[index] ? (
+                    <div className="rounded-md bg-muted/40 p-3">
+                      {rowDetails[index]}
                     </div>
-                  )
-                })}
-
-                {rowDetails?.[index] ? (
-                  <div className="rounded-md bg-muted/40 p-3">
-                    {rowDetails[index]}
-                  </div>
-                ) : null}
-              </div>
-            </Fragment>
-          )
-        })}
-      </div>
+                  ) : null}
+                </div>
+              </Fragment>
+            )
+          })}
+        </div>
+      ) : null}
     </>
   )
 }

@@ -16,24 +16,14 @@ import { semanticJsonEqual } from "../src/lib/semantic-json"
 describe("DNS server upsert helpers", () => {
   test("returning from a preset to custom restores the clean create draft", () => {
     const baseline = getDnsServerDraft()
-    const preset = getDnsServerPresetTransition(
-      "cloudflare",
-      baseline,
-      [],
-      []
-    )
+    const preset = getDnsServerPresetTransition("cloudflare", baseline, [], [])
     expect(preset).not.toBeNull()
 
     const presetDraft = {
       ...baseline,
       ...preset!.fields,
     }
-    const custom = getDnsServerPresetTransition(
-      "custom",
-      baseline,
-      [],
-      []
-    )
+    const custom = getDnsServerPresetTransition("custom", baseline, [], [])
     expect(custom).not.toBeNull()
 
     const restoredDraft = {
@@ -65,12 +55,7 @@ describe("DNS server upsert helpers", () => {
     )
     expect(preset).not.toBeNull()
 
-    const restored = getDnsServerPresetTransition(
-      "custom",
-      customDraft,
-      [],
-      []
-    )
+    const restored = getDnsServerPresetTransition("custom", customDraft, [], [])
     expect(restored?.fields).toEqual({
       displayName: "Домашний DNS",
       tag: "dns_home",
@@ -95,12 +80,7 @@ describe("DNS server upsert helpers", () => {
       detour: "vpn_backup",
     }
 
-    const restored = getDnsServerPresetTransition(
-      "custom",
-      customDraft,
-      [],
-      []
-    )
+    const restored = getDnsServerPresetTransition("custom", customDraft, [], [])
 
     expect(presetDraft.detour).toBe("vpn_backup")
     expect(restored?.fields.detour).toBe("vpn_primary")
@@ -166,6 +146,7 @@ describe("DNS server upsert helpers", () => {
       "create",
       {
         displayName: "Keenetic DNS",
+        domains: "",
         tag: "router",
         type: DnsServerType.keenetic,
         address: "1.1.1.1",
@@ -186,6 +167,7 @@ describe("DNS server upsert helpers", () => {
       "create",
       {
         displayName: "Cloudflare",
+        domains: "",
         tag: "cloudflare",
         type: DnsServerType.static,
         address: "1.1.1.1",
@@ -233,6 +215,7 @@ describe("DNS server upsert helpers", () => {
       "create",
       {
         displayName: "Cloudflare",
+        domains: "",
         tag: "cloudflare",
         type: DnsServerType.static,
         address: "1.1.1.1",
@@ -256,6 +239,7 @@ describe("DNS server upsert helpers", () => {
       "create",
       {
         displayName: "Cloudflare",
+        domains: "",
         tag: "cloudflare",
         type: DnsServerType.static,
         address: "1.1.1.1",
@@ -280,6 +264,7 @@ describe("DNS server upsert helpers", () => {
         "create",
         {
           displayName: "Office DNS",
+          domains: "",
           tag: "office_dns",
           type: DnsServerType.static,
           address: "192.0.2.53",

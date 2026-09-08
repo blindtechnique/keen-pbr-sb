@@ -434,7 +434,9 @@ RuntimeFirewallBackendTransactionResult escaped_transaction_failure(
 RuntimeFirewallWorkerAttemptResult execute_runtime_firewall_worker_attempt(
     const RuntimeFirewallWorkerAttemptInput& input,
     Firewall& firewall,
-    MetaUdp443ActivationBackendServices& meta_services) {
+    MetaUdp443ActivationBackendServices& meta_services,
+    const RouteFailureHealthSnapshot* failure_health,
+    const OutboundFamilyReachabilitySnapshot* family_reachability) {
     RuntimeFirewallWorkerAttemptResult result;
     result.operation_kind = input.operation_kind;
     initialize_owned_conntrack_cleanup_authority(result, input);
@@ -489,7 +491,7 @@ RuntimeFirewallWorkerAttemptResult execute_runtime_firewall_worker_attempt(
     result.transaction_executed = true;
     try {
         result.transaction = execute_runtime_firewall_backend_transaction(
-            input.transaction, firewall, recording_meta);
+            input.transaction, firewall, recording_meta, failure_health, family_reachability);
     } catch (const std::exception& error) {
         // The transaction function is itself non-throwing for backend faults.
         // Retain a final safety net so a future adapter regression cannot tear
@@ -531,20 +533,24 @@ RuntimeFirewallWorkerAttemptResult execute_runtime_firewall_worker_attempt(
     const RuntimeFirewallWorkerAttemptInput& input,
     Firewall& firewall,
     ConntrackManager& conntrack_manager,
-    NetlinkManager& netlink) {
+    NetlinkManager& netlink,
+    const RouteFailureHealthSnapshot* failure_health,
+    const OutboundFamilyReachabilitySnapshot* family_reachability) {
     SystemMetaUdp443ActivationBackendServices meta_services{
         conntrack_manager, netlink};
     return execute_runtime_firewall_worker_attempt(
-        input, firewall, meta_services, conntrack_manager);
+        input, firewall, meta_services, conntrack_manager, failure_health, family_reachability);
 }
 
 RuntimeFirewallWorkerAttemptResult execute_runtime_firewall_worker_attempt(
     const RuntimeFirewallWorkerAttemptInput& input,
     Firewall& firewall,
     MetaUdp443ActivationBackendServices& meta_services,
-    ConntrackManager& conntrack_manager) {
+    ConntrackManager& conntrack_manager,
+    const RouteFailureHealthSnapshot* failure_health,
+    const OutboundFamilyReachabilitySnapshot* family_reachability) {
     auto result = execute_runtime_firewall_worker_attempt(
-        input, firewall, meta_services);
+        input, firewall, meta_services, failure_health, family_reachability);
     cleanup_native_direct_egress_sources(
         input, conntrack_manager, result);
     cleanup_owned_conntrack_after_commit(

@@ -53,8 +53,11 @@ export function DnsCheckModal({
   useEffect(() => {
     if (open) {
       startPcCheck(false)
+    } else {
+      resetPcCheck()
     }
-  }, [open, startPcCheck])
+    return resetPcCheck
+  }, [open, resetPcCheck, startPcCheck])
 
   const command = pcCheckState.randomString
     ? `nslookup ${pcCheckState.randomString}.${DNS_CHECK_DOMAIN_SUFFIX}`
@@ -62,6 +65,7 @@ export function DnsCheckModal({
 
   const isBrowserSuccess = browserStatus === "success"
   const isPcSuccess = pcStatus === "pc-success"
+  const hasExpired = !pcCheckState.waiting && pcCheckState.showWarning
   const handleClose = () => {
     resetPcCheck()
     onOpenChange(false)
@@ -94,7 +98,14 @@ export function DnsCheckModal({
                 ) : browserStatus === "checking" ? (
                   <Loader2 className="h-4 w-4 animate-spin" />
                 ) : (
-                  <AlertCircle className="h-4 w-4 text-destructive" />
+                  <AlertCircle
+                    className={
+                      browserStatus === "browser-fail" ||
+                      browserStatus === "sse-fail"
+                        ? "h-4 w-4 text-warning-foreground"
+                        : "h-4 w-4 text-muted-foreground"
+                    }
+                  />
                 )
               }
               text={getBrowserStatusText(browserStatus, t)}
@@ -109,7 +120,7 @@ export function DnsCheckModal({
                   <AlertCircle className="h-4 w-4 text-muted-foreground" />
                 )
               }
-              text={getPcStatusText(isPcSuccess, pcCheckState.waiting, t)}
+              text={getPcStatusText(pcStatus, pcCheckState.waiting, t)}
             />
           </div>
 
@@ -126,9 +137,27 @@ export function DnsCheckModal({
             <Alert className="border-amber-500/30 bg-amber-500/5 text-amber-700 dark:text-amber-300">
               <AlertCircle className="text-amber-600 dark:text-amber-300" />
               <AlertDescription className="text-amber-700 dark:text-amber-300">
-                {t("overview.dnsCheck.modal.warning")}
+                {hasExpired
+                  ? t("overview.dnsCheck.modal.expired")
+                  : t("overview.dnsCheck.modal.warning")}
               </AlertDescription>
             </Alert>
+          ) : null}
+
+          {hasExpired || pcStatus === "sse-fail" ? (
+            <Button
+              className="w-full"
+              onClick={() => startPcCheck(false)}
+              variant="outline"
+            >
+              {t("overview.dnsCheck.card.runAgain")}
+            </Button>
+          ) : null}
+
+          {isPcSuccess && !isBrowserSuccess ? (
+            <p className="text-sm text-muted-foreground">
+              {t("overview.dnsCheck.modal.browserUnconfirmed")}
+            </p>
           ) : null}
 
           {isPcSuccess ? (
@@ -144,7 +173,7 @@ export function DnsCheckModal({
 
 function StatusLine({ icon, text }: { icon: React.ReactNode; text: string }) {
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex items-start gap-2 [&>svg]:mt-0.5 [&>svg]:shrink-0">
       {icon}
       <span>{text}</span>
     </div>
@@ -239,12 +268,16 @@ function getBrowserStatusText(
 }
 
 function getPcStatusText(
-  isPcSuccess: boolean,
+  status: DnsCheckStatus,
   isWaiting: boolean,
   t: (key: string) => string
 ) {
-  if (isPcSuccess) {
+  if (status === "pc-success") {
     return t("overview.dnsCheck.status.manualSuccess")
+  }
+
+  if (status === "sse-fail") {
+    return t("overview.dnsCheck.status.sseUnavailable")
   }
 
   if (isWaiting) {

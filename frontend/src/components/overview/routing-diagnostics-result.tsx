@@ -23,6 +23,8 @@ import {
   getVisibleRuleDiagnostics,
 } from "./routing-diagnostics-utils"
 import { RoutingLegend } from "./routing-legend"
+import { RoutingEvidenceDetails } from "./routing-evidence-details"
+import type { RoutingHttpProbeControls } from "./routing-http-probe-state"
 
 const emptyRuleDiagnostics: RoutingTestResponse["rule_diagnostics"] = []
 
@@ -30,11 +32,12 @@ export function RoutingDiagnosticsResult({
   diagnostics,
   lists,
   outbounds,
+  ...httpControls
 }: {
   diagnostics: RoutingTestResponse
   lists?: ConfigObject["lists"]
   outbounds?: ConfigObject["outbounds"]
-}) {
+} & RoutingHttpProbeControls) {
   const { t } = useTranslation()
   const [showAllRules, setShowAllRules] = useState(false)
   const ruleDiagnostics = diagnostics.rule_diagnostics ?? emptyRuleDiagnostics
@@ -170,6 +173,12 @@ export function RoutingDiagnosticsResult({
           </div>
         </div>
       ) : null}
+
+      <RoutingEvidenceDetails
+        diagnostics={diagnostics}
+        lists={lists}
+        {...httpControls}
+      />
 
       {ruleDiagnostics.length > 0 ? (
         <div className="space-y-3">

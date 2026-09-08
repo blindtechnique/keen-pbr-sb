@@ -24,18 +24,14 @@ export function getCatalogSetupInstallState(
     (list) => !list.already_installed
   )
   const allInstalled = installed.length > 0 && pending.length === 0
-  const policyChanges =
-    (preview.summary.route_rules?.length ?? 0) > 0 ||
-    (preview.summary.dns_rules?.length ?? 0) > 0 ||
-    Boolean(preview.summary.route_rule) ||
-    Boolean(preview.summary.dns_rule) ||
-    Boolean(preview.summary.dns_server?.created) ||
-    Boolean(preview.summary.blackhole?.created)
   return {
     installed,
     pending,
     allInstalled,
-    noChanges: allInstalled && !policyChanges,
+    // Existing lists can still receive source/inline updates without new
+    // route or DNS summaries. Only the authoritative candidate identifies a
+    // no-op; the summaries describe what to display, not whether to apply.
+    noChanges: preview.base_revision === preview.candidate_revision,
   } as const
 }
 

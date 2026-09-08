@@ -1,5 +1,7 @@
 add_executable(keen-pbr-tests
   test_main.cpp
+  test_firewall_counter_evidence.cpp
+  test_routing_firewall_evidence_view.cpp
   test_firewall_verifier.cpp
   test_firewall_runtime.cpp
   test_firewall_cleanup_absence.cpp
@@ -43,6 +45,10 @@ add_executable(keen-pbr-tests
   ../src/update/component_transaction_journal.cpp
   test_component_capture.cpp
   ../src/update/component_capture.cpp
+  test_component_opkg_metadata.cpp
+  ../src/update/component_opkg_metadata.cpp
+  test_nfqws_script_effects.cpp
+  ../src/update/nfqws_script_effects.cpp
   test_component_feed_index.cpp
   ../src/update/component_feed_index.cpp
   test_component_ipk_store.cpp
@@ -119,6 +125,7 @@ add_executable(keen-pbr-tests
   test_dns_probe_server.cpp
   test_list_set_usage.cpp
   test_exit_address_check.cpp
+  test_routing_http_probe.cpp
   test_list_service.cpp
   test_cache_manager_durability.cpp
   test_ipc_control_service.cpp
@@ -126,11 +133,15 @@ add_executable(keen-pbr-tests
   test_status_command.cpp
   test_resolver_fallback.cpp
   test_list_parser.cpp
+  test_list_preview.cpp
+  test_list_source_decoder.cpp
   test_list_streamer.cpp
   test_srs_decoder.cpp
   test_http_client.cpp
   test_interface_probe.cpp
   test_config_validation.cpp
+  test_config_validation_complete_metadata.cpp
+  test_config_passthrough.cpp
   test_config_store.cpp
   test_catalog_setup_planner.cpp
   test_nfqws_list_match.cpp
@@ -139,6 +150,10 @@ add_executable(keen-pbr-tests
   test_subscription_import_plan.cpp
   test_subscription_transport_naming.cpp
   test_subscription_store.cpp
+  test_subscription_refresh.cpp
+  test_subscription_backup.cpp
+  test_backup_subscriptions.cpp
+  test_subscription_notices.cpp
   test_sing_box_install_policy.cpp
   test_sing_box_install_observation.cpp
   test_sing_box_release_plan.cpp
@@ -148,6 +163,8 @@ add_executable(keen-pbr-tests
   test_dependency_analysis.cpp
   test_list_delete_planner.cpp
   test_routing_state.cpp
+  test_route_failure_policy.cpp
+  test_route_failure_policy_firewall.cpp
   test_raw_rtnetlink_codec.cpp
   test_runtime_routing_exact_owner.cpp
   test_runtime_routing_operation_owner.cpp
@@ -162,6 +179,7 @@ add_executable(keen-pbr-tests
   test_api_diagnostic_tasks.cpp
   test_api_dependency_analysis.cpp
   test_connection_query.cpp
+  test_connection_history.cpp
   test_conntrack_event_monitor.cpp
   test_conntrack_manager.cpp
   test_idle_stall_detector.cpp
@@ -176,9 +194,12 @@ add_executable(keen-pbr-tests
   test_api_status_events.cpp
   test_api_dns_test.cpp
   test_api_logs.cpp
+  test_service_process_restart.cpp
   test_api_remote_access.cpp
   test_api_transports.cpp
   test_api_subscriptions.cpp
+  test_api_operation_errors.cpp
+  test_api_config_validation_json.cpp
   test_api_registry_check.cpp
   test_api_transport_exit_check.cpp
   test_openapi_runtime_contracts.cpp
@@ -210,7 +231,10 @@ add_executable(keen-pbr-tests
   test_probe_candidates.cpp
   test_host_coverage.cpp
   test_entry_review.cpp
+  test_tunnel_probe_review.cpp
+  test_tunnel_probe_review_view.cpp
   test_log_follower.cpp
+  test_nfqws_log_reader.cpp
   test_list_shrink_guard.cpp
   test_tunnel_candidate_scan.cpp
   test_scan_tunnel_candidates.cpp
@@ -233,15 +257,21 @@ add_executable(keen-pbr-tests
   test_runtime_state_machine.cpp
   test_runtime_state_store.cpp
   test_router_info_cache.cpp
+  test_router_info_metadata.cpp
+  test_router_local_metrics.cpp
   test_urltest_manager.cpp
   test_port_spec_util.cpp
   test_policy_rule.cpp
+  test_policy_rule_evidence.cpp
+  test_routing_policy_evidence_view.cpp
   test_route_table.cpp
   test_pid_file.cpp
   test_crash_diagnostics.cpp
   ../src/config/config.cpp
   ../src/daemon/config_store.cpp
   ../src/api/router_info_cache.cpp
+  ../src/api/router_info_metadata.cpp
+  ../src/api/router_local_metrics.cpp
   ../src/daemon/daemon_core.cpp
   ../src/daemon/conntrack_cleanup_coordinator.cpp
   ../src/daemon/idle_stall_supervisor.cpp
@@ -278,6 +308,9 @@ add_executable(keen-pbr-tests
   ../src/config/subscription_import_plan.cpp
   ../src/config/subscription_transport_naming.cpp
   ../src/config/subscription_store.cpp
+  ../src/config/subscription_refresh.cpp
+  ../src/config/subscription_backup.cpp
+  ../src/log/nfqws_log_maintenance.cpp
   ../src/util/last_command_failure.cpp
   ../src/backup/persistent_snapshot.cpp
   ../src/backup/restore_journal.cpp
@@ -300,6 +333,7 @@ add_executable(keen-pbr-tests
   ../src/firewall/iptables_verifier.cpp
   ../src/firewall/nftables_verifier.cpp
   ../src/firewall/firewall_verifier.cpp
+  ../src/firewall/rule_counter_evidence.cpp
   ../src/firewall/firewall.cpp
   ../src/firewall/firewall_runtime.cpp
   ../src/firewall/port_spec_util.cpp
@@ -315,6 +349,8 @@ add_executable(keen-pbr-tests
   ../src/api/auth_runtime.cpp
   ../src/firewall/ipset_restore_pipe.cpp
   ../src/log/logger.cpp
+  ../src/log/notification_state.cpp
+  test_notification_state.cpp
   ../src/log/trace.cpp
   ../src/dns/dnsmasq_gen.cpp
   ../src/dns/dnsmasq_access_policy.cpp
@@ -326,6 +362,7 @@ add_executable(keen-pbr-tests
   ../src/daemon/system_resolver_hook.cpp
   ../src/dns/dns_probe_server.cpp
   ../src/cache/cache_manager.cpp
+  ../src/lists/list_source_decoder.cpp
   ../src/ipc/ipc_control_service.cpp
   ../src/ipc/control_protocol.cpp
   ../src/ipc/control_client.cpp
@@ -343,6 +380,7 @@ add_executable(keen-pbr-tests
   ../src/lists/list_set_usage.cpp
   ../src/lists/srs_decoder.cpp
   ../src/config/list_parser.cpp
+  ../src/lists/list_preview.cpp
   ../src/cmd/test_routing.cpp
   ../src/cmd/status.cpp
   ../src/daemon/list_service.cpp
@@ -432,10 +470,12 @@ add_executable(keen-pbr-tests
   ../src/health/circuit_breaker.cpp
   ../src/health/interface_probe.cpp
   ../src/health/exit_address_check.cpp
+  ../src/health/routing_http_probe.cpp
   ../src/health/differential_probe.cpp
   ../src/health/probe_candidates.cpp
   ../src/health/host_coverage.cpp
   ../src/health/entry_review.cpp
+  ../src/health/tunnel_probe_review.cpp
   ../src/health/log_follower.cpp
   ../src/health/nfqws_scan_source.cpp
   ../src/health/tunnel_probe_automation.cpp
@@ -451,6 +491,7 @@ add_executable(keen-pbr-tests
   ../src/routing/netlink.cpp
   ../src/routing/raw_rtnetlink_codec.cpp
   ../src/routing/fib_lookup.cpp
+  ../src/routing/policy_rule_evidence.cpp
   ../src/routing/interface_monitor.cpp
   ../src/util/blocking_executor.cpp
   ../src/util/base64.cpp
@@ -481,9 +522,11 @@ add_executable(keen-pbr-tests
 # without relinking the daemon/API monolith.
 add_executable(keen-pbr-runtime-routing-exact-tests
   test_main.cpp
+  test_policy_rule_evidence.cpp
   test_raw_rtnetlink_codec.cpp
   test_runtime_routing_transaction.cpp
   test_runtime_routing_exact_owner.cpp
+  ../src/routing/policy_rule_evidence.cpp
   ../src/routing/netlink.cpp
   ../src/routing/raw_rtnetlink_codec.cpp
   ../src/routing/policy_rule.cpp
@@ -527,11 +570,19 @@ add_test(
 # cache lifetime and GC race checks.
 add_executable(keen-pbr-cache-generation-tests
   test_main.cpp
+  test_list_parser.cpp
+  test_list_refresh_task.cpp
   test_cache_manager_durability.cpp
   test_list_streamer.cpp
+  test_list_service.cpp
+  test_list_shrink_guard.cpp
   ../src/cache/cache_manager.cpp
+  ../src/lists/list_source_decoder.cpp
+  ../src/config/config.cpp
   ../src/config/config_writer.cpp
   ../src/config/list_parser.cpp
+  ../src/daemon/list_service.cpp
+  ../src/runtime/list_refresh_task.cpp
   ../src/http/http_client.cpp
   ../src/http/http_transport.cpp
   ../src/http/curl_runtime.cpp
@@ -540,6 +591,7 @@ add_executable(keen-pbr-cache-generation-tests
   ../src/lists/srs_decoder.cpp
   ../src/log/logger.cpp
   ../src/log/trace.cpp
+  ../src/util/traced_mutex.cpp
 )
 set_target_properties(keen-pbr-cache-generation-tests PROPERTIES
   CXX_STANDARD 17
@@ -562,7 +614,11 @@ target_link_libraries(keen-pbr-cache-generation-tests PRIVATE
   PkgConfig::ZLIB
   Threads::Threads
 )
+target_compile_options(keen-pbr-cache-generation-tests PRIVATE
+  -ffunction-sections -fdata-sections)
 keen_pbr_apply_project_options(keen-pbr-cache-generation-tests)
+target_link_options(keen-pbr-cache-generation-tests PRIVATE
+  -Wl,--gc-sections -Wl,--no-export-dynamic)
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
   target_link_libraries(keen-pbr-cache-generation-tests PRIVATE stdc++fs)
 endif()
@@ -878,8 +934,10 @@ add_executable(keen-pbr-rescue-tests
   test_rescue_integrity.cpp
   test_rollback_availability.cpp
   test_package_footprint.cpp
+  test_component_boot_recovery.cpp
   ../src/update/rollback_availability.cpp
   ../src/update/package_footprint.cpp
+  ../src/update/component_boot_recovery.cpp
 )
 set_target_properties(keen-pbr-rescue-tests PROPERTIES
   CXX_STANDARD 17
@@ -904,6 +962,43 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_L
   target_link_libraries(keen-pbr-rescue-tests PRIVATE stdc++fs)
 endif()
 add_test(NAME keen-pbr-rescue-tests COMMAND keen-pbr-rescue-tests)
+
+# External component capture/IPK recovery without starting services, invoking a
+# real package manager or linking the daemon/API test suite.
+add_executable(keen-pbr-component-recovery-tests EXCLUDE_FROM_ALL
+  test_main.cpp
+  test_component_capture.cpp
+  test_component_opkg_metadata.cpp
+  test_component_package_transaction.cpp
+  test_nfqws_script_effects.cpp
+  test_component_ipk_store.cpp
+  test_component_feed_index.cpp
+  test_component_transaction_journal.cpp
+  test_component_boot_recovery.cpp
+  test_package_footprint.cpp
+  ../src/update/component_capture.cpp
+  ../src/update/component_package_transaction.cpp
+  ../src/update/component_opkg_metadata.cpp
+  ../src/update/component_ipk_store.cpp
+  ../src/update/nfqws_script_effects.cpp
+  ../src/update/component_feed_index.cpp
+  ../src/update/component_transaction_journal.cpp
+  ../src/update/component_boot_recovery.cpp
+  ../src/update/package_footprint.cpp
+  ../src/config/config_writer.cpp
+)
+set_target_properties(keen-pbr-component-recovery-tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+target_include_directories(keen-pbr-component-recovery-tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/third_party/doctest ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(keen-pbr-component-recovery-tests PRIVATE KEEN_PBR3_TESTING)
+target_link_libraries(keen-pbr-component-recovery-tests PRIVATE
+  nlohmann_json::nlohmann_json fmt::fmt-header-only PkgConfig::ZLIB Threads::Threads)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+  target_link_libraries(keen-pbr-component-recovery-tests PRIVATE stdc++fs)
+endif()
+keen_pbr_apply_project_options(keen-pbr-component-recovery-tests)
+add_test(NAME keen-pbr-component-recovery-tests COMMAND keen-pbr-component-recovery-tests)
 
 # Keep the asynchronous Keenetic DNS coordinator independently buildable.
 # This exercises its concurrency and generation-fence contract without
@@ -945,13 +1040,71 @@ add_test(
   COMMAND keen-pbr-keenetic-dns-refresh-tests
 )
 
+# Pull-only task diagnostics: exercise actual timerfd and registry/API projection
+# without linking the daemon or the unrelated HTTP/authentication stack.
+add_executable(keen-pbr-background-task-diagnostics-tests EXCLUDE_FROM_ALL
+  test_main.cpp
+  test_periodic_task_metrics.cpp
+  test_scheduler.cpp
+  scheduler_fd_diagnostic_test_stubs.cpp
+  ../src/runtime/periodic_task_metrics.cpp
+  ../src/daemon/scheduler.cpp
+  ../src/log/logger.cpp
+  ../src/log/trace.cpp
+  ../src/util/traced_mutex.cpp
+)
+set_target_properties(keen-pbr-background-task-diagnostics-tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+target_compile_definitions(keen-pbr-background-task-diagnostics-tests PRIVATE
+  KEEN_PBR3_TESTING KEEN_PBR_TASK_DIAGNOSTICS_FOCUSED)
+target_include_directories(keen-pbr-background-task-diagnostics-tests PRIVATE
+  ${KEEN_PBR_GENERATED_INCLUDE_DIR}
+  ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/third_party/doctest
+  ${LIBNL_INCLUDE_DIRS} ${LIBNL_ROUTE_INCLUDE_DIRS})
+target_link_libraries(keen-pbr-background-task-diagnostics-tests PRIVATE
+  nlohmann_json::nlohmann_json fmt::fmt-header-only Threads::Threads)
+if(WITH_API)
+  target_sources(keen-pbr-background-task-diagnostics-tests PRIVATE
+    test_api_diagnostic_tasks.cpp
+    ../src/api/handler_diagnostic_tasks.cpp
+    ../src/api/handler_runtime_inventory.cpp
+    ../src/api/health_response.cpp
+    ../src/api/status_stream.cpp
+    ../src/api/sse_broadcaster.cpp
+    ../src/runtime/lifecycle_operation.cpp)
+  target_compile_definitions(keen-pbr-background-task-diagnostics-tests PRIVATE WITH_API)
+  target_link_libraries(keen-pbr-background-task-diagnostics-tests PRIVATE httplib::httplib)
+endif()
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+  target_link_libraries(keen-pbr-background-task-diagnostics-tests PRIVATE stdc++fs)
+endif()
+target_compile_options(keen-pbr-background-task-diagnostics-tests PRIVATE
+  -ffunction-sections -fdata-sections)
+target_link_options(keen-pbr-background-task-diagnostics-tests PRIVATE
+  -Wl,--gc-sections -Wl,--no-export-dynamic)
+keen_pbr_apply_project_options(keen-pbr-background-task-diagnostics-tests)
+# This optional focused executable is run explicitly after building its target.
+# Do not register an EXCLUDE_FROM_ALL binary in default CTest: the same source
+# tests already belong to keen-pbr-tests, and CI must not expect an unbuilt file.
+
 # Keep the router overview's RCI cache independently buildable. These tests
-# exercise cold-load single-flight, stale-while-refresh and failure retry
-# without linking the API server or performing any real network requests.
+# exercise cold-load single-flight, event invalidation and failure retry.
+# The real netlink adapter and SSE broadcaster are included without linking
+# the daemon/API server or performing RCI requests.
 add_executable(keen-pbr-router-info-cache-tests
   test_main.cpp
   test_router_info_cache.cpp
+  test_router_info_metadata.cpp
+  test_router_local_metrics.cpp
+  test_interface_monitor.cpp
+  ../src/routing/interface_monitor.cpp
   ../src/api/router_info_cache.cpp
+  ../src/api/router_info_metadata.cpp
+  ../src/api/router_local_metrics.cpp
+  ../src/log/logger.cpp
+  ../src/log/trace.cpp
+  ../src/util/traced_mutex.cpp
 )
 set_target_properties(keen-pbr-router-info-cache-tests PROPERTIES
   CXX_STANDARD 17
@@ -959,13 +1112,27 @@ set_target_properties(keen-pbr-router-info-cache-tests PROPERTIES
   CXX_EXTENSIONS NO
 )
 target_include_directories(keen-pbr-router-info-cache-tests PRIVATE
+  ${KEEN_PBR_GENERATED_INCLUDE_DIR}
+  ${CMAKE_SOURCE_DIR}/include
   ${CMAKE_SOURCE_DIR}/src
   ${CMAKE_SOURCE_DIR}/third_party/doctest
 )
 target_link_libraries(keen-pbr-router-info-cache-tests PRIVATE
   nlohmann_json::nlohmann_json
+  fmt::fmt-header-only PkgConfig::LIBNL PkgConfig::LIBNL_ROUTE
   Threads::Threads
 )
+target_compile_definitions(keen-pbr-router-info-cache-tests PRIVATE KEEN_PBR3_TESTING)
+if(WITH_API)
+  target_sources(keen-pbr-router-info-cache-tests PRIVATE
+    test_status_stream.cpp
+    ../src/api/status_stream.cpp
+    ../src/api/sse_broadcaster.cpp)
+  target_compile_definitions(keen-pbr-router-info-cache-tests PRIVATE WITH_API)
+endif()
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+  target_link_libraries(keen-pbr-router-info-cache-tests PRIVATE stdc++fs)
+endif()
 keen_pbr_apply_project_options(keen-pbr-router-info-cache-tests)
 add_test(
   NAME keen-pbr-router-info-cache-tests
@@ -1149,6 +1316,7 @@ add_executable(keen-pbr-runtime-resolver-generation-tests
   test_resolver_stream_attempt_owner.cpp
   test_runtime_firewall_lifecycle_resolver_attempt.cpp
   ../src/cache/cache_manager.cpp
+  ../src/lists/list_source_decoder.cpp
   ../src/daemon/runtime_resolver_generation_snapshot.cpp
   ../src/daemon/resolver_stream_attempt_owner.cpp
   ../src/daemon/runtime_firewall_lifecycle_resolver_attempt.cpp
@@ -1259,6 +1427,200 @@ target_link_options(test_config_store PRIVATE
 )
 keen_pbr_apply_project_options(test_config_store)
 add_test(NAME test_config_store COMMAND test_config_store)
+
+# Exercise per-rule primary/fallback selection together with its real config,
+# dependency, routing-state and OpenConnect firewall consumers. Function-level
+# collection keeps unused daemon/firewall execution paths out of this target.
+add_executable(keen-pbr-route-failure-policy-tests
+  test_main.cpp
+  test_route_failure_policy.cpp
+  test_route_failure_policy_firewall.cpp
+  test_config_validation.cpp
+  test_config_validation_complete_metadata.cpp
+  test_api_config_validation_json.cpp
+  test_dns_server.cpp
+  test_config_migration_history.cpp
+  test_config_backup_migration.cpp
+  test_dependency_analysis.cpp
+  test_outbound_delete.cpp
+  test_routing_state.cpp
+  ../src/config/config.cpp
+  ../src/config/dependency_analysis.cpp
+  ../src/config/outbound_delete.cpp
+  ../src/config/list_parser.cpp
+  ../src/config/routing_state.cpp
+  ../src/dns/dns_probe_server.cpp
+  ../src/dns/dns_server.cpp
+  ../src/firewall/firewall_runtime.cpp
+  ../src/firewall/port_spec_util.cpp
+  ../src/http/curl_runtime.cpp
+  ../src/http/http_client.cpp
+  ../src/http/http_transport.cpp
+  ../src/keenetic/internal_vpn_ingress_resolver.cpp
+  ../src/keenetic/ndms_rci_json_resource.cpp
+  ../src/keenetic/ndms_version_resource.cpp
+  ../src/keenetic/ndms_version_resource_production.cpp
+  ../src/keenetic/ndms_version_projection.cpp
+  ../src/keenetic/ndms_version_projection_production.cpp
+  ../src/log/logger.cpp
+  ../src/log/trace.cpp
+  ../src/routing/firewall_state.cpp
+  ../src/routing/netlink.cpp
+  ../src/routing/raw_rtnetlink_codec.cpp
+  ../src/routing/policy_rule.cpp
+  ../src/routing/route_table.cpp
+  ../src/routing/target.cpp
+  ../src/util/system_info.cpp
+  ../src/util/traced_mutex.cpp
+)
+set_target_properties(keen-pbr-route-failure-policy-tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+target_compile_definitions(keen-pbr-route-failure-policy-tests PRIVATE
+  KEEN_PBR3_TESTING)
+if(USE_KEENETIC_API)
+  target_compile_definitions(keen-pbr-route-failure-policy-tests PRIVATE USE_KEENETIC_API)
+endif()
+target_include_directories(keen-pbr-route-failure-policy-tests PRIVATE
+  ${KEEN_PBR_GENERATED_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/third_party/doctest
+  ${LIBNL_INCLUDE_DIRS} ${LIBNL_ROUTE_INCLUDE_DIRS})
+target_link_libraries(keen-pbr-route-failure-policy-tests PRIVATE
+  nlohmann_json::nlohmann_json fmt::fmt-header-only
+  ${KEEN_PBR_CURL_TARGET} PkgConfig::LIBNL PkgConfig::LIBNL_ROUTE
+  Threads::Threads)
+target_compile_options(keen-pbr-route-failure-policy-tests PRIVATE
+  -ffunction-sections -fdata-sections)
+target_link_options(keen-pbr-route-failure-policy-tests PRIVATE -Wl,--gc-sections)
+keen_pbr_apply_project_options(keen-pbr-route-failure-policy-tests)
+# The production crash-reporting -rdynamic would retain every exported
+# firewall function despite --gc-sections. This focused executable needs only
+# its tested consumers, not the complete daemon dependency graph.
+target_link_options(keen-pbr-route-failure-policy-tests PRIVATE -Wl,--no-export-dynamic)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+  target_link_libraries(keen-pbr-route-failure-policy-tests PRIVATE stdc++fs)
+endif()
+add_test(NAME keen-pbr-route-failure-policy-tests COMMAND keen-pbr-route-failure-policy-tests)
+
+# Exercise list-source selection, empty-list matches and per-family routing
+# together without the daemon/API monolith or a live router. Build every
+# required typed consumer from current headers; do not reuse a private archive.
+# These cases are already in the main suite. Keep this manually selected
+# target out of the default build/CTest so CI does not compile them twice.
+add_executable(keen-pbr-routing-list-review-tests EXCLUDE_FROM_ALL
+  test_main.cpp
+  test_firewall_counter_evidence.cpp
+  test_iptables_builder.cpp
+  test_nftables_builder.cpp
+  test_runtime_state_machine.cpp
+  test_test_routing.cpp
+  test_firewall_verifier.cpp
+  test_firewall_runtime.cpp
+  test_list_streamer.cpp
+  test_cache_manager_durability.cpp
+  test_dnsmasq_gen.cpp
+  test_internal_vpn_server_resolver.cpp
+  test_nfqws_log_reader.cpp
+  test_catalog_setup_planner.cpp
+  test_sing_box_transport_pause.cpp
+  test_runtime_route_health_plan.cpp
+  test_routing_state.cpp
+  ../src/cache/cache_manager.cpp
+  ../src/lists/list_source_decoder.cpp
+  ../src/cmd/test_routing.cpp
+  ../src/daemon/config_store.cpp
+  ../src/config/config.cpp
+  ../src/config/config_writer.cpp
+  ../src/config/list_parser.cpp
+  ../src/config/routing_state.cpp
+  ../src/daemon/runtime_route_health_plan.cpp
+  ../src/dns/dns_router.cpp
+  ../src/dns/dns_probe_server.cpp
+  ../src/dns/dns_server.cpp
+  ../src/dns/dnsmasq_access_policy.cpp
+  ../src/dns/dnsmasq_gen.cpp
+  ../src/dns/keenetic_dns.cpp
+  ../src/firewall/firewall.cpp
+  ../src/firewall/firewall_runtime.cpp
+  ../src/firewall/iptables.cpp
+  ../src/firewall/ipset_restore_pipe.cpp
+  ../src/firewall/nftables.cpp
+  ../src/firewall/nft_batch_pipe.cpp
+  ../src/firewall/firewall_verifier.cpp
+  ../src/firewall/rule_counter_evidence.cpp
+  ../src/firewall/iptables_verifier.cpp
+  ../src/firewall/nftables_verifier.cpp
+  ../src/firewall/port_spec_util.cpp
+  ../src/firewall/ppe_deoffload.cpp
+  ../src/firewall/ttl_bypass.cpp
+  ../src/http/curl_runtime.cpp
+  ../src/health/routing_health_checker.cpp
+  ../src/http/http_client.cpp
+  ../src/http/http_transport.cpp
+  ../src/keenetic/internal_vpn_ingress_resolver.cpp
+  ../src/keenetic/internal_vpn_server_resolver.cpp
+  ../src/keenetic/ndms_interface_inventory.cpp
+  ../src/keenetic/ndms_wireguard_identity.cpp
+  ../src/keenetic/ndms_rci_json_resource.cpp
+  ../src/keenetic/ndms_version_resource.cpp
+  ../src/keenetic/ndms_version_resource_production.cpp
+  ../src/keenetic/ndms_version_projection.cpp
+  ../src/keenetic/ndms_version_projection_production.cpp
+  ../src/lists/list_set_usage.cpp
+  ../src/lists/ipset.cpp
+  ../src/lists/kernel_set_tester.cpp
+  ../src/lists/list_shrink_guard.cpp
+  ../src/lists/list_streamer.cpp
+  ../src/lists/srs_decoder.cpp
+  ../src/log/logger.cpp
+  ../src/log/trace.cpp
+  ../src/routing/firewall_state.cpp
+  ../src/routing/interface_monitor.cpp
+  ../src/routing/netlink.cpp
+  ../src/routing/raw_rtnetlink_codec.cpp
+  ../src/routing/policy_rule.cpp
+  ../src/routing/route_table.cpp
+  ../src/routing/routing_verifier.cpp
+  ../src/routing/target.cpp
+  ../src/runtime/nfqws_runtime_contract.cpp
+  ../src/runtime/runtime_state_machine.cpp
+  ../src/setup/catalog_setup_planner.cpp
+  ../src/update/sing_box_transport_pause.cpp
+  ../src/util/firewall_backend_utils.cpp
+  ../src/util/blocking_executor.cpp
+  ../src/util/ipv6_support.cpp
+  ../src/util/last_command_failure.cpp
+  ../src/util/network_routes.cpp
+  ../src/util/nfqws_validator.cpp
+  ../src/util/system_info.cpp
+  ../src/util/traced_mutex.cpp
+)
+set_target_properties(keen-pbr-routing-list-review-tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+target_compile_definitions(keen-pbr-routing-list-review-tests PRIVATE
+  KEEN_PBR3_TESTING USE_KEENETIC_API)
+if(WITH_API)
+  target_compile_definitions(keen-pbr-routing-list-review-tests PRIVATE WITH_API)
+  target_sources(keen-pbr-routing-list-review-tests PRIVATE
+    test_runtime_outbound_state.cpp ../src/health/runtime_outbound_state.cpp
+    ../src/health/circuit_breaker.cpp)
+endif()
+target_include_directories(keen-pbr-routing-list-review-tests PRIVATE
+  $<TARGET_PROPERTY:keen-pbr,INCLUDE_DIRECTORIES>
+  ${KEEN_PBR_GENERATED_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/third_party/doctest
+  ${LIBNL_INCLUDE_DIRS} ${LIBNL_ROUTE_INCLUDE_DIRS})
+target_link_libraries(keen-pbr-routing-list-review-tests PRIVATE
+  nlohmann_json::nlohmann_json fmt::fmt-header-only
+  ${KEEN_PBR_CURL_TARGET} PkgConfig::ZLIB PkgConfig::LIBNL
+  PkgConfig::LIBNL_ROUTE Threads::Threads ${LIBRESOLV})
+target_compile_options(keen-pbr-routing-list-review-tests PRIVATE
+  -ffunction-sections -fdata-sections)
+keen_pbr_apply_project_options(keen-pbr-routing-list-review-tests)
+target_link_options(keen-pbr-routing-list-review-tests PRIVATE
+  -Wl,--gc-sections -Wl,--no-export-dynamic)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+  target_link_libraries(keen-pbr-routing-list-review-tests PRIVATE stdc++fs)
+endif()
 
 # Keep the Unix control ingress owner independently runnable. Business
 # dispatch remains in Daemon; this target proves framing, peer transfer,
@@ -1415,6 +1777,7 @@ add_executable(keen-pbr-internal-vpn-resolution-cache-tests
   test_internal_vpn_resolution_cache.cpp
   test_runtime_internal_vpn_lkg_store.cpp
   test_runtime_cold_boot_publication.cpp
+  ../src/dns/dnsmasq_access_policy.cpp
   ../src/daemon/internal_vpn_resolution_cache.cpp
   ../src/daemon/runtime_cold_boot_publication.cpp
   ../src/daemon/runtime_firewall_core_publication.cpp
@@ -1553,6 +1916,309 @@ add_test(
   NAME keen-pbr-api-runtime-lifecycle-tests
   COMMAND keen-pbr-api-runtime-lifecycle-tests
 )
+
+# Check additive API response metadata without rebuilding the daemon/API
+# monolith after every generated schema change.
+if(WITH_API)
+  add_executable(keen-pbr-api-operation-errors-tests
+    test_main.cpp
+    test_api_operation_errors.cpp
+    test_api_config_validation_json.cpp
+    test_nfqws_validator.cpp
+    test_api_health_routing.cpp
+    test_list_refresh_request.cpp
+    ../src/api/handler_health_routing.cpp
+    ../src/api/handler_lists_refresh.cpp
+    ../src/health/routing_health_checker.cpp
+    ../src/firewall/ppe_deoffload.cpp
+    ../src/util/nfqws_validator.cpp
+  )
+  set_target_properties(keen-pbr-api-operation-errors-tests PROPERTIES
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+  target_compile_definitions(keen-pbr-api-operation-errors-tests PRIVATE WITH_API)
+  target_include_directories(keen-pbr-api-operation-errors-tests PRIVATE
+    ${KEEN_PBR_GENERATED_INCLUDE_DIR}
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/doctest
+    ${LIBNL_INCLUDE_DIRS}
+    ${LIBNL_ROUTE_INCLUDE_DIRS}
+  )
+  target_link_libraries(keen-pbr-api-operation-errors-tests PRIVATE
+    nlohmann_json::nlohmann_json fmt::fmt-header-only Threads::Threads)
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+    target_link_libraries(keen-pbr-api-operation-errors-tests PRIVATE stdc++fs)
+  endif()
+  target_compile_options(keen-pbr-api-operation-errors-tests PRIVATE
+    -ffunction-sections -fdata-sections)
+  keen_pbr_apply_project_options(keen-pbr-api-operation-errors-tests)
+  # Exercise the production parser without retaining server registration and
+  # its unrelated API/daemon dependencies in this focused executable.
+  target_link_options(keen-pbr-api-operation-errors-tests PRIVATE
+    -Wl,--gc-sections -Wl,--no-export-dynamic)
+  add_test(NAME keen-pbr-api-operation-errors-tests
+    COMMAND keen-pbr-api-operation-errors-tests)
+
+  # Notification preferences have no daemon/runtime mutation dependency. Keep
+  # their bounded persistence and HTTP/SSE handler behavior in a focused gate.
+  add_executable(keen-pbr-notifications-tests
+    test_main.cpp
+    test_notification_state.cpp
+    test_api_notifications.cpp
+    test_service_process_restart.cpp
+    ../src/log/notification_state.cpp
+    ../src/config/config_writer.cpp
+    ../src/api/handler_logs.cpp
+    ../src/api/handler_reload.cpp
+    ../src/api/status_stream.cpp
+    ../src/api/sse_broadcaster.cpp
+    ../src/log/file_sink.cpp
+    ../src/log/logger.cpp
+    ../src/log/trace.cpp
+    ../src/util/last_command_failure.cpp
+    ../src/util/traced_mutex.cpp
+  )
+  set_target_properties(keen-pbr-notifications-tests PROPERTIES
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+  target_compile_definitions(keen-pbr-notifications-tests PRIVATE
+    WITH_API KEEN_PBR3_TESTING)
+  target_include_directories(keen-pbr-notifications-tests PRIVATE
+    ${KEEN_PBR_GENERATED_INCLUDE_DIR}
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/doctest
+    ${LIBNL_INCLUDE_DIRS}
+    ${LIBNL_ROUTE_INCLUDE_DIRS}
+  )
+  target_link_libraries(keen-pbr-notifications-tests PRIVATE
+    nlohmann_json::nlohmann_json fmt::fmt-header-only
+    httplib::httplib Threads::Threads)
+  if(HTTPLIB_ANL_LIB)
+    target_link_libraries(keen-pbr-notifications-tests PRIVATE ${HTTPLIB_ANL_LIB})
+  endif()
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+    target_link_libraries(keen-pbr-notifications-tests PRIVATE stdc++fs)
+  endif()
+  target_compile_options(keen-pbr-notifications-tests PRIVATE
+    -ffunction-sections -fdata-sections)
+  keen_pbr_apply_project_options(keen-pbr-notifications-tests)
+  target_link_options(keen-pbr-notifications-tests PRIVATE
+    -Wl,--gc-sections -Wl,--no-export-dynamic)
+  add_test(NAME keen-pbr-notifications-tests COMMAND keen-pbr-notifications-tests)
+
+  # Router log retention and subscription refresh without a full daemon link.
+  add_executable(keen-pbr-log-retention-tests
+    test_main.cpp test_log_size_bounds.cpp
+    ../src/log/file_sink.cpp ../src/log/nfqws_log_maintenance.cpp
+    ../src/health/nfqws_scan_source.cpp)
+  add_executable(keen-pbr-subscription-refresh-tests
+    test_main.cpp test_subscription_refresh.cpp test_subscription_store.cpp
+    test_subscription_import_plan.cpp test_subscription_notices.cpp
+    test_subscription_transport_update.cpp
+    ../src/config/subscription_refresh.cpp ../src/config/subscription_store.cpp
+    ../src/config/subscription_import_plan.cpp ../src/config/subscription_fetch_policy.cpp
+    ../src/config/config_writer.cpp ../src/util/base64.cpp
+    ../src/api/subscription_transport_update.cpp)
+  # Exercise private subscription archives, file rollback and offline recovery
+  # directly through their production helpers, without HTTP server or daemon.
+  add_executable(keen-pbr-subscription-backup-tests
+    test_main.cpp test_subscription_backup.cpp test_backup_subscriptions.cpp
+    test_config_validation.cpp test_config_migration_history.cpp
+    test_config_passthrough.cpp
+    test_config_backup_migration.cpp
+    test_outbound_delete.cpp
+    ../src/config/outbound_delete.cpp ../src/config/dependency_analysis.cpp
+    ../src/config/routing_state.cpp
+    test_persistent_snapshot.cpp test_recovery_coordinator.cpp
+    ../src/config/subscription_backup.cpp ../src/config/subscription_refresh.cpp
+    ../src/config/subscription_store.cpp ../src/config/subscription_import_plan.cpp
+    ../src/config/subscription_fetch_policy.cpp ../src/config/config.cpp
+    ../src/config/config_writer.cpp ../src/util/base64.cpp
+    ../src/config/list_parser.cpp ../src/firewall/port_spec_util.cpp
+    ../src/dns/dns_server.cpp ../src/dns/dns_probe_server.cpp
+    ../src/util/system_info.cpp
+    ../src/keenetic/ndms_rci_json_resource.cpp
+    ../src/keenetic/ndms_version_resource.cpp
+    ../src/keenetic/ndms_version_resource_production.cpp
+    ../src/keenetic/ndms_version_projection.cpp
+    ../src/keenetic/ndms_version_projection_production.cpp
+    ../src/http/curl_runtime.cpp ../src/http/http_client.cpp ../src/http/http_transport.cpp
+    ../src/backup/persistent_snapshot.cpp ../src/backup/recovery_coordinator.cpp
+    ../src/backup/restore_journal.cpp
+    ../src/api/handler_backup.cpp ../src/api/sse_broadcaster.cpp)
+  target_include_directories(keen-pbr-subscription-backup-tests PRIVATE
+    ${LIBNL_INCLUDE_DIRS} ${LIBNL_ROUTE_INCLUDE_DIRS})
+  # Config validation cases, like the main suite, exercise Keenetic's DNS
+  # provider with mocked version discovery; use its production compile branch.
+  target_compile_definitions(keen-pbr-subscription-backup-tests PRIVATE USE_KEENETIC_API)
+  target_link_libraries(keen-pbr-subscription-backup-tests PRIVATE ${KEEN_PBR_CURL_TARGET})
+  foreach(slice_target keen-pbr-log-retention-tests keen-pbr-subscription-refresh-tests
+                       keen-pbr-subscription-backup-tests)
+    target_sources(${slice_target} PRIVATE
+      ../src/log/logger.cpp ../src/log/trace.cpp
+      ../src/util/last_command_failure.cpp ../src/util/traced_mutex.cpp)
+    set_target_properties(${slice_target} PROPERTIES
+      CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+    target_compile_definitions(${slice_target} PRIVATE WITH_API KEEN_PBR3_TESTING)
+    target_include_directories(${slice_target} PRIVATE
+      ${KEEN_PBR_GENERATED_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/include
+      ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/third_party/doctest)
+    target_link_libraries(${slice_target} PRIVATE nlohmann_json::nlohmann_json
+      fmt::fmt-header-only httplib::httplib Threads::Threads)
+    if(HTTPLIB_ANL_LIB)
+      target_link_libraries(${slice_target} PRIVATE ${HTTPLIB_ANL_LIB})
+    endif()
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+      target_link_libraries(${slice_target} PRIVATE stdc++fs)
+    endif()
+    target_compile_options(${slice_target} PRIVATE -ffunction-sections -fdata-sections)
+    keen_pbr_apply_project_options(${slice_target})
+    target_link_options(${slice_target} PRIVATE -Wl,--gc-sections -Wl,--no-export-dynamic)
+    add_test(NAME ${slice_target} COMMAND ${slice_target})
+  endforeach()
+
+  # Exercise connection/routing evidence and its opt-in HTTP transport without
+  # linking unrelated API registration, NDMS or the daemon. No external network
+  # is required: the transfer regressions below use an in-process loopback server.
+  add_executable(keen-pbr-connections-history-tests
+    test_main.cpp
+    test_routing_http_probe.cpp
+    test_http_client.cpp
+    ../src/health/routing_http_probe.cpp
+    ../src/config/list_parser.cpp
+    ../src/health/url_tester.cpp
+    ../src/http/http_client.cpp
+    ../src/http/http_transport.cpp
+    ../src/http/curl_runtime.cpp
+    test_routing_firewall_evidence_view.cpp
+    ../src/log/logger.cpp
+    ../src/log/trace.cpp
+    test_routing_policy_evidence_view.cpp
+    ../src/routing/policy_rule_evidence.cpp
+    test_connection_history.cpp
+    test_connection_query.cpp
+    ../src/api/handler_connections.cpp
+    ../src/api/connection_query.cpp
+  )
+  set_target_properties(keen-pbr-connections-history-tests PROPERTIES
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+  target_compile_definitions(keen-pbr-connections-history-tests PRIVATE
+    WITH_API KEEN_PBR3_TESTING)
+  target_include_directories(keen-pbr-connections-history-tests PRIVATE
+    ${KEEN_PBR_GENERATED_INCLUDE_DIR}
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/doctest
+    ${LIBNL_INCLUDE_DIRS}
+    ${LIBNL_ROUTE_INCLUDE_DIRS}
+  )
+  target_link_libraries(keen-pbr-connections-history-tests PRIVATE
+    nlohmann_json::nlohmann_json fmt::fmt-header-only
+    httplib::httplib Threads::Threads ${KEEN_PBR_CURL_TARGET} PkgConfig::ZLIB)
+  if(HTTPLIB_ANL_LIB)
+    target_link_libraries(keen-pbr-connections-history-tests PRIVATE ${HTTPLIB_ANL_LIB})
+  endif()
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+    target_link_libraries(keen-pbr-connections-history-tests PRIVATE stdc++fs)
+  endif()
+  target_compile_options(keen-pbr-connections-history-tests PRIVATE
+    -ffunction-sections -fdata-sections)
+  keen_pbr_apply_project_options(keen-pbr-connections-history-tests)
+  target_link_options(keen-pbr-connections-history-tests PRIVATE
+    -Wl,--gc-sections -Wl,--no-export-dynamic)
+  add_test(NAME keen-pbr-connections-history-tests COMMAND
+    keen-pbr-connections-history-tests "--test-case-exclude=*[network]*")
+
+  # Manual focused aggregate: each test is also in the normal keen-pbr-tests
+  # gate. Keep list pagination and the shared connection case-fold contract
+  # testable without relinking the daemon and unrelated mutation handlers.
+  add_executable(keen-pbr-list-query-tests EXCLUDE_FROM_ALL
+    test_main.cpp
+    test_list_query.cpp
+    test_connection_query.cpp
+    test_list_preview.cpp
+    test_list_source_decoder.cpp
+    test_api_list_preview.cpp
+    ../src/api/handler_lists_query.cpp
+    ../src/api/handler_list_preview.cpp
+    ../src/api/connection_query.cpp
+    ../src/api/sse_broadcaster.cpp
+    ../src/lists/list_preview.cpp
+    ../src/lists/list_source_decoder.cpp
+    ../src/config/list_parser.cpp
+    ../src/config/config.cpp
+    ../src/http/http_client.cpp
+    ../src/http/http_transport.cpp
+    ../src/http/curl_runtime.cpp
+    ../src/log/logger.cpp
+    ../src/log/trace.cpp
+    ../src/util/traced_mutex.cpp
+  )
+  set_target_properties(keen-pbr-list-query-tests PROPERTIES
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+  target_compile_definitions(keen-pbr-list-query-tests PRIVATE
+    WITH_API KEEN_PBR3_TESTING)
+  target_include_directories(keen-pbr-list-query-tests PRIVATE
+    ${KEEN_PBR_GENERATED_INCLUDE_DIR}
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/doctest
+    ${LIBNL_INCLUDE_DIRS}
+    ${LIBNL_ROUTE_INCLUDE_DIRS}
+  )
+  target_link_libraries(keen-pbr-list-query-tests PRIVATE
+    nlohmann_json::nlohmann_json fmt::fmt-header-only
+    httplib::httplib Threads::Threads ${KEEN_PBR_CURL_TARGET})
+  if(HTTPLIB_ANL_LIB)
+    target_link_libraries(keen-pbr-list-query-tests PRIVATE ${HTTPLIB_ANL_LIB})
+  endif()
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+    target_link_libraries(keen-pbr-list-query-tests PRIVATE stdc++fs)
+  endif()
+  target_compile_options(keen-pbr-list-query-tests PRIVATE
+    -ffunction-sections -fdata-sections)
+  keen_pbr_apply_project_options(keen-pbr-list-query-tests)
+  target_link_options(keen-pbr-list-query-tests PRIVATE
+    -Wl,--gc-sections -Wl,--no-export-dynamic)
+endif()
+
+# Keep automatic-list rechecks independently testable without the daemon or
+# firewall binaries. Includes the real store, scan/task and API view contract.
+add_executable(keen-pbr-tunnel-probe-review-tests
+  test_main.cpp
+  test_entry_review.cpp
+  test_tunnel_probe_review.cpp
+  test_tunnel_probe_review_view.cpp
+  test_tunnel_probe_task.cpp
+  test_tunnel_candidate_scan.cpp
+  ../src/health/entry_review.cpp
+  ../src/health/tunnel_probe_review.cpp
+  ../src/health/tunnel_probe_task.cpp
+  ../src/health/tunnel_probe_automation.cpp
+  ../src/health/tunnel_candidate_scan.cpp
+  ../src/health/probe_candidates.cpp
+  ../src/health/host_coverage.cpp
+  ../src/health/log_follower.cpp
+  ../src/health/nfqws_scan_source.cpp
+  ../src/health/differential_probe.cpp
+  ../src/config/config_writer.cpp
+  ../src/config/list_parser.cpp
+  ../src/nfqws/list_match.cpp
+  ../src/log/logger.cpp
+  ../src/log/trace.cpp
+)
+set_target_properties(keen-pbr-tunnel-probe-review-tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+target_include_directories(keen-pbr-tunnel-probe-review-tests PRIVATE
+  ${KEEN_PBR_GENERATED_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/third_party/doctest)
+target_link_libraries(keen-pbr-tunnel-probe-review-tests PRIVATE
+  nlohmann_json::nlohmann_json fmt::fmt-header-only Threads::Threads)
+keen_pbr_apply_project_options(keen-pbr-tunnel-probe-review-tests)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+  target_link_libraries(keen-pbr-tunnel-probe-review-tests PRIVATE stdc++fs)
+endif()
+add_test(NAME keen-pbr-tunnel-probe-review-tests COMMAND keen-pbr-tunnel-probe-review-tests)
 
 # Keep tmpfs DNS observation log maintenance independently buildable. This
 # target verifies the same-inode truncate contract used with dnsmasq's live
@@ -1780,6 +2446,34 @@ add_test(
 )
 
 add_test(
+  NAME keen-pbr-dnsmasq-helper-timing
+  COMMAND /bin/sh
+    ${CMAKE_SOURCE_DIR}/tests/package_it/run-dnsmasq-helper-timing.sh
+    ${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/dnsmasq.sh
+)
+
+add_test(
+  NAME keen-pbr-dnsmasq-direct-fallback
+  COMMAND /bin/sh
+    ${CMAKE_SOURCE_DIR}/tests/package_it/run-dnsmasq-direct-fallback.sh
+    ${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/dnsmasq.sh
+)
+
+add_test(
+  NAME keen-pbr-installer-dns-rollback
+  COMMAND /bin/sh
+    ${CMAKE_SOURCE_DIR}/tests/package_it/run-installer-dns-rollback.sh
+    ${CMAKE_SOURCE_DIR}/install.sh
+)
+
+add_test(
+  NAME keen-pbr-uninstall-cleanup
+  COMMAND /bin/sh
+    ${CMAKE_SOURCE_DIR}/tests/package_it/run-uninstall-cleanup.sh
+    ${CMAKE_SOURCE_DIR}
+)
+
+add_test(
   NAME keen-pbr-netfilter-hook-signals
   COMMAND /bin/sh
     ${CMAKE_SOURCE_DIR}/tests/package_it/run-netfilter-hook-signals.sh
@@ -1916,8 +2610,12 @@ target_compile_definitions(keen-pbr-tests PRIVATE USE_KEENETIC_API)
 if(WITH_API)
   target_compile_definitions(keen-pbr-tests PRIVATE WITH_API)
   target_sources(keen-pbr-tests PRIVATE
+    test_api_health_routing.cpp
     test_api_reload.cpp
     test_api_lists_refresh.cpp
+    test_list_query.cpp
+    test_api_notifications.cpp
+    test_list_refresh_request.cpp
     test_api_catalog_setup.cpp
     test_build_identity.cpp
     test_api_nfqws.cpp
@@ -1942,6 +2640,9 @@ if(WITH_API)
     ../src/api/handler_health_routing.cpp
     ../src/api/handler_reload.cpp
     ../src/api/handler_lists_refresh.cpp
+    ../src/api/handler_lists_query.cpp
+    ../src/api/handler_list_preview.cpp
+    test_api_list_preview.cpp
     ../src/api/handler_logs.cpp
     ../src/api/handler_remote_access.cpp
     ../src/api/handler_ndms_names.cpp
@@ -1956,11 +2657,15 @@ if(WITH_API)
     ../src/api/handler_dependency_analysis.cpp
     ../src/api/handler_transports.cpp
     ../src/api/handler_subscriptions.cpp
+    ../src/api/subscription_transport_update.cpp
     ../src/api/handler_transport_exit_check.cpp
     ../src/health/exit_address_check.cpp
+    ../src/health/routing_http_probe.cpp
     ../src/api/transport_manager_endpoint.cpp
     ../src/api/handler_registry_check.cpp
     ../src/api/handler_test_routing.cpp
+    ../src/firewall/rule_counter_evidence.cpp
+    ../src/routing/policy_rule_evidence.cpp
     ../src/api/handler_dns_test.cpp
     ../src/api/handler_connections.cpp
     ../src/api/handler_nfqws.cpp
@@ -1988,6 +2693,7 @@ endif()
 add_executable(keen-pbr-firewall-it
   firewall_integration_main.cpp
   ../src/cache/cache_manager.cpp
+  ../src/lists/list_source_decoder.cpp
   ../src/config/config.cpp
   ../src/config/config_writer.cpp
   ../src/config/list_parser.cpp

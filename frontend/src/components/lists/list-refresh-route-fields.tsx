@@ -15,7 +15,7 @@ import {
   getOutboundDisplayName,
   getOutboundReferenceLabel,
 } from "@/lib/outbound-display"
-import { useMemo } from "react"
+import { useMemo, type ReactNode } from "react"
 import { useTranslation } from "react-i18next"
 
 export function ListRefreshRouteFields({
@@ -25,16 +25,18 @@ export function ListRefreshRouteFields({
   fallbackError,
   fallbackFieldName,
   fieldWidth = "full",
+  addControlSize = "sm",
   onChange,
   outbounds,
   primaryEmptyLabel,
 }: {
   /** «Настройки» показывают эти поля компактными, редактор списка — во всю ширину. */
   fieldWidth?: "full" | "short"
+  addControlSize?: "sm" | "default"
   chain: ListRefreshRouteChain
-  detourError?: string | null
+  detourError?: ReactNode
   detourFieldName?: string
-  fallbackError?: string | null
+  fallbackError?: ReactNode
   fallbackFieldName?: string
   onChange: (chain: ListRefreshRouteChain) => void
   outbounds: readonly Outbound[]
@@ -87,9 +89,11 @@ export function ListRefreshRouteFields({
           <FieldLabel>{t("common.listRefreshRoute.fallbacks")}</FieldLabel>
           <FieldContent>
             <MultiSelectList
+              addControlSize={addControlSize}
               addLabel={t("common.listRefreshRoute.addFallback")}
               allowReorder
               emptyMessage={t("common.listRefreshRoute.noFallbacks")}
+              fullWidthAdd={fieldWidth === "short"}
               getSearchText={(tag) => {
                 const outbound = outboundByTag.get(tag)
                 return outbound ? getOutboundReferenceLabel(outbound) : tag

@@ -391,6 +391,8 @@ endfunction()
 set(SOURCES
   src/log/logger.cpp
   src/log/file_sink.cpp
+  src/log/nfqws_log_maintenance.cpp
+  src/log/notification_state.cpp
   src/log/trace.cpp
   src/http/http_client.cpp
   src/http/http_transport.cpp
@@ -489,6 +491,8 @@ set(SOURCES
   src/update/package_footprint.cpp
   src/update/component_transaction_journal.cpp
   src/update/component_capture.cpp
+  src/update/component_opkg_metadata.cpp
+  src/update/nfqws_script_effects.cpp
   src/update/component_feed_index.cpp
   src/update/component_ipk_store.cpp
   src/update/component_package_transaction.cpp
@@ -501,10 +505,14 @@ set(SOURCES
   src/config/subscription_import_plan.cpp
   src/config/subscription_transport_naming.cpp
   src/config/subscription_store.cpp
+  src/config/subscription_refresh.cpp
+  src/config/subscription_backup.cpp
   src/config/dependency_analysis.cpp
+  src/config/outbound_delete.cpp
   src/config/list_delete_planner.cpp
   src/config/routing_state.cpp
   src/config/list_parser.cpp
+  src/lists/list_preview.cpp
   src/setup/catalog_setup_planner.cpp
   src/nfqws/list_match.cpp
   src/lists/ipset.cpp
@@ -514,6 +522,7 @@ set(SOURCES
   src/lists/list_set_usage.cpp
   src/lists/srs_decoder.cpp
   src/cache/cache_manager.cpp
+  src/lists/list_source_decoder.cpp
   src/connections/conntrack_event_monitor.cpp
   src/runtime/conntrack_manager.cpp
   src/runtime/interface_traffic_cadence.cpp
@@ -531,10 +540,13 @@ set(SOURCES
   src/health/nfqws_scan_source.cpp
   src/health/tunnel_probe_automation.cpp
   src/health/tunnel_probe_task.cpp
+  src/health/entry_review.cpp
+  src/health/tunnel_probe_review.cpp
   src/health/tunnel_probe_report.cpp
   src/health/tunnel_candidate_scan.cpp
   src/routing/target.cpp
   src/routing/fib_lookup.cpp
+  src/routing/policy_rule_evidence.cpp
   src/routing/netlink.cpp
   src/routing/raw_rtnetlink_codec.cpp
   src/routing/interface_monitor.cpp
@@ -546,6 +558,7 @@ set(SOURCES
   src/health/circuit_breaker.cpp
   src/health/url_tester.cpp
   src/health/exit_address_check.cpp
+  src/health/routing_http_probe.cpp
   src/health/interface_probe.cpp
   src/health/routing_health_checker.cpp
   src/health/runtime_outbound_state.cpp
@@ -561,8 +574,9 @@ set(SOURCES
   src/firewall/nftables.cpp
   src/firewall/ipset_restore_pipe.cpp
   src/firewall/nft_batch_pipe.cpp
-  src/firewall/firewall_verifier.cpp
-  src/firewall/iptables_verifier.cpp
+    src/firewall/firewall_verifier.cpp
+    src/firewall/rule_counter_evidence.cpp
+    src/firewall/iptables_verifier.cpp
   src/firewall/nftables_verifier.cpp
   src/dns/dns_server.cpp
   src/dns/keenetic_dns.cpp
@@ -650,6 +664,8 @@ if(WITH_API)
     src/api/update_version.cpp
     src/api/handler_reload.cpp
     src/api/handler_lists_refresh.cpp
+    src/api/handler_lists_query.cpp
+    src/api/handler_list_preview.cpp
     src/api/handler_config.cpp
     src/api/handler_dependency_analysis.cpp
     src/api/handler_health_routing.cpp
@@ -660,6 +676,7 @@ if(WITH_API)
     src/api/handler_diagnostic_tasks.cpp
     src/api/handler_transports.cpp
     src/api/handler_subscriptions.cpp
+    src/api/subscription_transport_update.cpp
     src/api/handler_transport_exit_check.cpp
     src/api/transport_manager_endpoint.cpp
     src/api/handler_registry_check.cpp
@@ -669,6 +686,8 @@ if(WITH_API)
     src/api/handler_nfqws.cpp
     src/api/handler_logs.cpp
     src/api/router_info_cache.cpp
+    src/api/router_info_metadata.cpp
+    src/api/router_local_metrics.cpp
     src/api/handler_router_info.cpp
     src/api/handler_catalog.cpp
     src/api/handler_catalog_setup.cpp

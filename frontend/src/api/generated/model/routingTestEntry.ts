@@ -6,8 +6,10 @@
  * OpenAPI spec version: 3.0.0
  */
 import type { RoutingTestEvaluation } from './routingTestEvaluation';
+import type { RoutingTestFirewallCounters } from './routingTestFirewallCounters';
 import type { RoutingTestKernelRoute } from './routingTestKernelRoute';
 import type { RoutingTestListMatch } from './routingTestListMatch';
+import type { RoutingTestPolicyRules } from './routingTestPolicyRules';
 import type { RoutingTestUnknownCondition } from './routingTestUnknownCondition';
 
 export interface RoutingTestEntry {
@@ -16,6 +18,18 @@ export interface RoutingTestEntry {
   /** Details of the list entry that matched. Absent when no rule matched.
    */
   list_match?: RoutingTestListMatch;
+  /**
+     * Zero-based active rule index, only for a conclusive configured match.
+     * @minimum 0
+     */
+  expected_rule_index?: number;
+  /**
+     * Zero-based realized rule index, only for a conclusive live set match; not an observed packet.
+     * @minimum 0
+     */
+  actual_rule_index?: number;
+  policy_rules?: RoutingTestPolicyRules;
+  firewall_counters?: RoutingTestFirewallCounters;
   /** Outbound tag determined from the active rules, cached list data, and destination address. "(default)" when no rule matches and "(unknown)" when packet context is required.
    */
   expected_outbound: string;

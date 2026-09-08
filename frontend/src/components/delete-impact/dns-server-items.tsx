@@ -31,6 +31,9 @@ export function getDnsServerDeleteImpactItems(
   )
 
   for (const tag of serverTags) {
+    const domains = config?.dns?.servers?.find(
+      (server) => server.tag === tag
+    )?.domains
     items.push({
       label: (
         <>
@@ -39,6 +42,15 @@ export function getDnsServerDeleteImpactItems(
           {t("pages.dnsServers.deleteDialog.items.serverSuffix")}
         </>
       ),
+      ...(domains?.length
+        ? {
+            details: [
+              t("pages.dnsServers.deleteDialog.items.domains", {
+                domains: domains.join(", "),
+              }),
+            ],
+          }
+        : {}),
     })
   }
 

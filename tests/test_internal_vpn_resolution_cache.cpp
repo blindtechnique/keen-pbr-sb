@@ -1,8 +1,10 @@
 #include <doctest/doctest.h>
 
 #include "../src/daemon/internal_vpn_resolution_cache.hpp"
+#include "../src/dns/dnsmasq_access_policy.hpp"
 
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <type_traits>
@@ -468,6 +470,114 @@ TEST_CASE(
     CHECK(
         no_peer.effective_targets.front()
             .verified_ingress_interfaces.empty());
+}
+
+TEST_CASE(
+    "prepared OpenConnect catalogue rechecks peer ingress within the same "
+    "runtime generation") {
+    for (const bool process_clients : {true, false}) {
+        CAPTURE(process_clients);
+        InternalVpnResolutionCache cache;
+        const std::string service_id = "ndms-service:oc-server";
+        auto lan = live_interface("br7");
+        lan.ipv4_addresses = {"192.168.77.1/24"};
+        auto fresh = fresh_service_snapshot(
+            service_id, "Bridge7", "172.29.9.0/24");
+        fresh.catalog.services.front().kind =
+            NdmsVpnServerServiceKind::openconnect;
+
+        PreparedNativeVpnCatalog idle;
+        idle.runtime_generation = 77U;
+        idle.schedule_catalog_refresh = false;
+        idle.service_resolution = cache.resolve_services(
+            service_config(service_id, process_clients), fresh, {lan});
+        REQUIRE(idle.service_resolution.effective_targets.size() == 1U);
+        REQUIRE(idle.service_resolution.verified_includes_for_lkg.size() == 1U);
+        REQUIRE(idle.service_resolution.effective_targets.front()
+                    .verified_ingress_interfaces.empty());
+
+        // This already-published IKEv2 target is intentionally absent from
+        // the new live dump. An OC refresh must not reinterpret its baseline.
+        auto frozen_ike = target("ike-baseline");
+        frozen_ike.stable_id = "ndms-crypto-map:ikev2:baseline";
+        frozen_ike.verified_ingress_interfaces = {"xfrms1"};
+        idle.service_resolution.effective_targets.push_back(frozen_ike);
+        const auto prepared =
+            std::make_shared<const PreparedNativeVpnCatalog>(std::move(idle));
+        auto original_targets =
+            prepared->service_resolution.effective_targets;
+        std::vector<InternalVpnServer> no_servers;
+        InternalVpnResolutionCache prepared_before;
+        prepared_before.exchange_active(no_servers, original_targets);
+        std::vector<InternalVpnRuntimeTarget> frozen_targets{frozen_ike};
+        InternalVpnResolutionCache frozen_before;
+        frozen_before.exchange_active(no_servers, frozen_targets);
+
+        auto candidate = prepared->service_resolution;
+        auto session = live_interface("oc7");
+        session.carrier = true;
+        session.oper_state = "unknown";
+        session.ipv4_addresses = {"172.29.9.1/32"};
+        session.ipv4_peer_addresses = {"172.29.9.42/32"};
+        refresh_prepared_openconnect_service_ingress(
+            candidate, {lan, session});
+        REQUIRE(candidate.effective_targets.size() == 2U);
+        CHECK(candidate.effective_targets.front().verified_ingress_interfaces ==
+              std::vector<std::string>{"oc7"});
+        CHECK(candidate.effective_targets.front().process_clients ==
+              process_clients);
+        CHECK(candidate.effective_targets.front().source_cidrs_v4 ==
+              std::vector<std::string>{"172.29.9.0/24"});
+        CHECK(build_dnsmasq_trusted_interfaces({}, candidate.effective_targets) ==
+              std::vector<std::string>{"br*", "oc7", "xfrms1"});
+        if (process_clients) {
+            CHECK(candidate.effective_targets.front()
+                      .dns_redirect_local_destinations_v4 ==
+                  std::vector<std::string>{"172.29.9.1/32", "192.168.77.1/32"});
+        } else {
+            CHECK(candidate.effective_targets.front()
+                      .dns_redirect_local_destinations_v4.empty());
+        }
+
+        refresh_prepared_openconnect_service_ingress(candidate, {lan});
+        CHECK(candidate.effective_targets.front()
+                  .verified_ingress_interfaces.empty());
+        CHECK(candidate.effective_targets.front()
+                  .dns_redirect_local_destinations_v4.empty());
+        CHECK(build_dnsmasq_trusted_interfaces({}, candidate.effective_targets) ==
+              std::vector<std::string>{"br*", "xfrms1"});
+
+        session.name = "oc42";
+        session.ipv4_peer_addresses = {"172.29.9.99/32"};
+        refresh_prepared_openconnect_service_ingress(
+            candidate, {lan, session});
+        CHECK(candidate.effective_targets.front().verified_ingress_interfaces ==
+              std::vector<std::string>{"oc42"});
+        CHECK(build_dnsmasq_trusted_interfaces({}, candidate.effective_targets) ==
+              std::vector<std::string>{"br*", "oc42", "xfrms1"});
+
+        // Rechecking ingress cannot widen the pinned firmware pool.
+        session.ipv4_peer_addresses = {"172.29.10.99/32"};
+        refresh_prepared_openconnect_service_ingress(
+            candidate, {lan, session});
+        CHECK(candidate.effective_targets.front()
+                  .verified_ingress_interfaces.empty());
+        CHECK(candidate.effective_targets.front().source_cidrs_v4 ==
+              std::vector<std::string>{"172.29.9.0/24"});
+        CHECK(candidate.state == prepared->service_resolution.state);
+        CHECK(candidate.retain_verified_include_service_ids ==
+              prepared->service_resolution.retain_verified_include_service_ids);
+        CHECK(candidate.verified_includes_for_lkg.front()
+                  .verified_ingress_interfaces ==
+              prepared->service_resolution.verified_includes_for_lkg.front()
+                  .verified_ingress_interfaces);
+        CHECK(frozen_before.active_matches(
+            {}, {candidate.effective_targets.back()}));
+        CHECK(prepared_before.active_matches(
+            {}, prepared->service_resolution.effective_targets));
+        CHECK(prepared->runtime_generation == 77U);
+        CHECK_FALSE(prepared->schedule_catalog_refresh);
+    }
 }
 
 TEST_CASE("internal VPN resolution cache forwards exact verified publication") {

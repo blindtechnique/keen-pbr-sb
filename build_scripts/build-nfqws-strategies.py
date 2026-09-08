@@ -9,6 +9,7 @@ required-blobs.txt) не могут разъехаться между файла
 Запуск:  python3 build_scripts/build-nfqws-strategies.py <каталог-назначения>
 """
 import hashlib
+import json
 import os
 import re
 import sys
@@ -269,6 +270,52 @@ def revisioned_circular(key, matcher, actions, **options):
     return f"{detector}:kpbr_rev={revision}"
 
 
+def legacy_rotation_pools():
+    """Only the ten reviewed legacy pools; other profile bytes stay owned there.
+
+    Slot 1 is the exact former action. QUIC fallback already ships as
+    QUIC_TIERS[1]. The two UDP actions already ship in ver1 (alt) and ver2-4.
+    Independent explicit keys prevent a pool or profile from advancing another.
+    """
+    profiles = (
+        ("default", "default"), ("ver1", "ver1"),
+        ("ver1 (alt)", "ver1_alt"), ("ver2", "ver2"),
+        ("ver3 safe", "ver3_safe"), ("ver4", "ver4"),
+    )
+    zero_udp = "fake:blob=0x00000000000000000000000000000000:repeats=2"
+    quic_udp = "fake:blob=quic_initial:repeats=6"
+    result = {}
+    for profile, identity in profiles:
+        # Keep the original unbounded outgoing QUIC action range. A shorter
+        # circular range would let a later Initial bypass the orchestrator and
+        # run both strategy actions directly. Incoming replies are observation
+        # only, and never reach the fake actions below.
+        quic = [
+            "--filter-udp=443", "--filter-l7=quic", "--payload=all",
+            "--out-range=a", "--in-range=-n2",
+            circular(f"legacy_{identity}_quic", udp=True),
+            "--in-range=x", "--out-range=a", "--payload=quic_initial",
+        ] + pool([QUIC_TIERS[0], QUIC_TIERS[1]], 2)
+        result[profile] = {"NFQWS_ARGS_QUIC": " ".join(quic)}
+        if profile in ("default", "ver1"):
+            continue
+        tiers = (
+            [[zero_udp], [quic_udp]] if profile == "ver1 (alt)"
+            else [[quic_udp], [zero_udp]]
+        )
+        udp = [
+            f"--filter-udp={FILTER_UDP_MAIN}",
+            "--filter-l7=wireguard,stun,discord,mtproto",
+            "--payload=all", "--out-range=-n4", "--in-range=-n2",
+            circular(f"legacy_{identity}_udp", udp=True),
+            "--in-range=x", "--out-range=<n2",
+            "--payload=wireguard_initiation,wireguard_response,wireguard_cookie,"
+            "stun,discord_ip_discovery,mtproto_initial",
+        ] + pool(tiers, 2)
+        result[profile]["NFQWS_ARGS_UDP"] = " ".join(udp)
+    return result
+
+
 def wrap(name, tokens, indent=None):
     """Многострочное значение с отступом: формат, который понимает панель."""
     pad = " " * (len(name) + 2) if indent is None else " " * indent
@@ -524,6 +571,9 @@ def _wrap_text(text, width):
 
 
 def main():
+    if sys.argv[1:] == ["--legacy-pools"]:
+        print(json.dumps(legacy_rotation_pools(), indent=2))
+        return
     target = sys.argv[1] if len(sys.argv) > 1 else "nfqws-strategies"
     for name, spec in PROFILES.items():
         directory = os.path.join(target, name)

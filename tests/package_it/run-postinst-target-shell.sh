@@ -45,6 +45,16 @@ mkdir -p \
     /opt/var/run
 chmod 0755 /opt/var/lib/keen-pbr/rescue
 
+# Upgrades retain the conffile selected by opkg. Postinst must not replace it
+# with the now-empty first-install seed, even when it contains old demo names.
+printf '%s\n' \
+    '{"lists":{"local_list":{"domains":["example.com","user.example"]}},' \
+    '"route":{"rules":[{"list":["local_list"],"outbound":"user_vpn"}]}}' \
+    > /opt/etc/keen-pbr/config.json
+cp /opt/etc/keen-pbr/config.json /opt/var/run/package-it-config.before
+printf '%s\n' 'user.example' > /opt/etc/keen-pbr/local.lst
+cp /opt/etc/keen-pbr/local.lst /opt/var/run/package-it-local.before
+
 for helper in \
     portable-stat.sh \
     rescue-update.sh \
@@ -74,6 +84,9 @@ for service in S79transport-manager S80keen-pbr; do
 done
 
 KEEN_PBR_REPLACE_DNSMASQ_DEFAULTS=N /bin/sh "$POSTINST"
+
+cmp /opt/var/run/package-it-config.before /opt/etc/keen-pbr/config.json
+cmp /opt/var/run/package-it-local.before /opt/etc/keen-pbr/local.lst
 
 . /opt/var/lib/keen-pbr/rescue/portable-stat.sh
 [ "$(keen_pbr_stat_value '%a:%u' /opt/var/lib/keen-pbr/rescue)" = \

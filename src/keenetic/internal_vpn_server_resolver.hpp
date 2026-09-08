@@ -36,9 +36,9 @@ struct InternalVpnServerResolution {
     // identity. If the intended ingress itself is unresolved, the caller must
     // report degraded operation rather than claim full fail-closed coverage.
     std::vector<InternalVpnServer> safe_degraded_servers;
-    // Freshly verified stable include bindings from this observation. Unlike
-    // effective_servers, this remains useful when another configured identity
-    // failed authoritatively: the daemon can replace its include-only LKG with
+    // Freshly verified stable include bindings from this observation. These
+    // remain useful when another configured identity failed authoritatively:
+    // the daemon can replace its include-only LKG with
     // the successful subset instead of either retaining a revoked binding or
     // dropping an unrelated verified server.
     std::vector<InternalVpnServer> verified_includes_for_lkg;
@@ -93,6 +93,9 @@ InternalVpnServerResolution resolve_internal_vpn_server_policies(
 bool internal_vpn_server_policies_require_ndms_catalog(
     const std::vector<InternalVpnServer>& configured) noexcept;
 
+// Freshly verified rows remain effective despite unrelated resolution issues;
+// a bypass on a conflicting kernel interface is excluded. Candidate rows take
+// precedence over retained bindings and saved-name degraded fallbacks.
 // An incomplete observation may retain previously verified stable
 // process_clients=true bindings that still have the same configured identity
 // and policy when that identity's own observation is inconclusive. A verified

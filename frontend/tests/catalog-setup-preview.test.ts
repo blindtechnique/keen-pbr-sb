@@ -9,7 +9,10 @@ function preview(
 ): CatalogSetupPreviewResponse {
   return {
     base_revision: "a".repeat(64),
-    candidate_revision: "b".repeat(64),
+    candidate_revision:
+      installed.length > 0 && installed.every(Boolean) && !policyChanges
+        ? "a".repeat(64)
+        : "b".repeat(64),
     preview_token: "c".repeat(64),
     requires_warning_acceptance: false,
     summary: {
@@ -68,6 +71,7 @@ describe("catalog setup preview install state", () => {
 
   test("counts an automatically created DNS server as a policy change", () => {
     const result = preview([true, true])
+    result.candidate_revision = "b".repeat(64)
     result.summary.dns_server = {
       technical_id: "dns_cloudflare_proxy",
       display_name: "Cloudflare через Proxy",
@@ -79,5 +83,23 @@ describe("catalog setup preview install state", () => {
     const state = getCatalogSetupInstallState(result)
     expect(state.allInstalled).toBe(true)
     expect(state.noChanges).toBe(false)
+  })
+
+  test("applies source-only changes to already installed lists", () => {
+    const result = preview([true, true])
+    result.candidate_revision = "b".repeat(64)
+    result.summary.route_rules = []
+    result.summary.dns_rules = []
+
+    const state = getCatalogSetupInstallState(result)
+    expect(state.allInstalled).toBe(true)
+    expect(state.pending).toHaveLength(0)
+    expect(state.noChanges).toBe(false)
+  })
+
+  test("uses equal authoritative revisions for an unchanged candidate", () => {
+    const result = preview([true, true])
+    expect(getCatalogSetupInstallState(result).noChanges).toBe(true)
+    expect(result.base_revision).toBe(result.candidate_revision)
   })
 })

@@ -24,11 +24,49 @@ permissions:
   contents: read
 
 jobs:
+  resolve-source:
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.resolve.outputs.source_sha }}
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+      release: ${{ steps.resolve.outputs.release }}
+      channel: ${{ steps.resolve.outputs.channel }}
+      build_matrix: ${{ steps.resolve.outputs.build_matrix }}
+    steps:
+      - name: Checkout workflow source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Resolve immutable build source
+        id: resolve
+        env:
+          REQUESTED_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          python3 build_scripts/resolve-release-source.py \
+            --event-name "$GITHUB_EVENT_NAME" \
+            --ref "$GITHUB_REF" \
+            --sha "$GITHUB_SHA" \
+            --release-tag="$REQUESTED_RELEASE_TAG" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Test release source selection and workflow wiring
+        run: >-
+          python3 -m unittest
+          build_scripts.tests.test_update_release_pin
+          build_scripts.tests.test_keenetic_release_signatures
+          build_scripts.tests.test_signed_update_integration
+          build_scripts.tests.test_resolve_release_source
+          build_scripts.tests.test_release_workflow -v
+
   frontend:
+    needs: resolve-source
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve-source.outputs.source_sha }}
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
@@ -66,10 +104,13 @@ jobs:
           include-hidden-files: true
 
   backend:
+    needs: resolve-source
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve-source.outputs.source_sha }}
 
       - name: Install native build dependencies
         run: |
@@ -167,11 +208,14 @@ jobs:
               /workspace/uninstall.sh
 
   crash-diagnostics-smoke:
+    needs: resolve-source
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve-source.outputs.source_sha }}
 
       - name: Install native build dependencies
         run: |
@@ -202,11 +246,14 @@ jobs:
         run: ./build-crash-smoke/tests/crash-diagnostics-smoke
 
   clang-thread-safety:
+    needs: resolve-source
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve-source.outputs.source_sha }}
 
       - name: Install Clang build dependencies
         run: |
@@ -221,37 +268,43 @@ jobs:
             zlib1g-dev
 
       - name: Run production Clang thread-safety checks for alpha
-        if: github.event_name == 'push' && github.ref == 'refs/heads/alpha'
+        if: github.event_name == 'push' && needs.resolve-source.outputs.channel == 'alpha'
         run: make clang-check-production BUILD_JOBS=4
 
       - name: Run full Clang thread-safety checks
-        if: github.event_name != 'push' || github.ref != 'refs/heads/alpha'
+        if: github.event_name != 'push' || needs.resolve-source.outputs.channel != 'alpha'
         run: make clang-check BUILD_JOBS=4
 
   firewall-integration:
+    needs: resolve-source
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve-source.outputs.source_sha }}
 
       - name: Run Docker and network namespace integration suite
         run: make firewall-it
 
   build:
     needs:
+      - resolve-source
       - frontend
       - transport-manager
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        include: ${{ fromJSON((github.ref == 'refs/heads/alpha' || github.ref == 'refs/heads/next' || github.event_name == 'pull_request') && '[{"config":"aarch64-3.10","arch":"aarch64"}]' || '[{"config":"aarch64-3.10","arch":"aarch64"},{"config":"mips-3.4","arch":"mips"},{"config":"mipsel-3.4","arch":"mipsel"}]') }}
+      matrix: ${{ fromJSON(needs.resolve-source.outputs.build_matrix) }}
     env:
       KEENETIC_VERSION: "3.10"
+      SOURCE_SHA: ${{ needs.resolve-source.outputs.source_sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve-source.outputs.source_sha }}
 
       - name: Download frontend bundle
         uses: actions/download-artifact@v8
@@ -292,7 +345,8 @@ jobs:
           set -e
           IPK=$(find build/packages -name 'keen-pbr_*.ipk' | head -1)
           test -n "$IPK"
-          EXPECTED_COMMIT=$(git rev-parse --short=12 HEAD)
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          EXPECTED_COMMIT=$(git rev-parse --short=12 "$SOURCE_SHA")
           cp "$IPK" .
           IPK_NAME=$(basename "$IPK")
           python3 build_scripts/validate-keenetic-ipk.py "$IPK_NAME" \
@@ -318,10 +372,13 @@ jobs:
           if-no-files-found: error
 
   transport-manager:
+    needs: resolve-source
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve-source.outputs.source_sha }}
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -338,8 +395,9 @@ jobs:
         run: go vet ./...
 
   publish-release:
-    if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
+    if: github.repository == 'blindtechnique/keen-pbr-sb' && github.event_name != 'pull_request' && needs.resolve-source.outputs.release == 'true'
     needs:
+      - resolve-source
       - build
       - backend
       - crash-diagnostics-smoke
@@ -349,10 +407,24 @@ jobs:
     permissions:
       contents: write
     env:
-      RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+      RELEASE_TAG: ${{ needs.resolve-source.outputs.release_tag }}
+      SOURCE_SHA: ${{ needs.resolve-source.outputs.source_sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve-source.outputs.source_sha }}
+
+      - name: Checkout reviewed release signing tools
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: .release-signing-tools
+          sparse-checkout: |
+            build_scripts
+            packages/keys
+            packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr
+          persist-credentials: false
 
       - name: Download all Keenetic IPKs
         uses: actions/download-artifact@v8
@@ -361,12 +433,57 @@ jobs:
           path: release-assets
           merge-multiple: true
 
+      - name: Verify release tag and all IPKs
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git fetch --no-tags --depth=1 origin "refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$SOURCE_SHA"
+          EXPECTED_COMMIT=$(git rev-parse --short=12 "$SOURCE_SHA")
+          test "$(find release-assets -maxdepth 1 -name 'keen-pbr_*.ipk' | wc -l)" -eq 3
+          for config in aarch64-3.10 mips-3.4 mipsel-3.4; do
+            arch="${config%%-*}"
+            set -- release-assets/keen-pbr_*_keenetic_"$config".ipk
+            test "$#" -eq 1
+            test -f "$1"
+            python3 build_scripts/validate-keenetic-ipk.py "$1" \
+              --arch "$arch" --expected-commit "$EXPECTED_COMMIT"
+          done
+
       - name: Create checksums
         run: |
           cd release-assets
           test "$(find . -maxdepth 1 -name 'keen-pbr_*.ipk' | wc -l)" -eq 3
           sha256sum keen-pbr_*.ipk > SHA256SUMS
           cat SHA256SUMS
+
+      - name: Sign release manifest and installer
+        env:
+          KEENETIC_RELEASE_SIGNING_KEY: ${{ secrets.KEENETIC_RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          if [ -z "${KEENETIC_RELEASE_SIGNING_KEY:-}" ]; then
+            echo "::error::KEENETIC_RELEASE_SIGNING_KEY is not configured; no release assets were changed."
+            exit 1
+          fi
+          signing_key=$(mktemp "$RUNNER_TEMP/keenetic-release-key.XXXXXX")
+          trap 'rm -f -- "$signing_key"' EXIT
+          printf '%s\n' "$KEENETIC_RELEASE_SIGNING_KEY" > "$signing_key"
+          unset KEENETIC_RELEASE_SIGNING_KEY
+          # Historical installers require the reviewed verification backport;
+          # never combine a newer installer with an older package.
+          python3 .release-signing-tools/build_scripts/embed-release-verifier.py \
+            --installer install.sh \
+            --verifier .release-signing-tools/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/release-verify.sh \
+            --public-key .release-signing-tools/packages/keys/keenetic-release-public.pem --check
+          python3 .release-signing-tools/build_scripts/sign-keenetic-release.py \
+            --assets release-assets --installer install.sh \
+            --key "$signing_key" \
+            --public-key .release-signing-tools/packages/keys/keenetic-release-public.pem \
+            --repository "$GITHUB_REPOSITORY" --channel stable \
+            --release "$RELEASE_TAG" --source "$SOURCE_SHA" \
+            --build "github-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 
       - name: Extract release notes from CHANGELOG
         run: |
@@ -385,26 +502,37 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            for asset in $(gh release view "$RELEASE_TAG" --json assets -q '.assets[].name'); do
-              echo "Removing stale asset: $asset"
-              gh release delete-asset "$RELEASE_TAG" "$asset" -y || true
-            done
+          set -euo pipefail
+          # Recheck after validation/notes, immediately before the first write.
+          # A moved or deleted tag must not receive this run's old packages.
+          git fetch --no-tags --depth=1 origin "refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$SOURCE_SHA"
+          if gh release view -- "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release view --json assets -q '.assets[].name' -- "$RELEASE_TAG" |
+              while IFS= read -r asset; do
+                echo "Removing stale asset: $asset"
+                gh release delete-asset -y -- "$RELEASE_TAG" "$asset" || true
+              done
           fi
 
       - name: Create or update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ needs.resolve-source.outputs.source_sha }}
           name: "keen-pbr-sb ${{ env.RELEASE_TAG }}"
           body_path: RELEASE_BODY.md
           files: |
             release-assets/keen-pbr_*.ipk
             release-assets/SHA256SUMS
+            release-assets/install.sh
+            release-assets/release-manifest.tsv
+            release-assets/release-manifest.sig
 
   upload-next-artifact:
-    if: github.ref == 'refs/heads/next'
+    if: github.repository == 'blindtechnique/keen-pbr-sb' && github.event_name != 'pull_request' && needs.resolve-source.outputs.channel == 'next'
     needs:
+      - resolve-source
       - build
       - backend
       - crash-diagnostics-smoke
@@ -412,6 +540,22 @@ jobs:
       - firewall-integration
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve-source.outputs.source_sha }}
+
+      - name: Checkout reviewed release signing tools
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: .release-signing-tools
+          sparse-checkout: |
+            build_scripts
+            packages/keys
+            packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr
+          persist-credentials: false
+
       - name: Download aarch64 test IPK
         uses: actions/download-artifact@v8
         with:
@@ -423,6 +567,34 @@ jobs:
           cd release-assets
           sha256sum keen-pbr_*.ipk > SHA256SUMS
 
+      - name: Sign next manifest and installer
+        env:
+          SOURCE_SHA: ${{ needs.resolve-source.outputs.source_sha }}
+          KEENETIC_RELEASE_SIGNING_KEY: ${{ secrets.KEENETIC_RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          if [ -z "${KEENETIC_RELEASE_SIGNING_KEY:-}" ]; then
+            echo "::error::KEENETIC_RELEASE_SIGNING_KEY is not configured; signed artifact was not uploaded."
+            exit 1
+          fi
+          signing_key=$(mktemp "$RUNNER_TEMP/keenetic-release-key.XXXXXX")
+          trap 'rm -f -- "$signing_key"' EXIT
+          printf '%s\n' "$KEENETIC_RELEASE_SIGNING_KEY" > "$signing_key"
+          unset KEENETIC_RELEASE_SIGNING_KEY
+          python3 .release-signing-tools/build_scripts/embed-release-verifier.py \
+            --installer install.sh \
+            --verifier .release-signing-tools/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/release-verify.sh \
+            --public-key .release-signing-tools/packages/keys/keenetic-release-public.pem --check
+          python3 .release-signing-tools/build_scripts/sign-keenetic-release.py \
+            --assets release-assets --installer install.sh \
+            --key "$signing_key" \
+            --public-key .release-signing-tools/packages/keys/keenetic-release-public.pem \
+            --repository "$GITHUB_REPOSITORY" --channel next \
+            --release "next-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --source "$SOURCE_SHA" \
+            --build "github-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v7
         with:
@@ -430,11 +602,15 @@ jobs:
           path: |
             release-assets/keen-pbr_*.ipk
             release-assets/SHA256SUMS
+            release-assets/install.sh
+            release-assets/release-manifest.tsv
+            release-assets/release-manifest.sig
           if-no-files-found: error
 
   upload-alpha-artifact:
-    if: github.ref == 'refs/heads/alpha'
+    if: github.repository == 'blindtechnique/keen-pbr-sb' && github.event_name != 'pull_request' && needs.resolve-source.outputs.channel == 'alpha'
     needs:
+      - resolve-source
       - build
       - backend
       - crash-diagnostics-smoke
@@ -442,6 +618,22 @@ jobs:
       - firewall-integration
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve-source.outputs.source_sha }}
+
+      - name: Checkout reviewed release signing tools
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: .release-signing-tools
+          sparse-checkout: |
+            build_scripts
+            packages/keys
+            packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr
+          persist-credentials: false
+
       - name: Download aarch64 alpha IPK
         uses: actions/download-artifact@v8
         with:
@@ -453,6 +645,34 @@ jobs:
           cd release-assets
           sha256sum keen-pbr_*.ipk > SHA256SUMS
 
+      - name: Sign alpha manifest and installer
+        env:
+          SOURCE_SHA: ${{ needs.resolve-source.outputs.source_sha }}
+          KEENETIC_RELEASE_SIGNING_KEY: ${{ secrets.KEENETIC_RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          if [ -z "${KEENETIC_RELEASE_SIGNING_KEY:-}" ]; then
+            echo "::error::KEENETIC_RELEASE_SIGNING_KEY is not configured; signed artifact was not uploaded."
+            exit 1
+          fi
+          signing_key=$(mktemp "$RUNNER_TEMP/keenetic-release-key.XXXXXX")
+          trap 'rm -f -- "$signing_key"' EXIT
+          printf '%s\n' "$KEENETIC_RELEASE_SIGNING_KEY" > "$signing_key"
+          unset KEENETIC_RELEASE_SIGNING_KEY
+          python3 .release-signing-tools/build_scripts/embed-release-verifier.py \
+            --installer install.sh \
+            --verifier .release-signing-tools/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/release-verify.sh \
+            --public-key .release-signing-tools/packages/keys/keenetic-release-public.pem --check
+          python3 .release-signing-tools/build_scripts/sign-keenetic-release.py \
+            --assets release-assets --installer install.sh \
+            --key "$signing_key" \
+            --public-key .release-signing-tools/packages/keys/keenetic-release-public.pem \
+            --repository "$GITHUB_REPOSITORY" --channel alpha \
+            --release "alpha-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --source "$SOURCE_SHA" \
+            --build "github-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+
       - name: Upload alpha workflow artifact
         uses: actions/upload-artifact@v7
         with:
@@ -460,4 +680,7 @@ jobs:
           path: |
             release-assets/keen-pbr_*.ipk
             release-assets/SHA256SUMS
+            release-assets/install.sh
+            release-assets/release-manifest.tsv
+            release-assets/release-manifest.sig
           if-no-files-found: error

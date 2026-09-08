@@ -14,12 +14,14 @@ import type {
   SubscriptionApplyResponse,
   SubscriptionPreviewCandidate,
   SubscriptionPreviewResponse,
+  SubscriptionPreviewRequest,
 } from "@/api/generated/model"
 import {
   usePostSubscriptionApplyMutation,
   usePostSubscriptionPreviewMutation,
 } from "@/api/mutations"
 import { Alert, AlertDescription } from "@/components/ui/alert"
+import { OperationErrorMessage } from "@/components/shared/operation-error-message"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -32,18 +34,20 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
-import { getApiErrorMessage } from "@/lib/api-errors"
 import { cn } from "@/lib/utils"
 
 import {
   buildSelections,
+  getSubscriptionPreviewRefusalReason,
   initialSelectedLines,
+  initialNewServerLines,
   isSelectable,
   MAXIMUM_SUBSCRIPTION_SELECTION,
   requiresTagOverride,
   selectionProblems,
   toggleSelectedLine,
 } from "./subscription-import-model"
+import { runSubscriptionPreviewRequest } from "./subscription-preview-request"
 
 // The dialog walks one direction: url -> preview -> results. The preview
 // holds no share links - the backend keeps those in daemon memory behind the
@@ -63,7 +67,10 @@ export function SubscriptionImportDialog({
   // subscription URL or chose a subscription file there; asking them for it a
   // second time in this dialog would be the modal admitting it did not
   // understand what they gave it.
-  seed?: { readonly url: string } | { readonly document: string }
+  seed?:
+    | { readonly url: string }
+    | { readonly document: string }
+    | { readonly subscription_id: string; readonly pending_only: true }
 }) {
   const { t } = useTranslation()
   const [url, setUrl] = useState("")
@@ -75,18 +82,34 @@ export function SubscriptionImportDialog({
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [overrides, setOverrides] = useState<Map<number, string>>(new Map())
   const focusedProblemRef = useRef<string | null>(null)
+  const previewRequest = useRef<symbol | null>(null)
+  const newServersOnly = Boolean(
+    seed && "subscription_id" in seed && seed.pending_only
+  )
 
   const previewMutation = usePostSubscriptionPreviewMutation()
   const applyMutation = usePostSubscriptionApplyMutation()
 
+  useEffect(
+    () => () => {
+      previewRequest.current = null
+    },
+    []
+  )
+
+  const resetPreview = () => {
+    previewRequest.current = null
+    previewMutation.reset()
+  }
+
   const reset = () => {
+    resetPreview()
     setUrl("")
     setSubscriptionName("")
     setPreview(null)
     setResults(null)
     setSelected(new Set())
     setOverrides(new Map())
-    previewMutation.reset()
     applyMutation.reset()
   }
 
@@ -110,6 +133,7 @@ export function SubscriptionImportDialog({
       }
       if (
         preview &&
+        (selected.size > 0 || overrides.size > 0) &&
         !window.confirm(t("transports.subscriptionImport.discardConfirm"))
       ) {
         return
@@ -119,20 +143,24 @@ export function SubscriptionImportDialog({
     onOpenChange(next)
   }
 
-  const fetchPreview = (source?: { url: string } | { document: string }) => {
-    previewMutation.mutate(
-      { data: source ?? { url: url.trim() } },
-      {
-        onSuccess: (response) => {
-          if (response.status === 200) {
-            setPreview(response.data)
-            setSubscriptionName(
-              (current) => current || response.data.subscription_name || ""
-            )
-            setSelected(initialSelectedLines(response.data.candidates))
-            setOverrides(new Map())
-          }
-        },
+  const fetchPreview = (source?: SubscriptionPreviewRequest) => {
+    void runSubscriptionPreviewRequest(
+      previewRequest,
+      () =>
+        previewMutation.mutateAsync({ data: source ?? { url: url.trim() } }),
+      (response) => {
+        if (response.status === 200) {
+          setPreview(response.data)
+          setSubscriptionName(
+            (current) => current || response.data.subscription_name || ""
+          )
+          setSelected(
+            newServersOnly
+              ? initialNewServerLines(response.data.candidates)
+              : initialSelectedLines(response.data.candidates)
+          )
+          setOverrides(new Map())
+        }
       }
     )
   }
@@ -241,31 +269,27 @@ export function SubscriptionImportDialog({
     setSelected(new Set())
     setOverrides(new Map())
     applyMutation.reset()
-    previewMutation.reset()
+    resetPreview()
+    if (seed) fetchPreview(seed)
   }
   // The preview refusal carries a machine-readable reason; showing the
   // operator which rule refused their URL beats a generic sentence.
   const previewError = previewMutation.error as ApiError | null
-  const previewReason =
-    previewError &&
-    typeof previewError.details === "object" &&
-    previewError.details !== null &&
-    "reason" in previewError.details &&
-    typeof (previewError.details as { reason?: unknown }).reason === "string"
-      ? ((previewError.details as { reason: string }).reason as
-          | "scheme_not_allowed"
-          | "credentials_in_url"
-          | "destination_not_permitted"
-          | "malformed")
-      : null
+  const previewReason = getSubscriptionPreviewRefusalReason(previewError)
 
   return (
     <Dialog onOpenChange={close} open={open}>
       <DialogContent className="max-sm:top-auto max-sm:bottom-0 max-sm:left-0 max-sm:max-h-[calc(100dvh-0.75rem)] max-sm:max-w-none max-sm:translate-x-0 max-sm:translate-y-0 max-sm:overflow-y-auto max-sm:rounded-b-none max-sm:border-x-0 max-sm:border-b-0 sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>{t("transports.subscriptionImport.title")}</DialogTitle>
+          <DialogTitle>
+            {newServersOnly
+              ? t("subscriptions.previewNewServers")
+              : t("transports.subscriptionImport.title")}
+          </DialogTitle>
           <DialogDescription>
-            {t("transports.subscriptionImport.description")}
+            {newServersOnly
+              ? t("subscriptions.newServersHint")
+              : t("transports.subscriptionImport.description")}
           </DialogDescription>
         </DialogHeader>
 
@@ -317,9 +341,13 @@ export function SubscriptionImportDialog({
             ) : (
               <Alert>
                 <AlertDescription>
-                  {t(
-                    `transports.subscriptionImport.documentKind.${preview.document_kind}`
-                  )}
+                  {newServersOnly &&
+                  (preview.document_kind === "link_list" ||
+                    preview.document_kind === "base64_link_list")
+                    ? t("subscriptions.noNewServers")
+                    : t(
+                        `transports.subscriptionImport.documentKind.${preview.document_kind}`
+                      )}
                 </AlertDescription>
               </Alert>
             )}
@@ -335,7 +363,7 @@ export function SubscriptionImportDialog({
             ) : applyMutation.error ? (
               <Alert variant="destructive">
                 <AlertDescription>
-                  {getApiErrorMessage(applyMutation.error as ApiError)}
+                  <OperationErrorMessage error={applyMutation.error} />
                 </AlertDescription>
               </Alert>
             ) : null}
@@ -351,35 +379,60 @@ export function SubscriptionImportDialog({
           </div>
         ) : (
           <div className="space-y-3">
-            <Input
-              autoFocus
-              onChange={(event) => setUrl(event.target.value)}
-              onKeyDown={(event) => {
-                // The same guard the Fetch button has: each Enter would start
-                // another provider fetch and another credential-holding
-                // preview session on the daemon.
-                if (
-                  event.key === "Enter" &&
-                  url.trim() &&
-                  !previewMutation.isPending
-                ) {
-                  fetchPreview()
-                }
-              }}
-              placeholder={t("transports.subscriptionImport.urlPlaceholder")}
-              value={url}
-            />
-            <p className="text-xs text-muted-foreground">
-              {t("transports.subscriptionImport.urlHint")}
-            </p>
+            {newServersOnly ? (
+              <p
+                className="flex items-center gap-2 text-sm text-muted-foreground"
+                role="status"
+              >
+                {previewMutation.isPending ? (
+                  <LoaderCircleIcon className="size-4 animate-spin" />
+                ) : null}
+                {previewMutation.error
+                  ? t("subscriptions.refreshFailed")
+                  : t("subscriptions.loading")}
+              </p>
+            ) : (
+              <>
+                <Input
+                  autoFocus
+                  onChange={(event) => setUrl(event.target.value)}
+                  onKeyDown={(event) => {
+                    // The same guard the Fetch button has: each Enter would start
+                    // another provider fetch and another credential-holding
+                    // preview session on the daemon.
+                    if (
+                      event.key === "Enter" &&
+                      url.trim() &&
+                      !previewMutation.isPending
+                    ) {
+                      fetchPreview()
+                    }
+                  }}
+                  placeholder={t(
+                    "transports.subscriptionImport.urlPlaceholder"
+                  )}
+                  value={url}
+                />
+                <p className="text-xs text-muted-foreground">
+                  {t("transports.subscriptionImport.urlHint")}
+                </p>
+              </>
+            )}
             {previewMutation.error ? (
               <Alert variant="destructive">
                 <AlertDescription>
-                  {previewReason
-                    ? t(
-                        `transports.subscriptionImport.urlRefused.${previewReason}`
-                      )
-                    : getApiErrorMessage(previewMutation.error as ApiError)}
+                  <OperationErrorMessage
+                    error={previewMutation.error}
+                    summary={
+                      newServersOnly && previewError?.status === 404
+                        ? t("subscriptions.targetMissing")
+                        : previewReason
+                          ? t(
+                              `transports.subscriptionImport.urlRefused.${previewReason}`
+                            )
+                          : undefined
+                    }
+                  />
                 </AlertDescription>
               </Alert>
             ) : null}
@@ -418,8 +471,10 @@ export function SubscriptionImportDialog({
             </Button>
           ) : (
             <Button
-              disabled={!url.trim() || previewMutation.isPending}
-              onClick={() => fetchPreview()}
+              disabled={
+                (!newServersOnly && !url.trim()) || previewMutation.isPending
+              }
+              onClick={() => fetchPreview(newServersOnly ? seed : undefined)}
             >
               {t("transports.subscriptionImport.fetch")}
             </Button>
@@ -544,7 +599,11 @@ function DispositionBadge({
   )
 }
 
-function ResultsView({ results }: { results: SubscriptionApplyResponse }) {
+export function ResultsView({
+  results,
+}: {
+  results: SubscriptionApplyResponse
+}) {
   const { t } = useTranslation()
   // Three outcomes, not two. An entry an earlier apply already created is not
   // a failure: nothing went wrong and there is nothing to fix. Painting it red
@@ -588,7 +647,12 @@ function ResultsView({ results }: { results: SubscriptionApplyResponse }) {
               line: result.line,
               tag: result.tag ?? "",
             })}
-            {result.error ? ` — ${result.error}` : null}
+            <OperationErrorMessage
+              error={{
+                message: result.error ?? "",
+                details: { code: result.code },
+              }}
+            />
           </AlertDescription>
         </Alert>
       ))}

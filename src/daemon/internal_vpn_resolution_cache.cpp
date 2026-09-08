@@ -62,6 +62,18 @@ bool same_service_targets(
 
 } // namespace
 
+void refresh_prepared_openconnect_service_ingress(
+    InternalVpnServiceRuntimeResolution& resolution,
+    const std::vector<DumpedInterface>& live_interfaces) {
+    for (auto& target : resolution.effective_targets) {
+        if (!internal_vpn_target_is_openconnect(target)) continue;
+        std::vector<InternalVpnRuntimeTarget> openconnect{target};
+        refresh_internal_vpn_service_ingress_interfaces(
+            openconnect, live_interfaces);
+        target = std::move(openconnect.front());
+    }
+}
+
 bool InternalVpnResolutionCache::active_matches(
     const std::vector<InternalVpnServer>& servers,
     const std::vector<InternalVpnRuntimeTarget>& service_targets) const

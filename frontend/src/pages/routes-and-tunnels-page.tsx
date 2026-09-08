@@ -1,4 +1,6 @@
+import { useEffect } from "react"
 import { useTranslation } from "react-i18next"
+import { useSearch } from "wouter"
 
 import { useGetConfig } from "@/api/queries"
 import { selectConfig, selectOutbounds } from "@/api/selectors"
@@ -7,6 +9,10 @@ import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
 import { useSectionTab } from "@/hooks/use-section-tab"
 import { OutboundsPage } from "@/pages/outbounds-page"
 import { TransportsPage } from "@/pages/transports-page"
+import {
+  readSubscriptionDeepLink,
+  withoutSubscriptionDeepLink,
+} from "@/components/transports/subscription-settings-model"
 
 type ConnectionsTab = "tunnels" | "interfaces" | "failover" | "system"
 
@@ -33,10 +39,21 @@ export function RoutesAndTunnelsPage({
   initialTab,
 }: { initialTab?: ConnectionsTab } = {}) {
   const { t } = useTranslation()
+  const search = useSearch()
+  const subscriptionLink = readSubscriptionDeepLink(search)
   const [activeTab, setActiveTab] = useSectionTab<ConnectionsTab>(
     CONNECTIONS_TABS,
     initialTab ?? "tunnels"
   )
+  useEffect(() => {
+    if (
+      subscriptionLink.open &&
+      activeTab !== "tunnels" &&
+      activeTab !== "interfaces"
+    ) {
+      setActiveTab("tunnels")
+    }
+  }, [activeTab, setActiveTab, subscriptionLink.open])
   const configQuery = useGetConfig()
   const outbounds = selectOutbounds(selectConfig(configQuery.data))
   const countOf = (predicate: (type: string) => boolean) =>
@@ -68,7 +85,14 @@ export function RoutesAndTunnelsPage({
       />
       <SectionTabs
         ariaLabel={t("pages.routesAndTunnels.tabs.ariaLabel")}
-        onValueChange={setActiveTab}
+        onValueChange={(tab) => {
+          window.history.replaceState(
+            window.history.state,
+            "",
+            withoutSubscriptionDeepLink(window.location.href)
+          )
+          setActiveTab(tab)
+        }}
         tabs={tabs}
         value={mergedTabActive ? "tunnels" : activeTab}
       />

@@ -6,6 +6,50 @@ const t = (key: string, options?: Record<string, unknown>) =>
   `${key}:${String(options?.version ?? "")}`
 
 describe("notification collector", () => {
+  test("keeps an exact dismissed record hidden when its tail index changes", () => {
+    const incident = "2026-09-05 15:16:00.000 [E] Managed route repair failed"
+    const lines = ["2026-09-05 15:15:00.000 [I] Background check", incident]
+    const dismissed = new Set(["log-incident"])
+    const beforeTailMoved = collectNotices(
+      lines,
+      undefined,
+      undefined,
+      undefined,
+      ["log-background", "log-incident"],
+      dismissed,
+      t
+    )
+    const afterTailMoved = collectNotices(
+      [incident],
+      undefined,
+      undefined,
+      undefined,
+      ["log-incident"],
+      dismissed,
+      t
+    )
+
+    expect(beforeTailMoved).toEqual([])
+    expect(afterTailMoved).toEqual([])
+  })
+
+  test("shows a newly recorded identical message with a different exact ID", () => {
+    const incident = "2026-09-05 15:16:00.000 [E] Managed route repair failed"
+    const notices = collectNotices(
+      [incident, incident],
+      undefined,
+      undefined,
+      undefined,
+      ["log-dismissed", "log-new"],
+      new Set(["log-dismissed"]),
+      t
+    )
+
+    expect(notices).toHaveLength(1)
+    expect(notices[0]?.id).toBe("log-new")
+    expect(notices[0]?.details).toBe("Managed route repair failed")
+  })
+
   test("hides the resolved Keenetic remote-access compatibility incident only", () => {
     const notices = collectNotices(
       [
@@ -15,13 +59,13 @@ describe("notification collector", () => {
       undefined,
       undefined,
       undefined,
-      0,
+      [],
       new Set(),
       t
     )
 
     expect(notices).toHaveLength(1)
-    expect(notices[0]?.text).toContain(
+    expect(notices[0]?.details).toContain(
       "owned firewall rules could not be removed and verified"
     )
   })
@@ -35,13 +79,13 @@ describe("notification collector", () => {
       undefined,
       undefined,
       undefined,
-      0,
+      [],
       new Set(),
       t
     )
 
     expect(notices).toHaveLength(1)
-    expect(notices[0]?.text).toBe("Managed route repair failed")
+    expect(notices[0]?.details).toBe("Managed route repair failed")
   })
 
   test("keeps internal firewall recovery details out of the notification bell", () => {
@@ -58,13 +102,13 @@ describe("notification collector", () => {
       undefined,
       undefined,
       undefined,
-      0,
+      [],
       new Set(),
       t
     )
 
     expect(notices).toHaveLength(1)
-    expect(notices[0]?.text).toBe(
+    expect(notices[0]?.details).toBe(
       "Giving up on applying firewall rules after 6 retries: final failure"
     )
   })
@@ -77,13 +121,13 @@ describe("notification collector", () => {
       undefined,
       undefined,
       undefined,
-      0,
+      [],
       new Set(),
       t
     )
 
     expect(notices).toHaveLength(1)
-    expect(notices[0]?.text).toContain("line 41 failed")
+    expect(notices[0]?.details).toContain("line 41 failed")
   })
 
   test("keeps exact-domain-only SRS mapping in the journal", () => {
@@ -95,13 +139,13 @@ describe("notification collector", () => {
       undefined,
       undefined,
       undefined,
-      0,
+      [],
       new Set(),
       t
     )
 
     expect(notices).toHaveLength(1)
-    expect(notices[0]?.text).toContain("failed to refresh")
+    expect(notices[0]?.details).toContain("failed to refresh")
   })
 
   test("hides bounded SRS narrowing but keeps materially lossy conversion visible", () => {
@@ -115,12 +159,12 @@ describe("notification collector", () => {
       undefined,
       undefined,
       undefined,
-      0,
+      [],
       new Set(),
       t
     )
 
-    expect(notices.map((notice) => notice.text)).toEqual([
+    expect(notices.map((notice) => notice.details)).toEqual([
       "List 'domains': SRS import is lossy: skipped 4 invalid domain value(s)",
       "List 'rules': SRS import is lossy: skipped 3 rule(s), including 1 inverted rule(s)",
     ])
@@ -138,7 +182,7 @@ describe("notification collector", () => {
         available: true,
       },
       undefined,
-      0,
+      [],
       new Set(),
       t
     )
@@ -164,7 +208,7 @@ describe("notification collector", () => {
         available: false,
       },
       undefined,
-      0,
+      [],
       new Set(),
       t
     )
@@ -185,7 +229,7 @@ describe("notification collector", () => {
         available: true,
       },
       undefined,
-      0,
+      [],
       dismissed,
       t
     )
@@ -200,7 +244,7 @@ describe("notification collector", () => {
         available: true,
       },
       undefined,
-      0,
+      [],
       dismissed,
       t
     )
@@ -218,14 +262,14 @@ describe("notification collector", () => {
       undefined,
       undefined,
       undefined,
-      0,
+      [],
       new Set(),
       t
     )
 
     expect(notices).toHaveLength(1)
     expect(notices[0]?.timestamp).toBe("2026-08-27 21:53:45.503")
-    expect(notices[0]?.text).toContain("balanced mode")
+    expect(notices[0]?.details).toContain("balanced mode")
   })
 
   test("coalesces repeated current PPE incidents without inferring recovery", () => {
@@ -237,7 +281,7 @@ describe("notification collector", () => {
       undefined,
       undefined,
       undefined,
-      0,
+      [],
       new Set(),
       t
     )
@@ -254,7 +298,7 @@ describe("notification collector", () => {
       undefined,
       undefined,
       undefined,
-      0,
+      [],
       new Set(),
       t
     )
@@ -273,7 +317,7 @@ describe("notification collector", () => {
       undefined,
       undefined,
       undefined,
-      0,
+      [],
       new Set(),
       t,
       {
@@ -289,7 +333,7 @@ describe("notification collector", () => {
       undefined,
       undefined,
       undefined,
-      0,
+      [],
       new Set(),
       t,
       {
@@ -314,7 +358,7 @@ describe("notification collector", () => {
       undefined,
       undefined,
       undefined,
-      0,
+      [],
       new Set(),
       t,
       {
@@ -343,7 +387,7 @@ describe("list refresh notices follow the daemon, not the journal", () => {
       undefined,
       undefined,
       { ads: { last_updated: "2026-08-18T01:00:00Z" }, porn: {} },
-      0,
+      [],
       new Set(),
       t
     )
@@ -360,7 +404,7 @@ describe("list refresh notices follow the daemon, not the journal", () => {
         ads: {},
         porn: { last_error: "Could not resolve host: example.invalid" },
       },
-      0,
+      [],
       new Set(),
       t
     )
@@ -376,7 +420,7 @@ describe("list refresh notices follow the daemon, not the journal", () => {
       undefined,
       undefined,
       { ads: {}, porn: { last_error: "boom" } },
-      0,
+      [],
       new Set(),
       t
     )
@@ -392,7 +436,7 @@ describe("list refresh notices follow the daemon, not the journal", () => {
       undefined,
       undefined,
       {},
-      0,
+      [],
       new Set(),
       t
     )
@@ -410,7 +454,7 @@ describe("list refresh notices follow the daemon, not the journal", () => {
       undefined,
       undefined,
       { ads: {} },
-      0,
+      [],
       new Set(),
       t
     )

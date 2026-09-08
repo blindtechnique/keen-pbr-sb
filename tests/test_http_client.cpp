@@ -80,6 +80,22 @@ private:
     std::thread thread_;
 };
 
+keen_pbr3::HttpTransportRequest pinned_head_request(int port,
+                                                   const std::string& path = "/") {
+    keen_pbr3::HttpTransportRequest request;
+    request.url = "http://route-probe.invalid:" + std::to_string(port) + path;
+    request.resolve_entries = {
+        "route-probe.invalid:" + std::to_string(port) + ":127.0.0.1"};
+    request.destination_filter = [](const std::string& address) {
+        return address == "127.0.0.1";
+    };
+    request.timeout_ms = 1000;
+    request.head_only = true;
+    request.follow_redirects = false;
+    request.max_header_size = 16U * 1024U;
+    return request;
+}
+
 constexpr const char* kReadmeUrl =
     "https://raw.githubusercontent.com/maksimkurb/keen-pbr/refs/heads/main/README.md";
 
@@ -192,6 +208,10 @@ TEST_CASE("a destination filter reaches the transport on both download paths") {
     (void)client.download("https://example.test/a", options);
     CHECK(static_cast<bool>(transport->request.destination_filter));
     CHECK(transport->request.max_redirects == 5);
+    CHECK(transport->request.resolve_entries.empty());
+    CHECK_FALSE(transport->request.head_only);
+    CHECK(transport->request.follow_redirects);
+    CHECK(transport->request.max_header_size == 0);
 
     transport->request = {};
     (void)client.download_conditional(
@@ -433,4 +453,144 @@ TEST_CASE("url tester pins the probe socket to the requested device") {
     // usable default sends the probe out over the WAN instead.
     CHECK(transport->request.bind_interface == "nwg1");
     CHECK(transport->request.fwmark == 77);
+}
+
+TEST_CASE("manual HTTP transport pins DNS while retaining Host and sends only HEAD") {
+    keen_pbr3::CurlRuntime curl_runtime;
+    EnvironmentVariableGuard http_proxy("http_proxy", "http://127.0.0.2:9");
+    EnvironmentVariableGuard all_proxy("ALL_PROXY", "http://127.0.0.2:9");
+    EnvironmentVariableGuard no_proxy("no_proxy", "");
+    EnvironmentVariableGuard upper_no_proxy("NO_PROXY", "");
+    httplib::Server server;
+    server.Get("/", [](const httplib::Request& request, httplib::Response& response) {
+        response.status = 405;
+        response.set_header("X-Seen-Method", request.method);
+        response.set_header("X-Seen-Host", request.get_header_value("Host"));
+        response.set_content(std::string(65536, 'x'), "text/plain");
+    });
+    BoundHttpServer bound(server);
+    auto request = pinned_head_request(bound.port());
+    // HEAD may advertise a large resource; its Content-Length is not bytes
+    // downloaded and must not trip the ordinary GET-body limit.
+    request.max_response_size = 8;
+    keen_pbr3::LibcurlHttpTransport transport;
+    const auto response = transport.perform(request);
+    CHECK(response.status_code == 405);
+    CHECK(response.body.empty());
+    CHECK(response.headers.at("x-seen-method") == "HEAD");
+    CHECK(response.headers.at("x-seen-host") ==
+          "route-probe.invalid:" + std::to_string(bound.port()));
+    CHECK(response.headers.at("content-length") == "65536");
+    REQUIRE(response.primary_ip.has_value());
+    CHECK(*response.primary_ip == "127.0.0.1");
+    REQUIRE(response.connect_elapsed.has_value());
+    CHECK(response.connect_elapsed->count() >= 0);
+    CHECK_FALSE(response.tls_elapsed.has_value());
+}
+
+TEST_CASE("manual HTTP transport returns the first redirect without visiting its target") {
+    keen_pbr3::CurlRuntime curl_runtime;
+    httplib::Server server;
+    std::atomic<int> target_calls{0};
+    server.Get("/", [](const httplib::Request&, httplib::Response& response) {
+        response.set_redirect("/next");
+    });
+    server.Get("/next", [&](const httplib::Request&, httplib::Response& response) {
+        ++target_calls;
+        response.status = 204;
+    });
+    BoundHttpServer bound(server);
+    auto request = pinned_head_request(bound.port());
+    request.max_redirects = 0;
+    keen_pbr3::LibcurlHttpTransport transport;
+    const auto response = transport.perform(request);
+    CHECK(response.status_code == 302);
+    CHECK(response.headers.at("location") == "/next");
+    CHECK(target_calls.load() == 0);
+
+    // Explicitly enabling the old behavior still follows the redirect.
+    request.follow_redirects = true;
+    request.max_redirects = 5;
+    CHECK(transport.perform(request).status_code == 204);
+    CHECK(target_calls.load() == 1);
+}
+
+TEST_CASE("manual HTTP transport bounds cumulative headers and preserves the opt-out default") {
+    keen_pbr3::CurlRuntime curl_runtime;
+    httplib::Server server;
+    server.Get("/", [](const httplib::Request&, httplib::Response& response) {
+        response.set_header("X-First", std::string(180, 'a'));
+        response.set_header("X-Second", std::string(180, 'b'));
+    });
+    BoundHttpServer bound(server);
+    auto request = pinned_head_request(bound.port());
+    request.max_header_size = 256;
+    keen_pbr3::LibcurlHttpTransport transport;
+    try {
+        (void)transport.perform(request);
+        FAIL("Expected cumulative response header limit");
+    } catch (const keen_pbr3::HttpTransportError& error) {
+        CHECK(error.reason() == keen_pbr3::HttpTransportError::Reason::response_limit);
+    }
+    request.max_header_size = 0;
+    const auto response = transport.perform(request);
+    CHECK(response.headers.at("x-first").size() == 180);
+    CHECK(response.headers.at("x-second").size() == 180);
+}
+
+TEST_CASE("HTTP transport exposes a typed body limit without changing GET behavior") {
+    keen_pbr3::CurlRuntime curl_runtime;
+    httplib::Server server;
+    server.Get("/", [](const httplib::Request&, httplib::Response& response) {
+        response.set_content(std::string(1024, 'x'), "text/plain");
+    });
+    BoundHttpServer bound(server);
+    auto request = pinned_head_request(bound.port());
+    request.head_only = false;
+    request.max_response_size = 16;
+    keen_pbr3::LibcurlHttpTransport transport;
+    try {
+        (void)transport.perform(request);
+        FAIL("Expected response body limit");
+    } catch (const keen_pbr3::HttpTransportError& error) {
+        CHECK(error.reason() == keen_pbr3::HttpTransportError::Reason::response_limit);
+    }
+    request.max_response_size = 2048;
+    CHECK(transport.perform(request).body.size() == 1024);
+}
+
+TEST_CASE("manual HTTP transport reports timeout without retrying the HEAD request") {
+    keen_pbr3::CurlRuntime curl_runtime;
+    httplib::Server server;
+    std::atomic<int> requests{0};
+    server.Get("/", [&](const httplib::Request&, httplib::Response& response) {
+        ++requests;
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        response.status = 204;
+    });
+    BoundHttpServer bound(server);
+    auto request = pinned_head_request(bound.port());
+    request.timeout_ms = 40;
+    keen_pbr3::LibcurlHttpTransport transport;
+    try {
+        (void)transport.perform(request);
+        FAIL("Expected bounded HTTP timeout");
+    } catch (const keen_pbr3::HttpTransportError& error) {
+        CHECK(error.reason() == keen_pbr3::HttpTransportError::Reason::timeout);
+    }
+    CHECK(requests.load() == 1);
+}
+
+TEST_CASE("HTTP transport keeps legacy error construction and typed cancellation") {
+    using Error = keen_pbr3::HttpTransportError;
+    const Error legacy("legacy");
+    CHECK(legacy.reason() == Error::Reason::other);
+    CHECK(std::string(legacy.what()) == "legacy");
+    const Error marked("mark failed", Error::Reason::mark);
+    CHECK(marked.reason() == Error::Reason::mark);
+    keen_pbr3::CurlRuntime curl_runtime;
+    auto request = pinned_head_request(9);
+    request.cancellation = std::make_shared<std::atomic<bool>>(true);
+    keen_pbr3::LibcurlHttpTransport transport;
+    CHECK_THROWS_AS(transport.perform(request), keen_pbr3::HttpTransportCancelled);
 }

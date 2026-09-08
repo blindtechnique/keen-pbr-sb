@@ -145,8 +145,11 @@ std::string DnsmasqGenerator::compute_config_hash(
 void DnsmasqGenerator::generate_directives(
     std::ostream* out,
     const std::function<void(const std::string&)>& hash_record_callback) {
+    const bool firefox_doh_canary = dns_config_.firefox_doh_canary.value_or(true);
     if (hash_record_callback) {
         hash_record_callback("version|" + hash_version_);
+        hash_record_callback(
+            std::string("firefox-doh-canary|") + (firefox_doh_canary ? "1" : "0"));
         hash_record_callback(
             std::string("ipv6-enabled|")
             + (ipv6_policy_.targets_enabled ? "1" : "0"));
@@ -174,7 +177,9 @@ void DnsmasqGenerator::generate_directives(
         if (!trusted_interfaces_.empty()) {
             *out << "\n";
         }
-        *out << "address=/use-application-dns.net/\n\n";
+        if (firefox_doh_canary) {
+            *out << "address=/use-application-dns.net/\n\n";
+        }
         if (ipv6_policy_.suppress_aaaa) {
             // When IPv6 routing is disabled, returning AAAA records gives
             // clients an unusable first candidate. Browsers then wait for
@@ -238,16 +243,38 @@ void DnsmasqGenerator::generate_directives(
         *out << "\n";
     }
 
+    // The Keenetic hook persists only these upstream records after a complete
+    // resolver activation. Never copy ipset/nftset rules or DNS that depends
+    // on a detour into the stopped-runtime fallback.
+    if (out != nullptr) {
+        *out << "# keen-pbr direct-fallback v1\n";
+    }
     size_t fallback_index = 0;
     for (const DnsServerConfig* server : dns_registry_.fallback_servers()) {
+        const bool resolver_itself = server->port == 53 &&
+            (server->resolved_ip.rfind("127.", 0) == 0 ||
+             server->resolved_ip == "::1");
+        const bool direct_fallback = !server->detour.has_value() &&
+            !resolver_itself &&
+            !(ipv6_policy_.suppress_aaaa &&
+              server->resolved_ip.find(':') != std::string::npos);
         if (hash_record_callback) {
             hash_record_callback(
                 "fallback-server|" + std::to_string(fallback_index) +
                 "|" + server->resolved_ip +
                 "|" + std::to_string(server->port));
+            hash_record_callback(
+                "direct-fallback|" + std::to_string(fallback_index) +
+                "|" + (direct_fallback ? "yes" : "no"));
         }
         ++fallback_index;
         if (out != nullptr) {
+            if (direct_fallback) {
+                *out << "# keen-pbr direct-fallback server="
+                     << server->resolved_ip;
+                if (server->port != 53) *out << "#" << server->port;
+                *out << "\n";
+            }
             *out << "server=" << server->resolved_ip;
             if (server->port != 53) {
                 *out << "#" << server->port;
@@ -265,6 +292,64 @@ void DnsmasqGenerator::generate_directives(
     // covers; the inherited directives are emitted after that pass.
     std::vector<bool> keenetic_scoped_dns_suppressed(
         keenetic_scoped_dns_upstreams_.size(), false);
+
+    // Direct pins use the same registry, detours and resolver hash as lists.
+    // Keep only this small set in memory, never materialize downloaded lists.
+    std::set<std::string> direct_domains;
+    std::set<std::string> direct_server_records;
+    const std::vector<DnsServer> empty_servers;
+    const auto& configured_servers =
+        dns_config_.servers ? *dns_config_.servers : empty_servers;
+    for (const auto& server_config : configured_servers) {
+        if (!server_config.domains.has_value()) {
+            continue;
+        }
+        const auto servers = dns_registry_.get_servers(server_config.tag);
+        for (const auto& domain : *server_config.domains) {
+            const std::string bare = canonical_dns_domain(domain);
+            direct_domains.insert(bare);
+            for (const auto* server : servers) {
+                std::string address = server->resolved_ip;
+                if (server->port != 53) {
+                    address += "#" + std::to_string(server->port);
+                }
+                direct_server_records.insert("server=/" + bare + "/" + address);
+            }
+        }
+    }
+    // Check suffixes by DNS label: work is bounded by name length, not by the
+    // number of pins times the (potentially large) number of list entries.
+    const auto has_direct_binding = [&](std::string domain) {
+        domain = canonical_dns_domain(std::move(domain));
+        for (;;) {
+            if (direct_domains.count(domain) > 0) {
+                return true;
+            }
+            const auto dot = domain.find('.');
+            if (dot == std::string::npos) {
+                return false;
+            }
+            domain.erase(0, dot + 1);
+        }
+    };
+    for (size_t index = 0; index < keenetic_scoped_dns_upstreams_.size(); ++index) {
+        keenetic_scoped_dns_suppressed[index] =
+            has_direct_binding(keenetic_scoped_dns_upstreams_[index].domain);
+    }
+    if (out != nullptr && !direct_server_records.empty()) {
+        *out << "# Direct domain DNS bindings\n";
+    }
+    for (const auto& record : direct_server_records) {
+        if (hash_record_callback) {
+            hash_record_callback("direct-domain-server|" + record);
+        }
+        if (out != nullptr) {
+            *out << record << "\n";
+        }
+    }
+    if (out != nullptr && !direct_server_records.empty()) {
+        *out << "\n";
+    }
 
     std::set<std::string> ipset_lists;
     for (const auto& rule : route_config_.rules.value_or(std::vector<RouteRule>{})) {
@@ -479,7 +564,11 @@ void DnsmasqGenerator::generate_directives(
                     hash_record_callback("domain-rebind|" + list_name + "|" + bare);
                 }
             }
-            for (size_t server_index = 0; server_index < dns_servers.size(); ++server_index) {
+            const bool directly_bound =
+                !dns_servers.empty() && !direct_domains.empty() &&
+                has_direct_binding(bare);
+            for (size_t server_index = 0;
+                 !directly_bound && server_index < dns_servers.size(); ++server_index) {
                 const DnsServerConfig* server = dns_servers[server_index];
                 if (hash_record_callback) {
                     hash_record_callback(
@@ -495,11 +584,13 @@ void DnsmasqGenerator::generate_directives(
             ensure_list_header();
             push_batch(ipset_batch, bare);
             push_batch(rebind_batch, bare);
-            for (auto& server_batch : server_batches) {
-                push_batch(server_batch, bare);
+            if (!directly_bound) {
+                for (auto& server_batch : server_batches) {
+                    push_batch(server_batch, bare);
+                }
             }
         });
-        list_streamer_.stream_list_preferring_cache(list_name, list_cfg_it->second, collector);
+        list_streamer_.stream_list(list_name, list_cfg_it->second, collector);
 
         flush_batch(ipset_batch);
         flush_batch(rebind_batch);

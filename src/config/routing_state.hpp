@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../config/config.hpp"
+#include "route_failure_policy.hpp"
 #include "../keenetic/internal_vpn_runtime_target.hpp"
 #include "../lists/list_set_usage.hpp"
 #include "../routing/firewall_state.hpp"
@@ -31,6 +32,18 @@ inline bool is_reserved_table(uint32_t id) {
 using OutboundReachabilityFn = std::function<bool(const Outbound&)>;
 using OutboundReachabilitySnapshot = std::map<std::string, bool>;
 
+struct OutboundFamilyReachability {
+    bool ipv4{false};
+    bool ipv6{false};
+
+    bool any(bool ipv6_enabled = true) const noexcept {
+        return ipv4 || (ipv6_enabled && ipv6);
+    }
+    bool for_family(int family) const noexcept;
+};
+using OutboundFamilyReachabilitySnapshot =
+    std::map<std::string, OutboundFamilyReachability>;
+
 // Fully in-memory desired routing generation. Building this value performs no
 // netlink reads and does not mutate RouteTable or PolicyRuleManager. A missing
 // reachability entry preserves the historical no-observer behaviour and is
@@ -45,7 +58,8 @@ PlannedRoutingState plan_routing_state(
     const OutboundMarkMap& marks,
     const OutboundReachabilitySnapshot& reachability_snapshot = {},
     const std::map<std::string, std::string>* urltest_selections = nullptr,
-    bool ipv6_enabled = true);
+    bool ipv6_enabled = true,
+    const OutboundFamilyReachabilitySnapshot* family_reachability = nullptr);
 
 // Return URLTEST outbounds that directly or transitively contain one of the
 // changed child outbounds. Results preserve configuration order and contain
@@ -61,7 +75,8 @@ void populate_routing_state(const Config& cfg,
                             PolicyRuleManager& rules,
                             OutboundReachabilityFn reachability_check = {},
                             const std::map<std::string, std::string>* urltest_selections = nullptr,
-                            bool ipv6_enabled = true);
+                            bool ipv6_enabled = true,
+                            const OutboundFamilyReachabilitySnapshot* family_reachability = nullptr);
 
 // Reconcile one already-planned kernel generation without exposing policy
 // rules before their routes exist. A failed add intentionally leaves the
@@ -76,6 +91,16 @@ void reconcile_kernel_routing_state(
 
 bool is_interface_outbound_reachable(const Outbound& outbound, NetlinkManager& netlink);
 bool is_interface_outbound_reachable(
+    const Outbound& outbound,
+    const std::vector<DumpedRoute>& main_table_routes);
+
+// Pure family-specific observation from one route/link snapshot. Explicit
+// gateways constrain only their own family; link-scope VPNs support both.
+OutboundFamilyReachability interface_outbound_family_reachability(
+    const Outbound& outbound,
+    const std::vector<DumpedRoute>& main_table_routes,
+    bool interface_admin_up);
+OutboundFamilyReachability interface_outbound_family_reachability(
     const Outbound& outbound,
     const std::vector<DumpedRoute>& main_table_routes);
 
@@ -104,10 +129,20 @@ std::optional<std::string> infer_urltest_selection_from_routes(
 
 // Build firewall rule state (set names, actions, selectors) from config without touching firewall.
 // urltest_selections optionally overrides URLTEST outbounds to a selected child tag.
+// The same family snapshot must be used by the routing plan and firewall.
+const Outbound* resolve_effective_outbound_for_family(
+    const std::vector<Outbound>& outbounds,
+    const Outbound& outbound,
+    const std::map<std::string, std::string>* urltest_selections,
+    int family,
+    const OutboundFamilyReachabilitySnapshot* family_reachability = nullptr);
+
 std::vector<RuleState> build_fw_rule_states(
     const Config& cfg,
     const OutboundMarkMap& marks,
-    const std::map<std::string, std::string>* urltest_selections = nullptr);
+    const std::map<std::string, std::string>* urltest_selections = nullptr,
+    const RouteFailureHealthSnapshot* failure_health = nullptr,
+    const OutboundFamilyReachabilitySnapshot* family_reachability = nullptr);
 
 using ListSetUsageFn = std::function<ListSetUsage(const std::string&,
                                                   const ListConfig&)>;

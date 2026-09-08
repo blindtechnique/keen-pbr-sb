@@ -1,12 +1,24 @@
-import { useQueryClient } from "@tanstack/react-query"
-import { ExternalLink, Plus, RefreshCw } from "lucide-react"
-import { useMemo, useState } from "react"
+import {
+  keepPreviousData,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query"
+import {
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  ExternalLink,
+  Plus,
+  RefreshCw,
+} from "lucide-react"
+import { Fragment, useDeferredValue, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 import { useLocation } from "wouter"
 
-import type { ApiError } from "@/api/client"
 import type { ConfigObject } from "@/api/generated/model/configObject"
+import { queryLists } from "@/api/generated/keen-api"
+import type { ListPageItem } from "@/api/generated/model/listPageItem"
 import type { ConfigStateResponseListRefreshState } from "@/api/generated/model/configStateResponseListRefreshState"
 import {
   useConfigMutationPending,
@@ -37,23 +49,31 @@ import { createDnsServerDisplayNameMap } from "@/lib/dns-display"
 import { getRuleEditHref } from "@/lib/rule-route"
 import type { Dependency } from "@/lib/dependencies"
 import { ListDeleteReplacementPicker } from "@/components/lists/list-delete-replacement-picker"
+import { ListShrinkNotice } from "@/components/lists/list-shrink-notice"
+import { OperationErrorMessage } from "@/components/shared/operation-error-message"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { PageHeader } from "@/components/shared/page-header"
 import { PageActionBar } from "@/components/shared/page-action-bar"
 import { StatsDisplay } from "@/components/shared/stats-display"
 import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { useRowSelection } from "@/hooks/use-row-selection"
-import { filterBySearchQuery } from "@/lib/table-search"
-import { useTableSort } from "@/hooks/use-table-sort"
+import { nextTableSortState, type TableSortState } from "@/hooks/use-table-sort"
+import { useVirtualRows } from "@/hooks/use-virtual-rows"
+import { buildListPageRequest } from "@/pages/lists-pagination"
 import { useConfigDependencies } from "@/hooks/use-config-dependencies"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { getApiErrorMessage } from "@/lib/api-errors"
+import {
+  buildListRefreshRequest,
+  didListRefreshComplete,
+  type ListRefreshAction,
+  type ListShrinkRejection,
+} from "@/lib/list-refresh-controls"
 import { createOutboundDisplayNameMap } from "@/lib/outbound-display"
 import {
   formatListReferenceLabels,
-  getListDisplayName,
   getListReferenceLabel,
 } from "@/lib/list-display"
 import {
@@ -65,8 +85,8 @@ import {
 type ListDraft = {
   name: string
   ttlMs: string
-  domains: string
-  ipCidrs: string
+  domains: boolean
+  ipCidrs: boolean
   url: string
   file: string
 }
@@ -82,6 +102,7 @@ type ListTableRow = {
   lastAttempt?: string
   lastError?: string
   lastDetour?: string
+  shrinkRejection?: ListShrinkRejection
   stats?: {
     domains: number
     ipv4Subnets: number
@@ -116,10 +137,40 @@ export function ListsPage() {
   const configRevision = selectConfigRevision(configQuery.data)
   const isDraft = selectConfigIsDraft(configQuery.data)
   const listRefreshState = selectListRefreshState(configQuery.data)
+  const [search, setSearch] = useState("")
+  const deferredSearch = useDeferredValue(search)
+  const [offset, setOffset] = useState(0)
+  const [sortState, setSortState] = useState<{
+    activeColumn: number | null
+    direction: "asc" | "desc"
+  }>({ activeColumn: null, direction: "asc" })
+  const pageRequest = buildListPageRequest(deferredSearch, offset, sortState)
+  const pageQuery = useQuery({
+    // Config invalidation also refreshes pages, but a page is NEVER cached as
+    // the full configuration used by editors and import/export.
+    queryKey: [...queryKeys.config(), "lists-page", pageRequest],
+    queryFn: async ({ signal }) => {
+      const response = await queryLists(pageRequest, { signal })
+      if (response.status !== 200) throw new Error(response.data.error)
+      return response.data
+    },
+    placeholderData: keepPreviousData,
+  })
+  const page = pageQuery.data
+  const pageBusy = pageQuery.isFetching || search !== deferredSearch
+  const sort: TableSortState = {
+    ...sortState,
+    sortable: [0, 1],
+    onToggle: (column) => {
+      setSortState((current) => nextTableSortState(current, column))
+      setOffset(0)
+    },
+  }
   const [activeRefreshTarget, setActiveRefreshTarget] = useState<string | null>(
     null
   )
   const [bulkRefreshRunning, setBulkRefreshRunning] = useState(false)
+  const refreshRequestRef = useRef(false)
   const [deleteRequest, setDeleteRequest] = useState<{
     ids: string[]
     config: ConfigObject
@@ -135,7 +186,9 @@ export function ListsPage() {
       onSuccess: async (response, variables) => {
         const requestedName = variables?.data?.name
         const failedLists =
-          response.status === 200 ? response.data.failed_lists : []
+          response.status === 200 && Array.isArray(response.data.failed_lists)
+            ? response.data.failed_lists
+            : []
         if (failedLists.length > 0) {
           toast.error(
             failedLists.length === 1
@@ -158,6 +211,17 @@ export function ListsPage() {
           return
         }
 
+        if (!didListRefreshComplete(response, requestedName)) {
+          toast.error(
+            <OperationErrorMessage
+              error={response}
+              fallbackSummary={t("pages.lists.messages.refreshUnconfirmed")}
+            />,
+            { richColors: true }
+          )
+          return
+        }
+
         toast.success(
           requestedName
             ? t("pages.lists.messages.refreshedOne")
@@ -165,7 +229,13 @@ export function ListsPage() {
         )
       },
       onError: (error) => {
-        toast.error(getApiErrorMessage(error as ApiError), { richColors: true })
+        toast.error(
+          <OperationErrorMessage
+            error={error}
+            fallbackSummary={t("pages.lists.messages.refreshRequestFailed")}
+          />,
+          { richColors: true }
+        )
       },
       onSettled: () => {
         setActiveRefreshTarget(null)
@@ -176,13 +246,13 @@ export function ListsPage() {
 
   const tableRows = useMemo(
     () =>
-      getTableRowsFromListMap(
-        loadedConfig?.lists,
+      getTableRowsFromListPage(
+        page?.items,
         listRefreshState,
         createOutboundDisplayNameMap(loadedConfig?.outbounds ?? []),
         t
       ),
-    [loadedConfig?.lists, loadedConfig?.outbounds, listRefreshState, t]
+    [page?.items, loadedConfig?.outbounds, listRefreshState, t]
   )
   const tableRowsById = useMemo(
     () => new Map(tableRows.map((row) => [row.id, row])),
@@ -207,6 +277,7 @@ export function ListsPage() {
     const dnsChipsByList = new Map<string, Dependency[]>()
     for (const [index, rule] of (loadedConfig?.dns?.rules ?? []).entries()) {
       for (const listId of rule.list ?? []) {
+        if (!tableRowsById.has(listId)) continue
         const chips = dnsChipsByList.get(listId) ?? []
         const label = dnsServerNames.get(rule.server) ?? rule.server
         if (!chips.some((chip) => chip.label === label)) {
@@ -230,39 +301,31 @@ export function ListsPage() {
         ],
       ])
     )
-  }, [dependencyAnalysis.dependenciesByTarget, loadedConfig, tableRows])
-  const [search, setSearch] = useState("")
-  // Строки ищутся по имени, техническому идентификатору, источнику и по тому,
-  // где список используется: именно так его и вспоминают — «тот, что для
-  // телеграма» или «тот, что с githubusercontent».
-  const visibleRows = useMemo(
-    () =>
-      filterBySearchQuery(tableRows, search, (row) => [
-        row.displayName,
-        row.technicalId,
-        row.id,
-        row.locationLabel,
-        ...(dependenciesByList.get(row.id) ?? []).map(
-          (dependency) => dependency.label
-        ),
-      ]),
-    [tableRows, search, dependenciesByList]
-  )
-  // Колонки «Название» и «Источник» сортируются; «Записей» — составное поле
-  // вида «2 / 0 / 0», сравнивать его нечем, а «Где используется» и «Действия»
-  // сортировать бессмысленно.
-  const { sorted: sortedRows, sort } = useTableSort(visibleRows, [
-    { index: 0, get: (row) => row.displayName },
-    { index: 1, get: (row) => row.locationLabel },
+  }, [
+    dependencyAnalysis.dependenciesByTarget,
+    loadedConfig,
+    tableRows,
+    tableRowsById,
   ])
-  // Выделение живёт по видимым строкам: массовое действие не должно задеть
-  // то, что человек сейчас не видит.
+  // Search and ordering happen before pagination on the router.
+  const sortedRows = tableRows
+  const visibleRows = tableRows
   const listRowIds = sortedRows.map((row) => row.id)
-  const listSelection = useRowSelection(listRowIds)
-  const hasRefreshableLists = tableRows.some((row) => row.canRefresh)
-  const selectedRefreshableLists = tableRows.filter(
-    (row) => listSelection.selectedIds.has(row.id) && row.canRefresh
+  const allListIds = useMemo(
+    () => Object.keys(loadedConfig?.lists ?? {}),
+    [loadedConfig?.lists]
   )
+  const listSelection = useRowSelection(allListIds)
+  const hasRefreshableLists = page?.has_refreshable_lists ?? false
+  // Explicit selections survive page changes; select-all remains page-scoped.
+  const selectedRefreshableLists = [...listSelection.selectedIds]
+    .filter((id) => Boolean(loadedConfig?.lists?.[id]?.url))
+    .map((id) => ({ id }))
+  const mobileRows = useVirtualRows({
+    enabled: true,
+    keys: listRowIds,
+    estimateSize: 220,
+  })
   const refreshDisabled =
     listRefreshMutation.isPending || bulkRefreshRunning || configMutationPending
 
@@ -378,26 +441,54 @@ export function ListsPage() {
   }
 
   const handleRefreshAll = () => {
+    if (refreshDisabled || refreshRequestRef.current) return
     if (isDraft) {
       toast.warning(t("pages.lists.refresh.draftBlocked"), { richColors: true })
       return
     }
 
     setActiveRefreshTarget(REFRESH_ALL_TARGET)
-    listRefreshMutation.mutate({ data: {} })
+    refreshRequestRef.current = true
+    listRefreshMutation.mutate(
+      { data: {} },
+      {
+        onSettled: () => {
+          refreshRequestRef.current = false
+        },
+      }
+    )
   }
 
-  const handleRefreshOne = (listId: string) => {
+  const handleRefreshOne = (
+    listId: string,
+    action: ListRefreshAction = "refresh"
+  ) => {
+    if (refreshDisabled || refreshRequestRef.current) return
     if (isDraft) {
       toast.warning(t("pages.lists.refresh.draftBlocked"), { richColors: true })
       return
     }
 
+    const data = buildListRefreshRequest(
+      listId,
+      action,
+      tableRowsById.get(listId)?.shrinkRejection
+    )
+    if (!data) return
     setActiveRefreshTarget(listId)
-    listRefreshMutation.mutate({ data: { name: listId } })
+    refreshRequestRef.current = true
+    listRefreshMutation.mutate(
+      { data },
+      {
+        onSettled: () => {
+          refreshRequestRef.current = false
+        },
+      }
+    )
   }
 
   const handleBulkRefreshSelected = async () => {
+    if (refreshDisabled || refreshRequestRef.current) return
     if (isDraft) {
       toast.warning(t("pages.lists.refresh.draftBlocked"), { richColors: true })
       return
@@ -408,13 +499,17 @@ export function ListsPage() {
       return
     }
 
+    refreshRequestRef.current = true
     setBulkRefreshRunning(true)
     try {
       for (const list of selectedRefreshableLists) {
         await listRefreshMutation.mutateAsync({ data: { name: list.id } })
       }
       listSelection.clear()
+    } catch {
+      // The existing mutation error handler presents the failed request.
     } finally {
+      refreshRequestRef.current = false
       setBulkRefreshRunning(false)
     }
   }
@@ -436,15 +531,16 @@ export function ListsPage() {
           </Button>
         }
         leading={
-          tableRows.length > 0 ? (
+          (page?.total ?? 0) > 0 ? (
             <TableSearch
-              matchCount={visibleRows.length}
+              matchCount={page?.filtered_total ?? 0}
               onChange={(next) => {
                 setSearch(next)
+                setOffset(0)
                 listSelection.clear()
               }}
               placeholder={t("pages.lists.searchPlaceholder")}
-              totalCount={tableRows.length}
+              totalCount={page?.total ?? 0}
               value={search}
             />
           ) : null
@@ -476,21 +572,57 @@ export function ListsPage() {
 
       <ConfigSaveErrorAlert error={postConfigMutation.error} />
 
-      {configQuery.isLoading ? (
+      {configQuery.isLoading || pageQuery.isPending ? (
         <TableSkeleton />
-      ) : configQuery.isError ? (
+      ) : configQuery.isError || pageQuery.isError ? (
         <ListPlaceholder
           description={t("common.loadErrorDescription")}
           title={t("common.unableToLoadData")}
           variant="error"
         />
-      ) : tableRows.length === 0 ? (
+      ) : page?.total === 0 ? (
         <ListPlaceholder
           description={t("pages.lists.empty.description")}
           title={t("pages.lists.empty.title")}
         />
       ) : (
-        <div className="space-y-3">
+        <div className="space-y-3" aria-busy={pageBusy}>
+          {page && page.filtered_total > page.limit ? (
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-sm text-muted-foreground" aria-live="polite">
+                {t("listPagination.range", {
+                  from: page.offset + 1,
+                  to: page.offset + page.items.length,
+                  total: page.filtered_total,
+                })}
+              </p>
+              <div className="flex gap-1">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={pageBusy || page.offset === 0}
+                  onClick={() =>
+                    setOffset(Math.max(0, page.offset - page.limit))
+                  }
+                >
+                  <ChevronLeft className="size-4" />
+                  {t("listPagination.previous")}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={
+                    pageBusy ||
+                    page.offset + page.items.length >= page.filtered_total
+                  }
+                  onClick={() => setOffset(page.offset + page.limit)}
+                >
+                  {t("listPagination.next")}
+                  <ChevronRight className="size-4" />
+                </Button>
+              </div>
+            </div>
+          ) : null}
           {visibleRows.length === 0 ? (
             <ListPlaceholder
               description={t("common.tableSearch.empty")}
@@ -511,7 +643,7 @@ export function ListsPage() {
                 <Button
                   className="md:hidden"
                   disabled={configMutationPending}
-                  onClick={() => listSelection.setAllVisible(true)}
+                  onClick={() => listSelection.setAllVisible(true, listRowIds)}
                   size="sm"
                   variant="outline"
                 >
@@ -546,98 +678,146 @@ export function ListsPage() {
               </BulkSelectionToolbar>
             ) : null}
           </div>
-          <div className="divide-y divide-border/70 border-b border-border/70 md:hidden">
-            {sortedRows.map((list) => (
-              <div
-                className="flex items-start gap-3 bg-card px-1 py-3"
-                key={list.id}
-              >
-                <Checkbox
-                  aria-label={t("common.selection.selectRow", {
-                    rowLabel: getListAccessibleLabel(list),
-                  })}
-                  checked={listSelection.selectedIds.has(list.id)}
-                  className="mt-0.5 shrink-0"
-                  disabled={configMutationPending}
-                  onCheckedChange={() => listSelection.toggleOne(list.id)}
-                />
-                <div className="min-w-0 flex-1 space-y-2">
-                  <div className="flex min-w-0 items-start gap-2">
-                    <div className="min-w-0 flex-1">
-                      <p
-                        className="truncate text-sm font-medium"
-                        title={getListAccessibleLabel(list)}
-                      >
-                        {list.displayName}
-                      </p>
-                      {/* Адрес остаётся обрезанным намеренно. Раскрывать его
+          <div
+            ref={mobileRows.containerRef}
+            className="border-b border-border/70 md:hidden"
+          >
+            {mobileRows.items.map((item) => {
+              const list = sortedRows[item.index]
+              return (
+                <Fragment key={item.key}>
+                  {item.paddingBefore > 0 ? (
+                    <div
+                      aria-hidden="true"
+                      style={{ height: item.paddingBefore }}
+                    />
+                  ) : null}
+                  <div
+                    className="flex items-start gap-3 border-b border-border/70 bg-card px-1 py-3"
+                    data-index={item.index}
+                    ref={mobileRows.measureElement}
+                  >
+                    <Checkbox
+                      aria-label={t("common.selection.selectRow", {
+                        rowLabel: getListAccessibleLabel(list),
+                      })}
+                      checked={listSelection.selectedIds.has(list.id)}
+                      className="mt-0.5 shrink-0"
+                      disabled={configMutationPending}
+                      onCheckedChange={() => listSelection.toggleOne(list.id)}
+                    />
+                    <div className="min-w-0 flex-1 space-y-2">
+                      <div className="flex min-w-0 items-start gap-2">
+                        <div className="min-w-0 flex-1">
+                          <p
+                            className="truncate text-sm font-medium"
+                            title={getListAccessibleLabel(list)}
+                          >
+                            {list.displayName}
+                          </p>
+                          {/* Адрес остаётся обрезанным намеренно. Раскрывать его
                           здесь я пробовал: на строку с неудачной загрузкой
                           выходит две кнопки «Читать далее» подряд, и неясно,
                           какая к чему. Полный адрес показывает экран
                           редактирования, до которого один шаг — карандаш в этой
                           же строке. `title` помогает мыши на узком окне. */}
-                      <p
-                        className="truncate text-xs text-muted-foreground"
-                        title={list.locationLabel}
-                      >
-                        {list.locationLabel}
-                      </p>
-                      <ListRefreshSummary list={list} t={t} />
-                    </div>
-                    <Badge size="xs" variant="outline">
-                      {getListSourceLabel(list.draft, t)}
-                    </Badge>
-                  </div>
-                  {list.stats ? (
-                    <StatsDisplay
-                      domains={list.stats.domains}
-                      ipv4Subnets={list.stats.ipv4Subnets}
-                      ipv6Subnets={list.stats.ipv6Subnets}
-                    />
-                  ) : null}
-                  <DependencyList
-                    dependencies={dependenciesByList.get(list.id) ?? []}
-                    emptyHint={t("common.dependencies.none")}
-                  />
-                  <div className="flex justify-end gap-1">
-                    {list.canRefresh ? (
-                      <Button
-                        disabled={refreshDisabled}
-                        onClick={() => handleRefreshOne(list.id)}
-                        size="icon-sm"
-                        variant="ghost"
-                        aria-label={t("pages.lists.actions.update")}
-                      >
-                        <RefreshCw
-                          className={
-                            isRefreshIconActive(
+                          <p
+                            className="truncate text-xs text-muted-foreground"
+                            title={list.locationLabel}
+                          >
+                            {list.locationLabel}
+                          </p>
+                          <ListRefreshSummary
+                            list={list}
+                            t={t}
+                            disabled={refreshDisabled}
+                            pending={isRefreshIconActive(
                               activeRefreshTarget,
                               bulkRefreshRunning,
                               listSelection.selectedIds,
                               list.id
-                            )
-                              ? "animate-spin"
-                              : ""
-                          }
+                            )}
+                            onAccept={() => handleRefreshOne(list.id, "accept")}
+                          />
+                        </div>
+                        <Badge size="xs" variant="outline">
+                          {getListSourceLabel(list.draft, t)}
+                        </Badge>
+                      </div>
+                      {list.stats ? (
+                        <StatsDisplay
+                          domains={list.stats.domains}
+                          ipv4Subnets={list.stats.ipv4Subnets}
+                          ipv6Subnets={list.stats.ipv6Subnets}
                         />
-                      </Button>
-                    ) : null}
-                    <Button
-                      disabled={configMutationPending}
-                      onClick={() => navigate(`/lists/${list.id}/edit`)}
-                      size="icon-sm"
-                      variant="ghost"
-                      aria-label={t("common.edit")}
-                    >
-                      <KeenPencilIcon />
-                    </Button>
+                      ) : null}
+                      <DependencyList
+                        dependencies={dependenciesByList.get(list.id) ?? []}
+                        emptyHint={t("common.dependencies.none")}
+                      />
+                      <div className="flex justify-end gap-1">
+                        {list.canRefresh ? (
+                          <Button
+                            disabled={refreshDisabled}
+                            onClick={() => handleRefreshOne(list.id)}
+                            size="icon-sm"
+                            variant="ghost"
+                            aria-label={t("pages.lists.actions.update")}
+                          >
+                            <RefreshCw
+                              className={
+                                isRefreshIconActive(
+                                  activeRefreshTarget,
+                                  bulkRefreshRunning,
+                                  listSelection.selectedIds,
+                                  list.id
+                                )
+                                  ? "animate-spin"
+                                  : ""
+                              }
+                            />
+                          </Button>
+                        ) : null}
+                        {list.canRefresh ? (
+                          <Button
+                            disabled={refreshDisabled}
+                            onClick={() => handleRefreshOne(list.id, "force")}
+                            size="icon-sm"
+                            variant="ghost"
+                            aria-label={t(
+                              "pages.lists.actions.forceRefreshHint"
+                            )}
+                            title={t("pages.lists.actions.forceRefreshHint")}
+                          >
+                            <Download />
+                          </Button>
+                        ) : null}
+                        <Button
+                          disabled={configMutationPending}
+                          onClick={() => navigate(`/lists/${list.id}/edit`)}
+                          size="icon-sm"
+                          variant="ghost"
+                          aria-label={t("common.edit")}
+                        >
+                          <KeenPencilIcon />
+                        </Button>
+                      </div>
+                    </div>
                   </div>
-                </div>
-              </div>
-            ))}
+                </Fragment>
+              )
+            })}
+            {mobileRows.paddingAfter > 0 ? (
+              <div
+                aria-hidden="true"
+                style={{ height: mobileRows.paddingAfter }}
+              />
+            ) : null}
           </div>
           <div className="hidden md:block">
             <DataTable
+              virtualize
+              desktopOnly
               headers={[
                 t("pages.lists.headers.name"),
                 t("pages.lists.headers.type"),
@@ -667,7 +847,18 @@ export function ListsPage() {
                   <div className="text-sm text-muted-foreground md:text-xs">
                     {list.locationLabel}
                   </div>
-                  <ListRefreshSummary list={list} t={t} />
+                  <ListRefreshSummary
+                    list={list}
+                    t={t}
+                    disabled={refreshDisabled}
+                    pending={isRefreshIconActive(
+                      activeRefreshTarget,
+                      bulkRefreshRunning,
+                      listSelection.selectedIds,
+                      list.id
+                    )}
+                    onAccept={() => handleRefreshOne(list.id, "accept")}
+                  />
                 </div>,
                 <Badge key={`${list.id}-type`} variant="outline">
                   {getListSourceLabel(list.draft, t)}
@@ -731,6 +922,12 @@ export function ListsPage() {
                             label: t("pages.lists.actions.update"),
                             onClick: () => handleRefreshOne(list.id),
                           },
+                          {
+                            disabled: refreshDisabled,
+                            icon: <Download className="h-4 w-4" />,
+                            label: t("pages.lists.actions.forceRefreshHint"),
+                            onClick: () => handleRefreshOne(list.id, "force"),
+                          },
                         ]
                       : []),
                     {
@@ -750,7 +947,7 @@ export function ListsPage() {
                 disabled: configMutationPending,
                 onToggle: listSelection.toggleOne,
                 onToggleAll: listSelection.setAllVisible,
-                selectAllLabel: t("common.selection.selectAll"),
+                selectAllLabel: t("listPagination.selectPage"),
                 getRowLabel: (rowId) =>
                   t("common.selection.selectRow", {
                     rowLabel: getListAccessibleLabel(tableRowsById.get(rowId)),
@@ -834,16 +1031,15 @@ function getListAccessibleLabel(list: ListTableRow | undefined) {
     : list.displayName
 }
 
-function getTableRowsFromListMap(
-  lists: ConfigObject["lists"],
+function getTableRowsFromListPage(
+  items: ListPageItem[] | undefined,
   listRefreshState: ConfigStateResponseListRefreshState,
   outboundNames: ReadonlyMap<string, string>,
   t: (key: string) => string
 ): ListTableRow[] {
-  return Object.entries(lists ?? {}).map(([name, listConfig]) => {
-    const displayName = getListDisplayName(name, lists)
-    const domains = listConfig.domains ?? []
-    const ipCidrs = listConfig.ip_cidrs ?? []
+  return (items ?? []).map((listConfig) => {
+    const name = listConfig.id
+    const displayName = listConfig.display_name?.trim() || name
     const showInlineStats = !listConfig.url && !listConfig.file
 
     return {
@@ -852,9 +1048,9 @@ function getTableRowsFromListMap(
       technicalId: displayName !== name ? name : undefined,
       draft: {
         name,
-        ttlMs: String(listConfig.ttl_ms ?? 0),
-        domains: domains.join("\n"),
-        ipCidrs: ipCidrs.join("\n"),
+        ttlMs: "",
+        domains: listConfig.domain_count > 0,
+        ipCidrs: listConfig.ipv4_count + listConfig.ipv6_count > 0,
         url: listConfig.url ?? "",
         file: listConfig.file ?? "",
       },
@@ -864,15 +1060,16 @@ function getTableRowsFromListMap(
       lastUpdated: listRefreshState[name]?.last_updated,
       lastAttempt: listRefreshState[name]?.last_attempt,
       lastError: listRefreshState[name]?.last_error,
+      shrinkRejection: listRefreshState[name]?.shrink_rejection ?? undefined,
       lastDetour: listRefreshState[name]?.last_detour
         ? (outboundNames.get(listRefreshState[name]?.last_detour ?? "") ??
           listRefreshState[name]?.last_detour)
         : undefined,
       stats: showInlineStats
         ? {
-            domains: domains.length,
-            ipv4Subnets: ipCidrs.filter((value) => value.includes(".")).length,
-            ipv6Subnets: ipCidrs.filter((value) => value.includes(":")).length,
+            domains: listConfig.domain_count,
+            ipv4Subnets: listConfig.ipv4_count,
+            ipv6Subnets: listConfig.ipv6_count,
           }
         : undefined,
       canRefresh: Boolean(listConfig.url),
@@ -883,9 +1080,15 @@ function getTableRowsFromListMap(
 function ListRefreshSummary({
   list,
   t,
+  disabled,
+  pending,
+  onAccept,
 }: {
   list: ListTableRow
   t: ReturnType<typeof useTranslation>["t"]
+  disabled: boolean
+  pending: boolean
+  onAccept: () => void
 }) {
   if (!list.canRefresh) {
     return null
@@ -905,7 +1108,14 @@ function ListRefreshSummary({
       <div className="text-muted-foreground">
         {t("pages.lists.lastUpdated", { value: successfulAt })}
       </div>
-      {list.lastError ? (
+      {list.shrinkRejection ? (
+        <ListShrinkNotice
+          rejection={list.shrinkRejection}
+          disabled={disabled}
+          pending={pending}
+          onAccept={onAccept}
+        />
+      ) : list.lastError ? (
         // Ошибка демона содержит адрес и системное сообщение целиком: на
         // телефоне это десять строк, после которых следующий список уезжает за
         // экран. Две строки говорят, что обновление не прошло; подробности —

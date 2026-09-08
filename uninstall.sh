@@ -79,6 +79,32 @@ assert_recovery_state_is_clean() {
     done
 }
 
+remove_completed_recovery_data() {
+    # These are our fixed package/config snapshots, not the entire shared
+    # /opt/var/lib/keen-pbr directory. nfqws can still depend on its reporter
+    # and learned state after this package is removed.
+    assert_recovery_state_is_clean || return 1
+    for snapshot_name in previous-config pre-update-config \
+        pending-baseline-config pending-target-config; do
+        snapshot_path="$RESCUE_DIR/$snapshot_name"
+        [ ! -L "$snapshot_path" ] &&
+            { [ ! -e "$snapshot_path" ] || [ -d "$snapshot_path" ]; } || {
+            echo "Не удалось удалить резервные данные: неожиданный тип $snapshot_path" >&2
+            return 1
+        }
+    done
+    for snapshot_name in previous-config pre-update-config \
+        pending-baseline-config pending-target-config; do
+        rm -rf "$RESCUE_DIR/$snapshot_name" || return 1
+    done
+    for archive_name in current.ipk previous.ipk candidate.ipk \
+        pending-baseline.ipk pending-target.ipk; do
+        rm -f "$RESCUE_DIR/$archive_name" \
+            "$RESCUE_DIR/$archive_name.sha256" || return 1
+    done
+    rm -rf "$RECOVERY_DIR/config-save" "$RECOVERY_DIR/backup-restore" || return 1
+}
+
 assert_recovery_state_is_clean
 
 managed_sing_box=""
@@ -107,6 +133,9 @@ if ! LOCK_TOKEN=$("$LOCK_HELPER" acquire "$$" uninstall); then
     exit 1
 fi
 LOCK_OWNED=1
+KEEN_PBR_UPDATE_LOCK_PID=$$
+KEEN_PBR_UPDATE_LOCK_TOKEN=$LOCK_TOKEN
+export KEEN_PBR_UPDATE_LOCK_PID KEEN_PBR_UPDATE_LOCK_TOKEN
 
 # The user may spend an arbitrary amount of time answering prompts. Recheck
 # durable state after taking the shared lock so an update cannot race between
@@ -135,7 +164,9 @@ if is_yes "$remove_nfqws"; then
 fi
 
 if is_yes "$remove_data"; then
+    remove_completed_recovery_data
     rm -rf /opt/etc/keen-pbr /opt/var/cache/keen-pbr /opt/var/run/keen-pbr
+    echo "Конфигурация, списки, кэш и завершённые резервные снимки keen-pbr-sb удалены."
 else
     echo "Конфигурация сохранена в /opt/etc/keen-pbr"
 fi

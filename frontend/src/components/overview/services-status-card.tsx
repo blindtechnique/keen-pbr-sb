@@ -11,6 +11,7 @@ import {
   getHealthService,
   getTransports,
   postTransportAction,
+  postServiceRestartProcesses,
   useGetHealthService,
   useGetTransports,
 } from "@/api/generated/keen-api"
@@ -20,7 +21,8 @@ import {
   useRoutingControlPendingState,
 } from "@/api/mutations"
 import { getDnsmasqBadgeState } from "@/components/overview/dnsmasq-status"
-import { selectRoutingRecoveryAction } from "@/components/overview/service-routing-recovery"
+import { waitForServiceProcessRestart } from "@/components/overview/service-process-restart"
+import { ServiceRestartError } from "@/components/overview/service-restart-error"
 import { Switch } from "@/components/ui/switch"
 import { SectionCard } from "@/components/shared/section-card"
 import { Badge } from "@/components/ui/badge"
@@ -72,19 +74,6 @@ type ServiceRow = {
     onChange: (checked: boolean) => void
   }
   badges?: { label: string; tone: "success" | "warning" | "destructive" }[]
-}
-
-const errorMessage = (error: unknown) => {
-  if (error instanceof Error) return error.message
-  if (
-    error &&
-    typeof error === "object" &&
-    "message" in error &&
-    typeof error.message === "string"
-  ) {
-    return error.message
-  }
-  return "unknown error"
 }
 
 /**
@@ -164,30 +153,42 @@ export function ServicesStatusCard() {
       return response.data
     },
   }
-  const routingRecoveryMutation = useMutation({
+  const processRestartMutation = useMutation({
+    onMutate: () => {
+      toast.loading(t("overview.services.processRestarting"), {
+        id: "keen-pbr-process-restart",
+        description: t("overview.services.processRestartingDetail"),
+      })
+    },
     mutationFn: async () => {
       const healthResponse = await getHealthService({ cache: "no-store" })
-      const action = selectRoutingRecoveryAction(healthResponse.data)
-      if (action === "start") {
-        await serviceStartMutation.mutateAsync()
-      } else {
-        await serviceRestartMutation.mutateAsync()
+      const scheduled = await postServiceRestartProcesses()
+      if (scheduled.status !== 200 || scheduled.data.status !== "ok") {
+        throw new Error(t("overview.services.restartFailed"))
       }
-      await waitForRuntimeReadiness(runtimeReadinessProbe)
+      await waitForServiceProcessRestart(
+        runtimeReadinessProbe,
+        healthResponse.data.daemon_pid,
+        {
+          expectedTransportTags: restartableSingboxTransports.map(
+            (transport) => transport.tag
+          ),
+        }
+      )
     },
     onSuccess: async () => {
       await Promise.all([
         serviceHealthQuery.refetch(),
         transportsQuery.refetch(),
       ])
-      toast.success(t("overview.services.restartComplete"))
+      toast.success(t("overview.services.restartComplete"), {
+        id: "keen-pbr-process-restart",
+      })
     },
     onError: (error) =>
-      toast.error(
-        t("overview.services.restartFailedDetail", {
-          error: errorMessage(error),
-        })
-      ),
+      toast.error(<ServiceRestartError error={error} />, {
+        id: "keen-pbr-process-restart",
+      }),
   })
   const nfqwsRestartMutation = useMutation({
     mutationFn: async () => {
@@ -223,11 +224,7 @@ export function ServicesStatusCard() {
       // Refresh regardless: a failed restart still moved the service, and a
       // stale "running" badge next to a failure notice is its own lie.
       await queryClient.invalidateQueries({ queryKey: ["nfqws"] })
-      toast.error(
-        t("overview.services.restartFailedDetail", {
-          error: errorMessage(error),
-        })
-      )
+      toast.error(<ServiceRestartError error={error} />)
       // A failure is exactly when the full output matters, so open it rather
       // than leaving the user with a single truncated line.
       if (error instanceof ServiceRestartFailure) {
@@ -299,16 +296,13 @@ export function ServicesStatusCard() {
       ])
       toast.success(t("overview.services.restartComplete"))
     },
-    onError: (error) =>
-      toast.error(
-        t("overview.services.restartFailedDetail", {
-          error: errorMessage(error),
-        })
-      ),
+    onError: (error) => toast.error(<ServiceRestartError error={error} />),
   })
 
   const serviceHealth =
-    serviceHealthQuery.data?.status === 200 ? serviceHealthQuery.data.data : undefined
+    serviceHealthQuery.data?.status === 200
+      ? serviceHealthQuery.data.data
+      : undefined
   const serviceRunning = serviceHealth?.status === "running"
   const serviceTransitioning =
     serviceHealth?.runtime_state === "starting" ||
@@ -339,11 +333,18 @@ export function ServicesStatusCard() {
           : serviceRunning
             ? "up"
             : "down",
+      onRestart: serviceHealth
+        ? () => processRestartMutation.mutate()
+        : undefined,
+      restarting:
+        processRestartMutation.isPending ||
+        routingActionPending ||
+        serviceTransitioning,
       toggle: {
         checked: serviceRunning,
         disabled:
           routingActionPending ||
-          routingRecoveryMutation.isPending ||
+          processRestartMutation.isPending ||
           serviceTransitioning ||
           !serviceHealth,
         label: serviceRunning
@@ -385,11 +386,15 @@ export function ServicesStatusCard() {
           ? () => singboxRestartMutation.mutate()
           : undefined,
       restarting:
-        singboxRestartMutation.isPending || transportActionMutation.isPending,
+        singboxRestartMutation.isPending ||
+        transportActionMutation.isPending ||
+        processRestartMutation.isPending,
       toggle: {
         checked: runningSingbox > 0,
         disabled:
-          singboxTransports.length === 0 || transportActionMutation.isPending,
+          singboxTransports.length === 0 ||
+          transportActionMutation.isPending ||
+          processRestartMutation.isPending,
         label:
           runningSingbox > 0
             ? t("overview.runtime.actions.stop")
@@ -424,40 +429,15 @@ export function ServicesStatusCard() {
   ]
 
   return (
-    <SectionCard
-      action={
-        <Button
-          disabled={
-            routingActionPending ||
-            routingRecoveryMutation.isPending ||
-            serviceTransitioning ||
-            !serviceHealth
-          }
-          onClick={() => routingRecoveryMutation.mutate()}
-          size="sm"
-          variant="outline"
-        >
-          <RotateCw
-            className={cn(
-              "size-3.5",
-              routingRecoveryMutation.isPending && "animate-spin"
-            )}
-          />
-          {t("overview.services.restartRouting")}
-        </Button>
-      }
-      className="h-full"
-      title={t("overview.services.title")}
-    >
+    <SectionCard className="h-full" title={t("overview.services.title")}>
       <div className="space-y-3">
         {rows.map((row) => (
-          <div
-            className="flex items-start justify-between gap-3"
-            key={row.key}
-          >
+          <div className="flex items-start justify-between gap-3" key={row.key}>
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                <span className="truncate text-sm font-medium">{row.label}</span>
+                <span className="truncate text-sm font-medium">
+                  {row.label}
+                </span>
                 {row.badges?.map((badge) => (
                   <Badge key={badge.label} size="xs" variant={badge.tone}>
                     {badge.label}
@@ -472,50 +452,50 @@ export function ServicesStatusCard() {
               </div>
             </div>
             <div className="flex shrink-0 items-center gap-1.5">
-            {row.toggle ? (
-              <Switch
-                aria-label={row.toggle.label}
-                checked={row.toggle.checked}
-                disabled={row.toggle.disabled}
-                onCheckedChange={row.toggle.onChange}
-                title={row.toggle.label}
-              />
-            ) : null}
-            {row.onRestart ? (
-              <Button
-                aria-label={t("overview.services.restart")}
-                className="size-7"
-                disabled={row.restarting}
-                onClick={row.onRestart}
-                size="icon"
-                title={t("overview.services.restart")}
-                variant="ghost"
-              >
-                <RotateCw
-                  className={cn("size-3.5", row.restarting && "animate-spin")}
+              {row.toggle ? (
+                <Switch
+                  aria-label={row.toggle.label}
+                  checked={row.toggle.checked}
+                  disabled={row.toggle.disabled}
+                  onCheckedChange={row.toggle.onChange}
+                  title={row.toggle.label}
                 />
-              </Button>
-            ) : null}
-            <Badge
-              size="xs"
-              variant={
-                row.state === "up"
-                  ? "success"
+              ) : null}
+              {row.onRestart ? (
+                <Button
+                  aria-label={t("overview.services.restart")}
+                  className="size-7"
+                  disabled={row.restarting}
+                  onClick={row.onRestart}
+                  size="icon"
+                  title={t("overview.services.restart")}
+                  variant="ghost"
+                >
+                  <RotateCw
+                    className={cn("size-3.5", row.restarting && "animate-spin")}
+                  />
+                </Button>
+              ) : null}
+              <Badge
+                size="xs"
+                variant={
+                  row.state === "up"
+                    ? "success"
+                    : row.state === "pending"
+                      ? "warning"
+                      : row.state === "down"
+                        ? "destructive"
+                        : "secondary"
+                }
+              >
+                {row.state === "up"
+                  ? t("overview.services.badgeUp")
                   : row.state === "pending"
-                    ? "warning"
-                  : row.state === "down"
-                    ? "destructive"
-                    : "secondary"
-              }
-            >
-              {row.state === "up"
-                ? t("overview.services.badgeUp")
-                : row.state === "pending"
-                  ? t("overview.services.badgeTransitioning")
-                : row.state === "down"
-                  ? t("overview.services.badgeDown")
-                  : t("overview.services.badgeAbsent")}
-            </Badge>
+                    ? t("overview.services.badgeTransitioning")
+                    : row.state === "down"
+                      ? t("overview.services.badgeDown")
+                      : t("overview.services.badgeAbsent")}
+              </Badge>
             </div>
           </div>
         ))}

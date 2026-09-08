@@ -1,4 +1,6 @@
+import type { ReactNode } from "react"
 import type { ValidationErrorEntry } from "@/lib/api-errors"
+import { ServerFieldError } from "@/components/shared/server-field-error"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 
 export function ServerValidationAlert({
@@ -6,7 +8,7 @@ export function ServerValidationAlert({
   message,
 }: {
   errors: ValidationErrorEntry[]
-  message?: string | null
+  message?: ReactNode
 }) {
   if (errors.length === 0 && !message) {
     return null
@@ -19,17 +21,7 @@ export function ServerValidationAlert({
           {message ? (
             <div className="whitespace-pre-wrap">{message}</div>
           ) : null}
-          {errors.length > 0 ? (
-            <ul className="list-disc space-y-1 pl-5">
-              {errors.map((error, index) => (
-                <li key={`${error.path}-${error.message}-${index}`}>
-                  {error.path
-                    ? `${error.path}: ${error.message}`
-                    : error.message}
-                </li>
-              ))}
-            </ul>
-          ) : null}
+          {errors.length > 0 ? <ServerFieldError errors={errors} /> : null}
         </div>
       </AlertDescription>
     </Alert>

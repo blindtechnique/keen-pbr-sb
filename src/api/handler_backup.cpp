@@ -1,11 +1,16 @@
 #ifdef WITH_API
 
 #include "handler_backup.hpp"
+#include "config_validation_json.hpp"
 #include "maintenance_api.hpp"
+#include "status_stream.hpp"
 
 #include "../backup/persistent_snapshot.hpp"
 #include "generated/api_types.hpp"
 #include "../config/config.hpp"
+#include "../config/config_migration.hpp"
+#include "../config/subscription_backup.hpp"
+#include "../config/subscription_refresh.hpp"
 #include "../crypto/sha256.hpp"
 #include "../log/logger.hpp"
 #include "../util/base64.hpp"
@@ -431,14 +436,37 @@ std::string decode_backup_file(const nlohmann::json& value) {
     }
 }
 
+ApiError backup_config_validation_error(
+    const ConfigValidationError& error, const std::string& prefix, int status) {
+    const auto message = prefix + error.what();
+    return ApiError(message, status, nlohmann::json{
+        {"error", message}, {"code", "validation"},
+        {"validation_errors", serialize_config_validation_issues(error.issues())},
+    }.dump());
+}
+
 nlohmann::json read_persisted_config(const ApiContext& ctx) {
     try {
         const auto content = read_text(ctx.config_path);
         auto config = parse_config(content);
         validate_config(config);
-        return nlohmann::json(config);
+        // The typed view is for validation, not the private recovery artifact:
+        // it drops unknown fields, including nested null/empty extension values.
+        auto document = migrate_config_json(
+            nlohmann::json::parse(content, nullptr, true, true));
+        // Keep the previous general-section reset semantics for omitted known
+        // top-level sections. Never overlay arrays or nested objects from an old
+        // config: that would resurrect deliberately removed entries on restore.
+        const nlohmann::json defaults = config;
+        for (const auto& item : defaults.items()) {
+            if (!document.contains(item.key())) document[item.key()] = item.value();
+        }
+        return document;
     } catch (const ApiError&) {
         throw;
+    } catch (const ConfigValidationError& error) {
+        throw backup_config_validation_error(
+            error, "persisted configuration is invalid: ", 500);
     } catch (const std::exception& error) {
         throw ApiError(
             std::string("persisted configuration is invalid: ") +
@@ -447,7 +475,26 @@ nlohmann::json read_persisted_config(const ApiContext& ctx) {
     }
 }
 
+std::unique_lock<std::mutex> lock_subscription_file(const ApiContext& ctx) {
+    return ctx.subscription_refresh_service
+        ? ctx.subscription_refresh_service->store()->lock_for_backup()
+        : std::unique_lock<std::mutex>{};
+}
+
+nlohmann::json read_subscription_backup(const fs::path& path) {
+    const auto snapshot = persistent::capture_file(
+        path, std::nullopt, persistent::kMaxSubscriptionFileBytes);
+    if (!snapshot.existed) return nlohmann::json::array();
+    try {
+        return validated_subscription_backup(
+            nlohmann::json::parse(snapshot.content, nullptr, false));
+    } catch (const std::invalid_argument&) {
+        throw ApiError("invalid subscription backup", 400);
+    }
+}
+
 nlohmann::json make_backup(const ApiContext& ctx, const nlohmann::json& groups) {
+    const auto subscription_lock = lock_subscription_file(ctx);
     // Backup is a recovery artifact. It must describe the active persisted
     // state, never an unsaved UI draft returned by get_visible_config().
     const nlohmann::json source = read_persisted_config(ctx);
@@ -461,6 +508,8 @@ nlohmann::json make_backup(const ApiContext& ctx, const nlohmann::json& groups) 
         const auto path = fs::path(ctx.config_path).parent_path() / "transports.json";
         std::error_code ec;
         if (fs::is_regular_file(path, ec)) data["transports"] = nlohmann::json::parse(read_text(path));
+        data["subscriptions"] = read_subscription_backup(
+            fs::path(ctx.config_path).parent_path() / "subscriptions.json");
     }
     if (selected(groups, "outbounds")) {
         data["outbounds"] =
@@ -491,6 +540,7 @@ nlohmann::json make_backup(const ApiContext& ctx, const nlohmann::json& groups) 
             "/opt/etc/keen-pbr/nfqws-strategies");
     }
     nlohmann::json backup = {{"format", kBackupFormat}, {"schema", kBackupSchema},
+            {"config_schema_version", source.at("schema_version")},
             {"created_at", std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count()},
             {"groups", groups}, {"data", std::move(data)}};
@@ -515,7 +565,7 @@ void validate_bundle(const nlohmann::json& backup) {
     const auto& data = backup.at("data");
     static const std::set<std::string> kAllowedSections{
         "general", "transports", "outbounds", "dns",
-        "lists", "route", "nfqws",
+        "lists", "route", "nfqws", "subscriptions",
     };
     for (const auto& item : data.items()) {
         if (kAllowedSections.find(item.key()) == kAllowedSections.end()) {
@@ -541,6 +591,10 @@ void validate_bundle(const nlohmann::json& backup) {
         throw ApiError("invalid transports backup section", 400);
     if (data.contains("outbounds") && !data.at("outbounds").is_array())
         throw ApiError("invalid outbounds backup section", 400);
+    if (data.contains("subscriptions")) {
+        try { (void)validated_subscription_backup(data.at("subscriptions")); }
+        catch (const std::invalid_argument&) { throw ApiError("invalid subscription backup", 400); }
+    }
     for (const char* key : {"dns", "lists", "route"}) {
         if (data.contains(key) && !data.at(key).is_object())
             throw ApiError(std::string("invalid ") + key + " backup section", 400);
@@ -587,7 +641,43 @@ RestoreRoots persistent_layout(
     roots.transports =
         fs::path(ctx.config_path).parent_path() /
         "transports.json";
+    if (roots.subscriptions.empty())
+        roots.subscriptions = fs::path(ctx.config_path).parent_path() / "subscriptions.json";
     return roots;
+}
+
+// A new backup has an explicit subscription array, including an empty array.
+// A legacy backup leaves sources in place and only unlinks VPNs no longer
+// represented by the restored transport configuration. No provider request is
+// made while importing an archive.
+void append_subscription_restore(
+    const RestoreRoots& layout, const nlohmann::json* archived_sources,
+    const nlohmann::json& target_transports,
+    std::vector<FileReplacement>& replacements) {
+    nlohmann::json sources;
+    if (archived_sources) {
+        sources = *archived_sources;
+    } else {
+        const auto current = persistent::capture_file(
+            layout.subscriptions, std::nullopt, persistent::kMaxSubscriptionFileBytes);
+        if (!current.existed) return;
+        // An old archive must still restore its VPNs when unrelated existing
+        // metadata is unreadable as JSON. Keep those original bytes untouched.
+        const auto parsed = nlohmann::json::parse(current.content, nullptr, false);
+        try { sources = validated_subscription_backup(parsed); }
+        catch (const std::invalid_argument&) { return; }
+    }
+    nlohmann::json reconciled;
+    try { reconciled = reconcile_subscription_backup(sources, target_transports); }
+    catch (const std::invalid_argument&) { throw ApiError("invalid subscription backup", 400); }
+    if (!archived_sources && reconciled == sources) return;
+    FileReplacement replacement;
+    replacement.path = layout.subscriptions;
+    replacement.content = reconciled.dump() + "\n";
+    replacement.mode_override = static_cast<mode_t>(0600);
+    replacement.created_directory_mode = static_cast<mode_t>(0700);
+    replacement.max_content_bytes = persistent::kMaxSubscriptionFileBytes;
+    replacements.push_back(std::move(replacement));
 }
 
 struct PreparedRestore {
@@ -612,8 +702,24 @@ PreparedRestore prepare_persistent_rollback_restore(
             409);
     }
 
-    auto mutations = persistent::prepare_persistent_restore(
-        persistent_layout(ctx, roots), rollback);
+    const auto layout = persistent_layout(ctx, roots);
+    auto mutations = persistent::prepare_persistent_restore(layout, rollback);
+    const bool has_subscriptions = std::any_of(mutations.begin(), mutations.end(), [](const auto& item) {
+        return item.kind == PersistentTargetKind::subscriptions;
+    });
+    if (!has_subscriptions) {
+        const auto transport = std::find_if(mutations.begin(), mutations.end(), [](const auto& item) {
+            return item.kind == PersistentTargetKind::transports;
+        });
+        if (transport != mutations.end()) {
+            std::vector<FileReplacement> subscription_replacements;
+            append_subscription_restore(layout, nullptr, transport->replacement.remove
+                ? nlohmann::json(nullptr) : nlohmann::json::parse(transport->replacement.content),
+                subscription_replacements);
+            auto extra = persistent::snapshot_replacements(layout, std::move(subscription_replacements));
+            for (auto& item : extra) mutations.push_back(std::move(item));
+        }
+    }
     PreparedRestore prepared;
 
     for (const auto& mutation : mutations) {
@@ -629,6 +735,9 @@ PreparedRestore prepare_persistent_rollback_restore(
                     parse_config(prepared.next_config_json);
                 validate_config(*prepared.next_config);
                 ctx.validate_candidate_config(*prepared.next_config);
+            } catch (const ConfigValidationError& error) {
+                throw backup_config_validation_error(
+                    error, "rollback configuration is invalid: ", 400);
             } catch (const std::exception& error) {
                 throw ApiError(
                     std::string(
@@ -667,7 +776,7 @@ PreparedRestore prepare_persistent_rollback_restore(
                 prepared.previous_transport_revision =
                     Sha256::hex(mutation.before.content);
             }
-        } else {
+        } else if (mutation.kind != PersistentTargetKind::subscriptions) {
             prepared.restart_nfqws = true;
         }
     }
@@ -700,23 +809,31 @@ PreparedRestore prepare_restore_bundle(const ApiContext& ctx,
 
     if (config_changed) {
         nlohmann::json merged = read_persisted_config(ctx);
-        if (data.contains("general")) {
-            for (const auto& item : data.at("general").items()) {
-                merged[item.key()] = item.value();
-            }
-        }
-        for (const char* key : {"outbounds", "dns", "lists", "route"}) {
-            if (data.contains(key)) {
-                merged[key] = data.at(key);
-            }
-        }
-
-        prepared.next_config_json = merged.dump(1, '\t') + "\n";
         try {
+            auto incoming = data.value("general", nlohmann::json::object());
+            if (backup.contains("config_schema_version")) {
+                // An archive version and a configuration version describe
+                // different formats. Check source metadata even for DNS-only
+                // archives; never inherit the destination version by accident.
+                (void)migrate_config_json({
+                    {"schema_version", backup.at("config_schema_version")}});
+                if (!incoming.contains("schema_version")) {
+                    incoming["schema_version"] = backup.at("config_schema_version");
+                }
+            }
+            for (const char* key : {"outbounds", "dns", "lists", "route"}) {
+                if (data.contains(key)) incoming[key] = data.at(key);
+            }
+            incoming = migrate_config_json(std::move(incoming));
+            for (const auto& item : incoming.items()) merged[item.key()] = item.value();
+            prepared.next_config_json = merged.dump(1, '\t') + "\n";
             prepared.next_config =
                 parse_config(prepared.next_config_json);
             validate_config(*prepared.next_config);
             ctx.validate_candidate_config(*prepared.next_config);
+        } catch (const ConfigValidationError& error) {
+            throw backup_config_validation_error(
+                error, "backup configuration is invalid: ", 400);
         } catch (const std::exception& error) {
             throw ApiError(
                 std::string("backup configuration is invalid: ") +
@@ -746,6 +863,17 @@ PreparedRestore prepare_restore_bundle(const ApiContext& ctx,
         replacement.max_content_bytes = kMaxBackupBytes;
         replacements.push_back(std::move(replacement));
         prepared.restart_transports = true;
+    }
+
+    if (data.contains("subscriptions") || data.contains("transports")) {
+        nlohmann::json target_transports = nullptr;
+        if (data.contains("transports")) target_transports = data.at("transports");
+        else {
+            const auto current = persistent::capture_file(layout.transports, std::nullopt, kMaxBackupBytes);
+            if (current.existed) target_transports = nlohmann::json::parse(current.content);
+        }
+        append_subscription_restore(layout, data.contains("subscriptions") ? &data.at("subscriptions") : nullptr,
+            target_transports, replacements);
     }
 
     if (data.contains("nfqws")) {
@@ -1244,6 +1372,7 @@ void restore_bundle(const ApiContext& ctx,
                     const RestoreRoots& roots = {},
                     const RestoreExecutionHooks& hooks = {},
                     BackupRuntimeMutationGuard* mutation = nullptr) {
+    const auto subscription_lock = lock_subscription_file(ctx);
     with_persistent_snapshot_errors([&] {
         const auto prepared =
             prepare_restore_bundle(ctx, backup, roots);
@@ -1266,6 +1395,7 @@ std::string create_full_rollback_backup_at(
     const fs::path& path,
     const RestoreExecutionHooks& hooks = {},
     const RestoreRoots& roots = {}) {
+    const auto subscription_lock = lock_subscription_file(ctx);
     return with_persistent_snapshot_errors([&] {
         return write_persistent_rollback_snapshot_at(
             persistent::make_full_snapshot(
@@ -1281,6 +1411,7 @@ void restore_with_rollback(const ApiContext& ctx,
                            const RestoreExecutionHooks& hooks = {},
                            BackupRuntimeMutationGuard* mutation = nullptr,
                            const RestoreRoots& roots = {}) {
+    const auto subscription_lock = lock_subscription_file(ctx);
     with_persistent_snapshot_errors([&] {
         // Nothing below this line may discover a malformed archive. Preparing
         // the complete plan first keeps a previously known-good rollback intact
@@ -1320,6 +1451,7 @@ void restore_persistent_rollback(
     const RestoreExecutionHooks& hooks = {},
     const RestoreRoots& roots = {},
     BackupRuntimeMutationGuard* mutation = nullptr) {
+    const auto subscription_lock = lock_subscription_file(ctx);
     with_persistent_snapshot_errors([&] {
         const auto prepared =
             prepare_persistent_rollback_restore(
@@ -1564,6 +1696,11 @@ static void register_backup_handler_impl(
         if (body.size() > kMaxBackupBytes) throw ApiError("backup request is too large", 413);
         nlohmann::json request;
         try { request = nlohmann::json::parse(body); }
+        catch (const nlohmann::json::exception& error) {
+            const std::string message = "invalid backup request";
+            throw ApiError(message, 400,
+                serialize_json_validation_error(message, error).dump());
+        }
         catch (...) { throw ApiError("invalid backup request", 400); }
         try {
             auto maintenance =
@@ -1581,11 +1718,17 @@ static void register_backup_handler_impl(
         if (body.size() > kMaxBackupBytes) throw ApiError("backup is too large", 413);
         nlohmann::json backup;
         try { backup = nlohmann::json::parse(body); }
+        catch (const nlohmann::json::exception& error) {
+            const std::string message = "invalid backup JSON";
+            throw ApiError(message, 400,
+                serialize_json_validation_error(message, error).dump());
+        }
         catch (...) { throw ApiError("invalid backup JSON", 400); }
         BackupRuntimeMutationGuard mutation(
             ctx, "restore-backup");
         restore_with_rollback(
             ctx, backup, kRollbackPath, {}, &mutation);
+        if (ctx.status_stream) ctx.status_stream->publish_subscription_change();
         return R"({"ok":true})";
     });
     server.get("/api/backup/rollback", []() -> std::string {
@@ -1609,6 +1752,7 @@ static void register_backup_handler_impl(
             validate_bundle(rollback);
             restore_bundle(ctx, rollback, {}, {}, &mutation);
         }
+        if (ctx.status_stream) ctx.status_stream->publish_subscription_change();
         return R"({"ok":true})";
     });
 }

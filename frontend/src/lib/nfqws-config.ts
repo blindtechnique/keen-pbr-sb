@@ -32,6 +32,17 @@ const keys: (keyof NfqwsConfigForm)[] = [
   "LOG_LEVEL",
 ]
 
+export function nfqwsConfigChanged(
+  form: NfqwsConfigForm | null,
+  baseline: NfqwsConfigForm | null
+): boolean {
+  return (
+    form !== null &&
+    baseline !== null &&
+    keys.some((key) => form[key] !== baseline[key])
+  )
+}
+
 export function parseNfqwsConfig(source: string): NfqwsConfigForm {
   const raw: Record<string, string> = {}
   const lines = source.split("\n")
@@ -84,8 +95,10 @@ export function formatNfqwsConfig(
   form: NfqwsConfigForm
 ): string {
   let result = source
+  const original = parseNfqwsConfig(source)
   for (const key of keys) {
     const value = form[key]
+    if (value === original[key]) continue
     const raw =
       key === "NFQWS_EXTRA_ARGS"
         ? `$${value}`
@@ -101,7 +114,7 @@ export function formatNfqwsConfig(
     const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
     const pattern = new RegExp(`^${escaped}=.*(?:\\n[ \\t]+.*)*`, "m")
     if (pattern.test(result))
-      result = result.replace(pattern, `${key}=${rendered}`)
+      result = result.replace(pattern, () => `${key}=${rendered}`)
     else result += `${result.endsWith("\n") ? "" : "\n"}${key}=${rendered}\n`
   }
   return result

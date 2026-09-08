@@ -1262,4 +1262,180 @@ TEST_CASE("the migration warning reaches the operator log where it happens") {
     CHECK(live_log.find("component.conf-old") != std::string::npos);
 }
 
+namespace {
+
+struct CandidateInventoryWorld {
+    TempRoot root;
+    ComponentIpkStore store{root.path / "components", "nfqws2-keenetic"};
+    std::vector<std::vector<std::string>> commands;
+    std::string listing{"./opt/etc/nfqws2/new-file\n"};
+    ExecCaptureResult outer_result;
+    ExecCaptureResult list_result;
+    bool data_present{true};
+    bool data_symlink{false};
+    bool throw_listing{false};
+
+    CandidateInventoryWorld() {
+        const std::string bytes = "verified candidate archive";
+        store.adopt(IpkSlot::candidate, bytes,
+                    ScriptedWorld::entry("1.2.5", bytes));
+        outer_result.exit_code = 0;
+        list_result.exit_code = 0;
+    }
+
+    PackagePathList inventory() {
+        ComponentPackageTransaction transaction(
+            options_for(root), store,
+            [this](const std::vector<std::string>& argv, SafeExecTimeouts,
+                   const fs::path& cwd) {
+                commands.push_back(argv);
+                REQUIRE(cwd.empty());
+                REQUIRE(argv[0] == "/opt/bin/tar");
+                if (argv[1] == "-xzf") {
+                    REQUIRE(argv.size() == 5U);
+                    CHECK(argv[2] == store.ipk_path(IpkSlot::candidate).string());
+                    CHECK(argv[3] == "-C");
+                    const fs::path stage = argv[4];
+                    CHECK(stage == store.directory() / "staging");
+                    if (data_present) {
+                        if (data_symlink) {
+                            write_file(root.path / "foreign-data", "untouched");
+                            fs::create_symlink(root.path / "foreign-data",
+                                               stage / "data.tar.gz");
+                        } else {
+                            write_file(stage / "data.tar.gz", "data");
+                        }
+                    }
+                    return outer_result;
+                }
+                REQUIRE(argv == std::vector<std::string>{
+                                    "/opt/bin/tar", "-tzf",
+                                    (store.directory() / "staging" /
+                                     "data.tar.gz").string()});
+                if (throw_listing) throw std::runtime_error("listing failed");
+                auto result = list_result;
+                result.stdout_output = listing;
+                return result;
+            });
+        return transaction.candidate_data_paths();
+    }
+};
+
+} // namespace
+
+TEST_CASE("candidate inventory reads names without running scripts or extracting data") {
+    CandidateInventoryWorld world;
+    world.listing = "./\nopt/\n./opt/etc/\n./opt/etc/nfqws2/\n"
+                    "./opt/etc/nfqws2/z-file\nopt/etc/nfqws2/a file\n"
+                    "/opt/etc/nfqws2/z-file\n";
+    const auto result = world.inventory();
+    REQUIRE(result.complete);
+    CHECK(result.error.empty());
+    CHECK(result.paths == std::vector<std::string>{
+                              "/opt/etc/nfqws2/a file",
+                              "/opt/etc/nfqws2/z-file"});
+    CHECK(world.commands.size() == 2U);
+    CHECK_FALSE(fs::exists(world.store.directory() / "staging"));
+    CHECK(world.store.inspect(IpkSlot::candidate).state == IpkSlotState::usable);
+}
+
+TEST_CASE("candidate inventory requires a currently verified slot and issues no command otherwise") {
+    CandidateInventoryWorld world;
+    SUBCASE("missing") { world.store.discard(IpkSlot::candidate); }
+    SUBCASE("changed archive") {
+        write_file(world.store.ipk_path(IpkSlot::candidate), "corrupted");
+    }
+    const auto result = world.inventory();
+    CHECK_FALSE(result.complete);
+    CHECK(result.paths.empty());
+    CHECK_FALSE(result.error.empty());
+    CHECK(world.commands.empty());
+}
+
+TEST_CASE("candidate inventory rejects unsafe member spellings without a partial result") {
+    const std::vector<std::string> unsafe{
+        "../opt/file", "opt/../file", "/etc/file", "etc/file",
+        "opt//file", "opt/./file", "opt/dir/../../file", "opt",
+        "opt/file\tname", std::string("opt/file\0name", 13U),
+        "opt/file\\nname", "opt/../../etc/", "/etc/", ""};
+    for (const auto& member : unsafe) {
+        CandidateInventoryWorld world;
+        world.listing = "opt/valid\n" + member + "\n";
+        const auto result = world.inventory();
+        CAPTURE(member);
+        CHECK_FALSE(result.complete);
+        CHECK(result.paths.empty());
+        CHECK_FALSE(result.error.empty());
+        CHECK_FALSE(fs::exists(world.store.directory() / "staging"));
+    }
+}
+
+TEST_CASE("candidate inventory bounds member count length and total output") {
+    CandidateInventoryWorld world;
+    SUBCASE("too many unique files") {
+        world.listing.clear();
+        for (std::size_t index = 0; index <= kComponentMaxPathCount; ++index)
+            world.listing += "opt/file-" + std::to_string(index) + "\n";
+    }
+    SUBCASE("too long path") {
+        world.listing = "opt/" + std::string(kComponentMaxPathLength, 'x') + "\n";
+    }
+    SUBCASE("oversized output even with duplicate names") {
+        world.listing.clear();
+        while (world.listing.size() <=
+               kComponentMaxPathCount * (kComponentMaxPathLength + 3U))
+            world.listing += "opt/file\n";
+    }
+    SUBCASE("directory-only output") { world.listing = "./\nopt/\nopt/etc/\n"; }
+    SUBCASE("empty output") { world.listing.clear(); }
+    const auto result = world.inventory();
+    CHECK_FALSE(result.complete);
+    CHECK(result.paths.empty());
+    CHECK_FALSE(result.error.empty());
+    CHECK_FALSE(fs::exists(world.store.directory() / "staging"));
+}
+
+TEST_CASE("candidate inventory accepts the exact unique-path limit") {
+    CandidateInventoryWorld world;
+    world.listing.clear();
+    for (std::size_t index = 0; index < kComponentMaxPathCount; ++index)
+        world.listing += "opt/file-" + std::to_string(index) + "\n";
+    world.listing += "./opt/file-0\n";
+    const auto result = world.inventory();
+    CHECK(result.complete);
+    CHECK(result.paths.size() == kComponentMaxPathCount);
+}
+
+TEST_CASE("candidate inventory needs a regular data archive") {
+    CandidateInventoryWorld world;
+    SUBCASE("missing data") { world.data_present = false; }
+    SUBCASE("symlink data") { world.data_symlink = true; }
+    const auto result = world.inventory();
+    CHECK_FALSE(result.complete);
+    CHECK(result.paths.empty());
+    CHECK_FALSE(result.error.empty());
+    CHECK(world.commands.size() == 1U);
+    CHECK_FALSE(fs::exists(world.store.directory() / "staging"));
+    if (world.data_symlink) CHECK(fs::is_regular_file(world.root.path / "foreign-data"));
+}
+
+TEST_CASE("candidate inventory treats command uncertainty as incomplete and cleans scratch") {
+    CandidateInventoryWorld world;
+    SUBCASE("outer failure") { world.outer_result.exit_code = 1; }
+    SUBCASE("outer timeout") { world.outer_result.timed_out = true; }
+    SUBCASE("outer termination uncertain") { world.outer_result.termination_uncertain = true; }
+    SUBCASE("outer output truncated") { world.outer_result.truncated = true; }
+    SUBCASE("listing failure") { world.list_result.exit_code = 1; }
+    SUBCASE("listing timeout") { world.list_result.timed_out = true; }
+    SUBCASE("listing termination uncertain") { world.list_result.termination_uncertain = true; }
+    SUBCASE("listing output truncated") { world.list_result.truncated = true; }
+    SUBCASE("listing throws") { world.throw_listing = true; }
+    const auto result = world.inventory();
+    CHECK_FALSE(result.complete);
+    CHECK(result.paths.empty());
+    CHECK_FALSE(result.error.empty());
+    CHECK_FALSE(fs::exists(world.store.directory() / "staging"));
+    CHECK(world.store.inspect(IpkSlot::candidate).state == IpkSlotState::usable);
+}
+
 } // namespace keen_pbr3

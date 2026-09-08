@@ -1,6 +1,7 @@
 #ifdef WITH_API
 
 #include "handler_config.hpp"
+#include "config_validation_json.hpp"
 #include "maintenance_api.hpp"
 #include "generated/api_types.hpp"
 
@@ -294,6 +295,7 @@ bool stop_routing_best_effort(
         stop_routing_best_effort(ctx, config_operation);
     nlohmann::json payload = {
         {"error", reason},
+        {"code", "recovery_required"},
         {"saved", false},
         {"applied", applied},
         {"rolled_back", rolled_back},
@@ -333,17 +335,10 @@ void fail_lifecycle_best_effort(
 }
 
 nlohmann::json make_validation_error_json(const ConfigValidationError& error) {
-    nlohmann::json issues = nlohmann::json::array();
-    for (const auto& issue : error.issues()) {
-        issues.push_back({
-            {"path", issue.path},
-            {"message", issue.message},
-        });
-    }
-
     return {
         {"error", error.what()},
-        {"validation_errors", std::move(issues)},
+        {"code", "validation"},
+        {"validation_errors", serialize_config_validation_issues(error.issues())},
     };
 }
 
@@ -371,31 +366,7 @@ Config normalize_config_for_api_response(Config config) {
 }
 
 std::string serialize_config_pretty(const Config& config) {
-    nlohmann::json json = config;
-    std::function<bool(nlohmann::json&)> prune_json = [&](nlohmann::json& value) -> bool {
-        if (value.is_object()) {
-            for (auto it = value.begin(); it != value.end();) {
-                if (prune_json(it.value())) {
-                    it = value.erase(it);
-                } else {
-                    ++it;
-                }
-            }
-            return value.empty();
-        }
-
-        if (value.is_array()) {
-            for (auto& item : value) {
-                (void)prune_json(item);
-            }
-            return false;
-        }
-
-        return value.is_null();
-    };
-
-    (void)prune_json(json);
-    return json.dump(1, '\t') + "\n";
+    return serialize_config_document(config);
 }
 
 } // namespace
@@ -414,13 +385,22 @@ std::string commit_prepared_config_impl(
     const std::function<void(
         const std::string&,
         const std::string&)>& write_config_file,
-    const ConfigSaveRuntimeOptions& runtime_options) {
+    const ConfigSaveRuntimeOptions& runtime_options,
+    MaintenanceLease* borrowed_maintenance = nullptr,
+    RuntimeMutationAdmission::Lease* borrowed_runtime = nullptr,
+    bool reserve_generation = true) {
     try {
-        auto maintenance =
-            ctx.acquire_maintenance_lease(
+        std::unique_ptr<MaintenanceLease> owned_maintenance;
+        if (!borrowed_maintenance) {
+            owned_maintenance = ctx.acquire_maintenance_lease(
                 std::move(maintenance_operation));
-        ApiRuntimeMutationGuard config_operation(
-            ctx, "save-config");
+        }
+        auto* maintenance = borrowed_maintenance
+            ? borrowed_maintenance : owned_maintenance.get();
+        if (borrowed_maintenance) maintenance->verify_held();
+        auto config_operation = borrowed_runtime
+            ? ApiRuntimeMutationGuard(ctx, *borrowed_runtime)
+            : ApiRuntimeMutationGuard(ctx, "save-config");
         if (config_operation.uses_production_admission() &&
             (!ctx.enqueue_apply_validated_config_with_lease_return_fn ||
              !ctx.validate_runtime_mutation_lease_fn ||
@@ -440,6 +420,11 @@ std::string commit_prepared_config_impl(
                     .dump());
         }
         auto prepared = prepare();
+        if (prepared.draft_rebase &&
+            (!config_operation.uses_production_admission() ||
+             !ctx.enqueue_apply_validated_config_with_draft_rebase_fn)) {
+            throw ApiError("Targeted configuration apply is unavailable", 503);
+        }
 
         LifecycleOperationSnapshot lifecycle;
         if (ctx.lifecycle_operations) {
@@ -459,6 +444,7 @@ std::string commit_prepared_config_impl(
                     nlohmann::json{
                         {"error",
                          "A lifecycle operation is already active"},
+                        {"code", "busy"},
                         {"active_operation_id", *active}}
                         .dump());
             }
@@ -655,6 +641,35 @@ std::string commit_prepared_config_impl(
                 secure_transaction_id(),
                 rollback_payload,
                 std::move(effects));
+        } catch (const AtomicFileWriteError& error) {
+            fail_lifecycle_best_effort(
+                ctx,
+                lifecycle,
+                "Cannot start configuration recovery "
+                "journal");
+            const auto reason = std::string(
+                "Cannot start the durable configuration recovery journal: ") +
+                error.what();
+            if (error.committed()) {
+                throw_recovery_required(
+                    ctx, config_operation, reason, false, false);
+            }
+            // A temporary journal write failed before its rename. No active
+            // marker was published, and this request has not reserved a
+            // generation or changed transports/config/runtime yet. Keep the
+            // working routing generation and the user's draft intact.
+            throw ApiError(
+                "Configuration was not applied",
+                500,
+                nlohmann::json{
+                    {"error", reason},
+                    {"code", "apply_unchanged"},
+                    {"saved", false},
+                    {"applied", false},
+                    {"rolled_back", false},
+                    {"runtime_unchanged", true},
+                    {"recovery_required", false},
+                }.dump());
         } catch (const std::exception& error) {
             fail_lifecycle_best_effort(
                 ctx,
@@ -724,8 +739,9 @@ std::string commit_prepared_config_impl(
             inject_config_save_fault(
                 runtime_options,
                 ConfigSaveCheckpoint::wal_started);
-            (void)maintenance->reserve(
-                maintenance->base_generation());
+            if (reserve_generation) {
+                (void)maintenance->reserve(maintenance->base_generation());
+            }
             inject_config_save_fault(
                 runtime_options,
                 ConfigSaveCheckpoint::
@@ -865,11 +881,20 @@ std::string commit_prepared_config_impl(
             RuntimeMutationAdmission::Lease returned_lease;
             try {
                 returned_lease = config_operation.take_lease();
-                apply_result =
-                    ctx.enqueue_apply_validated_config_with_lease_return_fn(
-                        prepared.config,
-                        prepared.serialized,
-                        returned_lease);
+                if (prepared.draft_rebase) {
+                    apply_result =
+                        ctx.enqueue_apply_validated_config_with_draft_rebase_fn(
+                            prepared.config,
+                            prepared.serialized,
+                            std::move(*prepared.draft_rebase),
+                            returned_lease);
+                } else {
+                    apply_result =
+                        ctx.enqueue_apply_validated_config_with_lease_return_fn(
+                            prepared.config,
+                            prepared.serialized,
+                            returned_lease);
+                }
             } catch (...) {
                 apply_failure = std::current_exception();
             }
@@ -1030,6 +1055,14 @@ std::string commit_prepared_config_impl(
                 ctx,
                 lifecycle,
                 "Configuration commit or apply failed");
+            const char* outcome_code = "unknown";
+            if (!apply_result.applied) {
+                if (apply_result.rolled_back && !apply_result.runtime_unchanged) {
+                    outcome_code = "rolled_back";
+                } else if (!apply_result.rolled_back && apply_result.runtime_unchanged) {
+                    outcome_code = "apply_unchanged";
+                }
+            }
             throw ApiError(
                 "Commit/apply failed",
                 500,
@@ -1040,6 +1073,7 @@ std::string commit_prepared_config_impl(
                          : std::string(
                                "Commit/apply failed: ") +
                                apply_result.error},
+                    {"code", outcome_code},
                     {"saved", false},
                     {"applied", apply_result.applied},
                     {"rolled_back", apply_result.rolled_back},
@@ -1093,6 +1127,19 @@ std::string commit_prepared_config_impl(
             runtime_options,
             ConfigSaveCheckpoint::wal_committed);
 
+        if (prepared.success_finalize) {
+            try {
+                prepared.success_finalize(*maintenance);
+            } catch (const std::exception& error) {
+                Logger::instance().warn(
+                    "Configuration applied; metadata cleanup was deferred: {}",
+                    error.what());
+            } catch (...) {
+                Logger::instance().warn(
+                    "Configuration applied; metadata cleanup was deferred");
+            }
+        }
+
         nlohmann::json response = {
             {"status", prepared.success_status},
             {"message", prepared.success_message},
@@ -1139,13 +1186,31 @@ std::string commit_prepared_config(
         ConfigSaveRuntimeOptions{});
 }
 
+std::string commit_prepared_config_with_lease(
+    ApiContext& ctx,
+    MaintenanceLease& maintenance,
+    RuntimeMutationAdmission::Lease& runtime,
+    PrepareConfigCommit prepare,
+    bool reserve_generation) {
+    return commit_prepared_config_impl(
+        ctx, {}, std::move(prepare),
+        [](const std::string& path, const std::string& body) {
+            write_config_atomically(path, body);
+        },
+        ConfigSaveRuntimeOptions{}, &maintenance, &runtime,
+        reserve_generation);
+}
+
 #ifdef KEEN_PBR3_TESTING
 std::string commit_prepared_config_for_test(
     ApiContext& ctx,
     std::string maintenance_operation,
     PrepareConfigCommit prepare,
     ConfigFileWriterForTest write_config_file,
-    ConfigSaveTestOptions options) {
+    ConfigSaveTestOptions options,
+    MaintenanceLease* borrowed_maintenance,
+    RuntimeMutationAdmission::Lease* borrowed_runtime,
+    bool reserve_generation) {
     ConfigSaveRuntimeOptions runtime_options;
     runtime_options.recovery_state_root =
         options.recovery_state_root.empty()
@@ -1161,7 +1226,8 @@ std::string commit_prepared_config_for_test(
         std::move(maintenance_operation),
         std::move(prepare),
         std::move(write_config_file),
-        std::move(runtime_options));
+        std::move(runtime_options),
+        borrowed_maintenance, borrowed_runtime, reserve_generation);
 }
 #endif
 
@@ -1189,10 +1255,11 @@ static void register_config_handler_impl(
     });
 
     const auto parse_validated_candidate =
-        [](const std::string& body) -> Config {
+        [&ctx](const std::string& body) -> Config {
         Config staged;
         try {
             staged = parse_config(body);
+            normalize_changed_list_ip_cidrs(staged, ctx.get_visible_config());
             validate_config(staged);
         } catch (const ConfigValidationError& e) {
             throw ApiError(e.what(), 400, make_validation_error_json(e).dump());
@@ -1238,9 +1305,11 @@ static void register_config_handler_impl(
             try {
                 request = nlohmann::json::parse(body);
             } catch (const nlohmann::json::exception& error) {
+                const std::string message =
+                    std::string("Invalid JSON request: ") + error.what();
                 throw ApiError(
-                    std::string("Invalid JSON request: ") + error.what(),
-                    400);
+                    message, 400,
+                    serialize_json_validation_error(message, error).dump());
             }
             if (!request.is_object() ||
                 !request.contains("config") ||
@@ -1304,6 +1373,7 @@ static void register_config_handler_impl(
                     nlohmann::json{
                         {"error", message},
                         {"reason", "base_revision_mismatch"},
+                        {"code", "draft_changed"},
                         {"base_revision", requested_base_revision},
                         {"current_base_revision", current.revision},
                         {"draft_preserved", current.is_draft},
@@ -1335,26 +1405,18 @@ static void register_config_handler_impl(
                 const std::string message =
                     std::string("Invalid list delete request: ") +
                     error.what();
+                auto payload = serialize_json_validation_error(message, error);
+                payload["reason"] = "list_delete_invalid";
                 throw ApiError(
-                    message,
-                    400,
-                    nlohmann::json{
-                        {"error", message},
-                        {"reason", "list_delete_invalid"},
-                    }
-                        .dump());
+                    message, 400, payload.dump());
             } catch (const std::exception& error) {
                 const std::string message =
                     std::string("Invalid list delete request: ") +
                     error.what();
+                auto payload = serialize_json_validation_error(message, error);
+                payload["reason"] = "list_delete_invalid";
                 throw ApiError(
-                    message,
-                    400,
-                    nlohmann::json{
-                        {"error", message},
-                        {"reason", "list_delete_invalid"},
-                    }
-                        .dump());
+                    message, 400, payload.dump());
             }
 
             if (!is_lowercase_sha256_digest(
@@ -1396,6 +1458,7 @@ static void register_config_handler_impl(
                         nlohmann::json{
                             {"error", message},
                             {"reason", "base_revision_mismatch"},
+                            {"code", "draft_changed"},
                             {"base_revision", request.base_revision},
                             {"current_base_revision", visible.revision},
                             {"draft_preserved", visible.is_draft},
@@ -1447,6 +1510,7 @@ static void register_config_handler_impl(
                     nlohmann::json{
                         {"error", message},
                         {"reason", "base_revision_mismatch"},
+                        {"code", "draft_changed"},
                         {"base_revision", request.base_revision},
                         {"current_base_revision", current.revision},
                         {"draft_preserved", current.is_draft},
@@ -1509,6 +1573,7 @@ static void register_config_handler_impl(
                                 {"error", message},
                                 {"reason",
                                  "draft_base_revision_mismatch"},
+                                {"code", "draft_changed"},
                                 {"base_revision",
                                  staged_snapshot->base_revision},
                                 {"active_revision",

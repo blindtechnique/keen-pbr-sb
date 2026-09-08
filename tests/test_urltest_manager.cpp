@@ -1232,6 +1232,202 @@ TEST_CASE("urltest keeps the exact probe single-flight through selection resolut
     CHECK(commits.size() == 0);
 }
 
+TEST_CASE("urltest deferred selection holds its generation until the asynchronous terminal") {
+    auto transport = std::make_shared<UrltestTransport>();
+    URLTester tester(transport);
+    const auto marks = make_marks();
+    FakeRepeatingScheduler scheduler;
+    BlockingExecutor executor(2, 8);
+    CommitQueue commits;
+    UrltestManager* manager_ptr = nullptr;
+    std::size_t changes = 0;
+    UrltestManager manager(
+        tester, marks, scheduler, executor,
+        [&](const UrltestSelectionChange& change) {
+            ++changes;
+            REQUIRE(manager_ptr->synchronize_selected_if_generation(
+                change.urltest_tag, change.probe_generation,
+                change.previous_child_tag));
+            REQUIRE(manager_ptr->defer_selection_completion(
+                change.urltest_tag, change.probe_generation));
+            return true;
+        },
+        [&](const std::string& tag, std::uint64_t generation,
+            std::map<std::string, URLTestResult> results, TraceId) {
+            commits.push(tag, generation, std::move(results));
+            return true;
+        });
+    manager_ptr = &manager;
+    manager.register_urltest(make_urltest_outbound(), "backup");
+    auto initial = commits.pop();
+    REQUIRE(manager.commit_probe_results(initial.tag, initial.generation,
+                                         std::move(initial.results)));
+    REQUIRE(manager.get_state(initial.tag).has_value());
+    CHECK(manager.get_state(initial.tag)->probe_inflight);
+    CHECK(manager.get_state(initial.tag)->selection_pending);
+    CHECK(manager.get_selected(initial.tag) == "backup");
+
+    manager.trigger_immediate_test(initial.tag);
+    manager.trigger_immediate_test(initial.tag);
+    REQUIRE(scheduler.fire_label("urltest:" + initial.tag));
+    REQUIRE(scheduler.fire_label("urltest:" + initial.tag));
+    auto pending = manager.get_state(initial.tag);
+    REQUIRE(pending.has_value());
+    CHECK(pending->generation == initial.generation);
+    CHECK(pending->external_health_request_serial !=
+          pending->external_health_completed_serial);
+    CHECK(commits.size() == 0);
+
+    // Publish the kernel cursor before releasing the exact probe generation.
+    REQUIRE(manager.synchronize_selected_if_generation(
+        initial.tag, initial.generation, "primary"));
+    manager.complete_selection(initial.tag, initial.generation);
+    auto trailing = commits.pop();
+    CHECK(trailing.generation != initial.generation);
+    CHECK(manager.get_selected(initial.tag) == "primary");
+    // A duplicate terminal cannot release the trailing generation.
+    manager.complete_selection(initial.tag, initial.generation);
+    REQUIRE(manager.get_state(initial.tag).has_value());
+    CHECK(manager.get_state(initial.tag)->probe_inflight);
+    CHECK_FALSE(manager.get_state(initial.tag)->selection_pending);
+    CHECK_FALSE(manager.commit_probe_results(trailing.tag, trailing.generation,
+                                             std::move(trailing.results)));
+    const auto finished = manager.get_state(initial.tag);
+    REQUIRE(finished.has_value());
+    CHECK_FALSE(finished->probe_inflight);
+    CHECK(finished->external_health_completed_serial ==
+          finished->external_health_request_serial);
+    CHECK(changes == 1);
+    CHECK(commits.size() == 0);
+}
+
+TEST_CASE("urltest deferred rollback keeps its cursor and resumes pending health once") {
+    auto transport = std::make_shared<UrltestTransport>();
+    URLTester tester(transport);
+    const auto marks = make_marks();
+    FakeRepeatingScheduler scheduler;
+    BlockingExecutor executor(2, 8);
+    CommitQueue commits;
+    UrltestManager* manager_ptr = nullptr;
+    std::size_t changes = 0;
+    UrltestManager manager(
+        tester, marks, scheduler, executor,
+        [&](const UrltestSelectionChange& change) {
+            if (++changes == 1) {
+                REQUIRE(manager_ptr->synchronize_selected_if_generation(
+                    change.urltest_tag, change.probe_generation,
+                    change.previous_child_tag));
+                REQUIRE(manager_ptr->defer_selection_completion(
+                    change.urltest_tag, change.probe_generation));
+            }
+            return true;
+        },
+        [&](const std::string& tag, std::uint64_t generation,
+            std::map<std::string, URLTestResult> results, TraceId) {
+            commits.push(tag, generation, std::move(results));
+            return true;
+        });
+    manager_ptr = &manager;
+    manager.register_urltest(make_urltest_outbound(), "backup");
+    auto initial = commits.pop();
+    REQUIRE(manager.commit_probe_results(initial.tag, initial.generation,
+                                         std::move(initial.results)));
+    manager.trigger_external_health_test(initial.tag);
+    manager.trigger_external_health_test(initial.tag);
+    REQUIRE(scheduler.fire_label("urltest-external-health-retry:" + initial.tag));
+    CHECK(commits.size() == 0);
+    CHECK(manager.get_selected(initial.tag) == "backup");
+    // A verified rollback retains the previous cursor under the same fence.
+    REQUIRE(manager.synchronize_selected_if_generation(
+        initial.tag, initial.generation, "backup"));
+    bool resume_pending = true;
+    SUBCASE("verified rollback resumes immediately") {}
+    SUBCASE("recovery keeps requests pending without its old retry timer") {
+        resume_pending = false;
+    }
+    manager.complete_selection(initial.tag, initial.generation, resume_pending);
+    if (!resume_pending) {
+        const auto paused = manager.get_state(initial.tag);
+        REQUIRE(paused.has_value());
+        CHECK_FALSE(paused->probe_inflight);
+        CHECK_FALSE(paused->selection_pending);
+        CHECK(paused->external_health_request_serial !=
+              paused->external_health_completed_serial);
+        CHECK_FALSE(scheduler.fire_label(
+            "urltest-external-health-retry:" + initial.tag));
+        CHECK(commits.size() == 0);
+        // The existing central-recovery release wakes the retained intent.
+        manager.trigger_external_health_test(initial.tag);
+    }
+    auto trailing = commits.pop();
+    CHECK(manager.get_selected(initial.tag) == "backup");
+    CHECK(trailing.generation != initial.generation);
+    REQUIRE(manager.commit_probe_results(trailing.tag, trailing.generation,
+                                         std::move(trailing.results)));
+    CHECK(manager.get_selected(initial.tag) == "primary");
+    const auto finished = manager.get_state(initial.tag);
+    REQUIRE(finished.has_value());
+    CHECK_FALSE(finished->probe_inflight);
+    CHECK_FALSE(finished->selection_pending);
+    CHECK(finished->external_health_completed_serial ==
+          finished->external_health_request_serial);
+    CHECK(scheduler.count_label("urltest-external-health-retry:" + initial.tag) == 0);
+    CHECK(changes == 2);
+    CHECK(commits.size() == 0);
+}
+
+TEST_CASE("urltest deferred terminal cannot release a later registration probe") {
+    auto transport = std::make_shared<UrltestTransport>();
+    URLTester tester(transport);
+    const auto marks = make_marks();
+    FakeRepeatingScheduler scheduler;
+    BlockingExecutor executor(2, 8);
+    CommitQueue commits;
+    UrltestManager* manager_ptr = nullptr;
+    UrltestManager manager(
+        tester, marks, scheduler, executor,
+        [&](const UrltestSelectionChange& change) {
+            REQUIRE(manager_ptr->synchronize_selected_if_generation(
+                change.urltest_tag, change.probe_generation,
+                change.previous_child_tag));
+            REQUIRE(manager_ptr->defer_selection_completion(
+                change.urltest_tag, change.probe_generation));
+            return true;
+        },
+        [&](const std::string& tag, std::uint64_t generation,
+            std::map<std::string, URLTestResult> results, TraceId) {
+            commits.push(tag, generation, std::move(results));
+            return true;
+        });
+    manager_ptr = &manager;
+    manager.register_urltest(make_urltest_outbound(), "backup");
+    auto old = commits.pop();
+    REQUIRE(manager.commit_probe_results(old.tag, old.generation,
+                                         std::move(old.results)));
+    manager.trigger_external_health_test(old.tag);
+    manager.clear();
+    manager.register_urltest(make_urltest_outbound(), "backup");
+    auto fresh = commits.pop();
+    CHECK(fresh.generation != old.generation);
+    CHECK_FALSE(manager.defer_selection_completion(old.tag, old.generation));
+    manager.complete_selection(old.tag, old.generation);
+    CHECK_FALSE(manager.synchronize_selected_if_generation(
+        old.tag, old.generation, "primary"));
+    CHECK_FALSE(manager.commit_probe_results(old.tag, old.generation, {}));
+    const auto current = manager.get_state(fresh.tag);
+    REQUIRE(current.has_value());
+    CHECK(current->generation == fresh.generation);
+    CHECK(current->probe_inflight);
+    CHECK_FALSE(current->selection_pending);
+    CHECK(current->selected_outbound == "backup");
+    REQUIRE(manager.commit_probe_results(fresh.tag, fresh.generation,
+                                         std::move(fresh.results)));
+    CHECK(manager.get_state(fresh.tag)->selection_pending);
+    CHECK(manager.get_state(fresh.tag)->probe_inflight);
+    manager.complete_selection(fresh.tag, fresh.generation, false);
+    CHECK_FALSE(manager.get_state(fresh.tag)->probe_inflight);
+}
+
 TEST_CASE("external health transition launches one trailing urltest after an inflight probe") {
     auto transport = std::make_shared<UrltestTransport>();
     URLTester tester(transport);

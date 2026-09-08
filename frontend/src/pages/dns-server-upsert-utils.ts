@@ -7,6 +7,9 @@ import {
   type DnsPresetSelection,
 } from "@/components/dns/dns-preset-selection"
 import { makeTechnicalId } from "@/lib/technical-id"
+import { normalizeDnsDomainBindings } from "@/lib/dns-domain-bindings"
+import { configKnownFields } from "@/lib/config-known-fields.generated"
+import { pickUnknownConfigProperties } from "@/lib/config-unknown-fields"
 
 export type DnsServerDraft = {
   displayName: string
@@ -14,6 +17,7 @@ export type DnsServerDraft = {
   type: typeof DnsServerType.static | typeof DnsServerType.keenetic
   address: string
   detour: string
+  domains: string
 }
 
 export type DnsServerBackupDraft = {
@@ -39,6 +43,7 @@ export const emptyDnsServerDraft: DnsServerDraft = {
   type: DnsServerType.static,
   address: "",
   detour: "",
+  domains: "",
 }
 
 export function getDnsServerDraft(server?: DnsServer): DnsServerDraft {
@@ -52,6 +57,7 @@ export function getDnsServerDraft(server?: DnsServer): DnsServerDraft {
     type: server.type ?? DnsServerType.static,
     address: server.address ?? "",
     detour: server.detour ?? "",
+    domains: (server.domains ?? []).join("\n"),
   }
 }
 
@@ -104,12 +110,14 @@ export function buildUpdatedConfigForDnsServerUpsert(
 ): ConfigObject | null {
   const normalizedTag = draft.tag.trim()
   const normalizedDisplayName = draft.displayName.trim()
+  const domains = normalizeDnsDomainBindings(draft.domains)
   const isKeeneticDns = draft.type === DnsServerType.keenetic
   const normalizedAddress = isKeeneticDns
     ? null
     : normalizeDnsAddress(draft.address)
 
   if (
+    !domains ||
     !normalizedTag ||
     !normalizedDisplayName ||
     normalizedDisplayName.length > 80 ||
@@ -119,14 +127,20 @@ export function buildUpdatedConfigForDnsServerUpsert(
   }
 
   const normalizedDetour = isKeeneticDns ? "" : draft.detour.trim()
+  const currentServers = config.dns?.servers ?? []
+  const originalServer =
+    mode === "edit"
+      ? currentServers.find((server) => server.tag === originalTag)
+      : undefined
   const nextServer: DnsServer = {
+    ...pickUnknownConfigProperties(originalServer, configKnownFields.DnsServer),
     tag: normalizedTag,
     display_name: normalizedDisplayName,
     type: draft.type,
     ...(normalizedAddress ? { address: normalizedAddress } : {}),
     ...(normalizedDetour ? { detour: normalizedDetour } : {}),
+    ...(domains.length ? { domains } : {}),
   }
-  const currentServers = config.dns?.servers ?? []
   let nextServers =
     mode === "edit"
       ? currentServers.map((server) =>
@@ -138,7 +152,7 @@ export function buildUpdatedConfigForDnsServerUpsert(
     const backupTag = backupDraft.tag.trim()
     const backupAddress = normalizeDnsAddress(backupDraft.address)
     const duplicateTag = nextServers.some((server) => server.tag === backupTag)
-    const duplicateDefinition = nextServers.some(
+    const duplicateDefinition = nextServers.findIndex(
       (server) =>
         (server.type ?? DnsServerType.static) === DnsServerType.static &&
         server.address === backupAddress &&
@@ -154,7 +168,19 @@ export function buildUpdatedConfigForDnsServerUpsert(
       return null
     }
 
-    if (!duplicateDefinition) {
+    if (duplicateDefinition >= 0 && domains.length) {
+      // Reuse an existing backup without dropping its other domain pins.
+      nextServers = nextServers.map((server, index) =>
+        index === duplicateDefinition
+          ? {
+              ...server,
+              domains: normalizeDnsDomainBindings(
+                [...(server.domains ?? []), ...domains].join("\n")
+              ) ?? [...(server.domains ?? []), ...domains],
+            }
+          : server
+      )
+    } else if (duplicateDefinition < 0) {
       nextServers = [
         ...nextServers,
         {
@@ -165,6 +191,7 @@ export function buildUpdatedConfigForDnsServerUpsert(
           type: DnsServerType.static,
           address: backupAddress,
           ...(normalizedDetour ? { detour: normalizedDetour } : {}),
+          ...(domains.length ? { domains } : {}),
         },
       ]
     }
@@ -201,14 +228,18 @@ export function withSavedPlainDnsTemplate(
 
   const current = config.ui_preferences?.plain_dns_templates ?? []
   const normalizedName = name.toLowerCase()
+  const existingIndex = current.findIndex(
+    (item) => item.name.trim().toLowerCase() === normalizedName
+  )
   const replacement: PlainDnsTemplate = {
+    ...pickUnknownConfigProperties(
+      current[existingIndex],
+      configKnownFields.PlainDnsTemplate
+    ),
     name,
     primary_ipv4: primaryIpv4,
     ...(secondaryIpv4 ? { secondary_ipv4: secondaryIpv4 } : {}),
   }
-  const existingIndex = current.findIndex(
-    (item) => item.name.trim().toLowerCase() === normalizedName
-  )
   const nextTemplates =
     existingIndex >= 0
       ? current.map((item, index) =>
@@ -239,6 +270,7 @@ export function normalizeDnsServerDraftForComparison(draft: DnsServerDraft) {
     type: draft.type,
     address: isKeeneticDns ? "" : (normalizedAddress ?? draft.address.trim()),
     detour: isKeeneticDns ? "" : draft.detour.trim(),
+    domains: normalizeDnsDomainBindings(draft.domains) ?? draft.domains.trim(),
   }
 }
 

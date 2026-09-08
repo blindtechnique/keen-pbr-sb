@@ -258,7 +258,7 @@ ApiContext make_catalog_context(
         [] {},
         [] {},
         [] {},
-        [](std::optional<std::string>) {
+        [](const api::ListRefreshRequest&) {
             return ListRefreshOperationResult{};
         },
     };
@@ -2005,6 +2005,49 @@ TEST_CASE(
         domains ==
         std::vector<std::string>{"kino.pub", "alador.space"});
     CHECK(preset.find("domainSupplements") == preset.end());
+}
+
+TEST_CASE("packaged catalogue API preserves notice translations") {
+    CatalogPathFixture files;
+    files.write(
+        "bundled.json",
+        R"([{"id":"example","name":"Example","notice":"Описание",)"
+        R"("notice_i18n":{"en":"Description"}}])");
+
+    const auto snapshot = load_catalog_snapshot();
+    REQUIRE(snapshot.at("presets").size() == 1U);
+    const auto& preset = snapshot.at("presets").at(0);
+    CHECK(preset.at("notice") == "Описание");
+    CHECK(preset.at("notice_i18n").at("en") == "Description");
+    CHECK(preset.contains("catalog_identity"));
+}
+
+TEST_CASE("catalogue overlay keeps notice translations paired with source text") {
+    const auto upstream = nlohmann::json::parse(R"([
+        {"id":"translated","notice":"Old notice",
+         "notice_i18n":{"en":"Old translation"}},
+        {"id":"legacy","notice":"Old legacy notice",
+         "notice_i18n":{"en":"Stale translation"}},
+        {"id":"custom","notice":"Custom notice",
+         "notice_i18n":{"en":"Custom translation"}}
+    ])");
+    const auto bundled = nlohmann::json::parse(R"([
+        {"id":"translated","notice":"Новое описание",
+         "notice_i18n":{"en":"New description"}},
+        {"id":"legacy","notice":"Legacy package notice"},
+        {"id":"appended","notice":"Добавленное описание",
+         "notice_i18n":{"en":"Appended description"}}
+    ])");
+
+    const auto enriched =
+        enrich_catalog_with_routing_companions(upstream, bundled);
+    REQUIRE(enriched.size() == 4U);
+    CHECK(enriched.at(0).at("notice") == "Новое описание");
+    CHECK(enriched.at(0).at("notice_i18n").at("en") == "New description");
+    CHECK(enriched.at(1).at("notice") == "Legacy package notice");
+    CHECK_FALSE(enriched.at(1).contains("notice_i18n"));
+    CHECK(enriched.at(2) == upstream.at(2));
+    CHECK(enriched.at(3) == bundled.at(2));
 }
 
 TEST_CASE("a hand-edited catalogue source cannot take the endpoint down") {

@@ -1,7 +1,19 @@
-import { useQuery } from "@tanstack/react-query"
-import { useState, type MouseEvent, useMemo } from "react"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { useState, useMemo } from "react"
 import { BellIcon, CheckCheckIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
+import { toast } from "sonner"
+import { Link } from "wouter"
+
+import {
+  dismissNotifications,
+  getNotifications,
+} from "@/api/generated/keen-api"
+import type { NotificationDismissalState } from "@/api/generated/model"
+import {
+  applyNotificationState,
+  NOTIFICATION_STATE_QUERY_KEY,
+} from "@/api/notification-events"
 
 import { nfqwsUpdateQueryOptions } from "@/api/nfqws"
 import { useGetConfig, useGetHealthService } from "@/api/queries"
@@ -12,6 +24,7 @@ import {
   collectNotices,
   type SoftwareUpdateResponse,
 } from "@/components/layout/notifications"
+import { notificationUpdateIds } from "@/components/layout/subscription-notices"
 import {
   Popover,
   PopoverContent,
@@ -19,46 +32,28 @@ import {
 } from "@/components/ui/popover"
 import { cn } from "@/lib/utils"
 
-type LogsResponse = {
-  lines: string[]
-}
-
 /**
- * Notifications are derived rather than stored: the log already records
- * everything the service considers worth saying, so a separate feed would only
- * be a second place for the same facts to drift out of sync.
+ * The feed combines the log with current subscription and update notices.
+ * Only bounded dismissal identities
+ * live on the router, shared across browsers without touching routing state.
  */
-const DISMISSED_KEY = "keen-pbr-notifications-dismissed-until"
-const DISMISSED_IDS_KEY = "keen-pbr-notifications-dismissed-ids"
-
 export function NotificationsBell() {
   const { t } = useTranslation()
+  const queryClient = useQueryClient()
   const [open, setOpen] = useState(false)
-  const [dismissedUntil, setDismissedUntil] = useState(() => {
-    const stored = window.localStorage.getItem(DISMISSED_KEY)
-    return stored ? Number(stored) : 0
+  const stateQuery = useQuery<NotificationDismissalState | null>({
+    queryKey: NOTIFICATION_STATE_QUERY_KEY,
+    queryFn: () => null,
+    initialData: null,
+    enabled: false,
   })
-  const [dismissedIds, setDismissedIds] = useState<ReadonlySet<string>>(() => {
-    const stored = window.localStorage.getItem(DISMISSED_IDS_KEY)
-    if (!stored) return new Set()
-    try {
-      const parsed: unknown = JSON.parse(stored)
-      return new Set(
-        Array.isArray(parsed)
-          ? parsed.filter((value): value is string => typeof value === "string")
-          : []
-      )
-    } catch {
-      return new Set()
-    }
-  })
-
-  const logsQuery = useQuery<LogsResponse>({
+  const logsQuery = useQuery({
     queryKey: ["logs", "notifications"],
     queryFn: async () => {
-      const response = await fetch("/api/logs?lines=200")
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      return response.json()
+      const response = await getNotifications()
+      if (response.status !== 200) throw new Error(`HTTP ${response.status}`)
+      applyNotificationState(queryClient, response.data.state)
+      return response.data
     },
     refetchInterval: 60_000,
     refetchIntervalInBackground: false,
@@ -84,6 +79,14 @@ export function NotificationsBell() {
   // а не состояние.
   const configQuery = useGetConfig()
   const listRefreshState = selectListRefreshState(configQuery.data)
+  const dismissedIds = useMemo(
+    () =>
+      new Set([
+        ...(stateQuery.data?.log_ids ?? []),
+        ...(stateQuery.data?.update_ids ?? []),
+      ]),
+    [stateQuery.data]
+  )
 
   // Колокольчик смонтирован дважды всегда: десктопная и мобильная шапки
   // скрыты через CSS, а не размонтированы. Разбор двухсот строк лога
@@ -96,7 +99,7 @@ export function NotificationsBell() {
         updateQuery.data,
         nfqwsUpdateQuery.data,
         listRefreshState,
-        dismissedUntil,
+        logsQuery.data?.line_ids ?? [],
         dismissedIds,
         t,
         {
@@ -104,38 +107,41 @@ export function NotificationsBell() {
             serviceHealthQuery.data?.status === 200
               ? serviceHealthQuery.data.data
               : undefined,
-        }
+        },
+        logsQuery.data?.subscription_notices
       ),
     [
       logsQuery.data,
       updateQuery.data,
       nfqwsUpdateQuery.data,
       listRefreshState,
-      dismissedUntil,
       dismissedIds,
       serviceHealthQuery.data,
       t,
     ]
   )
 
-  const dismissAll = (event: MouseEvent<HTMLButtonElement>) => {
-    const now =
-      event.timeStamp > 1_000_000_000_000
-        ? event.timeStamp
-        : performance.timeOrigin + event.timeStamp
-    const syntheticIds = notices
-      .filter((notice) => notice.timestamp === undefined)
-      .map((notice) => notice.id)
-    const nextDismissedIds = new Set([...dismissedIds, ...syntheticIds])
-    window.localStorage.setItem(DISMISSED_KEY, String(now))
-    window.localStorage.setItem(
-      DISMISSED_IDS_KEY,
-      JSON.stringify([...nextDismissedIds])
-    )
-    setDismissedUntil(now)
-    setDismissedIds(nextDismissedIds)
-    setOpen(false)
-  }
+  const clearMutation = useMutation({
+    mutationFn: async () => {
+      // Include the whole loaded warning/error window, not just the visible
+      // twenty. New entries arriving during this request are not dismissed.
+      const logIds = (logsQuery.data?.line_ids ?? []).filter((_, index) =>
+        /^\S+ \S+\s+\[[EW]\]\s+/.test(logsQuery.data?.lines[index] ?? "")
+      )
+      const updateIds = notificationUpdateIds(
+        notices,
+        logsQuery.data?.subscription_notices ?? []
+      )
+      const response = await dismissNotifications({
+        log_ids: logIds,
+        update_ids: updateIds,
+      })
+      if (response.status !== 200) throw new Error(`HTTP ${response.status}`)
+      applyNotificationState(queryClient, response.data)
+    },
+    onSuccess: () => setOpen(false),
+    onError: () => toast.error(t("notifications.clearFailed")),
+  })
 
   return (
     <Popover onOpenChange={setOpen} open={open}>
@@ -170,7 +176,10 @@ export function NotificationsBell() {
           {notices.length > 0 ? (
             <Button
               className="h-7 gap-1.5 px-2 text-xs text-muted-foreground"
-              onClick={dismissAll}
+              disabled={
+                clearMutation.isPending || !stateQuery.data || !logsQuery.data
+              }
+              onClick={() => clearMutation.mutate()}
               size="sm"
               variant="ghost"
             >
@@ -180,7 +189,28 @@ export function NotificationsBell() {
           ) : null}
         </div>
 
-        {notices.length === 0 ? (
+        {logsQuery.data?.subscription_notices_error ? (
+          <p
+            className="border-b px-3 py-2 text-sm text-muted-foreground"
+            role="status"
+          >
+            {t("notifications.subscriptions.loadFailed")}
+          </p>
+        ) : null}
+
+        {logsQuery.isPending || logsQuery.isError ? (
+          <p
+            className="px-3 py-6 text-center text-sm text-muted-foreground"
+            role="status"
+          >
+            {t(
+              logsQuery.isError
+                ? "notifications.loadFailed"
+                : "notifications.loading"
+            )}
+          </p>
+        ) : notices.length === 0 &&
+          !logsQuery.data?.subscription_notices_error ? (
           <p className="px-3 py-6 text-center text-sm text-muted-foreground">
             {t("notifications.empty")}
           </p>
@@ -201,6 +231,25 @@ export function NotificationsBell() {
                   />
                   <div className="min-w-0">
                     <p className="text-sm break-words">{notice.text}</p>
+                    {notice.href && notice.actionLabel ? (
+                      <Link
+                        className="mt-1 inline-block text-sm text-primary underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2"
+                        href={notice.href}
+                        onClick={() => setOpen(false)}
+                      >
+                        {notice.actionLabel}
+                      </Link>
+                    ) : null}
+                    {notice.details ? (
+                      <details className="mt-1 text-xs text-muted-foreground">
+                        <summary className="cursor-pointer">
+                          {t("notifications.details")}
+                        </summary>
+                        <p className="mt-1 break-words whitespace-pre-wrap">
+                          {notice.details}
+                        </p>
+                      </details>
+                    ) : null}
                     {notice.timestamp ? (
                       <p className="text-xs text-muted-foreground">
                         {notice.timestamp}

@@ -147,6 +147,36 @@ TEST_CASE("native writer lease owns all guards and reports cooperative scope") {
     CHECK(maintenance->verify_count >= 3U);
 }
 
+TEST_CASE("native writer borrows outer leases synchronously without releasing ownership") {
+    TempDirectory directory;
+    RuntimeMutationAdmission runtime;
+    const auto maintenance = std::make_shared<MaintenanceState>();
+    auto admitted = acquire_writer(directory.state, runtime, maintenance);
+    REQUIRE(admitted.state == NdmsNativeWriterAdmissionState::admitted);
+    const auto token = admitted.lease.runtime_token();
+    unsigned callbacks = 0;
+    admitted.lease.with_outer_leases([&](MaintenanceLease& outer,
+                                       RuntimeMutationAdmission::Lease& owned_runtime) {
+        ++callbacks;
+        CHECK(outer.base_generation() == 41U);
+        CHECK(owned_runtime.token() == token);
+        CHECK_FALSE(runtime.try_acquire("competing-config-save").has_value());
+        CHECK(outer.reserve(outer.base_generation()) == 42U);
+    });
+    CHECK(callbacks == 1);
+    CHECK(admitted.lease.runtime_token() == token);
+    CHECK_NOTHROW(admitted.lease.verify_held());
+    CHECK(maintenance->reserve_count == 1);
+    CHECK(maintenance->destruction_count == 0);
+    CHECK_THROWS_AS(admitted.lease.with_outer_leases(
+        [](MaintenanceLease&, RuntimeMutationAdmission::Lease&) {
+            throw std::runtime_error("config apply failed");
+        }), std::runtime_error);
+    CHECK(admitted.lease.runtime_token() == token);
+    CHECK_NOTHROW(admitted.lease.verify_held());
+    CHECK_FALSE(runtime.try_acquire("after-failed-config-save").has_value());
+}
+
 TEST_CASE("native writer lease refuses missing or lost outer guards") {
     TempDirectory directory;
     RuntimeMutationAdmission runtime;

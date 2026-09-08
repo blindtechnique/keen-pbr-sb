@@ -1,5 +1,12 @@
 ## Repository signing keys
 
+Keenetic releases of this fork use the dedicated public key
+`packages/keys/keenetic-release-public.pem` and Actions secret
+`KEENETIC_RELEASE_SIGNING_KEY`. See [Keenetic release signatures](../../docs/keenetic-release-signing.md)
+for the manifest, first trusted installation and encrypted backup policy.
+The keys below belong to separate inherited repository-signing paths and are
+not trust anchors for this fork's Keenetic updater.
+
 This repo supports optional repository signing for OpenWrt and Debian.
 
 Private keys are loaded from environment variables:

@@ -4,6 +4,8 @@ import type {
   RuntimeInterfaceInventoryEntry,
 } from "@/api/generated/model"
 import type { NativeInterfaceModel } from "@/lib/native-interfaces"
+import { configKnownFields } from "@/lib/config-known-fields.generated"
+import { pickUnknownConfigProperties } from "@/lib/config-unknown-fields"
 
 /**
  * Readonly view used by the controlled settings field.
@@ -311,6 +313,7 @@ export function updateInternalVpnServerOverride({
     const persistedInterface =
       currentMatch?.interface ?? baselineMatch?.interface ?? normalizedInterface
     const nextOverride: InternalVpnServerPolicyOverride = {
+      ...(currentMatch ?? baselineMatch),
       interface: persistedInterface,
       process_clients: processClients,
       ...(effectiveNdmsId ? { ndms_id: effectiveNdmsId } : {}),
@@ -418,8 +421,8 @@ export function reconcileInternalVpnServerOverrides({
     const ndmsId = normalizeOptionalValue(override.ndms_id)
     return Boolean(
       ndmsId &&
-        rolelessConfirmationIds.has(ndmsId) &&
-        !baselineStableIds.has(ndmsId)
+      rolelessConfirmationIds.has(ndmsId) &&
+      !baselineStableIds.has(ndmsId)
     )
   })
   if (hasNewStableDeclaration) {
@@ -500,6 +503,10 @@ export function normalizeInternalVpnServerOverrides(
     }
     const ndmsId = normalizeOptionalValue(value.ndms_id)
     const normalized: InternalVpnServerPolicyOverride = {
+      ...pickUnknownConfigProperties(
+        value,
+        configKnownFields.InternalVpnServer
+      ),
       interface: interfaceName,
       process_clients: value.process_clients,
       ...(ndmsId ? { ndms_id: ndmsId } : {}),
