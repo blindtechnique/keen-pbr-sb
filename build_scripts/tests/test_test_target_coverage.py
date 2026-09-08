@@ -66,6 +66,38 @@ OPT_IN_ONLY = {
 # some target's source list.
 UNCOMPILED_SOURCES: set = set()
 
+# These direct dependencies previously surfaced only after the long backend
+# build. Keep the check limited to known source pairs, including opt-in targets.
+REQUIRED_SOURCE_DEPENDENCIES = {
+    "../src/config/config.cpp": "../src/config/list_parser.cpp",
+    "../src/daemon/daemon_api.cpp": "../src/config/outbound_delete.cpp",
+    "../src/api/handler_transports.cpp": "../src/config/outbound_delete.cpp",
+    "../src/config/outbound_delete.cpp": "../src/config/dependency_analysis.cpp",
+}
+
+
+def literal_target_sources(text):
+    """Collect this file's literal source lists, not arbitrary CMake syntax."""
+    text = re.sub(r"#[^\n]*", "", text)
+    sources = {}
+    for match in re.finditer(
+        r"\b(?:add_executable|target_sources)\(\s*([\w-]+)\s+([^)]*)\)",
+        text,
+    ):
+        sources.setdefault(match[1], set()).update(
+            re.findall(r"[\w./-]+\.cpp", match[2])
+        )
+    return sources
+
+
+def missing_source_dependencies(text):
+    return sorted(
+        (target, consumer, provider)
+        for target, sources in literal_target_sources(text).items()
+        for consumer, provider in REQUIRED_SOURCE_DEPENDENCIES.items()
+        if consumer in sources and provider not in sources
+    )
+
 
 def declared_targets():
     text = CMAKE.read_text(encoding="utf-8")
@@ -98,6 +130,44 @@ def gated_targets():
 
 
 class TestTargetCoverage(unittest.TestCase):
+    def test_required_production_sources_are_linked(self):
+        text = CMAKE.read_text(encoding="utf-8")
+        sources = literal_target_sources(text)
+        for consumer in REQUIRED_SOURCE_DEPENDENCIES:
+            self.assertTrue(
+                any(consumer in target_sources for target_sources in sources.values()),
+                "dependency check no longer sees its consumer: " + consumer,
+            )
+        self.assertEqual(
+            missing_source_dependencies(text), [],
+            "test target omits a required implementation (target, consumer, provider)",
+        )
+
+    def test_dependency_scan_combines_blocks_and_ignores_comments(self):
+        text = """
+        add_executable(example EXCLUDE_FROM_ALL
+          ../src/config/config.cpp
+        )
+        # target_sources(ignored PRIVATE ../src/config/config.cpp)
+        target_sources(example PRIVATE
+          ../src/config/list_parser.cpp # implemented here (not a new target)
+        )
+        """
+        self.assertEqual(set(literal_target_sources(text)), {"example"})
+        self.assertEqual(missing_source_dependencies(text), [])
+        self.assertEqual(
+            missing_source_dependencies(text.replace("../src/config/list_parser.cpp", "")),
+            [("example", "../src/config/config.cpp", "../src/config/list_parser.cpp")],
+        )
+
+    def test_dependency_scan_detects_each_missing_provider(self):
+        text = CMAKE.read_text(encoding="utf-8")
+        for consumer, provider in REQUIRED_SOURCE_DEPENDENCIES.items():
+            with self.subTest(consumer=consumer, provider=provider):
+                # Exercise the actual target lists without changing any file.
+                missing = missing_source_dependencies(text.replace(provider, ""))
+                self.assertTrue(any(item[1:] == (consumer, provider) for item in missing))
+
     def test_package_dns_regressions_run_in_the_default_gate(self):
         self.assertEqual(make_recipe("test").count("$(MAKE) test-package-dns"), 1)
         recipe = make_recipe("test-package-dns")

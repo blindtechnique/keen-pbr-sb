@@ -1386,6 +1386,7 @@ add_executable(test_config_store
   test_main.cpp
   test_config_store.cpp
   ../src/config/config.cpp
+  ../src/config/list_parser.cpp
   ../src/daemon/config_store.cpp
   ../src/dns/dns_probe_server.cpp
   ../src/dns/dns_server.cpp
@@ -2870,6 +2871,7 @@ if(KEEN_PBR_FUZZ)
   add_executable(keen-pbr-fuzz-config
     fuzz/fuzz_config_parser.cpp
     ../src/config/config.cpp
+    ../src/config/list_parser.cpp
     ../src/firewall/port_spec_util.cpp
     ../src/dns/dns_server.cpp
     ../src/dns/dns_probe_server.cpp
