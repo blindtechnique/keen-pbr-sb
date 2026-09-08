@@ -63,7 +63,7 @@ ApiContext make_exit_check_test_context(SseBroadcaster& broadcaster) {
         []() {},
         []() {},
         []() {},
-        [](std::optional<std::string>) {
+        [](const api::ListRefreshRequest&) {
             return ListRefreshOperationResult{};
         },
     };

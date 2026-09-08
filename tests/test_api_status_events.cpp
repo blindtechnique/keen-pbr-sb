@@ -45,7 +45,7 @@ ApiContext make_status_context(SseBroadcaster& broadcaster,
         [] {},
         [] {},
         [] {},
-        [](std::optional<std::string>) {
+        [](const api::ListRefreshRequest&) {
             return ListRefreshOperationResult{};
         },
         &stream,

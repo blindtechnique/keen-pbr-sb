@@ -235,7 +235,7 @@ ApiContext make_remote_access_context(SseBroadcaster& broadcaster) {
         [] {},
         [] {},
         [] {},
-        [](std::optional<std::string>) {
+        [](const api::ListRefreshRequest&) {
             return ListRefreshOperationResult{};
         },
     };

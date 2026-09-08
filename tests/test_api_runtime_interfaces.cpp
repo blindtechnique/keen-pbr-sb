@@ -39,7 +39,7 @@ ApiContext make_test_api_context(
         []() {},
         []() {},
         []() {},
-        [](std::optional<std::string>) { return ListRefreshOperationResult{}; },
+        [](const api::ListRefreshRequest&) { return ListRefreshOperationResult{}; },
     };
 }
 

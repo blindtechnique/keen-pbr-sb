@@ -59,7 +59,7 @@ ApiContext make_inventory_context(SseBroadcaster& broadcaster) {
         [] {},
         [] {},
         [] {},
-        [](std::optional<std::string>) {
+        [](const api::ListRefreshRequest&) {
             return ListRefreshOperationResult{};
         },
     };

@@ -73,7 +73,7 @@ ApiContext make_registry_test_context(SseBroadcaster& broadcaster) {
         []() {},
         []() {},
         []() {},
-        [](std::optional<std::string>) {
+        [](const api::ListRefreshRequest&) {
             return ListRefreshOperationResult{};
         },
     };
