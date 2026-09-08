@@ -2,6 +2,10 @@
 
 #include "../config/config.hpp"
 
+#ifdef KEEN_PBR3_TESTING
+#include <optional>
+#endif
+
 namespace keen_pbr3 {
 
 struct Ipv6SupportDecision {
@@ -47,5 +51,25 @@ bool system_ipv6_supported();
 bool iptables_ipv6_supported();
 Ipv6SupportDecision resolve_ipv6_support(const Config& config);
 void log_ipv6_support_decision_once(const Ipv6SupportDecision& decision);
+
+#ifdef KEEN_PBR3_TESTING
+namespace testing {
+
+// Replace host/backend capability probes only in this thread and scope.
+// Explicit ipv6_enabled:false keeps precedence over the simulated capability.
+class ScopedIpv6SupportOverride final {
+public:
+    explicit ScopedIpv6SupportOverride(bool supported) noexcept;
+    ~ScopedIpv6SupportOverride() noexcept;
+
+    ScopedIpv6SupportOverride(const ScopedIpv6SupportOverride&) = delete;
+    ScopedIpv6SupportOverride& operator=(const ScopedIpv6SupportOverride&) = delete;
+
+private:
+    std::optional<bool> previous_;
+};
+
+} // namespace testing
+#endif
 
 } // namespace keen_pbr3

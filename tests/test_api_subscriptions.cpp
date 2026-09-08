@@ -387,11 +387,17 @@ struct SubscriptionsHarness {
                   "127.0.0.1:" + std::to_string(api_port);
               return api_config;
           }()) {
+        // Exact recovery validates the saved config before restoring transports.
+        // Keep both views on a valid baseline without pre-existing outbounds.
+        const std::string baseline =
+            R"({"dns":{"system_resolver":{"address":"127.0.0.1"}}})" "\n";
+        visible_config = parse_and_validate_config(baseline);
+        REQUIRE_FALSE(visible_config.outbounds.has_value());
         {
             std::ofstream config(
                 directory.path / "config.json",
                 std::ios::binary | std::ios::trunc);
-            config << "{}\n";
+            config << baseline;
         }
         if (with_manager) {
             manager = std::make_unique<FakeManager>(directory.path);
@@ -596,12 +602,34 @@ TEST_CASE("an oversized document is named rather than merely refused") {
           "too_large");
 }
 
-TEST_CASE("preview refuses to plan without the manager") {
+TEST_CASE("preview refuses to plan without the manager configuration") {
     // Without tags and fingerprints the plan cannot judge conflicts, and a
     // preview that silently skipped that judgement would read as "no
     // conflicts". The manager is consulted before the fetch.
     constexpr int api_port = 18283;
     SubscriptionsHarness harness(api_port, false);
+    httplib::Client client("127.0.0.1", api_port);
+
+    const auto response = client.Post(
+        "/api/subscriptions/preview",
+        nlohmann::json{{"url", "https://provider.example/sub"}}.dump(),
+        "application/json");
+    REQUIRE(response != nullptr);
+    CHECK(response->status == 503);
+    const auto body = nlohmann::json::parse(response->body);
+    CHECK(body.at("error") ==
+          "transport manager config not found: " +
+              (harness.directory.path / "transports.json").string());
+    CHECK(harness.fetch_calls == 0U);
+}
+
+TEST_CASE("preview refuses to plan when the configured manager is unavailable") {
+    constexpr int api_port = 18298;
+    SubscriptionsHarness harness(api_port);
+    // Retain valid endpoint authority but close its listener: this exercises
+    // the HTTP-unavailable branch, not the absent-configuration branch.
+    harness.manager.reset();
+    REQUIRE(std::filesystem::exists(harness.directory.path / "transports.json"));
     httplib::Client client("127.0.0.1", api_port);
 
     const auto response = client.Post(

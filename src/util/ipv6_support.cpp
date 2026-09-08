@@ -9,6 +9,25 @@
 
 namespace keen_pbr3 {
 
+#ifdef KEEN_PBR3_TESTING
+namespace {
+thread_local std::optional<bool> ipv6_support_override_for_tests;
+}
+
+namespace testing {
+
+ScopedIpv6SupportOverride::ScopedIpv6SupportOverride(bool supported) noexcept
+    : previous_(ipv6_support_override_for_tests) {
+    ipv6_support_override_for_tests = supported;
+}
+
+ScopedIpv6SupportOverride::~ScopedIpv6SupportOverride() noexcept {
+    ipv6_support_override_for_tests = previous_;
+}
+
+} // namespace testing
+#endif
+
 bool system_ipv6_supported() {
     const int fd = socket(AF_INET6, SOCK_DGRAM, 0);
     if (fd < 0) {
@@ -67,6 +86,14 @@ Ipv6SupportDecision resolve_ipv6_support(const Config& config) {
         && !*config.daemon->ipv6_enabled) {
         return {false, Ipv6SupportDecision::Reason::DisabledByConfig};
     }
+
+#ifdef KEEN_PBR3_TESTING
+    if (ipv6_support_override_for_tests.has_value()) {
+        return *ipv6_support_override_for_tests
+            ? Ipv6SupportDecision{true, Ipv6SupportDecision::Reason::Enabled}
+            : Ipv6SupportDecision{false, Ipv6SupportDecision::Reason::UnsupportedBySystem};
+    }
+#endif
 
     if (!system_ipv6_supported() || !firewall_ipv6_supported(config)) {
         return {false, Ipv6SupportDecision::Reason::UnsupportedBySystem};

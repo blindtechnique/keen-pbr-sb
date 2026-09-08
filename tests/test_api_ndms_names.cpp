@@ -303,6 +303,7 @@ TEST_CASE("NDMS catalog invalidation rejects an older in-flight response") {
     std::condition_variable fetch_condition;
     bool first_fetch_started = false;
     bool release_first_fetch = false;
+    bool release_replacement_fetch = false;
 
     NdmsCatalogCache cache(
         [&] {
@@ -319,6 +320,14 @@ TEST_CASE("NDMS catalog invalidation rejects an older in-flight response") {
                     });
                 return ndms_payload("Pre-event catalog");
             }
+            // Keep the replacement from publishing its typed catalog before
+            // the rejected caller observes the intentionally empty LKG phase.
+            std::unique_lock<std::mutex> lock(fetch_mutex);
+            fetch_condition.wait(
+                lock,
+                [&] {
+                    return release_replacement_fetch;
+                });
             return ndms_payload("Post-event catalog");
         });
 
@@ -350,6 +359,7 @@ TEST_CASE("NDMS catalog invalidation rejects an older in-flight response") {
     // The post-invalidation forced caller must join the old single-flight
     // request first, rather than racing a duplicate fetch alongside it.
     CHECK(replacement.wait_for(20ms) == std::future_status::timeout);
+    CHECK(fetch_count.load(std::memory_order_relaxed) == 1);
     {
         std::lock_guard<std::mutex> lock(fetch_mutex);
         release_first_fetch = true;
@@ -364,6 +374,11 @@ TEST_CASE("NDMS catalog invalidation rejects an older in-flight response") {
     CHECK(rejected.observation_generation == 0U);
     CHECK(rejected.observation_epoch == 0U);
     CHECK(rejected.invalidation_epoch == 1U);
+    {
+        std::lock_guard<std::mutex> lock(fetch_mutex);
+        release_replacement_fetch = true;
+    }
+    fetch_condition.notify_all();
     const auto replacement_result = replacement.get();
     CHECK(replacement_result.status == NdmsCatalogCacheStatus::fresh);
     CHECK(replacement_result.refreshed);
@@ -618,11 +633,14 @@ TEST_CASE("NDMS handler cache returns safe unavailable data without a snapshot")
 }
 
 TEST_CASE("NDMS handler cache coalesces concurrent refreshes") {
+    const auto now = NdmsCatalogCache::Clock::time_point{};
     std::atomic<int> fetch_count{0};
     std::mutex fetch_mutex;
     std::condition_variable fetch_condition;
     bool fetch_started = false;
     bool release_fetch = false;
+    bool second_entered = false;
+    int clock_reads = 0;
 
     NdmsCatalogCache cache(
         [&] {
@@ -637,8 +655,19 @@ TEST_CASE("NDMS handler cache coalesces concurrent refreshes") {
                 });
             return ndms_payload();
         },
-        NdmsCatalogCache::Clock::duration::zero(),
-        5s);
+        30s,
+        5s,
+        [&] {
+            std::lock_guard<std::mutex> lock(fetch_mutex);
+            if (++clock_reads == 2) {
+                // The first fetch is still held. This is the second get's
+                // entry under the resource mutex, so publication cannot pass
+                // it before it joins the in-flight refresh wait.
+                second_entered = true;
+                fetch_condition.notify_all();
+            }
+            return now;
+        });
 
     auto first = std::async(
         std::launch::async,
@@ -654,20 +683,18 @@ TEST_CASE("NDMS handler cache coalesces concurrent refreshes") {
             });
     }
 
-    std::atomic<bool> second_started{false};
     auto second = std::async(
         std::launch::async,
         [&] {
-            second_started.store(true, std::memory_order_release);
             return cache.get();
         });
-    while (!second_started.load(std::memory_order_acquire)) {
-        std::this_thread::yield();
-    }
-    std::this_thread::sleep_for(20ms);
-
     {
-        std::lock_guard<std::mutex> lock(fetch_mutex);
+        std::unique_lock<std::mutex> lock(fetch_mutex);
+        fetch_condition.wait(
+            lock,
+            [&] {
+                return second_entered;
+            });
         release_fetch = true;
     }
     fetch_condition.notify_all();

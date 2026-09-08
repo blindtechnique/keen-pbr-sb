@@ -6,6 +6,7 @@
 #include "../src/lists/list_entry_visitor.hpp"
 #include "../src/routing/firewall_state.hpp"
 #include "../src/runtime/meta_udp_443_policy.hpp"
+#include "../src/util/ipv6_support.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -548,10 +549,10 @@ TEST_CASE("Runtime firewall consumes one pinned remote-list generation") {
         snapshot));
 
     CHECK(firewall.loaded_entries ==
-          std::vector<std::string>{"192.0.2.1/32"});
+          std::vector<std::string>{"192.0.2.1"});
     REQUIRE(applied.static_destinations.count("remote") == 1U);
     CHECK(applied.static_destinations.at("remote") ==
-          std::vector<std::string>{"192.0.2.1/32"});
+          std::vector<std::string>{"192.0.2.1"});
 }
 
 TEST_CASE("Runtime firewall uses the prepared Keenetic DNS snapshot") {
@@ -1692,6 +1693,24 @@ TEST_CASE("runtime source and port selectors still work without a named list") {
     }
 }
 
+#ifdef KEEN_PBR3_TESTING
+TEST_CASE("IPv6 support overrides restore nested capability decisions") {
+    Config config;
+    const testing::ScopedIpv6SupportOverride unsupported(false);
+    CHECK_FALSE(resolve_ipv6_support(config).enabled);
+    CHECK(resolve_ipv6_support(config).reason ==
+          Ipv6SupportDecision::Reason::UnsupportedBySystem);
+    {
+        const testing::ScopedIpv6SupportOverride supported(true);
+        CHECK(resolve_ipv6_support(config).enabled);
+        CHECK(resolve_ipv6_support(config).reason ==
+              Ipv6SupportDecision::Reason::Enabled);
+    }
+    CHECK_FALSE(resolve_ipv6_support(config).enabled);
+    CHECK(resolve_ipv6_support(config).reason ==
+          Ipv6SupportDecision::Reason::UnsupportedBySystem);
+}
+
 TEST_CASE("C1 runtime list selector and DNS marks share the family egress snapshot") {
     auto config = parse_config(R"({
       "daemon":{"ipv6_enabled":true},
@@ -1712,13 +1731,27 @@ TEST_CASE("C1 runtime list selector and DNS marks share the family egress snapsh
     const std::map<std::string, std::string> selected{{"group","inner"},{"inner","a"}};
     const OutboundFamilyReachabilitySnapshot families{{"a",{true,false}},{"b",{false,true}}};
     bool ipv6 = true;
+    bool ipv6_supported = true;
+    auto expected_reason = Ipv6SupportDecision::Reason::Enabled;
     SUBCASE("dual stack") {}
-    SUBCASE("IPv6 disabled") { ipv6 = false; config.daemon->ipv6_enabled = false; }
+    SUBCASE("IPv6 disabled") {
+        ipv6 = false;
+        config.daemon->ipv6_enabled = false;
+        expected_reason = Ipv6SupportDecision::Reason::DisabledByConfig;
+    }
+    SUBCASE("IPv6 unsupported by system") {
+        ipv6 = false;
+        ipv6_supported = false;
+        expected_reason = Ipv6SupportDecision::Reason::UnsupportedBySystem;
+    }
+    const testing::ScopedIpv6SupportOverride ipv6_support(ipv6_supported);
+    CHECK(resolve_ipv6_support(config).reason == expected_reason);
     CacheManager cache{"/nonexistent/keen-pbr-test-cache"};
     RecordingFirewall firewall;
     const auto staged = stage_runtime_firewall(config, marks, selected, cache, firewall,
         FirewallApplyMode::PreserveSets, nullptr, nullptr, nullptr, true, std::nullopt,
         nullptr, false, {}, nullptr, &families);
+    CHECK(firewall.ipv6_enabled() == ipv6);
     REQUIRE(staged.rule_states.size() == 2U);
     CHECK(staged.rule_states[0].fwmark == marks.at("a"));
     CHECK(staged.rule_states[0].mark_for_family(AF_INET6) == marks.at("b"));
@@ -1734,6 +1767,7 @@ TEST_CASE("C1 runtime list selector and DNS marks share the family egress snapsh
         CHECK(item.first == marks.at(item.second.family == AF_INET6 ? "b" : "a"));
     }
 }
+#endif
 
 TEST_CASE("C1 IPv4 WhatsApp overlay retains the IPv4 leaf when IPv6 has a different leaf") {
     const auto config = parse_config(R"({
