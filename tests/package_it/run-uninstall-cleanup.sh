@@ -100,7 +100,14 @@ EOF
     printf 'keep nfqws boot dependency\n' > "$ROOT/opt/var/lib/keen-pbr/nfqws-rotator-telemetry-v1.lua"
     printf 'keep nfqws learned data\n' > "$ROOT/opt/var/lib/keen-pbr/nfqws-rotator-learned-v1.0"
     printf 'keep unrelated file\n' > "$ROOT/opt/var/lib/keen-pbr/foreign-data"
+    # Only the generated entry point pretends to be root. Do not put id in
+    # PATH: child lock helpers must observe the real owner of these temp files.
     awk -v root="$ROOT" '
+        NR == 1 {
+            print
+            print "id() { if [ \"$#\" -eq 1 ] && [ \"$1\" = -u ]; then printf %s \"${TEST_UNINSTALL_UID:-0}\"; else command id \"$@\"; fi; }"
+            next
+        }
         /^ask\(\) \{/ {
             print "ask() { case \"$1\" in \"Удалить также\"*) printf %s \"$REMOVE_DATA\" ;; *) printf N ;; esac; }"
             skip=1; next
@@ -129,6 +136,16 @@ assert_standalone_dns() {
     ! grep -q '^conf-script=.*keen-pbr' "$ROOT/opt/etc/dnsmasq.conf"
     [ "$(stat -c %a "$ROOT/opt/etc/dnsmasq.conf")" = 640 ]
 }
+
+setup_case unprivileged_guard
+if TEST_UNINSTALL_UID=1000 REMOVE_DATA=Y "$SHELL_RUNNER" "$ROOT/uninstall" > "$ROOT/output" 2>&1; then exit 1; fi
+grep -q 'Запустите деинсталлятор от пользователя root' "$ROOT/output"
+[ -f "$ROOT/installed" ]
+[ -f "$ROOT/opt/var/lib/keen-pbr/rescue/previous-config/auth.json" ]
+[ ! -e "$ROOT/actions" ]
+[ ! -e "$ROOT/opt/var/run/keen-pbr-update.lock" ]
+cmp "$ROOT/original-dns" "$ROOT/opt/etc/dnsmasq.conf"
+echo 'PASS unprivileged uninstall is refused before any fixture mutation'
 
 setup_case keep
 REMOVE_DATA=N "$SHELL_RUNNER" "$ROOT/uninstall" > "$ROOT/output"
