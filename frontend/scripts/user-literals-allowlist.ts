@@ -64,6 +64,10 @@ export const allowedLiterals: readonly string[] = [
   // контекстом, а исходный текст — только внутри закрытых «Подробностей».
   "Invalid log response",
   "Invalid log response: lines must be an array of strings",
+  // createBackgroundTaskRequest перехватывает эту внутреннюю причину и
+  // публикует только статус failed, без error.message. BackgroundTasksDetails
+  // показывает существующий перевод backgroundTasks.failed в обеих локалях.
+  "Invalid background task diagnostics response",
   // Тайм-аут сохраняется только в скачиваемом JSON диагностики. Его язык и
   // формат не должны менять машинно-читаемый снимок при смене языка панели.
   "Request timed out after ${…} ms",
