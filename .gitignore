@@ -40,3 +40,16 @@ oom-*
 
 # Generated at build time by the Keenetic package build.
 packages/keenetic/keen-pbr/version.mk
+
+# Private working notes and owner/agent instructions stay local.
+/AGENTS.md
+/CLAUDE.md
+/CODEX*.md
+/CLAUDE*.md
+/*HANDOFF*.md
+/ROADMAP*.local*.md
+/*.local.ru.md
+/ALPHA-ROUTER-TEST.ru.md
+/docs/PUBLISH_GITHUB.ru.md
+/docs/FORK_MAINTENANCE.ru.md
+/docs/RELEASE_12_BASELINE.ru.md
