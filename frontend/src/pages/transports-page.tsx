@@ -55,6 +55,10 @@ import {
   useGetTransports,
 } from "@/api/queries"
 import { selectConfig } from "@/api/selectors"
+import {
+  importTransportDefinitions,
+  refreshTransportTransferInventory,
+} from "@/api/transport-transfer"
 import { KeenPencilIcon } from "@/components/shared/keen-icons"
 import { EditDeleteActions } from "@/components/shared/edit-delete-actions"
 import { DataTable } from "@/components/shared/data-table"
@@ -811,32 +815,9 @@ export function TransportsPage({
           })
         )
 
-      for (const transport of imported) {
-        const exists = existingTags.has(transport.tag)
-        if (exists && !replaceConflicts) continue
-        const response = await postTransportConfig({
-          operation: exists
-            ? TransportConfigOperationOperation.update
-            : TransportConfigOperationOperation.create,
-          tag: exists ? transport.tag : undefined,
-          transport,
-        })
-        if (response.status !== 200) {
-          throw new Error(
-            "error" in response.data
-              ? response.data.error
-              : `HTTP ${response.status}`
-          )
-        }
-      }
+      await importTransportDefinitions(imported, existingTags, replaceConflicts)
     },
-    onSuccess: async () => {
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.transports() }),
-        queryClient.invalidateQueries({
-          queryKey: queryKeys.transportConfig(),
-        }),
-      ])
+    onSuccess: () => {
       toast.success(t("configTransfer.imported"))
     },
     onError: (transferError) =>
@@ -847,8 +828,14 @@ export function TransportsPage({
         />,
         { richColors: true }
       ),
-    onSettled: () => {
-      if (transportImportRef.current) transportImportRef.current.value = ""
+    onSettled: async () => {
+      // A later entry may fail after earlier writes committed. Refresh before
+      // enabling retry so those entries are updates, not duplicate creates.
+      try {
+        await refreshTransportTransferInventory(queryClient)
+      } finally {
+        if (transportImportRef.current) transportImportRef.current.value = ""
+      }
     },
   })
 

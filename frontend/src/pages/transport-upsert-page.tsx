@@ -4,7 +4,6 @@ import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 import { useLocation } from "wouter"
 
-import { postConfigSave } from "@/api/generated/keen-api"
 import {
   TransportConfigOperationOperation,
   TransportSpecType,
@@ -13,6 +12,7 @@ import {
 } from "@/api/generated/model"
 import {
   createLinkedTransportApplyRequest,
+  useApplyConfigMutation,
   usePostConfigMutation,
   usePostTransportConfigApplyMutation,
   usePostTransportConfigMutation,
@@ -70,7 +70,6 @@ export function TransportUpsertPage({
   const catalogNavigation = useCatalogNavigation()
   const queryClient = useQueryClient()
   const [dirty, setDirty] = useState(false)
-  const [linkedRouteApplyPending, setLinkedRouteApplyPending] = useState(false)
   const configQuery = useGetTransportConfig()
   const transportsQuery = useGetTransports()
   const keenConfigQuery = useGetConfig()
@@ -184,6 +183,7 @@ export function TransportUpsertPage({
   // Изменение kill-switch живёт в связанном маршруте, то есть в черновике
   // конфигурации, — отдельная мутация с отдельным сообщением об ошибке.
   const routeMutation = usePostConfigMutation()
+  const routeApplyMutation = useApplyConfigMutation()
   const close = () =>
     navigate("/transports", catalogNavigation.navigationOptions)
   const editsNativeTracker =
@@ -458,9 +458,10 @@ export function TransportUpsertPage({
         },
         {
           onSuccess: async () => {
-            setLinkedRouteApplyPending(true)
             try {
-              const applied = await postConfigSave()
+              // Keep apply in the existing mutation registry: UpsertPage also
+              // uses it to prevent closing while this linked save is running.
+              const applied = await routeApplyMutation.mutateAsync()
               if (applied.status !== 200) {
                 throw new Error(applied.data.error)
               }
@@ -469,8 +470,6 @@ export function TransportUpsertPage({
               toast.error(<OperationErrorMessage error={mutationError} />, {
                 richColors: true,
               })
-            } finally {
-              setLinkedRouteApplyPending(false)
             }
           },
           onError: (mutationError) => {
@@ -512,7 +511,7 @@ export function TransportUpsertPage({
           configMutation.isPending ||
           configApplyMutation.isPending ||
           routeMutation.isPending ||
-          linkedRouteApplyPending
+          routeApplyMutation.isPending
         }
         key={`${mode}:${transportTag ?? nativeCreateSeed?.interface ?? "new"}`}
         killSwitchAvailable={

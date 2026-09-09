@@ -973,6 +973,8 @@ export const enTranslation = {
     },
   },
   common: {
+    ruleEditTargetChanged:
+      "This rule changed, was deleted, or is no longer uniquely identifiable. Your draft is still here. Copy any changes you need, then reopen the rule from the list before saving or deleting it.",
     // Labels of shared interface primitives. They used to be hardcoded in
     // English inside components/ui/*, so a Russian user saw "Close" on the
     // dialog close button.

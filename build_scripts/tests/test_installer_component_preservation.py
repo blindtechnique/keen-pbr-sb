@@ -216,6 +216,65 @@ fetch() {{
         self.assertEqual(self.feed.read_bytes(), self.old_feed)
         self.assertFalse(self.work.exists())
 
+    def configure_nfqws(self, overrides=""):
+        return self.run_shell(("cleanup", "configure_nfqws2"),
+                              "trap cleanup EXIT\ntrap 'exit 129' HUP\nconfigure_nfqws2",
+                              'ask() { printf "y\\n"; }\n' + overrides)
+
+    def test_configure_feed_restored_when_update_or_dependencies_fail(self):
+        self.prepare_feed()
+        for phase in ("update", "install"):
+            with self.subTest(phase=phase):
+                self.work.mkdir(exist_ok=True)
+                self.executable(self.opt / "bin/opkg", f'''case "$1" in
+status) echo 'Status: install ok installed'; exit 0;;
+update|install) [ ! -e '{self.feed}' ] || exit 99;;
+esac
+[ "$1" != "{phase}" ] || exit 1
+exit 0''')
+                result = self.configure_nfqws()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.feed.read_bytes(), self.old_feed)
+                self.assertEqual(self.feed.stat().st_mode & 0o777, 0o640)
+                self.assertFalse(self.work.exists())
+
+    def test_configure_feed_symlink_restored_after_dependency_failure(self):
+        target = self.root / "user-feed.conf"
+        target.write_bytes(self.old_feed)
+        self.feed.symlink_to(target)
+        self.executable(self.opt / "bin/opkg", '[ "$1" != install ] || exit 1\nexit 0')
+        result = self.configure_nfqws()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(self.feed.is_symlink())
+        self.assertEqual(self.feed.resolve(), target)
+        self.assertEqual(target.read_bytes(), self.old_feed)
+        self.assertFalse(self.work.exists())
+
+    def test_configure_hangup_after_feed_move_restores_original(self):
+        self.prepare_feed()
+        self.executable(self.opt / "bin/opkg", "exit 0")
+        fault = self.root / "configure-move-interrupted"
+        move_then_hangup = f'''mv() {{
+    command mv "$@" || return 1
+    if [ ! -f '{fault}' ]; then
+        touch '{fault}'
+        kill -HUP $$
+    fi
+}}'''
+        result = self.configure_nfqws(move_then_hangup)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.feed.read_bytes(), self.old_feed)
+        self.assertFalse(self.work.exists())
+
+    def test_configure_success_keeps_new_canonical_feed(self):
+        self.prepare_feed()
+        self.executable(self.opt / "bin/opkg", "echo 'Status: install ok installed'\nexit 0")
+        result = self.configure_nfqws()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.feed.read_bytes(),
+                         b"src/gz nfqws2-keenetic https://nfqws.github.io/nfqws2-keenetic/all\n")
+        self.assertFalse(self.work.exists())
+
     def test_hangup_after_feed_move_restores_original(self):
         self.prepare_feed()
         self.executable(self.opt / "bin/opkg", "exit 0")

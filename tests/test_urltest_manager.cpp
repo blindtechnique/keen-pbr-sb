@@ -11,6 +11,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -570,6 +571,61 @@ TEST_CASE("initial urltest probe commits through the controller callback") {
     CHECK(changes.back().new_child_tag == "backup");
     CHECK(changes.back().reason ==
           UrltestSelectionChangeReason::healthy_rebalance);
+}
+
+TEST_CASE("urltest maximum tolerance preserves healthy selection") {
+    std::string initial_selection;
+    std::string expected_selection = "primary";
+    SUBCASE("initial probe selects a healthy child") {
+    }
+    SUBCASE("current healthy child is retained even when slower") {
+        initial_selection = "backup";
+        expected_selection = "backup";
+    }
+
+    auto transport = std::make_shared<UrltestTransport>();
+    URLTester tester(transport);
+    const auto marks = make_marks();
+    FakeRepeatingScheduler scheduler;
+    BlockingExecutor executor(1, 8);
+    CommitQueue commits;
+    std::vector<UrltestSelectionChange> changes;
+
+    UrltestManager manager(
+        tester,
+        marks,
+        scheduler,
+        executor,
+        [&changes](const UrltestSelectionChange& change) {
+            changes.push_back(change);
+            return true;
+        },
+        [&commits](const std::string& tag,
+                   std::uint64_t generation,
+                   std::map<std::string, URLTestResult> results,
+                   TraceId) {
+            commits.push(tag, generation, std::move(results));
+            return true;
+        });
+
+    auto outbound = make_urltest_outbound();
+    outbound.tolerance_ms = std::numeric_limits<std::uint32_t>::max();
+    manager.register_urltest(outbound, initial_selection);
+    auto initial = commits.pop();
+    executor.shutdown();
+
+    REQUIRE(initial.results.at("primary").success);
+    REQUIRE(initial.results.at("backup").success);
+    CHECK(initial.results.at("primary").latency_ms == 8U);
+    CHECK(initial.results.at("backup").latency_ms == 80U);
+    CHECK(manager.commit_probe_results(initial.tag,
+                                       initial.generation,
+                                       std::move(initial.results)) ==
+          initial_selection.empty());
+    CHECK(manager.get_selected("automatic") == expected_selection);
+    CHECK(changes.size() == (initial_selection.empty() ? 1U : 0U));
+    REQUIRE(manager.get_state("automatic").has_value());
+    CHECK_FALSE(manager.get_state("automatic")->probe_inflight);
 }
 
 TEST_CASE("urltest binds direct interface children and keeps nested selectors mark-only") {

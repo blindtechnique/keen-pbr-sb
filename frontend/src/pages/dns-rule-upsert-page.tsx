@@ -52,7 +52,7 @@ import { isSemanticallyDirty } from "@/lib/semantic-dirty"
 import { semanticJsonEqual } from "@/lib/semantic-json"
 import { getTagNameValidationError } from "@/lib/tag-name-validation"
 import { makeTechnicalId } from "@/lib/technical-id"
-import { resolveRuleRouteIndex } from "@/lib/rule-route"
+import { useRuleEditTarget } from "@/hooks/use-rule-edit-target"
 import {
   Select,
   SelectContent,
@@ -99,10 +99,18 @@ export function DnsRuleUpsertPage({
 
   const loadedConfig = selectConfig(configQuery.data)
   const rules = loadedConfig?.dns?.rules ?? []
-  const parsedRuleIndex =
-    mode === "edit" ? resolveRuleRouteIndex(rules, ruleId) : -1
-  const existingRule =
-    mode === "edit" && parsedRuleIndex >= 0 ? rules[parsedRuleIndex] : undefined
+  const editTarget = useRuleEditTarget(
+    rules,
+    mode === "edit" ? ruleId : undefined,
+    Boolean(loadedConfig),
+    (left, right) =>
+      semanticJsonEqual(
+        normalizeDnsRuleDraft(getRuleDraft(left)),
+        normalizeDnsRuleDraft(getRuleDraft(right))
+      )
+  )
+  const parsedRuleIndex = editTarget.index
+  const existingRule = mode === "edit" ? editTarget.rule : undefined
 
   if (mode === "edit" && loadedConfig && !existingRule) {
     return (
@@ -158,7 +166,10 @@ export function DnsRuleUpsertPage({
         mode === "create"
           ? t("pages.dnsRuleUpsert.createTitle")
           : t("pages.dnsRuleUpsert.editCardTitle", {
-              name: getDnsRuleDisplayName(existingRule, parsedRuleIndex),
+              name: getDnsRuleDisplayName(
+                existingRule,
+                editTarget.displayIndex
+              ),
             })
       }
       description={t("pages.dnsRuleUpsert.description")}
@@ -227,6 +238,7 @@ function DnsRuleForm({
     }
   )
   const postConfigMutation = usePostConfigMutation()
+  const targetUnavailable = mode === "edit" && parsedRuleIndex < 0
 
   // Удаление правила из самой формы — как в конфигураторе, где в строке стоит
   // только карандаш. На DNS-правило никто не ссылается, поэтому список
@@ -289,6 +301,9 @@ function DnsRuleForm({
     validators: {
       onSubmitAsync: async ({ value }) => {
         clearFormServerErrors(form)
+        if (targetUnavailable) {
+          return { form: t("common.ruleEditTargetChanged"), fields: {} }
+        }
         const displayNameError = validateDisplayName(value.rule.displayName, t)
         if (displayNameError) {
           setFormServerErrors(form, {
@@ -683,13 +698,19 @@ function DnsRuleForm({
         ) : null}
       </FieldGroup>
 
-      <ServerValidationAlert errors={unmappedServerErrors} />
+      <ServerValidationAlert
+        errors={unmappedServerErrors}
+        message={
+          targetUnavailable ? t("common.ruleEditTargetChanged") : undefined
+        }
+      />
 
       <div className="flex justify-end gap-3" data-upsert-actions>
         {mode === "edit" ? (
           <UpsertDeleteAction
             confirmLabel={t("pages.dnsRuleUpsert.delete.confirm")}
             description={t("pages.dnsRuleUpsert.delete.description")}
+            disabled={targetUnavailable}
             impactItems={[]}
             isPending={postConfigMutation.isPending}
             label={t("common.delete")}
@@ -703,7 +724,12 @@ function DnsRuleForm({
         <form.Subscribe selector={(state) => state.canSubmit}>
           {(canSubmit) => (
             <Button
-              disabled={postConfigMutation.isPending || !isDirty || !canSubmit}
+              disabled={
+                targetUnavailable ||
+                postConfigMutation.isPending ||
+                !isDirty ||
+                !canSubmit
+              }
               size="xl"
               type="submit"
             >

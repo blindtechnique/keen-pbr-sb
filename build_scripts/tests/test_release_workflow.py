@@ -23,6 +23,7 @@ SOURCE = "needs.resolve-source.outputs."
 TRUSTED_PUBLISHER = "github.repository == 'blindtechnique/keen-pbr-sb' && github.event_name != 'pull_request' && "
 SIGNING_JOBS = {
     "publish-release": "Sign release manifest and installer",
+    "publish-beta": "Sign beta manifest and installer",
     "upload-alpha-artifact": "Sign alpha manifest and installer",
     "upload-next-artifact": "Sign next manifest and installer",
 }
@@ -93,7 +94,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
         required_jobs = {
             "frontend", "backend", "crash-diagnostics-smoke", "clang-thread-safety",
             "firewall-integration", "transport-manager", "build", "publish-release",
-            "upload-alpha-artifact", "upload-next-artifact",
+            "upload-alpha-artifact", "upload-next-artifact", "publish-beta",
         }
         self.assertTrue(required_jobs <= self.jobs.keys())
         for name, job in self.jobs.items():
@@ -130,6 +131,8 @@ class ReleaseWorkflowTest(unittest.TestCase):
             with self.subTest(channel=channel):
                 condition, _ = field(self.jobs[f"upload-{channel}-artifact"], "if", 4)
                 self.assertEqual(expression(condition), TRUSTED_PUBLISHER + SOURCE + f"channel == '{channel}'")
+        condition, _ = field(self.jobs["publish-beta"], "if", 4)
+        self.assertEqual(expression(condition), TRUSTED_PUBLISHER + SOURCE + "channel == 'beta'")
         # Manual release-tag rebuilds run on their selected source, not on the
         # dispatch UI's alpha/next branch. Resolver tests cover channel=none and
         # the full architecture matrix for those releases.
@@ -227,18 +230,46 @@ class ReleaseWorkflowTest(unittest.TestCase):
                 self.assertIn('--public-key .release-signing-tools/packages/keys/keenetic-release-public.pem', code)
                 self.assertLess(code.index('embed-release-verifier.py'), code.index('sign-keenetic-release.py'))
                 self.assertIn('--key "$signing_key"', code)
-                channel = {'publish-release': 'stable', 'upload-alpha-artifact': 'alpha', 'upload-next-artifact': 'next'}[name]
+                channel = {'publish-release': 'stable', 'publish-beta': 'beta', 'upload-alpha-artifact': 'alpha', 'upload-next-artifact': 'next'}[name]
                 self.assertIn('--channel ' + channel, code)
                 if channel == 'stable':
                     self.assertIn('--release "$RELEASE_TAG"', code)
                 else:
                     self.assertIn(f'--release "{channel}-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"', code)
                 for step_name, step in job_steps.items():
-                    if 'gh release delete-asset' in step or 'uses: softprops/action-gh-release@' in step or 'uses: actions/upload-artifact@' in step:
+                    if 'gh release delete-asset' in step or 'gh release create' in step or 'uses: softprops/action-gh-release@' in step or 'uses: actions/upload-artifact@' in step:
                         self.assertLess(names.index(sign_name), names.index(step_name))
                         if 'gh release delete-asset' not in step:
                             for artifact in ('install.sh', 'release-manifest.tsv', 'release-manifest.sig', 'SHA256SUMS'):
                                 self.assertIn('release-assets/' + artifact, step)
+
+    def test_beta_requires_all_profiles_and_gates_without_promoting_stable(self) -> None:
+        job = self.jobs['publish-beta']
+        inline, following = field(job, 'needs', 4)
+        for gate in ('build', 'backend', 'crash-diagnostics-smoke', 'clang-thread-safety', 'firewall-integration'):
+            self.assertIn(gate, inline + following)
+        # The build already depends on both the frontend and Go gates.
+        inline, following = field(self.jobs['build'], 'needs', 4)
+        for gate in ('frontend', 'transport-manager'):
+            self.assertIn(gate, inline + following)
+        job_steps = steps(job)
+        verify = shell(job_steps['Verify all beta IPKs and create checksums'])
+        for config in ('aarch64-3.10', 'mips-3.4', 'mipsel-3.4'):
+            self.assertIn(config, verify)
+        self.assertIn('-eq 3', verify)
+        self.assertIn('--expected-commit "$EXPECTED_COMMIT"', verify)
+        self.assertIn('--arch "${config%%-*}"', verify)
+        names = list(job_steps)
+        self.assertLess(names.index('Verify all beta IPKs and create checksums'), names.index(SIGNING_JOBS['publish-beta']))
+        publish = shell(job_steps['Publish Beta prerelease'])
+        self.assertIn('gh release create "$tag"', publish)
+        self.assertIn('--target "$SOURCE_SHA"', publish)
+        self.assertIn('--prerelease --latest=false', publish)
+        self.assertIn('tag="beta-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"', publish)
+        self.assertNotIn('delete-asset', job)
+        self.assertNotIn('continue-on-error', job)
+        trigger_text = self.text.split('\njobs:', 1)[0]
+        self.assertEqual(trigger_text.count('      - beta\n'), 2)
 
     @unittest.skipUnless(shutil.which('bash'), 'workflow shell validation requires bash')
     def test_signing_steps_have_valid_runner_shell_syntax(self) -> None:

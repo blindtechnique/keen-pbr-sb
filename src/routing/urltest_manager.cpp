@@ -1451,6 +1451,8 @@ std::string UrltestManager::select_outbound_from_state(
         }
 
         const uint32_t tolerance = static_cast<uint32_t>(ut.tolerance_ms.value_or(100));
+        const std::uint64_t tolerated_latency =
+            static_cast<std::uint64_t>(min_latency) + tolerance;
 
         if (!state.selected_outbound.empty()) {
             const auto existing_it = std::find(group.outbounds.begin(),
@@ -1459,7 +1461,7 @@ std::string UrltestManager::select_outbound_from_state(
             if (existing_it != group.outbounds.end()) {
                 const auto* result = healthy_result(state.selected_outbound);
                 if (result != nullptr &&
-                    result->latency_ms <= min_latency + tolerance) {
+                    result->latency_ms <= tolerated_latency) {
                     return state.selected_outbound;
                 }
             }
@@ -1470,7 +1472,7 @@ std::string UrltestManager::select_outbound_from_state(
             if (result == nullptr) {
                 continue;
             }
-            if (result->latency_ms <= min_latency + tolerance) {
+            if (result->latency_ms <= tolerated_latency) {
                 return child_tag;
             }
         }

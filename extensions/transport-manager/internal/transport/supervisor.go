@@ -63,6 +63,12 @@ func newSupervisor(manager *Manager, interval, baseBackoff, maxBackoff time.Dura
 }
 
 func (s *Supervisor) Register(spec TransportSpec) {
+	s.RegisterWithDesired(spec, spec.AutoStart)
+}
+
+// RegisterWithDesired restores the runtime intent of a replaced isolated
+// transport without changing its persistent auto_start preference.
+func (s *Supervisor) RegisterWithDesired(spec TransportSpec, desired bool) {
 	if spec.Type == "native" {
 		s.Forget(spec.Tag)
 		return
@@ -97,7 +103,7 @@ func (s *Supervisor) Register(spec TransportSpec) {
 	if s.states[spec.Tag] != state {
 		return
 	}
-	state.desired = spec.AutoStart
+	state.desired = desired
 	state.attempts = 0
 	state.next = time.Time{}
 	state.observedUp = false
@@ -105,7 +111,9 @@ func (s *Supervisor) Register(spec TransportSpec) {
 	state.nextRuleCheck = time.Time{}
 }
 
-func (s *Supervisor) Forget(tag string) {
+// Forget returns the removed isolated transport's desired state while holding
+// its existing operation lock. A shared/native registration has no such state.
+func (s *Supervisor) Forget(tag string) (desired, existed bool) {
 	s.mu.Lock()
 	if key, grouped := s.tagGroups[tag]; grouped {
 		delete(s.tagGroups, tag)
@@ -120,20 +128,22 @@ func (s *Supervisor) Forget(tag string) {
 			delete(s.groupStates, key)
 		}
 		s.mu.Unlock()
-		return
+		return false, false
 	}
 	state := s.states[tag]
 	s.mu.Unlock()
 	if state == nil {
-		return
+		return false, false
 	}
 	state.opMu.Lock()
 	defer state.opMu.Unlock()
 	s.mu.Lock()
-	if s.states[tag] == state {
-		delete(s.states, tag)
+	defer s.mu.Unlock()
+	if s.states[tag] != state {
+		return false, false
 	}
-	s.mu.Unlock()
+	delete(s.states, tag)
+	return state.desired, true
 }
 
 func (s *Supervisor) Run(ctx context.Context) {

@@ -909,6 +909,23 @@ BoundedOpkgInstallResult run_bounded_nfqws_opkg_install(
     std::error_code conf_error;
     const auto conf_status = fs::symlink_status(feed_conf, conf_error);
     bool conf_present = !conf_error && fs::exists(conf_status);
+    // Hiding the canonical feed is temporary: a failed HTTPS bootstrap must
+    // leave the original bytes and permissions available for the next retry.
+    std::optional<std::string> removed_feed;
+    const auto restore_removed_feed = [&] {
+        if (!removed_feed) return;
+        try {
+            AtomicFileWriteOptions restore_options;
+            restore_options.file_mode =
+                static_cast<mode_t>(conf_status.permissions()) & 07777;
+            write_file_atomically(feed_conf.string(), *removed_feed,
+                                  restore_options);
+            removed_feed.reset();
+        } catch (const std::exception& error) {
+            note(std::string("The original nfqws2 feed definition could not "
+                             "be restored: ") + error.what());
+        }
+    };
     if (conf_present && !fs::is_regular_file(conf_status)) {
         // A symlink or anything else non-regular is somebody's deliberate
         // arrangement: it stays active for opkg and is not this action's
@@ -937,6 +954,7 @@ BoundedOpkgInstallResult run_bounded_nfqws_opkg_install(
                 return combined;
             }
             conf_present = false;
+            removed_feed = std::move(body);
         } else {
             note("An nfqws2 feed definition with custom content is already "
                  "present and is left as it is.");
@@ -948,6 +966,7 @@ BoundedOpkgInstallResult run_bounded_nfqws_opkg_install(
     if (command_failed()) {
         note("The Entware package lists could not be refreshed; nothing "
              "was installed.");
+        restore_removed_feed();
         return combined;
     }
     (void)run_annotated({options.opkg, "install", "ca-certificates",
@@ -956,6 +975,7 @@ BoundedOpkgInstallResult run_bounded_nfqws_opkg_install(
     if (command_failed()) {
         note("The HTTPS prerequisites (ca-certificates, wget-ssl) could not "
              "be installed; nothing else was touched.");
+        restore_removed_feed();
         return combined;
     }
     // Best effort, exactly like the shell installer: a router without
@@ -968,6 +988,7 @@ BoundedOpkgInstallResult run_bounded_nfqws_opkg_install(
         note("The wget-nossl removal did not finish cleanly; stopping "
              "before the package manager is asked to do more.");
         if (combined.status == 0) combined.status = -1;
+        restore_removed_feed();
         return combined;
     }
     combined.status = 0;
@@ -981,11 +1002,13 @@ BoundedOpkgInstallResult run_bounded_nfqws_opkg_install(
             write_file_atomically(feed_conf.string(), kNfqwsFeedConfContent,
                                   write_options);
             combined.feed_conf_written = true;
+            removed_feed.reset();
         } catch (const std::exception& error) {
             combined.status = -1;
             note(std::string("The nfqws2 feed definition could not be "
                              "written: ") +
                  error.what());
+            restore_removed_feed();
             return combined;
         }
     }

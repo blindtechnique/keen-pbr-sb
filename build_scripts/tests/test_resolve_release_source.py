@@ -44,9 +44,12 @@ class ResolveReleaseSourceTest(unittest.TestCase):
         git(cls.repo, "tag", "-a", "v-annotated", "-m", "annotated release")
         cls.annotated_object = git(cls.repo, "rev-parse", "refs/tags/v-annotated")
         git(cls.repo, "tag", "releases/v-nested")
+        for channel in ("alpha", "beta", "next"):
+            git(cls.repo, "tag", f"{channel}-123-1")
         git(cls.repo, "commit", "--allow-empty", "-qm", "newer branch source")
         cls.head_sha = git(cls.repo, "rev-parse", "HEAD")
         git(cls.repo, "branch", "alpha")
+        git(cls.repo, "branch", "beta")
         git(cls.repo, "branch", "next")
         git(cls.repo, "branch", "branch-only")
         git(cls.repo, "branch", "v-light")
@@ -97,7 +100,7 @@ class ResolveReleaseSourceTest(unittest.TestCase):
         )
 
     def test_manual_release_uses_exact_remote_tag_from_each_branch(self) -> None:
-        for ref in ("refs/heads/main", "refs/heads/alpha", "refs/heads/next"):
+        for ref in ("refs/heads/main", "refs/heads/alpha", "refs/heads/beta", "refs/heads/next"):
             for tag in ("v-light", "v-annotated", "releases/v-nested"):
                 with self.subTest(ref=ref, tag=tag):
                     output = self.successful(self.resolve("workflow_dispatch", ref, tag=tag))
@@ -107,6 +110,30 @@ class ResolveReleaseSourceTest(unittest.TestCase):
                     self.assertEqual(output["channel"], "none")
                     self.assert_architectures(output, ["aarch64", "mips", "mipsel"])
                     self.assertEqual(git(self.repo, "rev-parse", "HEAD"), self.head_sha)
+
+    def test_manual_prerelease_tag_cannot_enter_stable_publisher(self) -> None:
+        for channel in ("alpha", "beta", "next"):
+            for branch in ("main", "alpha", "beta", "next"):
+                with self.subTest(channel=channel, branch=branch):
+                    output_path = self.root / "prerelease-output"
+                    output_path.write_text("previous=value\n", encoding="utf-8")
+                    result = self.resolve(
+                        "workflow_dispatch", f"refs/heads/{branch}",
+                        tag=f"{channel}-123-1", github_output=output_path,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(result.stdout, "")
+                    self.assertIn(f"rerun the original {channel} workflow", result.stderr)
+                    self.assertEqual(output_path.read_text(encoding="utf-8"), "previous=value\n")
+
+    def test_prerelease_tag_ref_cannot_enter_stable_publisher(self) -> None:
+        for channel in ("alpha", "beta", "next"):
+            for event in ("push", "workflow_dispatch"):
+                with self.subTest(channel=channel, event=event):
+                    result = self.resolve(event, f"refs/tags/{channel}-123-1")
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(result.stdout, "")
+                    self.assertIn(f"rerun the original {channel} workflow", result.stderr)
 
     def test_missing_remote_tag_never_falls_back_to_branch_sha_or_local_tag(self) -> None:
         for tag in ("branch-only", "local-only", "not-present", self.head_sha):
@@ -142,16 +169,16 @@ class ResolveReleaseSourceTest(unittest.TestCase):
         self.assertEqual(output["source_sha"], self.release_sha)
         self.assertEqual(output["release_tag"], "v-annotated")
 
-    def test_alpha_next_and_main_defaults_keep_event_sha(self) -> None:
+    def test_all_branch_defaults_keep_event_sha(self) -> None:
         for event in ("push", "workflow_dispatch"):
-            for branch in ("alpha", "next", "main"):
+            for branch in ("alpha", "beta", "next", "main"):
                 with self.subTest(event=event, branch=branch):
                     output = self.successful(self.resolve(event, f"refs/heads/{branch}", sha=self.release_sha))
                     self.assertEqual(output["source_sha"], self.release_sha)
                     self.assertEqual(output["release"], "false")
                     self.assertEqual(output["release_tag"], "")
                     self.assertEqual(output["channel"], "none" if branch == "main" else branch)
-                    self.assert_architectures(output, ["aarch64", "mips", "mipsel"] if branch == "main" else ["aarch64"])
+                    self.assert_architectures(output, ["aarch64", "mips", "mipsel"] if branch in ("main", "beta") else ["aarch64"])
 
     def test_pull_request_keeps_merge_sha_and_cannot_publish_a_release(self) -> None:
         output = self.successful(self.resolve(

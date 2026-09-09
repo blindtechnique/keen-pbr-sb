@@ -59,20 +59,30 @@ The pre-signing updater is not retroactively authenticated. Plan the first
 signed stable release and bootstrap delivery together: old unsigned releases
 do not satisfy the new updater. There is no silent unsigned fallback.
 
-Automatic updates remain stable-only. Alpha/next workflow artifacts are also
-signed but are not added to automatic discovery. Before manually installing
+Automatic updates remain stable-only. Alpha/next workflow artifacts and Beta
+prereleases are signed but are not added to automatic discovery. Before manually installing
 one, verify its IPK using the matching signed manifest/channel/release context.
 Direct `opkg install` does not invoke our updater: this change does not claim
 that opkg or third-party feeds independently verify this fork's manifest.
 
 ## CI and private key
 
+Pushing `beta` builds all three supported Keenetic profiles: `aarch64-3.10`,
+`mips-3.4` and `mipsel-3.4`. After the frontend, transport-manager, backend,
+crash, thread-safety and firewall checks succeed, CI validates all three IPKs
+against the frozen source, signs the bundle, uploads `keen-pbr-beta-ipk` and
+publishes `beta-<run-id>-<attempt>` as a GitHub prerelease, never as Latest.
+This tag is also the signed manifest's release identifier. To repeat a Beta
+build, rerun its workflow or dispatch on the `beta` branch with an empty
+`release_tag`; generated alpha/beta/next tags cannot enter the stable publisher.
+Beta publication does not install anything on a router.
+
 Actions secret: `KEENETIC_RELEASE_SIGNING_KEY`, PKCS#8 PEM inside GitHub Secrets.
 [GitHub CLI encrypts values before upload](https://cli.github.com/manual/gh_secret_set).
 Provisioning passes private material through stdin, never command-line arguments
 or console output.
 
-Only trusted stable/alpha/next jobs in this fork sign artifacts. PR builds/tests
+Only trusted stable/alpha/beta/next jobs in this fork sign artifacts. PR builds/tests
 do not receive or require the secret. The key is scoped to the signing step;
 its restricted runner temporary file is removed on success and failure. Missing
 or mismatched keys stop publication before any existing release asset changes.

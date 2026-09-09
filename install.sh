@@ -480,7 +480,7 @@ rv_localfile=$2
 
 # Restrict context before passing it through awk -v (which interprets escapes).
 case "$rv_repository" in ''|*[!A-Za-z0-9_./-]*) release_verify_fail 'invalid repository' ;; esac
-case "$rv_channel" in stable|alpha|next) ;; *) release_verify_fail 'invalid channel' ;; esac
+case "$rv_channel" in stable|alpha|beta|next) ;; *) release_verify_fail 'invalid channel' ;; esac
 case "$rv_release" in ''|*[!A-Za-z0-9._-]*) release_verify_fail 'invalid release' ;; esac
 case "$rv_kind" in installer|package) ;; *) release_verify_fail 'invalid file kind' ;; esac
 case "$rv_arch" in any|aarch64|armv7|mipsel|mips|x64) ;; *) release_verify_fail 'invalid architecture' ;; esac
@@ -1055,14 +1055,21 @@ configure_nfqws2() {
     say "Подготавливаю HTTPS и официальный репозиторий nfqws2..."
     # Старый wget из Entware понимает только HTTP/FTP. Сначала обновляем
     # обычные feeds и заменяем его на SSL-вариант, и только после этого
-    # добавляем HTTPS-feed nfqws2. Удаление feed также чинит повторный запуск
+    # добавляем HTTPS-feed nfqws2. Временное перемещение feed чинит повторный запуск
     # после ранее прерванной установки.
     mkdir -p /opt/etc/opkg
-    rm -f /opt/etc/opkg/nfqws2-keenetic.conf
+    if [ -f /opt/etc/opkg/nfqws2-keenetic.conf ] ||
+       [ -L /opt/etc/opkg/nfqws2-keenetic.conf ]; then
+        NFQWS_SAVED_FEED="$TMP_DIR/nfqws2-keenetic.conf"
+        mv /opt/etc/opkg/nfqws2-keenetic.conf "$NFQWS_SAVED_FEED"
+    else
+        rm -f /opt/etc/opkg/nfqws2-keenetic.conf
+    fi
     /opt/bin/opkg update || die "не удалось обновить список пакетов Entware"
     /opt/bin/opkg install ca-certificates wget-ssl || die "не удалось установить HTTPS-зависимости nfqws2"
     /opt/bin/opkg remove wget-nossl >/dev/null 2>&1 || true
     printf '%s\n' 'src/gz nfqws2-keenetic https://nfqws.github.io/nfqws2-keenetic/all' > /opt/etc/opkg/nfqws2-keenetic.conf
+    NFQWS_SAVED_FEED=
     /opt/bin/opkg update || die "не удалось загрузить официальный репозиторий nfqws2"
     say "Устанавливаю пакет nfqws2..."
     if /opt/bin/opkg status nfqws2-keenetic 2>/dev/null | grep -q '^Status:.* installed'; then

@@ -43,6 +43,12 @@ def git(repository: Path, *arguments: str) -> str:
 def tag_ref(repository: Path, name: str) -> str:
     if not name or name.startswith("refs/"):
         raise ResolutionError("release_tag must be a short tag name, not a refs/ path")
+    if name.startswith(("alpha-", "beta-", "next-")):
+        channel = name.split("-", 1)[0]
+        raise ResolutionError(
+            f"{channel} prerelease tags cannot be published as stable; "
+            f"rerun the original {channel} workflow instead"
+        )
     reference = f"refs/tags/{name}"
     try:
         git(repository, "check-ref-format", reference)
@@ -80,7 +86,7 @@ def resolve_source(
     is_release = bool(release_tag)
     channel = "none"
     if not is_release and event_name in ("push", "workflow_dispatch"):
-        if ref in ("refs/heads/alpha", "refs/heads/next"):
+        if ref in ("refs/heads/alpha", "refs/heads/beta", "refs/heads/next"):
             channel = ref.removeprefix("refs/heads/")
     single_architecture = not is_release and (
         ref in ("refs/heads/alpha", "refs/heads/next") or event_name == "pull_request"

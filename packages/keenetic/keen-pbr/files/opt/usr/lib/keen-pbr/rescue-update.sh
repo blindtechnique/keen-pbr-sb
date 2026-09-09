@@ -704,14 +704,103 @@ cleanup_process() {
     exit "$status"
 }
 
+configured_api_health() {
+    # Rescue can run an older restored binary, so do not depend on a new CLI
+    # command. Select only the top-level api object and its direct settings
+    # member; DNS listeners and braces/quotes in JSON strings are unrelated.
+    awk '
+    function string_done() {
+        if (object[depth] && need_key[depth]) {
+            key[depth] = token
+            need_key[depth] = 0
+            # nlohmann uses the last duplicate member, including null.
+            if (depth == 1 && token == "api") {
+                listen = ""
+                enabled = 0
+                api_depth = 0
+            } else if (api_depth && depth == api_depth && token == "listen") {
+                listen = ""
+            } else if (api_depth && depth == api_depth && token == "enabled") {
+                enabled = 0
+            }
+        } else if (api_depth && depth == api_depth && key[depth] == "listen") {
+            listen = token
+        }
+    }
+    {
+        for (i = 1; i <= length($0); i++) {
+            ch = substr($0, i, 1)
+            if (in_comment) {
+                if (ch == "*" && substr($0, i + 1, 1) == "/") {
+                    in_comment = 0
+                    i++
+                }
+                continue
+            }
+            if (in_string) {
+                if (unicode_left) {
+                    unicode = unicode * 16 + index("0123456789abcdef", tolower(ch)) - 1
+                    if (--unicode_left == 0) {
+                        # The selected keys and port are ASCII. Non-ASCII
+                        # host characters cannot affect the trailing port.
+                        token = token sprintf("%c", unicode < 128 ? unicode : 63)
+                    }
+                } else if (escaped) {
+                    escaped = 0
+                    if (ch == "u") { unicode_left = 4; unicode = 0 }
+                    else if (ch == "n") token = token "\n"
+                    else if (ch == "r") token = token "\r"
+                    else if (ch == "t") token = token "\t"
+                    else if (ch == "b") token = token sprintf("%c", 8)
+                    else if (ch == "f") token = token sprintf("%c", 12)
+                    else token = token ch
+                } else if (ch == "\\") escaped = 1
+                else if (ch == "\"") { in_string = 0; string_done() }
+                else token = token ch
+                continue
+            }
+            # parse_config also permits JSON comments.
+            if (ch == "/") {
+                next_ch = substr($0, i + 1, 1)
+                if (next_ch == "/") break
+                if (next_ch == "*") { in_comment = 1; i++; continue }
+            }
+            if (api_depth && depth == api_depth && key[depth] == "enabled" &&
+                ch == "t" && substr($0, i, 4) == "true") enabled = 1
+            if (ch == "\"") { in_string = 1; token = "" }
+            else if (ch == "{" || ch == "[") {
+                selected_api = depth == 1 && key[depth] == "api"
+                depth++
+                object[depth] = ch == "{"
+                need_key[depth] = object[depth]
+                key[depth] = ""
+                if (selected_api) {
+                    listen = ""
+                    api_depth = object[depth] ? depth : 0
+                }
+            } else if (ch == "}" || ch == "]") {
+                if (depth == api_depth) api_depth = 0
+                delete object[depth]
+                delete need_key[depth]
+                delete key[depth]
+                depth--
+            } else if (ch == "," && object[depth]) {
+                need_key[depth] = 1
+                key[depth] = ""
+            }
+        }
+    }
+    END { printf "%d|%s\n", enabled, listen }
+    ' "$CONFIG_DIR/config.json" 2>/dev/null
+}
+
 verify_runtime() {
     attempts=0
     stable=0
     auth_body_file="$RESCUE_DIR/.auth-status.$$"
-    listen=$(
-        sed -n 's/.*"listen"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-            "$CONFIG_DIR/config.json" 2>/dev/null | head -n 1
-    )
+    api_settings=$(configured_api_health)
+    api_enabled=${api_settings%%|*}
+    listen=${api_settings#*|}
     api_port=${listen##*:}
     case "$api_port" in
         ''|*[!0-9]*) api_port=12121 ;;
@@ -720,6 +809,15 @@ verify_runtime() {
     while [ "$attempts" -lt 15 ]; do
         if "$KEEN_PBR_INIT" check >/dev/null 2>&1 &&
            "$TRANSPORT_INIT" check >/dev/null 2>&1; then
+            # API is optional even in a full package. With it disabled, the
+            # same three stable service observations are the health contract.
+            if [ "$api_enabled" = 0 ]; then
+                stable=$((stable + 1))
+                [ "$stable" -lt 3 ] || return 0
+                attempts=$((attempts + 1))
+                sleep 2
+                continue
+            fi
             http_code=""
             rm -f "$auth_body_file"
             if [ -x "$OPT_CURL" ]; then
