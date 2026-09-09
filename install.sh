@@ -6,7 +6,7 @@ umask 077
 PROJECT_REPOSITORY="${MYKEENPBR_REPOSITORY:-blindtechnique/keen-pbr-sb}"
 TRUSTED_RELEASE_REPOSITORY="blindtechnique/keen-pbr-sb"
 GITHUB_API="https://api.github.com/repos"
-STABLE_RELEASE_TAG='v3.3.0-sb.12'
+STABLE_RELEASE_TAG='v3.3.1-sb.12'
 SING_BOX_PINNED_VERSION="1.13.14"
 TMP_DIR=
 TRANSPORT_CONFIG="/opt/etc/keen-pbr/transports.json"
@@ -660,7 +660,8 @@ bootstrap_rescue_helpers() {
     helper_tree="$TMP_DIR/package-helpers"
     mkdir "$helper_tree" || die "не удалось подготовить каталог rescue helper"
     chmod 0700 "$helper_tree" || die "не удалось защитить каталог rescue helper"
-    tar -xOf "$PACKAGE_FILE" ./data.tar.gz > "$payload" ||
+    # BusyBox tar needs explicit gzip mode for the Entware IPK outer archive.
+    tar -xzOf "$PACKAGE_FILE" ./data.tar.gz > "$payload" ||
         die "проверенный IPK не содержит data.tar.gz"
     [ -s "$payload" ] || die "data.tar.gz в проверенном IPK пуст"
     tar -xzf "$payload" -C "$helper_tree" \

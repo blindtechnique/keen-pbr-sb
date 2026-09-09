@@ -9,7 +9,7 @@ delivery path, not a completed upgrade on a real stable11 router.
 
 1. Stable11 checks GitHub `releases/latest`. Its version parser only recognizes
    `v<version>-sb.<uint32 counter>`, so stable release tags retain this format.
-   The first intended tag is `v3.3.0-sb.12`; package/UI versions remain timestamps.
+   The corrected Release 12 candidate is `v3.3.1-sb.12`; package/UI versions remain timestamps.
 2. The old updater downloads `install.sh` from the selected tag and invokes it
    with `--update`. With no explicit handoff tag, this installer uses its embedded
    `STABLE_RELEASE_TAG`, avoiding a second selection of a different Latest.

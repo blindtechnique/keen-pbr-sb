@@ -10,22 +10,22 @@
 
 При переходе со старых выпусков учитывайте совместимость: новый установщик принимает подписанные пакеты. Если в Latest ещё находится неподписанный `v3.0.7-sb.11`, он остановится до установки пакета. Дождитесь подписанного стабильного выпуска либо явно выберите тестовый выпуск командой ниже.
 
-Перед их выполнением проверьте наличие `v3.3.0-sb.12` и пакета для своей архитектуры в [Releases](https://github.com/blindtechnique/keen-pbr-sb/releases). Команда ниже устанавливает именно этот выпуск, независимо от того, какой выпуск назначен стабильным:
+Перед их выполнением проверьте наличие `v3.3.1-sb.12` и пакета для своей архитектуры в [Releases](https://github.com/blindtechnique/keen-pbr-sb/releases). Команда ниже устанавливает именно этот выпуск, независимо от того, какой выпуск назначен стабильным:
 
 ```sh
 (
   set -e
   installer=$(mktemp /tmp/keen-pbr-sb-install.XXXXXX)
   trap 'rm -f "$installer"' EXIT
-  wget -O "$installer" https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/v3.3.0-sb.12/install.sh
-  KEEN_PBR_UPDATE_RELEASE_TAG=v3.3.0-sb.12 sh "$installer"
+  wget -O "$installer" https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/v3.3.1-sb.12/install.sh
+  KEEN_PBR_UPDATE_RELEASE_TAG=v3.3.1-sb.12 sh "$installer"
 )
 ```
 
 Если вы используете уже установленный `curl`, замените строку загрузки на:
 
 ```sh
-curl -fL https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/v3.3.0-sb.12/install.sh -o "$installer"
+curl -fL https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/v3.3.1-sb.12/install.sh -o "$installer"
 ```
 
 Установщик определяет архитектуру, проверяет пакет и предлагает настройку авторизации, DNS и дополнительных компонентов. Закреплённая для этого выпуска версия sing-box — **1.13.14**; уже установленный sing-box можно сохранить. nfqws2 устанавливается официальным пакетом отдельно, с согласия пользователя.
@@ -47,8 +47,8 @@ curl -fL https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/v3.3.0-sb.
   set -e
   installer=$(mktemp /tmp/keen-pbr-sb-install.XXXXXX)
   trap 'rm -f "$installer"' EXIT
-  wget -O "$installer" https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/v3.3.0-sb.12/install.sh
-  KEEN_PBR_UPDATE_RELEASE_TAG=v3.3.0-sb.12 sh "$installer" --update
+  wget -O "$installer" https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/v3.3.1-sb.12/install.sh
+  KEEN_PBR_UPDATE_RELEASE_TAG=v3.3.1-sb.12 sh "$installer" --update
 )
 ```
 

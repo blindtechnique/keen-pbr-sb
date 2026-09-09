@@ -17,7 +17,10 @@ INSTALLER = ROOT / "install.sh"
 SELF_UPDATE = ROOT / "packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/self-update.sh"
 PACKAGE = "keen-pbr_3.3.0-test_keenetic_aarch64-3.10.ipk"
 PAYLOAD = b"release pin fixture, not an installable package\n"
-STABLE_RELEASE = "v3.3.0-sb.12"
+VERSION = dict(line.split("=", 1) for line in
+               (ROOT / "version.mk").read_text(encoding="utf8").splitlines()
+               if "=" in line and not line.startswith("#"))
+STABLE_RELEASE = f"v{VERSION['KEEN_PBR_VERSION']}-sb.{VERSION['KEEN_PBR_RELEASE']}"
 
 
 def function(text: str, name: str, next_name: str) -> str:
@@ -76,7 +79,8 @@ fetch() {
 }
 '''
             env = {**os.environ, "FIXTURE_TMP_DIR": directory,
-                   "KEEN_PBR_UPDATE_RELEASE_TAG": requested}
+                   "KEEN_PBR_UPDATE_RELEASE_TAG": requested,
+                   "FIXTURE_RELEASE_TAG": STABLE_RELEASE}
             shell = [shutil.which("busybox"), "sh"] if shutil.which("busybox") else ["sh"]
             program = initialize + script + assets + download + "\ndownload_package\n"
             if legacy_updater:
@@ -85,7 +89,7 @@ fetch() {
                 (root / "tagged-install.sh").write_text(program, encoding="utf8")
                 program = r'''
 set -eu
-release_tag=v3.3.0-sb.12
+release_tag=$FIXTURE_RELEASE_TAG
 INSTALLER="$FIXTURE_TMP_DIR/downloaded-install.sh"
 INSTALLER_URL="https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/$release_tag/install.sh"
 fetch_url() {

@@ -5,12 +5,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 
@@ -24,6 +26,7 @@ EMBEDDER = ROOT / "build_scripts/embed-release-verifier.py"
 PACKAGE = "keen-pbr_3.3.1-test_keenetic_aarch64-3.10.ipk"
 REPOSITORY = "blindtechnique/keen-pbr-sb"
 RELEASE = "v3.3.1"
+BUSYBOX = os.environ.get("BUSYBOX") or shutil.which("busybox")
 
 
 def load_module(name, path):
@@ -36,6 +39,50 @@ def load_module(name, path):
 def shell_function(text, name, next_name):
     return name + "() {" + text.split(name + "() {", 1)[1].split(
         "\n" + next_name + "() {", 1)[0]
+
+
+@unittest.skipUnless(BUSYBOX, "BusyBox tar is required")
+class InstallerBootstrapArchiveTest(unittest.TestCase):
+    def test_gzip_ipk_helpers_extract_with_busybox_tar(self):
+        source = INSTALLER.read_text(encoding="utf8")
+        # Execute the real bootstrap extraction, stopping before helper execution
+        # or publication under /opt. GNU tar's gzip autodetection hid this bug.
+        extraction = source.split("bootstrap_rescue_helpers() {", 1)[1].split(
+            '\n    rescue_source=', 1)[0]
+        helpers = ("portable-stat.sh", "rescue-update.sh",
+                   "rescue-startup-guard.sh", "update-lock.sh")
+        content = b"#!/bin/sh\n# Extraction-only fixture; never executed.\n"
+        data = io.BytesIO()
+        with tarfile.open(fileobj=data, mode="w:gz") as archive:
+            for helper in helpers:
+                member = tarfile.TarInfo(f"./opt/usr/lib/keen-pbr/{helper}")
+                member.size = len(content)
+                archive.addfile(member, io.BytesIO(content))
+        payload = data.getvalue()
+
+        with tempfile.TemporaryDirectory(prefix="kpbr-bootstrap-busybox-") as temporary:
+            work = Path(temporary)
+            package = work / PACKAGE
+            with tarfile.open(package, mode="w:gz") as archive:
+                member = tarfile.TarInfo("./data.tar.gz")
+                member.size = len(payload)
+                archive.addfile(member, io.BytesIO(payload))
+            script = r'''
+set -eu
+die() { printf '%s\n' "$*" >&2; exit 1; }
+tar() { "$BUSYBOX" tar "$@"; }
+''' + extraction
+            result = subprocess.run(
+                [BUSYBOX, "sh", "-c", script],
+                env={**os.environ, "BUSYBOX": BUSYBOX, "TMP_DIR": str(work),
+                     "PACKAGE_FILE": str(package)},
+                capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((work / "data.tar.gz").read_bytes(), payload)
+            for helper in helpers:
+                self.assertEqual(
+                    (work / "package-helpers/opt/usr/lib/keen-pbr" / helper).read_bytes(),
+                    content)
 
 
 @unittest.skipUnless(shutil.which("sh") and shutil.which("openssl"),
