@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import re
 import os
+import json
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -19,6 +21,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/release-keenetic.yml"
+CI_DEPENDENCIES = ROOT / "build_scripts/ci-install-ubuntu-deps.sh"
 SOURCE = "needs.resolve-source.outputs."
 TRUSTED_PUBLISHER = "github.repository == 'blindtechnique/keen-pbr-sb' && github.event_name != 'pull_request' && "
 SIGNING_JOBS = {
@@ -136,6 +139,77 @@ class ReleaseWorkflowTest(unittest.TestCase):
         # Manual release-tag rebuilds run on their selected source, not on the
         # dispatch UI's alpha/next branch. Resolver tests cover channel=stable and
         # the full architecture matrix for those releases.
+
+    def test_native_dependency_steps_use_only_ubuntu_without_changing_packages(self) -> None:
+        common = ['libcurl4-openssl-dev', 'libnl-3-dev', 'libnl-route-3-dev', 'libunwind-dev']
+        tail = ['pkg-config', 'zlib1g-dev']
+        expected = {
+            'backend': common + ['busybox-static', 'lua5.3'] + tail,
+            'crash-diagnostics-smoke': common + tail,
+            'clang-thread-safety': ['clang'] + common + tail,
+        }
+        for name, packages in expected.items():
+            with self.subTest(job=name):
+                step_name = 'Install Clang build dependencies' if name == 'clang-thread-safety' else 'Install native build dependencies'
+                code = shell(steps(self.jobs[name])[step_name])
+                self.assertEqual(shlex.split(code), ['sh', 'build_scripts/ci-install-ubuntu-deps.sh', *packages])
+        helper = CI_DEPENDENCIES.read_text(encoding='utf-8')
+        for forbidden in ('--allow-unauthenticated', 'AllowInsecure', 'Verify-Peer', '|| true', 'rm ', 'mv '):
+            self.assertNotIn(forbidden, helper)
+
+    def run_fake_ci_dependencies(self, packages: list[str], *, update_status: int = 0, install_status: int = 0) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            calls = root / 'apt-calls.jsonl'
+            sudo = root / 'sudo'
+            sudo.write_text('#!/bin/sh\n[ "$1" = apt-get ] || exit 97\nexec "$@"\n', encoding='utf-8')
+            sudo.chmod(0o755)
+            apt = root / 'apt-get'
+            apt.write_text(
+                '#!/usr/bin/env python3\nimport json, os, sys\n'
+                'with open(os.environ["FIXTURE_APT_CALLS"], "a") as out:\n'
+                '    out.write(json.dumps(sys.argv[1:]) + "\\n")\n'
+                'kind = "UPDATE" if sys.argv[-1] == "update" else "INSTALL"\n'
+                'sys.exit(int(os.environ["FIXTURE_APT_" + kind + "_STATUS"]))\n', encoding='utf-8')
+            apt.chmod(0o755)
+            environment = dict(os.environ)
+            environment.update({
+                'PATH': str(root) + os.pathsep + environment.get('PATH', ''),
+                'FIXTURE_APT_CALLS': str(calls),
+                'FIXTURE_APT_UPDATE_STATUS': str(update_status),
+                'FIXTURE_APT_INSTALL_STATUS': str(install_status),
+            })
+            result = subprocess.run(['sh', str(CI_DEPENDENCIES), *packages], cwd=root, env=environment, text=True, capture_output=True, timeout=10)
+            commands = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+            return result, commands
+
+    @unittest.skipUnless(shutil.which('sh') and shutil.which('python3'), 'dependency fixture requires sh and python3')
+    def test_ci_dependencies_forward_unchanged_args_and_same_apt_source_options(self) -> None:
+        packages = ['libcurl4-openssl-dev', 'clang=1:18.0-1', 'argument with spaces']
+        result, commands = self.run_fake_ci_dependencies(packages)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        options = ['-o', 'Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources', '-o', 'Dir::Etc::sourceparts=/dev/null']
+        self.assertEqual(commands, [options + ['update'], options + ['install', '-y', *packages]])
+
+    @unittest.skipUnless(shutil.which('sh') and shutil.which('python3'), 'dependency fixture requires sh and python3')
+    def test_ci_dependencies_failed_update_never_installs(self) -> None:
+        result, commands = self.run_fake_ci_dependencies(['clang'], update_status=100)
+        self.assertEqual(result.returncode, 100)
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0][-1], 'update')
+
+    @unittest.skipUnless(shutil.which('sh') and shutil.which('python3'), 'dependency fixture requires sh and python3')
+    def test_ci_dependencies_propagate_install_failure(self) -> None:
+        result, commands = self.run_fake_ci_dependencies(['clang'], install_status=42)
+        self.assertEqual(result.returncode, 42)
+        self.assertEqual(len(commands), 2)
+        self.assertEqual(commands[1][-3:], ['install', '-y', 'clang'])
+
+    @unittest.skipUnless(shutil.which('sh') and shutil.which('python3'), 'dependency fixture requires sh and python3')
+    def test_ci_dependencies_empty_request_does_not_call_apt(self) -> None:
+        result, commands = self.run_fake_ci_dependencies([])
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(commands, [])
 
     def test_publisher_uses_frozen_tag_and_commit(self) -> None:
         publish = self.jobs["publish-release"]
@@ -313,12 +387,23 @@ gh() {
 '''
         for scenario, tag_status, expected_exit, should_create in (
             ('new tag', 2, 0, True),
+            ('new tag with release notes', 2, 0, True),
+            ('new tag without matching notes', 2, 0, True),
             ('existing tag and release', 0, 0, False),
             ('remote failure', 128, 128, False),
         ):
             with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 calls = root / 'github-calls'
+                if scenario == 'new tag with release notes':
+                    (root / 'CHANGELOG.md').write_text(
+                        '# Changelog\n\n## [3x3x0-sbx12]\nWrong regex match.\n'
+                        '## [3.3.0-sb.12] — Beta\n\nShort release summary.\n'
+                        '### Added\n- New release feature.\n\n'
+                        '## [3.3.0]\nDetailed implementation history.\n', encoding='utf-8')
+                elif scenario == 'new tag without matching notes':
+                    (root / 'CHANGELOG.md').write_text(
+                        '# Changelog\n\n## [3.3.0]\nDetailed implementation history.\n', encoding='utf-8')
                 environment = dict(os.environ)
                 environment.update({
                     'SOURCE_SHA': 'a' * 40, 'RELEASE_TAG': 'v3.3.0-sb.12',
@@ -333,6 +418,17 @@ gh() {
                     self.assertIn('release create v3.3.0-sb.12', command)
                     self.assertIn('--target ' + 'a' * 40, command)
                     self.assertIn('--prerelease --latest=false', command)
+                    self.assertIn('--notes-file BETA_NOTES.md', command)
+                    notes = (root / 'BETA_NOTES.md').read_text(encoding='utf-8')
+                    if scenario == 'new tag with release notes':
+                        self.assertIn('Short release summary.', notes)
+                        self.assertIn('### Added\n- New release feature.', notes)
+                        self.assertNotIn('Wrong regex match.', notes)
+                        self.assertNotIn('Detailed implementation history.', notes)
+                        self.assertNotIn('Beta build from', notes)
+                    else:
+                        self.assertIn('Beta build from', notes)
+                        self.assertIn('aarch64-3.10, mips-3.4, mipsel-3.4', notes)
                 if tag_status == 0:
                     self.assertIn('already exists and was not changed', result.stdout)
                     self.assertIn('advance KEEN_PBR_RELEASE', result.stdout)

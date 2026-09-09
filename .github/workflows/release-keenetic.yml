@@ -117,8 +117,7 @@ jobs:
 
       - name: Install native build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          sh build_scripts/ci-install-ubuntu-deps.sh \
             libcurl4-openssl-dev \
             libnl-3-dev \
             libnl-route-3-dev \
@@ -222,8 +221,7 @@ jobs:
 
       - name: Install native build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          sh build_scripts/ci-install-ubuntu-deps.sh \
             libcurl4-openssl-dev \
             libnl-3-dev \
             libnl-route-3-dev \
@@ -260,8 +258,7 @@ jobs:
 
       - name: Install Clang build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          sh build_scripts/ci-install-ubuntu-deps.sh \
             clang \
             libcurl4-openssl-dev \
             libnl-3-dev \
@@ -628,8 +625,17 @@ jobs:
               exit "$tag_status"
             fi
           fi
-          printf 'Beta build from `%s`.\n\nKeenetic profiles: aarch64-3.10, mips-3.4, mipsel-3.4.\n\nAutomatic stable updates remain unchanged until promotion. See [CHANGELOG](https://github.com/%s/blob/%s/CHANGELOG.md).\n' \
-            "$SOURCE_SHA" "$GITHUB_REPOSITORY" "$SOURCE_SHA" > BETA_NOTES.md
+          : > BETA_NOTES.md
+          if [ -f CHANGELOG.md ]; then
+            awk -v heading="## [${RELEASE_TAG#v}]" '
+              /^## \[/ {include = index($0, heading) == 1; next}
+              include {print}
+            ' CHANGELOG.md > BETA_NOTES.md
+          fi
+          if ! [ -s BETA_NOTES.md ]; then
+            printf 'Beta build from `%s`.\n\nKeenetic profiles: aarch64-3.10, mips-3.4, mipsel-3.4.\n\nAutomatic stable updates remain unchanged until promotion. See [CHANGELOG](https://github.com/%s/blob/%s/CHANGELOG.md).\n' \
+              "$SOURCE_SHA" "$GITHUB_REPOSITORY" "$SOURCE_SHA" > BETA_NOTES.md
+          fi
           gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
             --target "$SOURCE_SHA" --prerelease --latest=false \
             --title "keen-pbr-sb $RELEASE_TAG — Beta" --notes-file BETA_NOTES.md \
