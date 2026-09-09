@@ -178,6 +178,7 @@ test: ## Build and run unit tests (doctest)
 	python3 -m unittest build_scripts.tests.test_build_identity -v
 	python3 -m unittest build_scripts.tests.test_test_target_coverage -v
 	python3 -m unittest build_scripts.tests.test_pinned_versions -v
+	python3 -m unittest build_scripts.tests.test_netlink_uapi_compat -v
 	$(MAKE) test-package-dns
 	cmake -S . -B $(GCC_BUILD_DIR) $(GCC_CMAKE_FLAGS) -DBUILD_TESTS=ON \
 		-DWITH_API=ON -DUSE_KEENETIC_API=ON $(TEST_CMAKE_FLAGS)
