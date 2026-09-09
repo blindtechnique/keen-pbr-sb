@@ -57,6 +57,21 @@ def tag_ref(repository: Path, name: str) -> str:
     return reference
 
 
+def stable_release_tag(repository: Path, source_sha: str) -> str:
+    """Read release identity from the tested commit, not the workflow checkout."""
+    version_file = git(repository, "show", f"{source_sha}:version.mk")
+    versions = re.findall(r"^KEEN_PBR_VERSION=([0-9]+\.[0-9]+\.[0-9]+)$", version_file, re.MULTILINE)
+    releases = re.findall(r"^KEEN_PBR_RELEASE=([0-9]+)$", version_file, re.MULTILINE)
+    if len(versions) != 1 or len(releases) != 1 or int(releases[0]) > 0xFFFFFFFF:
+        raise ResolutionError("version.mk must define one numeric version and uint32 release counter")
+    tag = f"v{versions[0]}-sb.{int(releases[0])}"
+    installer = git(repository, "show", f"{source_sha}:install.sh")
+    pins = re.findall(r"^STABLE_RELEASE_TAG=['\"]([^'\"]+)['\"]$", installer, re.MULTILINE)
+    if pins != [tag]:
+        raise ResolutionError("install.sh STABLE_RELEASE_TAG must match version.mk for a stable build")
+    return tag
+
+
 def resolve_source(
     repository: Path,
     *,
@@ -84,9 +99,17 @@ def resolve_source(
         # commit), not the source branch HEAD or a subsequently moved ref.
 
     is_release = bool(release_tag)
-    channel = "none"
+    candidate = False
+    channel = "stable" if is_release else "none"
+    if is_release:
+        if release_tag != stable_release_tag(repository, source_sha):
+            raise ResolutionError("release_tag must match the stable release identity in source version.mk")
     if not is_release and event_name in ("push", "workflow_dispatch"):
-        if ref in ("refs/heads/alpha", "refs/heads/beta", "refs/heads/next"):
+        if ref == "refs/heads/main":
+            channel = "stable"
+            candidate = True
+            release_tag = stable_release_tag(repository, source_sha)
+        elif ref in ("refs/heads/alpha", "refs/heads/next"):
             channel = ref.removeprefix("refs/heads/")
     single_architecture = not is_release and (
         ref in ("refs/heads/alpha", "refs/heads/next") or event_name == "pull_request"
@@ -95,6 +118,7 @@ def resolve_source(
         "source_sha": source_sha,
         "release_tag": release_tag,
         "release": "true" if is_release else "false",
+        "candidate": "true" if candidate else "false",
         "channel": channel,
         "build_matrix": {"include": ARCHITECTURES[:1] if single_architecture else ARCHITECTURES},
     }

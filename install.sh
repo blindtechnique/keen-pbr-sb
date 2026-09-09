@@ -6,6 +6,7 @@ umask 077
 PROJECT_REPOSITORY="${MYKEENPBR_REPOSITORY:-blindtechnique/keen-pbr-sb}"
 TRUSTED_RELEASE_REPOSITORY="blindtechnique/keen-pbr-sb"
 GITHUB_API="https://api.github.com/repos"
+STABLE_RELEASE_TAG='v3.3.0-sb.12'
 SING_BOX_PINNED_VERSION="1.13.14"
 TMP_DIR=
 TRANSPORT_CONFIG="/opt/etc/keen-pbr/transports.json"
@@ -30,6 +31,13 @@ case "${1:-}" in
     "") ;;
     *) printf '%s\n' "ОШИБКА: неизвестный параметр: $1" >&2; exit 2 ;;
 esac
+
+# stable11 downloads this source through its release tag but passes only
+# --update. Keep that legacy handoff on this release even if Latest changes;
+# modern signed updaters already pass the exact verified tag explicitly.
+if [ "$UPDATE_ONLY" = "1" ] && [ -z "$REQUESTED_RELEASE_TAG" ]; then
+    REQUESTED_RELEASE_TAG=$STABLE_RELEASE_TAG
+fi
 
 cleanup() {
     status=$?
@@ -588,8 +596,10 @@ ensure_release_verifier() {
     [ "$PROJECT_REPOSITORY" = "$TRUSTED_RELEASE_REPOSITORY" ] ||
         die "Этот установщик проверяет только выпуски blindtechnique/keen-pbr-sb. Для другого проекта нужен его доверенный установщик."
     if ! command -v openssl >/dev/null 2>&1 && [ ! -x /opt/bin/openssl ]; then
-        [ "$UPDATE_ONLY" = "0" ] ||
-            die "Не найден OpenSSL для проверки выпуска. Установите пакет Entware openssl-util и повторите обновление."
+        # The unsigned stable11 updater enters this installer with --update
+        # before openssl-util was a package dependency. Establish that local
+        # verifier dependency from Entware before downloading/checking the IPK;
+        # the signed self-updater still requires its packaged dependency first.
         say "Устанавливаю OpenSSL для проверки подписи пакета..."
         /opt/bin/opkg update && /opt/bin/opkg install openssl-util ||
             die "Не удалось установить OpenSSL для проверки подписи. Установка keen-pbr-sb не началась."

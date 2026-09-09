@@ -6,6 +6,9 @@
 #include <limits>
 #include <optional>
 #include <vector>
+#include <array>
+#include <string_view>
+#include <nlohmann/json.hpp>
 
 namespace keen_pbr3 {
 namespace {
@@ -81,6 +84,43 @@ bool is_newer_fork_version(const std::string& candidate, const std::string& curr
         if (left != right) return left > right;
     }
     return lhs->release > rhs->release;
+}
+
+std::string published_fork_version(const nlohmann::json& release) {
+    if (!release.is_object()) return {};
+    const auto tag_field = release.find("tag_name");
+    const auto tag = tag_field != release.end() && tag_field->is_string()
+                         ? tag_field->get<std::string>() : std::string{};
+    const auto assets = release.find("assets");
+    std::string package_version;
+    if (assets != release.end() && assets->is_array()) {
+        constexpr std::string_view prefix = "keen-pbr_";
+        constexpr std::array<std::string_view, 3> suffixes = {
+            "_keenetic_aarch64-3.10.ipk", "_keenetic_mips-3.4.ipk",
+            "_keenetic_mipsel-3.4.ipk"};
+        for (const auto& asset : *assets) {
+            if (!asset.is_object()) continue;
+            const auto name_field = asset.find("name");
+            if (name_field == asset.end() || !name_field->is_string()) continue;
+            const auto name = name_field->get<std::string>();
+            if (name.compare(0, prefix.size(), prefix) != 0) continue;
+            for (const auto suffix : suffixes) {
+                if (name.size() <= prefix.size() + suffix.size() ||
+                    name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0)
+                    continue;
+                const auto version = "v" + name.substr(
+                    prefix.size(), name.size() - prefix.size() - suffix.size());
+                if (!parse_fork_version(version)) continue;
+                // A partially replaced multi-architecture release must not
+                // advertise whichever package happens to be listed first.
+                if (!package_version.empty() && package_version != version) return {};
+                package_version = version;
+                break;
+            }
+        }
+    }
+    if (!package_version.empty()) return package_version;
+    return parse_fork_version(tag) ? tag : std::string{};
 }
 
 bool safe_github_tag(const std::string& value) {

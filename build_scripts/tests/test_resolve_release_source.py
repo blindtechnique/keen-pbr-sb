@@ -38,26 +38,34 @@ class ResolveReleaseSourceTest(unittest.TestCase):
         git(cls.repo, "config", "commit.gpgsign", "false")
         git(cls.repo, "config", "tag.gpgsign", "false")
         git(cls.repo, "remote", "add", "origin", str(cls.remote))
-        git(cls.repo, "commit", "--allow-empty", "-qm", "release source")
-        cls.release_sha = git(cls.repo, "rev-parse", "HEAD")
-        git(cls.repo, "tag", "v-light")
-        git(cls.repo, "tag", "-a", "v-annotated", "-m", "annotated release")
-        cls.annotated_object = git(cls.repo, "rev-parse", "refs/tags/v-annotated")
+        cls.release_tag = "v3.3.0-sb.12"
+        cls.release_sha = cls.commit_source("3.3.0", "12", cls.release_tag)
+        git(cls.repo, "tag", cls.release_tag)
         git(cls.repo, "tag", "releases/v-nested")
         for channel in ("alpha", "beta", "next"):
             git(cls.repo, "tag", f"{channel}-123-1")
-        git(cls.repo, "commit", "--allow-empty", "-qm", "newer branch source")
-        cls.head_sha = git(cls.repo, "rev-parse", "HEAD")
+        cls.annotated_tag = "v3.3.1-sb.13"
+        cls.annotated_sha = cls.commit_source("3.3.1", "13", cls.annotated_tag)
+        git(cls.repo, "tag", "-a", cls.annotated_tag, "-m", "annotated release")
+        cls.annotated_object = git(cls.repo, "rev-parse", f"refs/tags/{cls.annotated_tag}")
+        cls.invalid_sources = {
+            "missing installer pin": cls.commit_source("3.3.0", "12", None),
+            "different installer pin": cls.commit_source("3.3.0", "12", "v3.3.0-sb.11"),
+            "timestamp release counter": cls.commit_source("3.3.0", "20260910000000", cls.release_tag),
+            "invalid version": cls.commit_source("3.3.0-alpha", "12", cls.release_tag),
+        }
+        cls.head_tag = "v3.3.2-sb.14"
+        cls.head_sha = cls.commit_source("3.3.2", "14", cls.head_tag)
         git(cls.repo, "branch", "alpha")
         git(cls.repo, "branch", "beta")
         git(cls.repo, "branch", "next")
         git(cls.repo, "branch", "branch-only")
-        git(cls.repo, "branch", "v-light")
+        git(cls.repo, "branch", cls.release_tag)
         git(cls.repo, "push", "-q", "origin", "--all")
         git(cls.repo, "push", "-q", "origin", "--tags")
         # Make the local tag disagree with the remote. Only exact remote fetch
         # may choose the manually requested release source.
-        git(cls.repo, "tag", "-f", "v-light", cls.head_sha)
+        git(cls.repo, "tag", "-f", cls.release_tag, cls.head_sha)
         git(cls.repo, "tag", "local-only")
         # The event merge object need not equal either branch tip or checkout
         # HEAD. Build a local merge object without changing any checkout ref.
@@ -66,6 +74,19 @@ class ResolveReleaseSourceTest(unittest.TestCase):
             cls.repo, "commit-tree", tree, "-p", cls.head_sha, "-p", cls.release_sha,
             "-m", "pull request tested merge",
         )
+
+    @classmethod
+    def commit_source(cls, version: str, release: str, pin: str | None) -> str:
+        (cls.repo / "version.mk").write_text(
+            f"KEEN_PBR_VERSION={version}\nKEEN_PBR_RELEASE={release}\n", encoding="utf-8",
+        )
+        (cls.repo / "install.sh").write_text(
+            "#!/bin/sh\n" + (f"STABLE_RELEASE_TAG='{pin}'\n" if pin is not None else ""),
+            encoding="utf-8",
+        )
+        git(cls.repo, "add", "version.mk", "install.sh")
+        git(cls.repo, "commit", "-qm", "release identity fixture")
+        return git(cls.repo, "rev-parse", "HEAD")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -101,13 +122,14 @@ class ResolveReleaseSourceTest(unittest.TestCase):
 
     def test_manual_release_uses_exact_remote_tag_from_each_branch(self) -> None:
         for ref in ("refs/heads/main", "refs/heads/alpha", "refs/heads/beta", "refs/heads/next"):
-            for tag in ("v-light", "v-annotated", "releases/v-nested"):
+            for tag, expected_sha in ((self.release_tag, self.release_sha), (self.annotated_tag, self.annotated_sha)):
                 with self.subTest(ref=ref, tag=tag):
                     output = self.successful(self.resolve("workflow_dispatch", ref, tag=tag))
-                    self.assertEqual(output["source_sha"], self.release_sha)
+                    self.assertEqual(output["source_sha"], expected_sha)
                     self.assertEqual(output["release_tag"], tag)
                     self.assertEqual(output["release"], "true")
-                    self.assertEqual(output["channel"], "none")
+                    self.assertEqual(output["channel"], "stable")
+                    self.assertEqual(output["candidate"], "false")
                     self.assert_architectures(output, ["aarch64", "mips", "mipsel"])
                     self.assertEqual(git(self.repo, "rev-parse", "HEAD"), self.head_sha)
 
@@ -155,19 +177,19 @@ class ResolveReleaseSourceTest(unittest.TestCase):
     def test_tag_events_preserve_event_commit_instead_of_current_tag_tip(self) -> None:
         for event in ("push", "workflow_dispatch"):
             with self.subTest(event=event):
-                output = self.successful(self.resolve(event, "refs/tags/v-light", sha=self.head_sha))
-                self.assertEqual(output["source_sha"], self.head_sha)
-                self.assertEqual(output["release_tag"], "v-light")
+                output = self.successful(self.resolve(event, f"refs/tags/{self.release_tag}", sha=self.release_sha))
+                self.assertEqual(output["source_sha"], self.release_sha)
+                self.assertEqual(output["release_tag"], self.release_tag)
                 self.assertEqual(output["release"], "true")
-                self.assertEqual(output["channel"], "none")
+                self.assertEqual(output["channel"], "stable")
                 self.assert_architectures(output, ["aarch64", "mips", "mipsel"])
-        annotated = self.successful(self.resolve("push", "refs/tags/v-annotated", sha=self.annotated_object))
-        self.assertEqual(annotated["source_sha"], self.release_sha)
+        annotated = self.successful(self.resolve("push", f"refs/tags/{self.annotated_tag}", sha=self.annotated_object))
+        self.assertEqual(annotated["source_sha"], self.annotated_sha)
 
     def test_manual_input_takes_precedence_over_dispatch_tag_ref(self) -> None:
-        output = self.successful(self.resolve("workflow_dispatch", "refs/tags/other", tag="v-annotated"))
-        self.assertEqual(output["source_sha"], self.release_sha)
-        self.assertEqual(output["release_tag"], "v-annotated")
+        output = self.successful(self.resolve("workflow_dispatch", "refs/tags/other", tag=self.annotated_tag))
+        self.assertEqual(output["source_sha"], self.annotated_sha)
+        self.assertEqual(output["release_tag"], self.annotated_tag)
 
     def test_all_branch_defaults_keep_event_sha(self) -> None:
         for event in ("push", "workflow_dispatch"):
@@ -176,8 +198,9 @@ class ResolveReleaseSourceTest(unittest.TestCase):
                     output = self.successful(self.resolve(event, f"refs/heads/{branch}", sha=self.release_sha))
                     self.assertEqual(output["source_sha"], self.release_sha)
                     self.assertEqual(output["release"], "false")
-                    self.assertEqual(output["release_tag"], "")
-                    self.assertEqual(output["channel"], "none" if branch == "main" else branch)
+                    self.assertEqual(output["release_tag"], self.release_tag if branch == "main" else "")
+                    self.assertEqual(output["candidate"], "true" if branch == "main" else "false")
+                    self.assertEqual(output["channel"], {"main": "stable", "beta": "none"}.get(branch, branch))
                     self.assert_architectures(output, ["aarch64", "mips", "mipsel"] if branch in ("main", "beta") else ["aarch64"])
 
     def test_pull_request_keeps_merge_sha_and_cannot_publish_a_release(self) -> None:
@@ -205,11 +228,39 @@ class ResolveReleaseSourceTest(unittest.TestCase):
     def test_github_output_matches_stdout_and_preserves_previous_keys(self) -> None:
         output_path = self.root / "github-output"
         output_path.write_text("previous=value\n", encoding="utf-8")
-        output = self.successful(self.resolve("workflow_dispatch", "refs/heads/next", tag="v-light", github_output=output_path))
+        output = self.successful(self.resolve("workflow_dispatch", "refs/heads/next", tag=self.release_tag, github_output=output_path))
         fields = dict(line.split("=", 1) for line in output_path.read_text(encoding="utf-8").splitlines())
         self.assertEqual(fields.pop("previous"), "value")
         fields["build_matrix"] = json.loads(fields["build_matrix"])
         self.assertEqual(fields, output)
+
+    def test_stable_candidate_requires_version_and_standalone_installer_to_agree(self) -> None:
+        for reason, sha in self.invalid_sources.items():
+            with self.subTest(reason=reason):
+                result = self.resolve("push", "refs/heads/main", sha=sha)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                # Development channels and PRs do not need a release pin.
+                for branch in ("alpha", "next"):
+                    output = self.successful(self.resolve("push", f"refs/heads/{branch}", sha=sha))
+                    self.assertEqual(output["candidate"], "false")
+                self.successful(self.resolve("pull_request", "refs/pull/23/merge", sha=sha))
+
+    def test_stable_tag_must_match_version_and_installer_in_the_event_commit(self) -> None:
+        for tag, sha in (
+            (self.release_tag, self.head_sha),
+            ("releases/v-nested", self.release_sha),
+            ("v3.3.0-20260910000000", self.release_sha),
+        ):
+            with self.subTest(tag=tag):
+                result = self.resolve("push", f"refs/tags/{tag}", sha=sha)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("release_tag must match", result.stderr)
+        for reason, sha in self.invalid_sources.items():
+            with self.subTest(reason=reason):
+                result = self.resolve("push", f"refs/tags/{self.release_tag}", sha=sha)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
 
 
 if __name__ == "__main__":

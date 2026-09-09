@@ -23,7 +23,7 @@ SOURCE = "needs.resolve-source.outputs."
 TRUSTED_PUBLISHER = "github.repository == 'blindtechnique/keen-pbr-sb' && github.event_name != 'pull_request' && "
 SIGNING_JOBS = {
     "publish-release": "Sign release manifest and installer",
-    "publish-beta": "Sign beta manifest and installer",
+    "upload-stable-candidate-artifact": "Sign stable candidate manifest and installer",
     "upload-alpha-artifact": "Sign alpha manifest and installer",
     "upload-next-artifact": "Sign next manifest and installer",
 }
@@ -82,7 +82,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
     def test_resolver_exports_the_single_effective_release_contract(self) -> None:
         self.assertIn("resolve-source", self.jobs)
         _, outputs = field(self.jobs["resolve-source"], "outputs", 4)
-        for name in ("source_sha", "release_tag", "release", "channel", "build_matrix"):
+        for name in ("source_sha", "release_tag", "release", "candidate", "channel", "build_matrix"):
             with self.subTest(output=name):
                 value, _ = field(outputs, name, 6)
                 self.assertRegex(expression(value), rf"^steps\.[\w-]+\.outputs\.{name}$")
@@ -94,7 +94,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
         required_jobs = {
             "frontend", "backend", "crash-diagnostics-smoke", "clang-thread-safety",
             "firewall-integration", "transport-manager", "build", "publish-release",
-            "upload-alpha-artifact", "upload-next-artifact", "publish-beta",
+            "upload-alpha-artifact", "upload-next-artifact", "upload-stable-candidate-artifact",
         }
         self.assertTrue(required_jobs <= self.jobs.keys())
         for name, job in self.jobs.items():
@@ -131,10 +131,10 @@ class ReleaseWorkflowTest(unittest.TestCase):
             with self.subTest(channel=channel):
                 condition, _ = field(self.jobs[f"upload-{channel}-artifact"], "if", 4)
                 self.assertEqual(expression(condition), TRUSTED_PUBLISHER + SOURCE + f"channel == '{channel}'")
-        condition, _ = field(self.jobs["publish-beta"], "if", 4)
-        self.assertEqual(expression(condition), TRUSTED_PUBLISHER + SOURCE + "channel == 'beta'")
+        condition, _ = field(self.jobs["upload-stable-candidate-artifact"], "if", 4)
+        self.assertEqual(expression(condition), TRUSTED_PUBLISHER + SOURCE + "candidate == 'true'")
         # Manual release-tag rebuilds run on their selected source, not on the
-        # dispatch UI's alpha/next branch. Resolver tests cover channel=none and
+        # dispatch UI's alpha/next branch. Resolver tests cover channel=stable and
         # the full architecture matrix for those releases.
 
     def test_publisher_uses_frozen_tag_and_commit(self) -> None:
@@ -144,10 +144,10 @@ class ReleaseWorkflowTest(unittest.TestCase):
             with self.subTest(variable=variable):
                 value, _ = field(environment, variable, 6)
                 self.assertEqual(expression(value), SOURCE + output)
-        publish_step = steps(publish)["Create or update GitHub Release"]
-        _, publish_inputs = field(publish_step, "with", 8)
-        target, _ = field(publish_inputs, "target_commitish", 10)
-        self.assertEqual(expression(target), SOURCE + "source_sha")
+        publish_code = shell(steps(publish)["Create GitHub Pre-release"])
+        self.assertIn('gh release create "$RELEASE_TAG"', publish_code)
+        self.assertIn('--target "$SOURCE_SHA" --verify-tag --prerelease --latest=false', publish_code)
+        self.assertIn('--title "keen-pbr-sb $RELEASE_TAG — Beta"', publish_code)
 
     def assert_fresh_tag_check(self, code: str) -> None:
         fetch = re.search(r"\bgit fetch[^\n]*refs/tags/\$\{?RELEASE_TAG\}?", code)
@@ -177,17 +177,15 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertRegex(verify, r"-eq\s+3\b", "release must contain all three full-package artifacts")
         mutation_steps = [
             name for name, step in release_steps.items()
-            if "gh release delete-asset" in step or "uses: softprops/action-gh-release@" in step
+            if "gh release create" in step
         ]
-        self.assertEqual(len(mutation_steps), 2)
+        self.assertEqual(len(mutation_steps), 1)
         for name in mutation_steps:
             with self.subTest(mutation=name):
                 self.assertLess(names.index(verify_name), names.index(name))
                 self.assertNotRegex(release_steps[name], r"continue-on-error:\s*true")
-        delete_steps = [step for step in release_steps.values() if "gh release delete-asset" in step]
-        self.assertEqual(len(delete_steps), 1)
-        before_delete = shell(delete_steps[0]).split("gh release delete-asset", 1)[0]
-        self.assert_fresh_tag_check(before_delete)
+        before_create = shell(release_steps[mutation_steps[0]]).split("gh release create", 1)[0]
+        self.assert_fresh_tag_check(before_create)
         self.assertNotRegex(release_steps[verify_name], r"continue-on-error:\s*true")
 
     def test_contract_is_run_before_consumers_check_out_an_older_tag(self) -> None:
@@ -230,7 +228,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
                 self.assertIn('--public-key .release-signing-tools/packages/keys/keenetic-release-public.pem', code)
                 self.assertLess(code.index('embed-release-verifier.py'), code.index('sign-keenetic-release.py'))
                 self.assertIn('--key "$signing_key"', code)
-                channel = {'publish-release': 'stable', 'publish-beta': 'beta', 'upload-alpha-artifact': 'alpha', 'upload-next-artifact': 'next'}[name]
+                channel = {'publish-release': 'stable', 'upload-stable-candidate-artifact': 'stable', 'upload-alpha-artifact': 'alpha', 'upload-next-artifact': 'next'}[name]
                 self.assertIn('--channel ' + channel, code)
                 if channel == 'stable':
                     self.assertIn('--release "$RELEASE_TAG"', code)
@@ -243,8 +241,15 @@ class ReleaseWorkflowTest(unittest.TestCase):
                             for artifact in ('install.sh', 'release-manifest.tsv', 'release-manifest.sig', 'SHA256SUMS'):
                                 self.assertIn('release-assets/' + artifact, step)
 
-    def test_beta_requires_all_profiles_and_gates_without_promoting_stable(self) -> None:
-        job = self.jobs['publish-beta']
+    def test_main_candidate_requires_all_profiles_and_gates_without_promoting_stable(self) -> None:
+        job = self.jobs['upload-stable-candidate-artifact']
+        _, environment = field(job, 'env', 4)
+        for variable, output in (('SOURCE_SHA', 'source_sha'), ('RELEASE_TAG', 'release_tag')):
+            value, _ = field(environment, variable, 6)
+            self.assertEqual(expression(value), SOURCE + output)
+        _, permissions = field(job, 'permissions', 4)
+        contents, _ = field(permissions, 'contents', 6)
+        self.assertEqual(contents, 'write')
         inline, following = field(job, 'needs', 4)
         for gate in ('build', 'backend', 'crash-diagnostics-smoke', 'clang-thread-safety', 'firewall-integration'):
             self.assertIn(gate, inline + following)
@@ -253,23 +258,84 @@ class ReleaseWorkflowTest(unittest.TestCase):
         for gate in ('frontend', 'transport-manager'):
             self.assertIn(gate, inline + following)
         job_steps = steps(job)
-        verify = shell(job_steps['Verify all beta IPKs and create checksums'])
+        verify = shell(job_steps['Verify all candidate IPKs and create checksums'])
         for config in ('aarch64-3.10', 'mips-3.4', 'mipsel-3.4'):
             self.assertIn(config, verify)
         self.assertIn('-eq 3', verify)
         self.assertIn('--expected-commit "$EXPECTED_COMMIT"', verify)
         self.assertIn('--arch "${config%%-*}"', verify)
         names = list(job_steps)
-        self.assertLess(names.index('Verify all beta IPKs and create checksums'), names.index(SIGNING_JOBS['publish-beta']))
-        publish = shell(job_steps['Publish Beta prerelease'])
-        self.assertIn('gh release create "$tag"', publish)
-        self.assertIn('--target "$SOURCE_SHA"', publish)
-        self.assertIn('--prerelease --latest=false', publish)
-        self.assertIn('tag="beta-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"', publish)
+        self.assertLess(names.index('Verify all candidate IPKs and create checksums'), names.index(SIGNING_JOBS['upload-stable-candidate-artifact']))
+        upload = job_steps['Upload stable candidate workflow artifact']
+        self.assertIn('name: keen-pbr-stable-candidate-ipk', upload)
+        publish = shell(job_steps['Publish new Beta Pre-release'])
+        self.assertLess(names.index('Upload stable candidate workflow artifact'), names.index('Publish new Beta Pre-release'))
+        self.assertIn('gh release create "$RELEASE_TAG"', publish)
+        self.assertIn('--target "$SOURCE_SHA" --prerelease --latest=false', publish)
+        self.assertIn('git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG"', publish)
+        self.assertIn('advance KEEN_PBR_RELEASE', publish)
+        self.assertIn('"$tag_status" -ne 2', publish)
+        self.assertNotIn('softprops/action-gh-release', job)
+        self.assertNotIn('make_latest:', job)
+        self.assertNotIn('--channel beta', job)
+        self.assertNotIn('beta-$GITHUB_RUN_ID', job)
         self.assertNotIn('delete-asset', job)
         self.assertNotIn('continue-on-error', job)
         trigger_text = self.text.split('\njobs:', 1)[0]
-        self.assertEqual(trigger_text.count('      - beta\n'), 2)
+        self.assertEqual(trigger_text.count('      - main\n'), 2)
+        self.assertNotIn('      - beta\n', trigger_text)
+
+    @unittest.skipUnless(shutil.which('bash'), 'publication fixtures require bash')
+    def test_publishers_never_replace_existing_release_assets_or_promote_on_rerun(self) -> None:
+        for name, job in self.jobs.items():
+            if 'gh release' in job or 'uses: softprops/action-gh-release@' in job:
+                self.assertIn(name, ('publish-release', 'upload-stable-candidate-artifact'))
+                condition, _ = field(job, 'if', 4)
+                intent = 'release' if name == 'publish-release' else 'candidate'
+                self.assertEqual(expression(condition), TRUSTED_PUBLISHER + SOURCE + f"{intent} == 'true'")
+                for forbidden in ('delete-asset', 'gh release edit', 'gh release upload', 'git push', '--force', 'softprops/action-gh-release'):
+                    self.assertNotIn(forbidden, job)
+                self.assertIn('--prerelease --latest=false', job)
+        _, body = field(steps(self.jobs['upload-stable-candidate-artifact'])['Publish new Beta Pre-release'], 'run', 8)
+        code = textwrap.dedent(body)
+        fake_commands = '''
+git() {
+  case "$1" in
+    rev-parse) printf '%s\\n' "$SOURCE_SHA" ;;
+    ls-remote) return "$FIXTURE_TAG_STATUS" ;;
+    *) return 99 ;;
+  esac
+}
+gh() {
+  printf '%s\\n' "$*" >> "$FIXTURE_CALLS"
+  return 0
+}
+'''
+        for scenario, tag_status, expected_exit, should_create in (
+            ('new tag', 2, 0, True),
+            ('existing tag and release', 0, 0, False),
+            ('remote failure', 128, 128, False),
+        ):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                calls = root / 'github-calls'
+                environment = dict(os.environ)
+                environment.update({
+                    'SOURCE_SHA': 'a' * 40, 'RELEASE_TAG': 'v3.3.0-sb.12',
+                    'GITHUB_REPOSITORY': 'blindtechnique/keen-pbr-sb',
+                    'FIXTURE_TAG_STATUS': str(tag_status), 'FIXTURE_CALLS': str(calls),
+                })
+                result = subprocess.run(['bash', '-c', fake_commands + code], cwd=root, env=environment, text=True, capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, expected_exit, result.stderr)
+                self.assertEqual(calls.exists(), should_create)
+                if should_create:
+                    command = calls.read_text(encoding='utf-8')
+                    self.assertIn('release create v3.3.0-sb.12', command)
+                    self.assertIn('--target ' + 'a' * 40, command)
+                    self.assertIn('--prerelease --latest=false', command)
+                if tag_status == 0:
+                    self.assertIn('already exists and was not changed', result.stdout)
+                    self.assertIn('advance KEEN_PBR_RELEASE', result.stdout)
 
     @unittest.skipUnless(shutil.which('bash'), 'workflow shell validation requires bash')
     def test_signing_steps_have_valid_runner_shell_syntax(self) -> None:

@@ -4,21 +4,21 @@ on:
   push:
     tags:
       - "v*"
-    # Alpha and next produce an aarch64 test IPK. Beta and release tags build
-    # all supported Keenetic profiles. Main requires a version tag to publish.
+    # Alpha and next produce an aarch64 test IPK. Main builds an all-profile
+    # Beta prerelease; promotion to Latest separately reuses its signed assets.
     branches:
       - alpha
-      - beta
+      - main
       - next
   pull_request:
     branches:
       - alpha
-      - beta
+      - main
       - next
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Existing tag to rebuild and publish (for example v3.0.7-sb.11)"
+        description: "Compatible tag to build a new Pre-release (for example v3.3.0-sb.12; published assets are not replaced)"
         required: false
         type: string
 
@@ -32,6 +32,7 @@ jobs:
       source_sha: ${{ steps.resolve.outputs.source_sha }}
       release_tag: ${{ steps.resolve.outputs.release_tag }}
       release: ${{ steps.resolve.outputs.release }}
+      candidate: ${{ steps.resolve.outputs.candidate }}
       channel: ${{ steps.resolve.outputs.channel }}
       build_matrix: ${{ steps.resolve.outputs.build_matrix }}
     steps:
@@ -500,39 +501,24 @@ jobs:
           fi
           cat RELEASE_BODY.md
 
-      - name: Drop stale assets from existing release
+      - name: Create GitHub Pre-release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # Recheck after validation/notes, immediately before the first write.
-          # A moved or deleted tag must not receive this run's old packages.
+          # Create only: a rerun must never replace assets or downgrade a
+          # release that has already been promoted to Latest.
           git fetch --no-tags --depth=1 origin "refs/tags/$RELEASE_TAG"
           test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$SOURCE_SHA"
-          if gh release view -- "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release view --json assets -q '.assets[].name' -- "$RELEASE_TAG" |
-              while IFS= read -r asset; do
-                echo "Removing stale asset: $asset"
-                gh release delete-asset -y -- "$RELEASE_TAG" "$asset" || true
-              done
-          fi
-
-      - name: Create or update GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          target_commitish: ${{ needs.resolve-source.outputs.source_sha }}
-          name: "keen-pbr-sb ${{ env.RELEASE_TAG }}"
-          body_path: RELEASE_BODY.md
-          files: |
-            release-assets/keen-pbr_*.ipk
-            release-assets/SHA256SUMS
-            release-assets/install.sh
-            release-assets/release-manifest.tsv
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --target "$SOURCE_SHA" --verify-tag --prerelease --latest=false \
+            --title "keen-pbr-sb $RELEASE_TAG — Beta" --notes-file RELEASE_BODY.md \
+            release-assets/keen-pbr_*.ipk release-assets/SHA256SUMS \
+            release-assets/install.sh release-assets/release-manifest.tsv \
             release-assets/release-manifest.sig
 
-  publish-beta:
-    if: github.repository == 'blindtechnique/keen-pbr-sb' && github.event_name != 'pull_request' && needs.resolve-source.outputs.channel == 'beta'
+  upload-stable-candidate-artifact:
+    if: github.repository == 'blindtechnique/keen-pbr-sb' && github.event_name != 'pull_request' && needs.resolve-source.outputs.candidate == 'true'
     needs:
       - resolve-source
       - build
@@ -544,6 +530,7 @@ jobs:
     permissions:
       contents: write
     env:
+      RELEASE_TAG: ${{ needs.resolve-source.outputs.release_tag }}
       SOURCE_SHA: ${{ needs.resolve-source.outputs.source_sha }}
     steps:
       - name: Checkout
@@ -562,14 +549,14 @@ jobs:
             packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr
           persist-credentials: false
 
-      - name: Download all beta IPKs
+      - name: Download all candidate IPKs
         uses: actions/download-artifact@v8
         with:
           pattern: keenetic-ipk-*
           merge-multiple: true
           path: release-assets
 
-      - name: Verify all beta IPKs and create checksums
+      - name: Verify all candidate IPKs and create checksums
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
@@ -586,7 +573,7 @@ jobs:
           cd release-assets
           sha256sum keen-pbr_*.ipk > SHA256SUMS
 
-      - name: Sign beta manifest and installer
+      - name: Sign stable candidate manifest and installer
         env:
           KEENETIC_RELEASE_SIGNING_KEY: ${{ secrets.KEENETIC_RELEASE_SIGNING_KEY }}
         run: |
@@ -594,7 +581,7 @@ jobs:
           umask 077
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           if [ -z "${KEENETIC_RELEASE_SIGNING_KEY:-}" ]; then
-            echo "::error::KEENETIC_RELEASE_SIGNING_KEY is not configured; beta was not published."
+            echo "::error::KEENETIC_RELEASE_SIGNING_KEY is not configured; candidate was not signed."
             exit 1
           fi
           signing_key=$(mktemp "$RUNNER_TEMP/keenetic-release-key.XXXXXX")
@@ -609,14 +596,14 @@ jobs:
             --assets release-assets --installer install.sh \
             --key "$signing_key" \
             --public-key .release-signing-tools/packages/keys/keenetic-release-public.pem \
-            --repository "$GITHUB_REPOSITORY" --channel beta \
-            --release "beta-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --source "$SOURCE_SHA" \
+            --repository "$GITHUB_REPOSITORY" --channel stable \
+            --release "$RELEASE_TAG" --source "$SOURCE_SHA" \
             --build "github-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 
-      - name: Upload beta workflow artifact
+      - name: Upload stable candidate workflow artifact
         uses: actions/upload-artifact@v7
         with:
-          name: keen-pbr-beta-ipk
+          name: keen-pbr-stable-candidate-ipk
           path: |
             release-assets/keen-pbr_*.ipk
             release-assets/SHA256SUMS
@@ -625,18 +612,27 @@ jobs:
             release-assets/release-manifest.sig
           if-no-files-found: error
 
-      - name: Publish Beta prerelease
+      - name: Publish new Beta Pre-release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          tag="beta-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          printf 'Beta build from `%s`.\n\nKeenetic profiles: aarch64-3.10, mips-3.4, mipsel-3.4.\n\nManual testing release; stable updates are unchanged. See [CHANGELOG](https://github.com/%s/blob/%s/CHANGELOG.md).\n' \
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null; then
+            echo "::notice::$RELEASE_TAG already exists and was not changed. The candidate artifact is saved; advance KEEN_PBR_RELEASE for a new release."
+            exit 0
+          else
+            tag_status=$?
+            if [ "$tag_status" -ne 2 ]; then
+              echo "::error::Unable to check the release tag; no release was created."
+              exit "$tag_status"
+            fi
+          fi
+          printf 'Beta build from `%s`.\n\nKeenetic profiles: aarch64-3.10, mips-3.4, mipsel-3.4.\n\nAutomatic stable updates remain unchanged until promotion. See [CHANGELOG](https://github.com/%s/blob/%s/CHANGELOG.md).\n' \
             "$SOURCE_SHA" "$GITHUB_REPOSITORY" "$SOURCE_SHA" > BETA_NOTES.md
-          gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
             --target "$SOURCE_SHA" --prerelease --latest=false \
-            --title "keen-pbr-sb Beta $GITHUB_RUN_ID.$GITHUB_RUN_ATTEMPT" \
-            --notes-file BETA_NOTES.md \
+            --title "keen-pbr-sb $RELEASE_TAG — Beta" --notes-file BETA_NOTES.md \
             release-assets/keen-pbr_*.ipk release-assets/SHA256SUMS \
             release-assets/install.sh release-assets/release-manifest.tsv \
             release-assets/release-manifest.sig

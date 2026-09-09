@@ -17,6 +17,7 @@ INSTALLER = ROOT / "install.sh"
 SELF_UPDATE = ROOT / "packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/self-update.sh"
 PACKAGE = "keen-pbr_3.3.0-test_keenetic_aarch64-3.10.ipk"
 PAYLOAD = b"release pin fixture, not an installable package\n"
+STABLE_RELEASE = "v3.3.0-sb.12"
 
 
 def function(text: str, name: str, next_name: str) -> str:
@@ -26,7 +27,8 @@ def function(text: str, name: str, next_name: str) -> str:
 @unittest.skipUnless(shutil.which("sh"), "POSIX shell is required")
 class UpdateReleasePinTest(unittest.TestCase):
     def run_download(self, requested: str, returned: str, *, pretty=False,
-                     bad_hash=False):
+                     bad_hash=False, update=False, legacy_updater=False,
+                     bad_signature=False):
         with tempfile.TemporaryDirectory(prefix="kpbr-release-pin-") as directory:
             root = Path(directory)
             (root / "payload").write_bytes(PAYLOAD)
@@ -43,14 +45,17 @@ class UpdateReleasePinTest(unittest.TestCase):
             (root / "sums").write_text(f"{digest}  {PACKAGE}\n", encoding="utf8")
             # This suite isolates release selection; cryptographic integration is
             # exercised separately by test_signed_update_integration.
-            (root / "verifier").write_text("#!/bin/sh\nexit 0\n", encoding="utf8")
+            (root / "verifier").write_text(
+                "#!/bin/sh\nexit " + ("1" if bad_signature else "0") + "\n",
+                encoding="utf8")
             source = INSTALLER.read_text(encoding="utf8")
+            # Run the actual argument/env initializer, not a copy of its pin
+            # logic. Nothing before cleanup() performs filesystem mutations.
+            initialize = source.split("\ncleanup() {", 1)[0]
             assets = "github_asset_urls() {" + function(source, "github_asset_urls", "detect_target")
             download = "download_package() {" + function(source, "download_package", "bootstrap_rescue_helpers")
             script = r'''
-set -eu
-REQUESTED_RELEASE_TAG=${KEEN_PBR_UPDATE_RELEASE_TAG:-}
-unset KEEN_PBR_UPDATE_RELEASE_TAG
+TMP_DIR=$FIXTURE_TMP_DIR
 GITHUB_API=https://api.github.com/repos
 PROJECT_REPOSITORY=blindtechnique/keen-pbr-sb
 TRUSTED_RELEASE_REPOSITORY=blindtechnique/keen-pbr-sb
@@ -70,10 +75,29 @@ fetch() {
     esac
 }
 '''
-            env = {**os.environ, "TMP_DIR": directory,
+            env = {**os.environ, "FIXTURE_TMP_DIR": directory,
                    "KEEN_PBR_UPDATE_RELEASE_TAG": requested}
+            shell = [shutil.which("busybox"), "sh"] if shutil.which("busybox") else ["sh"]
+            program = initialize + script + assets + download + "\ndownload_package\n"
+            if legacy_updater:
+                # Preserve stable11's raw-tag URL and exact --update-only
+                # child invocation. It does not supply the modern env handoff.
+                (root / "tagged-install.sh").write_text(program, encoding="utf8")
+                program = r'''
+set -eu
+release_tag=v3.3.0-sb.12
+INSTALLER="$FIXTURE_TMP_DIR/downloaded-install.sh"
+INSTALLER_URL="https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/$release_tag/install.sh"
+fetch_url() {
+    printf '%s\n' "$2" >> "$FIXTURE_TMP_DIR/requests"
+    cp "$FIXTURE_TMP_DIR/tagged-install.sh" "$1"
+}
+fetch_url "$INSTALLER" "$INSTALLER_URL"
+/bin/sh "$INSTALLER" --update
+'''
+            arguments = ["--update"] if update else []
             result = subprocess.run(
-                ["sh", "-c", script + assets + download + "\ndownload_package\n"],
+                [*shell, "-c", program, "fixture-install.sh", *arguments],
                 env=env, capture_output=True, text=True, timeout=10)
             requests = root / "requests"
             return result, requests.read_text().splitlines() if requests.exists() else []
@@ -91,6 +115,38 @@ fetch() {
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertTrue(requests[0].endswith("/releases/tags/v3.3.0-alpha.1"))
                 self.assertFalse(any(url.endswith("/latest") for url in requests))
+
+    def test_legacy_update_without_env_handoff_uses_its_compatible_source_tag(self):
+        result, requests = self.run_download("", STABLE_RELEASE, update=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(requests[0].endswith("/releases/tags/" + STABLE_RELEASE))
+        self.assertFalse(any(url.endswith("/latest") for url in requests))
+
+    def test_stable11_raw_tagged_installer_call_stays_on_that_release(self):
+        result, requests = self.run_download("", STABLE_RELEASE, legacy_updater=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(requests[0],
+                         f"https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/{STABLE_RELEASE}/install.sh")
+        self.assertTrue(requests[1].endswith("/releases/tags/" + STABLE_RELEASE))
+        self.assertFalse(any(url.endswith("/latest") for url in requests))
+
+    def test_explicit_verified_env_tag_takes_precedence_over_legacy_default(self):
+        result, requests = self.run_download("v3.3.1-sb.13", "v3.3.1-sb.13", update=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(requests[0].endswith("/releases/tags/v3.3.1-sb.13"))
+
+    def test_legacy_default_refuses_metadata_for_a_different_release(self):
+        result, requests = self.run_download("", "v3.3.1-sb.13", update=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("другой выпуск", result.stderr)
+        self.assertEqual(len(requests), 1)
+
+    def test_legacy_pin_does_not_bypass_signature_verification(self):
+        result, requests = self.run_download("", STABLE_RELEASE, update=True,
+                                             bad_signature=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Подпись пакета", result.stderr)
+        self.assertEqual(len(requests), 5)
 
     def test_metadata_for_another_tag_does_not_download_a_package(self):
         result, requests = self.run_download("v3.3.0", "v3.3.1")

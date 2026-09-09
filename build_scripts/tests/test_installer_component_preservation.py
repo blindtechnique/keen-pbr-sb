@@ -315,6 +315,86 @@ exit 0""")
             'UPDATE_ONLY=1\nrepair_interrupted_nfqws_bootstrap() { exit 99; }\nensure_release_verifier() { :; }')
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def release_dependency(self, *, present=False, fail_phase="", update=True):
+        self.prepare_feed()
+        self.old_pair()
+        config = self.opt / "etc/keen-pbr/config.json"
+        config.write_bytes(b'{"user_configuration":"preserve"}\n')
+        effects = self.root / "effects"
+        openssl = self.opt / "bin/openssl"
+        if present:
+            self.executable(openssl, "exit 0")
+        self.executable(self.opt / "bin/opkg", f'''printf 'opkg %s\\n' "$*" >> '{effects}'
+[ "$1" != '{fail_phase}' ] || exit 1
+case "$*" in
+    update) exit 0;;
+    'install openssl-util')
+        printf '#!/bin/sh\\nexit 0\\n' > '{openssl}'
+        chmod 0755 '{openssl}'
+        exit 0;;
+    *) exit 99;;
+esac''')
+        # Hide the host's OpenSSL; only our temporary /opt executable exists
+        # after fake Entware successfully installs the verifier dependency.
+        overrides = f'''UPDATE_ONLY={1 if update else 0}
+command() {{ return 1; }}
+prepare_release_verifier() {{ printf 'prepare verifier\\n' >> '{effects}'; }}'''
+        result = self.run_shell(("ensure_release_verifier",),
+            f"ensure_release_verifier\nprintf 'package verification phase\\n' >> '{effects}'", overrides)
+        self.assertEqual(self.feed.read_bytes(), self.old_feed)
+        self.assertEqual(self.feed.stat().st_mode & 0o777, 0o640)
+        self.assertEqual(config.read_bytes(), b'{"user_configuration":"preserve"}\n')
+        self.assert_old_pair()
+        return result, effects.read_text().splitlines() if effects.exists() else []
+
+    def test_legacy_update_bootstraps_only_openssl_before_package_verification(self):
+        result, effects = self.release_dependency()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(effects, ["opkg update", "opkg install openssl-util",
+                                   "prepare verifier", "package verification phase"])
+        self.assertTrue((self.opt / "bin/openssl").exists())
+
+    def test_existing_openssl_needs_no_entware_mutation_on_update(self):
+        result, effects = self.release_dependency(present=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(effects, ["prepare verifier", "package verification phase"])
+
+    def test_openssl_bootstrap_failure_stops_before_verifier_or_package_actions(self):
+        for phase in ("update", "install"):
+            with self.subTest(phase=phase):
+                effects_path = self.root / "effects"
+                effects_path.unlink(missing_ok=True)
+                result, effects = self.release_dependency(fail_phase=phase)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Установка keen-pbr-sb не началась", result.stderr)
+                expected = ["opkg update"]
+                if phase == "install":
+                    expected.append("opkg install openssl-util")
+                self.assertEqual(effects, expected)
+                self.assertFalse((self.opt / "bin/openssl").exists())
+
+    def test_first_install_keeps_existing_openssl_bootstrap_behavior(self):
+        result, effects = self.release_dependency(update=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(effects[:2], ["opkg update", "opkg install openssl-util"])
+
+    def test_signed_self_updater_still_requires_preinstalled_openssl(self):
+        source = (ROOT / "packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/self-update.sh").read_text()
+        start = source.index('if [ ! -r "$RELEASE_VERIFIER" ]')
+        end = source.index('\nfetch_url "$RELEASE_JSON" "$RELEASE_API"', start)
+        verifier = self.root / "verifier"
+        key = self.root / "key"
+        verifier.write_text("fixture")
+        key.write_text("fixture")
+        effects = self.root / "signed-effects"
+        self.executable(self.opt / "bin/opkg", f"printf opkg >> '{effects}'")
+        check = source[start:end].replace("/opt/", str(self.opt) + "/")
+        result = self.run_shell((), check + f"\nprintf package >> '{effects}'",
+            f"command() {{ return 1; }}\nRELEASE_VERIFIER='{verifier}'\nRELEASE_PUBLIC_KEY='{key}'")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("не найден OpenSSL", result.stdout)
+        self.assertFalse(effects.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
