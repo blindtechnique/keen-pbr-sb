@@ -7,6 +7,21 @@
 #include <vector>
 
 namespace keen_pbr3 {
+bool interface_outbounds_are_unreferenced(
+    const Config& config, const std::string& kernel_interface) {
+    if (kernel_interface.empty()) return false;
+    std::vector<DependencyTarget> targets;
+    if (config.outbounds) {
+        for (const auto& outbound : *config.outbounds) {
+            if (outbound.type == OutboundType::INTERFACE &&
+                outbound.interface == kernel_interface) {
+                targets.push_back({DependencyEntityKind::Outbound, outbound.tag, false});
+            }
+        }
+    }
+    return targets.empty() || analyze_dependencies(config, targets).references.empty();
+}
+
 namespace {
 
 void remove_fallback_detours(

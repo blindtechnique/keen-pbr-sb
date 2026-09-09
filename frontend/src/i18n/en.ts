@@ -1397,8 +1397,9 @@ export const enTranslation = {
       nativeDescription:
         "These are existing router-firmware interfaces. keen-pbr-sb currently only shows them and lets you point a route at them; create, edit, start, restart or delete the interface itself in the Keenetic web configurator.",
       orphan: "Routes without a tunnel",
+      nativeInterfaceNotFound: "KeeneticOS interface not found",
       orphanDescription:
-        "Normally there are none: a route is created together with its tunnel. These point at interfaces keen-pbr does not manage - for example, another Entware package's tunnel.",
+        "These saved routes have no linked tunnel in the panel, for example after a VPN was deleted in KeeneticOS or for another Entware package. Open a route to change its interface or delete it after reviewing its dependencies.",
     },
     refresh: "Refresh",
     add: "Add proxy or connect VPN",

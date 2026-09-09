@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <string>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
 
@@ -254,6 +255,114 @@ TEST_CASE("maintenance coordinator distinguishes contention") {
             &exit_code) == MaintenanceLockErrorKind::busy);
     CHECK(exit_code == 75);
     CHECK_NOTHROW(owner.verify_held());
+}
+
+TEST_CASE("maintenance recovery handoff returns the parent's real lease") {
+    MaintenanceTempDir temporary;
+    const auto helper = copy_real_helper(temporary.path);
+    const auto root = temporary.path / "root";
+    const auto options = real_options(helper, root);
+    MaintenanceCoordinator parent("lifecycle", options);
+    const MaintenanceLeaseHandoff handoff{
+        parent.borrow_owner_pid(), parent.borrow_token()};
+    const pid_t child = ::fork();
+    REQUIRE(child >= 0);
+    if (child == 0) {
+        int result = 0;
+        try {
+            MaintenanceCoordinator recovery("persistent-recovery", options, handoff);
+            recovery.verify_held();
+            if (recovery.borrow_owner_pid() != ::getpid() ||
+                recovery.guardian_pid() != -1 || recovery.reserve(0) != 1) {
+                result = 1;
+            }
+            try {
+                MaintenanceCoordinator contender("update", options);
+                result = 2;
+            } catch (const MaintenanceLockError& error) {
+                if (error.kind() != MaintenanceLockErrorKind::busy) result = 3;
+            }
+        } catch (...) {
+            result = 4;
+        }
+        ::_exit(result);
+    }
+    int status = 0;
+    REQUIRE(::waitpid(child, &status, 0) == child);
+    REQUIRE(WIFEXITED(status));
+    CHECK(WEXITSTATUS(status) == 0);
+    CHECK_NOTHROW(parent.verify_held());
+    CHECK(parent.reserve(1) == 2);
+}
+
+TEST_CASE("maintenance recovery rejected handoff leaves parent ownership intact") {
+    MaintenanceTempDir temporary;
+    const auto helper = copy_real_helper(temporary.path);
+    const auto root = temporary.path / "root";
+    const auto options = real_options(helper, root);
+    MaintenanceCoordinator parent("lifecycle", options);
+    MaintenanceLeaseHandoff handoff{
+        parent.borrow_owner_pid(), parent.borrow_token()};
+    std::optional<ScopedEnvironmentVariable> transfer_failure;
+    SUBCASE("invalid token") {
+        handoff.token += "invalid";
+    }
+    SUBCASE("transfer fails before ownership commit") {
+        transfer_failure.emplace("KEEN_PBR_UPDATE_LOCK_TEST_FAIL_BEFORE_COMMIT", "1");
+    }
+    const pid_t child = ::fork();
+    REQUIRE(child >= 0);
+    if (child == 0) {
+        try {
+            MaintenanceCoordinator recovery("persistent-recovery", options, handoff);
+        } catch (const MaintenanceLockError&) {
+            ::_exit(0);
+        } catch (...) {
+            ::_exit(2);
+        }
+        ::_exit(1);
+    }
+    int status = 0;
+    REQUIRE(::waitpid(child, &status, 0) == child);
+    REQUIRE(WIFEXITED(status));
+    CHECK(WEXITSTATUS(status) == 0);
+    CHECK_NOTHROW(parent.verify_held());
+    CHECK(parent.reserve(0) == 1);
+}
+
+TEST_CASE("maintenance recovery initialization failure returns transferred lease") {
+    MaintenanceTempDir temporary;
+    const auto helper = copy_real_helper(temporary.path);
+    const auto root = temporary.path / "root";
+    const auto options = real_options(helper, root);
+    MaintenanceCoordinator parent("lifecycle", options);
+    const auto wrapper = temporary.path / "bad-generation.sh";
+    write_executable(wrapper,
+        "#!/bin/sh\nif [ \"$1\" = generation ]; then printf 'invalid\\n'; "
+        "else exec \"" + helper.string() + "\" \"$@\"; fi\n");
+    auto recovery_options = options;
+    recovery_options.helper_path = wrapper;
+    const MaintenanceLeaseHandoff handoff{
+        parent.borrow_owner_pid(), parent.borrow_token()};
+    const pid_t child = ::fork();
+    REQUIRE(child >= 0);
+    if (child == 0) {
+        try {
+            MaintenanceCoordinator recovery(
+                "persistent-recovery", recovery_options, handoff);
+        } catch (const MaintenanceLockError& error) {
+            ::_exit(error.kind() == MaintenanceLockErrorKind::malformed_response ? 0 : 2);
+        } catch (...) {
+            ::_exit(3);
+        }
+        ::_exit(1);
+    }
+    int status = 0;
+    REQUIRE(::waitpid(child, &status, 0) == child);
+    REQUIRE(WIFEXITED(status));
+    CHECK(WEXITSTATUS(status) == 0);
+    CHECK_NOTHROW(parent.verify_held());
+    CHECK(parent.reserve(0) == 1);
 }
 
 TEST_CASE("maintenance coordinator reserves generation with CAS") {

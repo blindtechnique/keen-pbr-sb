@@ -164,6 +164,7 @@ import {
   getHiddenNativeInterfaceIds,
   updateHiddenNativeInterfacePreference,
 } from "@/lib/hidden-native-interfaces"
+import { selectTransportOrphanOutbounds } from "@/lib/transport-orphan-outbounds"
 
 type NativeDeleteSelection = Readonly<{
   id: string
@@ -1751,41 +1752,19 @@ export function TransportsPage({
   // текущей вкладке: маршрут выключенного туннеля принадлежит его строке, а
   // спрятанный интерфейс прошивки не делает свой маршрут «сиротой». Иначе
   // переключение вкладки-провайдера превращало чужие туннели в «сирот».
-  const linkedOutboundTags = new Set<string>()
-  for (const item of managedItems) {
-    const bound = interfaceOutboundByInterface.get(item.interface)
-    if (bound) linkedOutboundTags.add(bound.tag)
-    linkedOutboundTags.add(item.tag)
-  }
-  for (const spec of configured) {
-    const bound = interfaceOutboundByInterface.get(spec.interface)
-    if (bound) linkedOutboundTags.add(bound.tag)
-    linkedOutboundTags.add(spec.tag)
-  }
-  for (const nativeInterface of nativeInterfaces) {
-    const bound = nativeInterface.kernelName
-      ? interfaceOutboundByInterface.get(nativeInterface.kernelName)
-      : undefined
-    if (bound) linkedOutboundTags.add(bound.tag)
-  }
-  // Члены групп «сиротами» не считаются: их видно в составе группы, и
-  // показывать их ещё раз отдельными строками — тот же дубль, от которого
-  // владелец избавлялся, сливая туннели с маршрутами.
-  const groupMemberTags = new Set<string>()
-  for (const outbound of keenConfig?.outbounds ?? []) {
-    if (outbound.type !== "urltest") continue
-    for (const group of outbound.outbound_groups ?? []) {
-      for (const member of group.outbounds) groupMemberTags.add(member)
-    }
-  }
-  const orphanOutbounds = (keenConfig?.outbounds ?? []).filter(
-    (outbound) =>
-      outbound.type === "interface" &&
-      !linkedOutboundTags.has(outbound.tag) &&
-      !groupMemberTags.has(outbound.tag)
-  )
+  const { outbounds: orphanOutbounds, unrepresentedNativeInterfaces } =
+    selectTransportOrphanOutbounds({
+      outbounds: keenConfig?.outbounds ?? [],
+      managedTransports: managedItems,
+      configuredTransports: configured,
+      nativeInterfaces,
+      inventoryAuthoritative: nativeInventoryAuthoritative,
+    })
   const orphanRows = orphanOutbounds.map((outbound) => {
     const runtimeInterface = runtimeInterfaceByName.get(
+      outbound.interface ?? ""
+    )
+    const unrepresentedNative = unrepresentedNativeInterfaces.has(
       outbound.interface ?? ""
     )
     const editHref = `/outbounds/${encodeURIComponent(outbound.tag)}/edit?view=page`
@@ -1805,13 +1784,19 @@ export function TransportsPage({
       </span>,
       <KeeneticStatus
         key="state"
-        tone={runtimeInterface?.status === "up" ? "success" : "neutral"}
+        tone={
+          !unrepresentedNative && runtimeInterface?.status === "up"
+            ? "success"
+            : "neutral"
+        }
       >
-        {runtimeInterface
-          ? runtimeInterface.status === "up"
-            ? t("pages.settings.general.inboundInterfacesStatusUp")
-            : t("pages.settings.general.inboundInterfacesStatusDown")
-          : t("runtime.outboundStatus.unknown")}
+        {unrepresentedNative
+          ? t("transports.groups.nativeInterfaceNotFound")
+          : runtimeInterface
+            ? runtimeInterface.status === "up"
+              ? t("pages.settings.general.inboundInterfacesStatusUp")
+              : t("pages.settings.general.inboundInterfacesStatusDown")
+            : t("runtime.outboundStatus.unknown")}
       </KeeneticStatus>,
       <span className="text-xs text-muted-foreground" key="latency">
         —

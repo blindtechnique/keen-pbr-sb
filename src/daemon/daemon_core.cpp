@@ -46,6 +46,7 @@
 #include "../log/nfqws_log_maintenance.hpp"
 #ifdef WITH_API
 #include "../config/subscription_refresh.hpp"
+#include "../api/handler_transports.hpp"
 #endif
 #include "../dns/dns_router.hpp"
 #include "../dns/dnsmasq_access_policy.hpp"
@@ -4417,6 +4418,12 @@ void Daemon::complete_runtime_cold_boot_attempt(
     }
     const bool terminal_transient = terminal.transient;
     const bool terminal_ambiguous = terminal.commit_ambiguous;
+    // Preserve the failure before moving the terminal into the planner below.
+    std::string terminal_failure_detail;
+    try {
+        terminal_failure_detail = terminal.detail;
+    } catch (...) {
+    }
     RuntimeColdBootCandidateAction action =
         RuntimeColdBootCandidateAction::request_fresh_recovery;
     try {
@@ -4482,6 +4489,18 @@ void Daemon::complete_runtime_cold_boot_attempt(
             schedule_runtime_cold_boot_recovery(
                 transaction, "transient clean cold-boot failure");
             return;
+        }
+        // This attempt has finished: do not leave an idle service in starting,
+        // which would also reject the user's normal Start action indefinitely.
+        try {
+            runtime_state_store_.set_routing_runtime_active(false);
+            const auto detail = terminal_failure_detail.empty()
+                ? std::string("startup routing initialization failed")
+                : terminal_failure_detail;
+            transition_runtime_or_throw(RuntimeState::broken, detail.c_str());
+            publish_runtime_state();
+            Logger::instance().error("Startup routing initialization failed: {}", detail);
+        } catch (...) {
         }
         open_runtime_cold_boot_services(transaction, /*runtime_ready=*/false);
         return;
@@ -15040,11 +15059,12 @@ void Daemon::run() {
                 if (maintenance_pending->exchange(true)) return;
 #ifdef WITH_API
                 const auto subscriptions = api_ctx_ ? api_ctx_->subscription_refresh_service : nullptr;
+                auto* native_metadata_context = routing_runtime_active() ? api_ctx_.get() : nullptr;
 #endif
                 const bool queued = blocking_executor_.try_post("log-subscription-maintenance",
                     [this, maintenance_pending
 #ifdef WITH_API
-                     , subscriptions
+                     , subscriptions, native_metadata_context
 #endif
                     ]() {
                         struct Finish {
@@ -15066,6 +15086,17 @@ void Daemon::run() {
                                 }
                             } catch (...) {
                                 Logger::instance().warn("Subscription auto-refresh failed");
+                            }
+                        }
+                        if (native_metadata_context && running_.load()) {
+                            try {
+                                reconcile_deleted_native_transports(*native_metadata_context);
+                            } catch (const ApiError& error) {
+                                // User work owns the ordinary commit lane first.
+                                // The next existing maintenance tick can retry.
+                                Logger::instance().debug("Native metadata cleanup deferred: {}", error.what());
+                            } catch (...) {
+                                Logger::instance().debug("Native metadata cleanup is not available this pass");
                             }
                         }
 #endif

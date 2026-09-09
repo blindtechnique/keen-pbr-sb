@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <cstdlib>
+#include <limits>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -172,21 +174,20 @@ ProbeResult probe_recovery_state(
 const std::vector<std::string>&
 managed_process_names(
     backup::RecoveryOperation operation) {
-    (void)operation;
-    // A config-save transaction can own both config.json and
-    // transports.json.  The preflight deliberately does not partially parse
-    // active.json before the RecoveryCoordinator verifies the journal, so use
-    // one conservative offline boundary for both operations.  This prevents a
-    // live transport-manager from rewriting transports.json while recovery is
-    // restoring the exact snapshot.
-    static const std::vector<std::string> names{
+    // Config saves own config.json and possibly transports.json, never the
+    // separately managed nfqws files. Leave nfqws running during their recovery.
+    static const std::vector<std::string> config_names{
+        "keen-pbr", "transport-manager", "sing-box",
+    };
+    static const std::vector<std::string> restore_names{
         "keen-pbr",
         "transport-manager",
         "nfqws2",
         "nfqws",
         "sing-box",
     };
-    return names;
+    return operation == backup::RecoveryOperation::config_save
+        ? config_names : restore_names;
 }
 
 bool production_runtime_active(
@@ -496,8 +497,24 @@ int run_recover_persistent_state_command() {
     options.layout = production_layout();
     options.lease_factory =
         [](const std::string& operation) {
+            MaintenanceLeaseHandoff handoff;
+            const char* pid = std::getenv("KEEN_PBR_UPDATE_LOCK_PID");
+            const char* token = std::getenv("KEEN_PBR_UPDATE_LOCK_TOKEN");
+            if (pid && *pid && token && *token) {
+                char* end = nullptr;
+                errno = 0;
+                const long value = std::strtol(pid, &end, 10);
+                if (errno != 0 || !end || *end || value <= 1 ||
+                    value > std::numeric_limits<pid_t>::max()) {
+                    throw MaintenanceLockError(
+                        MaintenanceLockErrorKind::unsafe_state,
+                        "Invalid inherited recovery maintenance owner");
+                }
+                handoff.owner_pid = static_cast<pid_t>(value);
+                handoff.token = token;
+            }
             return std::make_unique<MaintenanceCoordinator>(
-                operation);
+                operation, std::move(handoff));
         };
     options.runtime_active_probe =
         [](backup::RecoveryOperation operation) {

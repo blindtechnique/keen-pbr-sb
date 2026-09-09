@@ -6,7 +6,7 @@ umask 077
 PROJECT_REPOSITORY="${MYKEENPBR_REPOSITORY:-blindtechnique/keen-pbr-sb}"
 TRUSTED_RELEASE_REPOSITORY="blindtechnique/keen-pbr-sb"
 GITHUB_API="https://api.github.com/repos"
-STABLE_RELEASE_TAG='v3.3.1-sb.12'
+STABLE_RELEASE_TAG='v3.3.2-sb.12'
 SING_BOX_PINNED_VERSION="1.13.14"
 TMP_DIR=
 TRANSPORT_CONFIG="/opt/etc/keen-pbr/transports.json"

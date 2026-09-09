@@ -886,6 +886,7 @@ struct MaintenanceCoordinator::RuntimeOptions {
     std::chrono::milliseconds ready_timeout;
     std::chrono::milliseconds terminate_grace;
     bool production_helper{false};
+    MaintenanceLeaseHandoff handoff;
 };
 
 MaintenanceLockError::MaintenanceLockError(
@@ -905,7 +906,7 @@ int MaintenanceLockError::helper_exit_code() const noexcept {
 }
 
 MaintenanceCoordinator::MaintenanceCoordinator(
-    std::string operation) {
+    std::string operation, MaintenanceLeaseHandoff handoff) {
     start(
         std::move(operation),
         {
@@ -916,13 +917,15 @@ MaintenanceCoordinator::MaintenanceCoordinator(
             std::chrono::seconds{3},
             std::chrono::milliseconds{250},
             true,
+            std::move(handoff),
         });
 }
 
 #ifdef KEEN_PBR3_TESTING
 MaintenanceCoordinator::MaintenanceCoordinator(
     std::string operation,
-    MaintenanceCoordinatorTestOptions options) {
+    MaintenanceCoordinatorTestOptions options,
+    MaintenanceLeaseHandoff handoff) {
     start(
         std::move(operation),
         {
@@ -935,6 +938,7 @@ MaintenanceCoordinator::MaintenanceCoordinator(
             options.ready_timeout,
             options.terminate_grace,
             false,
+            std::move(handoff),
         });
 }
 #endif
@@ -998,6 +1002,49 @@ void MaintenanceCoordinator::start(
             "Maintenance helper protocol 3 is required");
     }
     drain_orphaned_leases();
+
+    if (options.handoff.owner_pid > 1 || !options.handoff.token.empty()) {
+        const auto& handoff = options.handoff;
+        const auto token_operation = handoff.token.substr(0, handoff.token.find('.'));
+        if (handoff.owner_pid <= 1 || handoff.owner_pid == owner_pid_ ||
+            !valid_operation(token_operation) ||
+            !valid_token(handoff.token, token_operation)) {
+            throw MaintenanceLockError(
+                MaintenanceLockErrorKind::unsafe_state,
+                "Invalid inherited maintenance handoff");
+        }
+        token_ = handoff.token;
+        handoff_parent_pid_ = handoff.owner_pid;
+        try {
+            // Reuse the init scripts' ownership transfer, never release then
+            // reacquire. The child PID protects its own in-flight recovery if
+            // its parent exits, without creating another guardian or lock.
+            const auto transfer = run_helper_command(
+                helper_path_, rescue_root_,
+                {"transfer", std::to_string(handoff_parent_pid_), token_,
+                 std::to_string(owner_pid_)},
+                options.command_timeout, options.terminate_grace);
+            if (require_single_line("Maintenance ownership handoff", transfer) != token_) {
+                throw MaintenanceLockError(
+                    MaintenanceLockErrorKind::malformed_response,
+                    "Maintenance ownership handoff returned a different token");
+            }
+            const auto generation = require_single_line(
+                "Inherited maintenance generation",
+                run_helper_command(helper_path_, rescue_root_, {"generation"},
+                                   options.command_timeout, options.terminate_grace));
+            if (!canonical_decimal(generation, kMaxGeneration, base_generation_)) {
+                throw MaintenanceLockError(
+                    MaintenanceLockErrorKind::malformed_response,
+                    "Inherited maintenance generation is invalid");
+            }
+            verify_held();
+            return;
+        } catch (...) {
+            release_noexcept();
+            throw;
+        }
+    }
 
     int control_pipe[2] = {-1, -1};
     int status_pipe[2] = {-1, -1};
@@ -1199,15 +1246,15 @@ std::uint32_t MaintenanceCoordinator::base_generation() const noexcept {
 }
 
 void MaintenanceCoordinator::verify_held() {
-    if (guardian_pid_ <= 1 || control_fd_ < 0) {
+    if (handoff_parent_pid_ <= 1 && (guardian_pid_ <= 1 || control_fd_ < 0)) {
         throw MaintenanceLockError(
             MaintenanceLockErrorKind::guardian_died,
             "Maintenance guardian is not running");
     }
     int status = 0;
-    const pid_t waited =
-        ::waitpid(guardian_pid_, &status, WNOHANG);
-    if (waited == guardian_pid_ ||
+    const pid_t waited = guardian_pid_ > 1
+        ? ::waitpid(guardian_pid_, &status, WNOHANG) : 0;
+    if ((guardian_pid_ > 1 && waited == guardian_pid_) ||
         (waited < 0 && errno != EINTR)) {
         if (control_fd_ >= 0) {
             (void)::close(control_fd_);
@@ -1232,7 +1279,7 @@ void MaintenanceCoordinator::verify_held() {
     if (result.exit_code != 0 || result.timed_out ||
         result.output_overflow) {
         status = 0;
-        const bool guardian_reaped = reap_until(
+        const bool guardian_reaped = guardian_pid_ > 1 && reap_until(
             guardian_pid_,
             Clock::now() + std::chrono::milliseconds{20},
             status);
@@ -1423,6 +1470,27 @@ std::string MaintenanceCoordinator::borrow_token() const {
 }
 
 void MaintenanceCoordinator::release_noexcept() noexcept {
+    if (handoff_parent_pid_ > 1) {
+        // A nested recovery returns the unchanged lease to its still-live
+        // init caller. If the caller died, release only our exact own record.
+        try {
+            const auto returned = run_helper_command(
+                helper_path_, rescue_root_,
+                {"transfer", std::to_string(owner_pid_), token_,
+                 std::to_string(handoff_parent_pid_)},
+                std::chrono::milliseconds{command_timeout_ms_},
+                std::chrono::milliseconds{terminate_grace_ms_});
+            if (returned.exit_code == 0 && !returned.timed_out &&
+                !returned.output_overflow) {
+                handoff_parent_pid_ = -1;
+                token_.clear();
+                owner_pid_ = -1;
+                return;
+            }
+        } catch (...) {
+        }
+        handoff_parent_pid_ = -1;
+    }
     if (control_fd_ >= 0) {
         (void)::close(control_fd_);
         control_fd_ = -1;

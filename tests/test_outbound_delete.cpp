@@ -7,6 +7,34 @@
 #include <algorithm>
 
 namespace keen_pbr3 {
+TEST_CASE("external native metadata cleanup retains every dependent outbound") {
+    Config config;
+    Outbound vpn;
+    vpn.tag = "native";
+    vpn.type = OutboundType::INTERFACE;
+    vpn.interface = "nwg4";
+    config.outbounds = std::vector<Outbound>{vpn};
+    CHECK(interface_outbounds_are_unreferenced(config, "nwg4"));
+    CHECK(interface_outbounds_are_unreferenced(config, "nwg9"));
+    CHECK_FALSE(interface_outbounds_are_unreferenced(config, ""));
+
+    RouteRule rule;
+    rule.outbound = vpn.tag;
+    rule.enabled = false;
+    config.route = RouteConfig{};
+    config.route->rules = std::vector<RouteRule>{rule};
+    CHECK_FALSE(interface_outbounds_are_unreferenced(config, "nwg4"));
+    config.route.reset();
+    Outbound group;
+    group.tag = "group";
+    group.type = OutboundType::URLTEST;
+    OutboundGroup members;
+    members.outbounds = {vpn.tag};
+    group.outbound_groups = std::vector<OutboundGroup>{members};
+    config.outbounds->push_back(group);
+    CHECK_FALSE(interface_outbounds_are_unreferenced(config, "nwg4"));
+}
+
 namespace {
 
 Outbound interface_outbound(const std::string& tag) {
