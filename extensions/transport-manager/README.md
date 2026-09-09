@@ -1,4 +1,4 @@
-# MyKeenPBR transport manager
+# keen-pbr-sb transport manager
 
 Локальный companion для Keenetic создаёт и контролирует transport-интерфейсы, а
 `keen-pbr` остаётся владельцем policy routing, списков и failover.

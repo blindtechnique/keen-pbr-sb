@@ -22,14 +22,14 @@ Alpha устанавливается только на тестовый роут
 
 ```powershell
 $RouterHost = "адрес-роутера"
-$SshPort = 222
+$SshPort = Read-Host 'Укажите SSH-порт вашего роутера'
 ssh -p $SshPort "root@$RouterHost"
 ```
 
 ## 2. Установка
 
 1. Дождитесь зелёного workflow ветки `alpha`.
-2. Запустите `install-alpha-build.bat` из каталога MyKeenPBR.
+2. Запустите `install-alpha-build.bat` из каталога проекта.
 3. Проверьте SHA256 и имя скачанного IPK в выводе установщика.
 4. После `OK-INSTALLED` обновите страницу панели один раз через `Ctrl+F5`.
 

@@ -124,7 +124,10 @@ for index in "${!bashism_patterns[@]}"; do
     # Awk's portable `function name(...)` syntax is not shell code. Mask only
     # a lexically identified single-quoted awk program, preserving every line
     # number and all surrounding shell text for the normal bashism scan.
+    # Blank comment-only lines without shifting diagnostics or removing code
+    # before an inline comment. Mentioning `source` is not executing it.
     if hits="$(python3 build_scripts/mask_awk_for_shell_scan.py "$file" |
+               sed 's/^[[:space:]]*#.*$//' |
                grep -nE "$pattern" 2>/dev/null)"; then
       while IFS= read -r line; do
         [ -n "$line" ] || continue
