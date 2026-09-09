@@ -6,22 +6,26 @@
 
 Нужны Keenetic/Netcraze с Entware в `/opt`, SSH-доступ от `root` и компоненты прошивки для policy routing и netfilter. Для правил по доменам клиенты должны использовать DNS роутера.
 
-Перед выполнением команды проверьте наличие `v3.3.0-sb.12` и пакета для своей архитектуры в [Releases](https://github.com/blindtechnique/keen-pbr-sb/releases). Команда ниже устанавливает именно этот выпуск, независимо от того, какой выпуск назначен стабильным:
+Для обычной установки последней стабильной версии используйте команду с `wget` из [README](../README.md#установка). Команды ниже нужны только для установки конкретной тестовой версии.
+
+При переходе со старых выпусков учитывайте совместимость: новый установщик принимает подписанные пакеты. Если в Latest ещё находится неподписанный `v3.0.7-sb.11`, он остановится до установки пакета. Дождитесь подписанного стабильного выпуска либо явно выберите тестовый выпуск командой ниже.
+
+Перед их выполнением проверьте наличие `v3.3.0-sb.12` и пакета для своей архитектуры в [Releases](https://github.com/blindtechnique/keen-pbr-sb/releases). Команда ниже устанавливает именно этот выпуск, независимо от того, какой выпуск назначен стабильным:
 
 ```sh
 (
   set -e
   installer=$(mktemp /tmp/keen-pbr-sb-install.XXXXXX)
   trap 'rm -f "$installer"' EXIT
-  curl -fL https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/v3.3.0-sb.12/install.sh -o "$installer"
+  wget -O "$installer" https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/v3.3.0-sb.12/install.sh
   KEEN_PBR_UPDATE_RELEASE_TAG=v3.3.0-sb.12 sh "$installer"
 )
 ```
 
-Если `curl` отсутствует, замените строку загрузки на:
+Если вы используете уже установленный `curl`, замените строку загрузки на:
 
 ```sh
-wget -O "$installer" https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/v3.3.0-sb.12/install.sh
+curl -fL https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/v3.3.0-sb.12/install.sh -o "$installer"
 ```
 
 Установщик определяет архитектуру, проверяет пакет и предлагает настройку авторизации, DNS и дополнительных компонентов. Закреплённая для этого выпуска версия sing-box — **1.13.14**; уже установленный sing-box можно сохранить. nfqws2 устанавливается официальным пакетом отдельно, с согласия пользователя.
@@ -43,7 +47,7 @@ wget -O "$installer" https://raw.githubusercontent.com/blindtechnique/keen-pbr-s
   set -e
   installer=$(mktemp /tmp/keen-pbr-sb-install.XXXXXX)
   trap 'rm -f "$installer"' EXIT
-  curl -fL https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/v3.3.0-sb.12/install.sh -o "$installer"
+  wget -O "$installer" https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/v3.3.0-sb.12/install.sh
   KEEN_PBR_UPDATE_RELEASE_TAG=v3.3.0-sb.12 sh "$installer" --update
 )
 ```
@@ -74,7 +78,6 @@ wget -O "$installer" https://raw.githubusercontent.com/blindtechnique/keen-pbr-s
 | `trojan://`, `ss://` | Trojan и Shadowsocks |
 | `hysteria2://`, `hy2://`, `tuic://` | Hysteria2 и TUIC |
 | `anytls://` | AnyTLS |
-| `naive+https://`, `naive+quic://`, `naive://` | NaiveProxy; нужен дополнительный компонент |
 | `socks://`, `socks5://`, `http://`, `https://` | SOCKS и HTTP-прокси |
 | JSON | Outbound, поддерживаемый установленной сборкой sing-box |
 
