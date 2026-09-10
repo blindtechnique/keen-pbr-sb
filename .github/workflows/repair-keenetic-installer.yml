@@ -64,10 +64,10 @@ jobs:
           verifier=packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/release-verify.sh
           key=packages/keys/keenetic-release-public.pem
           busybox sh "$verifier" repair/original/release-manifest.tsv repair/original/release-manifest.sig "$key" "$GITHUB_REPOSITORY" stable "$RELEASE_TAG" installer any any install.sh repair/original/install.sh
+          # Package provenance comes from the authenticated pinned manifest.
+          # The tag may already carry an installer-only repair, not new IPKs.
           PACKAGE_SOURCE=$(awk -F '\t' '$1 == "source" {print $2}' repair/original/release-manifest.tsv)
           [[ "$PACKAGE_SOURCE" =~ ^[0-9a-f]{40}$ ]]
-          git fetch --no-tags --depth=1 origin "refs/tags/$RELEASE_TAG"
-          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$PACKAGE_SOURCE"
           printf 'PACKAGE_SOURCE=%s\n' "$PACKAGE_SOURCE" >> "$GITHUB_ENV"
           shopt -s nullglob
           packages=(repair/original/*.ipk)
@@ -105,7 +105,7 @@ jobs:
           trap 'rm -f -- "$signing_key"' EXIT
           printf '%s\n' "$KEENETIC_RELEASE_SIGNING_KEY" > "$signing_key"
           unset KEENETIC_RELEASE_SIGNING_KEY
-          # v1 source stays the package/tag commit; signed build records the
+          # v1 source stays the package commit; signed build records the
           # separate, immutable installer source without changing the schema.
           python3 build_scripts/sign-keenetic-release.py --assets repair/candidate --installer install.sh --key "$signing_key" --public-key packages/keys/keenetic-release-public.pem --repository "$GITHUB_REPOSITORY" --channel stable --release "$RELEASE_TAG" --source "$PACKAGE_SOURCE" --build "installer-${INSTALLER_SHA}-github-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           for directory in original candidate; do
@@ -147,4 +147,4 @@ jobs:
           cmp repair/tag-before repair/tag-after
           gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .id > repair/latest-after
           cmp repair/latest-before repair/latest-after
-          printf 'Installer repaired from %s; package/tag source remains %s. All three IPKs and SHA256SUMS are unchanged; Pre-release and Latest are unchanged.\n' "$INSTALLER_SHA" "$PACKAGE_SOURCE" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Installer repaired from %s; package source remains %s. All three IPKs and SHA256SUMS are unchanged; Pre-release and Latest are unchanged.\n' "$INSTALLER_SHA" "$PACKAGE_SOURCE" >> "$GITHUB_STEP_SUMMARY"

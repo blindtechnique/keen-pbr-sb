@@ -41,8 +41,18 @@ class InstallerRepairWorkflowTest(unittest.TestCase):
         self.assertIn("for profile in aarch64-3.10 mips-3.4 mipsel-3.4; do", self.workflow)
         self.assertIn('stable "$RELEASE_TAG" package "${profile%%-*}" "${profile#*-}"', self.workflow)
         self.assertIn('--expected-commit "${PACKAGE_SOURCE:0:12}"', self.workflow)
-        self.assertIn('test "$(git rev-parse \'FETCH_HEAD^{commit}\')" = "$PACKAGE_SOURCE"', self.workflow)
         self.assertIn("cmp repair/original/SHA256SUMS repair/expected-SHA256SUMS", self.workflow)
+
+    def test_installer_only_tag_repair_does_not_replace_package_provenance(self):
+        source = 'PACKAGE_SOURCE=$(awk -F \'\\t\' \'$1 == "source" {print $2}\' repair/original/release-manifest.tsv)'
+        self.assertIn(source, self.workflow)
+        verified = 'stable "$RELEASE_TAG" installer any any install.sh repair/original/install.sh'
+        self.assertLess(self.workflow.index(verified), self.workflow.index(source))
+        self.assertNotIn("FETCH_HEAD", self.workflow)
+        self.assertEqual(len(re.findall(r"(?m)^\s*PACKAGE_SOURCE=", self.workflow)), 1)
+        self.assertIn("cmp repair/tag-before repair/tag-current", self.workflow)
+        self.assertIn("cmp repair/tag-before repair/tag-after", self.workflow)
+        self.assertNotIn("package/tag", self.workflow)
 
     def test_mixed_source_provenance_does_not_relabel_packages(self):
         signer = next(line for line in self.workflow.splitlines()
