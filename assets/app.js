@@ -95,8 +95,25 @@
     .then((r) => (r.ok ? r.json() : null))
     .then((d) => {
       if (!d || !d.tag_name) return;
-      const el = document.querySelector('.badges .badge:nth-child(2)');
-      if (el) el.textContent = 'Последний релиз ' + d.tag_name;
+      const el = document.getElementById('latest-release');
+      if (el) {
+        el.textContent = 'Последний стабильный ' + d.tag_name;
+        el.href = 'https://github.com/blindtechnique/keen-pbr-sb/releases/tag/' + encodeURIComponent(d.tag_name);
+      }
     })
     .catch(() => {});
+
+  // Promotion removes Beta without changing the illustrated release identity.
+  const currentRelease = document.getElementById('current-release');
+  if (currentRelease) {
+    const tag = currentRelease.dataset.tag;
+    fetch('https://api.github.com/repos/blindtechnique/keen-pbr-sb/releases/tags/' + encodeURIComponent(tag))
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!d || d.tag_name !== tag || d.draft) return;
+        currentRelease.textContent = tag + (d.prerelease ? ' · Beta' : '');
+        currentRelease.href = 'https://github.com/blindtechnique/keen-pbr-sb/releases/tag/' + encodeURIComponent(tag);
+      })
+      .catch(() => {});
+  }
 })();
