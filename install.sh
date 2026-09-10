@@ -680,11 +680,23 @@ bootstrap_rescue_helpers() {
         [ -f "$lock_source" ] && [ ! -L "$lock_source" ] &&
         [ -f "$metadata_source" ] && [ ! -L "$metadata_source" ] ||
         die "rescue helper в IPK имеет небезопасный тип"
-    /bin/sh -n "$rescue_source" || die "получен повреждённый rescue helper"
-    /bin/sh -n "$startup_guard_source" ||
+    # Some Keenetic firmware shells reject -n. Prefer Entware's POSIX shell,
+    # and probe syntax-check support before attributing failure to a helper.
+    rescue_syntax_shell=""
+    for rescue_shell_candidate in /opt/bin/sh /opt/bin/ash /bin/sh /bin/ash; do
+        if [ -x "$rescue_shell_candidate" ] &&
+            "$rescue_shell_candidate" -n -c ':' >/dev/null 2>&1; then
+            rescue_syntax_shell="$rescue_shell_candidate"
+            break
+        fi
+    done
+    [ -n "$rescue_syntax_shell" ] ||
+        die "не найдена оболочка для проверки синтаксиса; файлы восстановления не изменены"
+    "$rescue_syntax_shell" -n "$rescue_source" || die "получен повреждённый rescue helper"
+    "$rescue_syntax_shell" -n "$startup_guard_source" ||
         die "получен повреждённый startup guard"
-    /bin/sh -n "$lock_source" || die "получен повреждённый update lock helper"
-    /bin/sh -n "$metadata_source" ||
+    "$rescue_syntax_shell" -n "$lock_source" || die "получен повреждённый update lock helper"
+    "$rescue_syntax_shell" -n "$metadata_source" ||
         die "получен повреждённый metadata helper"
 
     [ ! -L "$RESCUE_DIR" ] &&

@@ -85,6 +85,137 @@ tar() { "$BUSYBOX" tar "$@"; }
                     content)
 
 
+@unittest.skipUnless(BUSYBOX, "BusyBox sh and tar are required")
+class InstallerBootstrapSyntaxTest(unittest.TestCase):
+    HELPERS = ("portable-stat.sh", "rescue-update.sh",
+               "rescue-startup-guard.sh", "update-lock.sh")
+    SHELLS = ("/opt/bin/sh", "/opt/bin/ash", "/bin/sh", "/bin/ash")
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="kpbr-bootstrap-syntax-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.rescue = self.root / "rescue"
+        self.rescue.mkdir()
+        self.init = self.root / "init.d"
+        self.init.mkdir()
+        self.published = [self.rescue / name for name in self.HELPERS
+                          if name != "rescue-startup-guard.sh"]
+        self.published.append(self.init / "S00keen-pbr-rescue")
+        for path in self.published:
+            path.write_text("previous helper\n")
+
+    def bootstrap(self, available, rejecting=(), invalid=None):
+        # Exercise the complete production bootstrap in a temporary filesystem,
+        # including all four syntax checks, publication, and mocked lock handoff.
+        # No helper under test is executed and no host /opt path is written.
+        source = INSTALLER.read_text(encoding="utf8")
+        function = shell_function(source, "bootstrap_rescue_helpers",
+                                  "find_existing_sing_box")
+        shell_paths = []
+        for index, original in enumerate(self.SHELLS):
+            shell = self.root / f"shell-{index}"
+            shell_paths.append(str(shell))
+            if original in available:
+                body = '#!/bin/sh\nprintf "%s\\n" "$0 $*" >> "$TEST_ROOT/shell-calls"\n'
+                if original in rejecting:
+                    body += 'echo \'Invalid option "-n"\' >&2\nexit 245\n'
+                else:
+                    body += 'exec "$BUSYBOX" sh "$@"\n'
+                shell.write_text(body)
+                shell.chmod(0o755)
+        candidates = "for rescue_shell_candidate in " + " ".join(self.SHELLS) + "; do"
+        self.assertIn(candidates, function)
+        function = function.replace(candidates, "for rescue_shell_candidate in " +
+                                    " ".join(f'"{path}"' for path in shell_paths) + "; do")
+        function = function.replace("/opt/etc/init.d", str(self.init))
+        data = io.BytesIO()
+        with tarfile.open(fileobj=data, mode="w:gz") as archive:
+            for helper in self.HELPERS:
+                content = b'#!/bin/sh\nprintf executed > "$TEST_ROOT/helper-executed"\n'
+                if helper == invalid:
+                    content += b"if\n"
+                member = tarfile.TarInfo(f"./opt/usr/lib/keen-pbr/{helper}")
+                member.size = len(content)
+                archive.addfile(member, io.BytesIO(content))
+        payload = data.getvalue()
+        package = self.root / PACKAGE
+        with tarfile.open(package, mode="w:gz") as archive:
+            member = tarfile.TarInfo("./data.tar.gz")
+            member.size = len(payload)
+            archive.addfile(member, io.BytesIO(payload))
+        lock = self.root / "mock-lock"
+        lock.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$TEST_ROOT/lock-calls"\n')
+        lock.chmod(0o755)
+        script = r'''
+set -eu
+die() { printf '%s\n' "$*" >&2; exit 1; }
+tar() { "$BUSYBOX" tar "$@"; }
+sync() { :; }
+''' + function + "\nbootstrap_rescue_helpers\n"
+        result = subprocess.run([BUSYBOX, "sh", "-c", script], capture_output=True,
+                                text=True, timeout=10, env={**os.environ,
+            "BUSYBOX": BUSYBOX, "TMP_DIR": str(self.root), "TEST_ROOT": str(self.root),
+            "PACKAGE_FILE": str(package), "RESCUE_DIR": str(self.rescue),
+            "LOCK_HELPER": str(lock), "LOCK_OWNER_PID": "123", "LOCK_TOKEN": "fixture"})
+        self.assertFalse((self.root / "helper-executed").exists())
+        return result
+
+    def assert_not_published(self):
+        for path in self.published:
+            self.assertEqual(path.read_text(), "previous helper\n")
+        self.assertFalse((self.root / "lock-calls").exists())
+
+    def test_entware_shell_works_when_firmware_rejects_noexec(self):
+        result = self.bootstrap(available=("/opt/bin/sh", "/bin/sh"), rejecting=("/bin/sh",))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = (self.root / "shell-calls").read_text().splitlines()
+        self.assertEqual(len(calls), 5)  # Capability probe and all four helpers.
+        self.assertTrue(all("shell-0 -n " in call for call in calls))
+        self.assertEqual((self.root / "lock-calls").read_text().splitlines(),
+                         ["held 123 fixture", "transfer 123 fixture 123"])
+        for path in self.published:
+            self.assertIn("helper-executed", path.read_text())
+
+    def test_ash_fallback_after_unsupported_entware_sh(self):
+        result = self.bootstrap(available=("/opt/bin/sh", "/opt/bin/ash"),
+                                rejecting=("/opt/bin/sh",))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = (self.root / "shell-calls").read_text().splitlines()
+        self.assertIn("shell-0 -n -c :", calls[0])
+        self.assertTrue(all("shell-1 -n " in call for call in calls[1:]))
+
+    def test_firmware_shell_remains_supported_without_entware_shell(self):
+        result = self.bootstrap(available=("/bin/sh",))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("shell-2 -n ", (self.root / "shell-calls").read_text())
+
+    def test_unsupported_shells_are_not_reported_as_corrupt_helpers(self):
+        result = self.bootstrap(available=self.SHELLS, rejecting=self.SHELLS)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("не найдена оболочка для проверки синтаксиса", result.stderr)
+        self.assertNotIn("повреждённый", result.stderr)
+        self.assert_not_published()
+
+    def test_missing_shells_do_not_publish_helpers(self):
+        result = self.bootstrap(available=())
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("не найдена оболочка для проверки синтаксиса", result.stderr)
+        self.assert_not_published()
+
+    def test_syntax_error_in_any_helper_prevents_all_publication(self):
+        for helper in self.HELPERS:
+            with self.subTest(helper=helper):
+                # Each complete bootstrap needs its own extraction directory.
+                shutil.rmtree(self.root / "package-helpers", ignore_errors=True)
+                (self.root / "shell-calls").unlink(missing_ok=True)
+                result = self.bootstrap(available=("/opt/bin/sh", "/bin/sh"), invalid=helper)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("повреждённый", result.stderr)
+                self.assertNotIn("shell-2", (self.root / "shell-calls").read_text())
+                self.assert_not_published()
+
+
 @unittest.skipUnless(shutil.which("sh") and shutil.which("openssl"),
                      "POSIX shell and OpenSSL are required")
 class SignedUpdateIntegrationTest(unittest.TestCase):

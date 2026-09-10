@@ -1,0 +1,150 @@
+name: Repair Keenetic Pre-release Installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing Beta Pre-release to repair (for example v3.3.2-sb.12)"
+        required: true
+        type: string
+      expected_manifest_sha256:
+        description: "SHA256 of the inspected existing release-manifest.tsv"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: installer-repair-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  repair-installer:
+    if: github.repository == 'blindtechnique/keen-pbr-sb' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      EXPECTED_MANIFEST_SHA256: ${{ inputs.expected_manifest_sha256 }}
+      INSTALLER_SHA: ${{ github.sha }}
+    steps:
+      - name: Checkout reviewed installer source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Test installer and repair wiring
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y busybox-static
+          busybox sh -n install.sh
+          python3 -m unittest build_scripts.tests.test_installer_repair_workflow build_scripts.tests.test_signed_update_integration build_scripts.tests.test_keenetic_release_signatures -v
+          python3 build_scripts/embed-release-verifier.py --installer install.sh --verifier packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/release-verify.sh --public-key packages/keys/keenetic-release-public.pem --check
+
+      - name: Authenticate the pinned existing release
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-sb\.[0-9]+$ ]]
+          [[ "$EXPECTED_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          test "$(git rev-parse HEAD)" = "$INSTALLER_SHA"
+          grep -Fx "STABLE_RELEASE_TAG='$RELEASE_TAG'" install.sh
+          mkdir -p repair/original repair/candidate
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > repair/release-before.json
+          jq -e '.prerelease == true and .draft == false and .immutable != true' repair/release-before.json >/dev/null
+          gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .id > repair/latest-before
+          git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}" > repair/tag-before
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir repair/original --pattern '*.ipk' --pattern install.sh --pattern release-manifest.tsv --pattern release-manifest.sig --pattern SHA256SUMS
+          printf '%s  %s\n' "$EXPECTED_MANIFEST_SHA256" repair/original/release-manifest.tsv | sha256sum -c -
+          verifier=packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/release-verify.sh
+          key=packages/keys/keenetic-release-public.pem
+          busybox sh "$verifier" repair/original/release-manifest.tsv repair/original/release-manifest.sig "$key" "$GITHUB_REPOSITORY" stable "$RELEASE_TAG" installer any any install.sh repair/original/install.sh
+          PACKAGE_SOURCE=$(awk -F '\t' '$1 == "source" {print $2}' repair/original/release-manifest.tsv)
+          [[ "$PACKAGE_SOURCE" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --no-tags --depth=1 origin "refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$PACKAGE_SOURCE"
+          printf 'PACKAGE_SOURCE=%s\n' "$PACKAGE_SOURCE" >> "$GITHUB_ENV"
+          shopt -s nullglob
+          packages=(repair/original/*.ipk)
+          test "${#packages[@]}" -eq 3
+          for profile in aarch64-3.10 mips-3.4 mipsel-3.4; do
+            packages=(repair/original/keen-pbr_*_keenetic_"${profile}".ipk)
+            test "${#packages[@]}" -eq 1
+            package=${packages[0]}
+            busybox sh "$verifier" repair/original/release-manifest.tsv repair/original/release-manifest.sig "$key" "$GITHUB_REPOSITORY" stable "$RELEASE_TAG" package "${profile%%-*}" "${profile#*-}" "${package##*/}" "$package"
+            python3 build_scripts/validate-keenetic-ipk.py "$package" --arch "${profile%%-*}" --expected-commit "${PACKAGE_SOURCE:0:12}"
+          done
+          (cd repair/original && sha256sum keen-pbr_*.ipk > ../expected-SHA256SUMS)
+          cmp repair/original/SHA256SUMS repair/expected-SHA256SUMS
+          cp repair/original/*.ipk repair/candidate/
+
+      - name: Keep the original installer bundle for rollback
+        uses: actions/upload-artifact@v7
+        with:
+          name: installer-before-repair
+          path: |
+            repair/original/install.sh
+            repair/original/release-manifest.tsv
+            repair/original/release-manifest.sig
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Sign repaired installer with unchanged package provenance
+        env:
+          KEENETIC_RELEASE_SIGNING_KEY: ${{ secrets.KEENETIC_RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test -n "${KEENETIC_RELEASE_SIGNING_KEY:-}"
+          signing_key=$(mktemp "$RUNNER_TEMP/keenetic-installer-key.XXXXXX")
+          trap 'rm -f -- "$signing_key"' EXIT
+          printf '%s\n' "$KEENETIC_RELEASE_SIGNING_KEY" > "$signing_key"
+          unset KEENETIC_RELEASE_SIGNING_KEY
+          # v1 source stays the package/tag commit; signed build records the
+          # separate, immutable installer source without changing the schema.
+          python3 build_scripts/sign-keenetic-release.py --assets repair/candidate --installer install.sh --key "$signing_key" --public-key packages/keys/keenetic-release-public.pem --repository "$GITHUB_REPOSITORY" --channel stable --release "$RELEASE_TAG" --source "$PACKAGE_SOURCE" --build "installer-${INSTALLER_SHA}-github-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          for directory in original candidate; do
+            awk -F '\t' '$1 != "build" && !($1 == "file" && $2 == "installer")' "repair/$directory/release-manifest.tsv" > "repair/$directory-package-manifest"
+          done
+          cmp repair/original-package-manifest repair/candidate-package-manifest
+          (cd repair/candidate && sha256sum -c ../original/SHA256SUMS)
+
+      - name: Replace only the three authenticated installer assets
+        run: |
+          set -euo pipefail
+          mkdir repair/recheck repair/published
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > repair/release-current.json
+          for phase in before current; do
+            jq -S '{id,tag_name,target_commitish,prerelease,draft,immutable,assets: [.assets[] | {id,name,size,digest}] | sort_by(.name)}' "repair/release-$phase.json" > "repair/identity-$phase"
+          done
+          cmp repair/identity-before repair/identity-current
+          git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}" > repair/tag-current
+          cmp repair/tag-before repair/tag-current
+          gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .id > repair/latest-current
+          cmp repair/latest-before repair/latest-current
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir repair/recheck --pattern release-manifest.tsv
+          printf '%s  %s\n' "$EXPECTED_MANIFEST_SHA256" repair/recheck/release-manifest.tsv | sha256sum -c -
+          # GitHub has no atomic multi-asset replacement. Mixed generations
+          # fail signature/hash verification until all three uploads finish.
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber repair/candidate/install.sh repair/candidate/release-manifest.tsv repair/candidate/release-manifest.sig
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir repair/published --pattern '*.ipk' --pattern install.sh --pattern release-manifest.tsv --pattern release-manifest.sig --pattern SHA256SUMS
+          for asset in install.sh release-manifest.tsv release-manifest.sig; do
+            cmp "repair/candidate/$asset" "repair/published/$asset"
+          done
+          cmp repair/original/SHA256SUMS repair/published/SHA256SUMS
+          (cd repair/published && sha256sum -c ../original/SHA256SUMS)
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > repair/release-after.json
+          for phase in before after; do
+            jq -S '{id,tag_name,target_commitish,prerelease,draft,immutable,assets: [.assets[] | select(.name != "install.sh" and .name != "release-manifest.tsv" and .name != "release-manifest.sig") | {id,name,size,digest}] | sort_by(.name)}' "repair/release-$phase.json" > "repair/unchanged-$phase"
+          done
+          cmp repair/unchanged-before repair/unchanged-after
+          git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}" > repair/tag-after
+          cmp repair/tag-before repair/tag-after
+          gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .id > repair/latest-after
+          cmp repair/latest-before repair/latest-after
+          printf 'Installer repaired from %s; package/tag source remains %s. All three IPKs and SHA256SUMS are unchanged; Pre-release and Latest are unchanged.\n' "$INSTALLER_SHA" "$PACKAGE_SOURCE" >> "$GITHUB_STEP_SUMMARY"

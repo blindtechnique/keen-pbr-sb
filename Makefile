@@ -99,7 +99,7 @@ check-warnings: ## Build with -Wall -Wextra -Werror (native compilers only)
 check-shell: ## Parse every shipped shell script with the target BusyBox and scan for bashisms
 	python3 -m unittest build_scripts.tests.test_mask_awk_for_shell_scan -v
 	bash build_scripts/check-shell-busybox.sh
-	BUSYBOX="$(BUSYBOX)" python3 -m unittest build_scripts.tests.test_signed_update_integration.InstallerBootstrapArchiveTest -v
+	BUSYBOX="$(BUSYBOX)" python3 -m unittest build_scripts.tests.test_signed_update_integration.InstallerBootstrapArchiveTest build_scripts.tests.test_signed_update_integration.InstallerBootstrapSyntaxTest -v
 	BUSYBOX="$(BUSYBOX)" python3 -m unittest build_scripts.tests.test_persistent_recovery_boundary -v
 
 check-ndmc-env: ## Prove the shipped installer/uninstaller run ndmc with a scrubbed LD_LIBRARY_PATH
