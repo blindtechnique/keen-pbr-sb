@@ -11,10 +11,10 @@
 <meta property="og:type" content="website">
 <meta property="og:title" content="keen-pbr-sb — нужные сайты через VPN, остальное напрямую">
 <meta property="og:description" content="Отмечаете YouTube, ChatGPT или соцсети — роутер сам отправляет их через VPN. Банки и госуслуги остаются на обычном канале. Для Keenetic и Netcraze.">
-<meta property="og:image" content="assets/img/dash-light.webp">
+<meta property="og:image" content="assets/img/dashboard-notifications.webp">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="preload" as="font" type="font/woff2" href="assets/fonts/roboto-cyrillic-400-normal.woff2" crossorigin>
-<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/style.css?v=20260910-2">
 </head>
 <body>
 
@@ -53,8 +53,9 @@
     <div class="hero__grid">
       <div>
         <div class="badges" style="margin-bottom:20px">
-          <a class="badge" id="current-release" data-tag="v3.3.2-sb.12" href="https://github.com/blindtechnique/keen-pbr-sb/releases">v3.3.2-sb.12 · Beta</a>
-          <a class="badge" id="latest-release" href="https://github.com/blindtechnique/keen-pbr-sb/releases">Версии и загрузки</a>
+          <span class="badge badge--ok">Проект живой, обновляется</span>
+          <a class="badge badge--brand" href="https://github.com/blindtechnique/keen-pbr-sb/releases">v3.3.2-sb.12</a>
+          <span class="badge badge--warn">Beta</span>
           <span class="badge">Бесплатно, открытый код</span>
         </div>
         <h1>Через VPN — только то, что нужно. Остальное напрямую</h1>
@@ -80,7 +81,7 @@
       </div>
     </div>
     <figure class="hero__shot" style="margin:56px 0 0">
-      <img src="assets/img/dash-light.webp" width="3072" height="1920" alt="Главный экран keen-pbr-sb: состояние системы, список маршрутов, панель служб">
+      <img src="assets/img/dashboard-notifications.webp?v=20260910-2" width="3072" height="1920" alt="Дашборд keen-pbr-sb: открытый колокольчик, маршруты, службы и трафик используемых интерфейсов">
     </figure>
   </div>
 </section>
@@ -211,7 +212,7 @@
     <div class="section__head">
       <div class="eyebrow">Что умеет</div>
       <h2>От первого VPN до удобной повседневной настройки</h2>
-      <p>Версия 12 объединяет импорт подключений, подписки, резервирование и управление nfqws2. Не только выбрать маршрут, но и понять, что происходит, когда сайт перестал открываться.</p>
+      <p>Наш сервис объединяет импорт подключений, подписки, резервирование и управление nfqws2. Не только выбрать маршрут, но и понять, что происходит, когда сайт перестал открываться.</p>
     </div>
 
     <div class="cards">
@@ -309,8 +310,8 @@
         <div class="card__ico">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.2-8.6"/><path d="M22 4l-10 10-3-3"/></svg>
         </div>
-        <h3>Уведомления общие для всех устройств</h3>
-        <p>Важные переключения, восстановления и предупреждения о подписках собраны в колокольчике. Прочитанное или удалённое на телефоне не приходится заново очищать на компьютере. Панель показывает ход применения настроек и перезапуска служб.</p>
+        <h3>Колокольчик: важное не потеряется</h3>
+        <p>Колокольчик сообщает об обновлениях keen-pbr-sb и nfqws2, новых серверах в подписках, остатке трафика, приближении срока окончания и ошибках обновления подписки. Данные о лимитах видны, если их передаёт провайдер. Из сообщения можно перейти к нужной подписке. Очистили уведомления на телефоне — они скроются и на компьютере: состояние хранится на роутере и синхронизируется между панелями. Журнал при этом не удаляется.</p>
       </article>
 
       <article class="card">
@@ -461,74 +462,74 @@
     </div>
 
     <div class="panel" id="p1">
-      <figure class="shot"><img loading="lazy" src="assets/img/dash-light.webp" alt="Главный экран: состояние системы, карточка роутера, список маршрутов, службы">
-        <figcaption><b>Главный экран.</b> Сверху — работает ли всё как надо и что сейчас с роутером: загрузка, память, сколько устройств подключено. Ниже — все ваши пути с задержкой в миллисекундах и пометкой, какой сейчас основной, а какой запасной. Справа — выключатели служб.</figcaption></figure>
-      <figure class="shot" style="margin-top:20px"><img loading="lazy" src="assets/img/dashboard-bottom.webp" alt="Проверка сайта, DNS и диагностика на дашборде">
+      <figure class="shot"><img loading="lazy" src="assets/img/dashboard-notifications.webp?v=20260910-2" alt="Главный экран: состояние системы, карточка роутера, список маршрутов, службы">
+        <figcaption><b>Главный экран и колокольчик.</b> Состояние роутера, маршруты и группы, управление службами, графики VPN и карточка «Трафик используемых интерфейсов». В открытом колокольчике — доступное обновление nfqws2 и напоминание об окончании подписки со ссылкой на неё.</figcaption></figure>
+      <figure class="shot" style="margin-top:20px"><img loading="lazy" src="assets/img/dashboard-bottom.webp?v=20260910-2" alt="Проверка сайта, DNS и диагностика на дашборде">
         <figcaption><b>Проверки под рукой.</b> Можно проверить сайт, убедиться, что DNS-запросы доходят до роутера, и скачать диагностику для обращения за помощью.</figcaption></figure>
     </div>
 
     <div class="panel" id="p2" hidden>
-      <figure class="shot"><img loading="lazy" src="assets/img/tunnels.webp" alt="VPN и прокси: подключения VLESS и AmneziaWG, состояния, задержки и использование">
+      <figure class="shot"><img loading="lazy" src="assets/img/tunnels.webp?v=20260910-2" alt="VPN и прокси: подключения VLESS и AmneziaWG, состояния, задержки и использование">
         <figcaption><b>Туннели.</b> Прокси и VPN из прошивки — в одном списке. Видны тип, страна сервера, состояние, задержка и связанные правила. Новое подключение можно импортировать из файла, ссылки или подписки.</figcaption></figure>
     </div>
 
     <div class="panel" id="p11" hidden>
-      <figure class="shot"><img loading="lazy" src="assets/img/groups.webp" alt="Группы VPN: порядок подключения, основной и запасные серверы">
+      <figure class="shot"><img loading="lazy" src="assets/img/groups.webp?v=20260910-2" alt="Группы VPN: порядок подключения, основной и запасные серверы">
         <figcaption><b>Группы.</b> Объедините несколько подключений и выберите порядок резерва или автоматический выбор по задержке. Панель показывает основной путь, запасные и правила, использующие группу.</figcaption></figure>
     </div>
 
     <div class="panel" id="p10" hidden>
-      <figure class="shot"><img loading="lazy" src="assets/img/subscriptions.webp" alt="Подписка VPN: оставшийся трафик, срок действия, подключения и расписание обновления">
+      <figure class="shot"><img loading="lazy" src="assets/img/subscriptions.webp?v=20260910-2" alt="Подписка VPN: оставшийся трафик, срок действия, подключения и расписание обновления">
         <figcaption><b>Подписки.</b> Срок действия и остаток трафика видны, если их сообщает провайдер. Существующие подключения обновляются по расписанию; новые серверы предлагается импортировать по вашему выбору.</figcaption></figure>
     </div>
 
     <div class="panel" id="p3" hidden>
-      <figure class="shot"><img loading="lazy" src="assets/img/catalog.webp" alt="Каталог: категории, поиск, отметки уже добавленных наборов">
+      <figure class="shot"><img loading="lazy" src="assets/img/catalog.webp?v=20260910-2" alt="Каталог: категории, поиск, отметки уже добавленных наборов">
         <figcaption><b>Каталог.</b> 100 готовых наборов по категориям, с поиском и пометкой того, что уже добавлено. Отмечаете нужное, внизу выбираете, куда направить, — и правила создаются сами.</figcaption></figure>
     </div>
 
     <div class="panel" id="p4" hidden>
-      <figure class="shot"><img loading="lazy" src="assets/img/lists.webp" alt="Списки: источники, количество записей, где используется">
+      <figure class="shot"><img loading="lazy" src="assets/img/lists.webp?v=20260910-2" alt="Списки: источники, количество записей, где используется">
         <figcaption><b>Списки.</b> Что откуда берётся, сколько в нём записей и — самое полезное — где он используется. Сразу видно, какие правила сломаются, если его удалить.</figcaption></figure>
-      <figure class="shot" style="margin-top:20px"><img loading="lazy" src="assets/img/rules.webp" alt="Правила: порядок, условия, маршрут">
+      <figure class="shot" style="margin-top:20px"><img loading="lazy" src="assets/img/rules.webp?v=20260910-2" alt="Правила: порядок, условия, маршрут">
         <figcaption><b>Правила.</b> Читаются сверху вниз, порядок меняется перетаскиванием. Слева — что подходит под правило, справа — куда это отправить: в туннель, в группу с резервом, напрямую или в никуда.</figcaption></figure>
     </div>
 
     <div class="panel" id="p5" hidden>
-      <figure class="shot"><img loading="lazy" src="assets/img/connections.webp" alt="Соединения: устройства домашней сети и их активные подключения">
+      <figure class="shot"><img loading="lazy" src="assets/img/connections.webp?v=20260910-2" alt="Соединения: устройства домашней сети и их активные подключения">
         <figcaption><b>Соединения.</b> Кто в доме сейчас в сети и сколько у него открытых подключений — телевизор, колонки, телефоны, умные лампы. Устройства показаны по именам из роутера, а не голыми адресами. Строку можно развернуть и увидеть, куда именно идёт трафик и каким путём.</figcaption></figure>
     </div>
 
     <div class="panel" id="p6" hidden>
-      <figure class="shot"><img loading="lazy" src="assets/img/dns-modal.webp" alt="Окно добавления DNS-сервера: готовые провайдеры, маршрут запросов и привязки доменов">
+      <figure class="shot"><img loading="lazy" src="assets/img/dns-modal.webp?v=20260910-2" alt="Окно добавления DNS-сервера: готовые провайдеры, маршрут запросов и привязки доменов">
         <figcaption><b>DNS-серверы.</b> Яндекс, Google, Cloudflare, Quad9, OpenDNS — выбираете плиткой или вписываете свой сервер. Можно отправлять запросы через выбранный VPN и закрепить отдельный DNS за нужными доменами.</figcaption></figure>
     </div>
 
     <div class="panel" id="p7" hidden>
-      <figure class="shot"><img loading="lazy" src="assets/img/nfqws.webp" alt="Страница nfqws2: служба, параметры, стратегии, списки, журналы">
+      <figure class="shot"><img loading="lazy" src="assets/img/nfqws.webp?v=20260910-2" alt="Страница nfqws2: служба, параметры, стратегии, списки, журналы">
         <figcaption><b>Обход блокировок (nfqws2).</b> Запуск, остановка и обновление службы, готовые и собственные стратегии, списки сайтов, редактор конфигурации и Lua-скриптов, журналы. Возможность обхода без VPN зависит от провайдера и выбранной стратегии.</figcaption></figure>
     </div>
 
     <div class="panel" id="p12" hidden>
-      <figure class="shot"><img loading="lazy" src="assets/img/check-tunnel.webp" alt="Проверка сайта, направленного через группу VPN">
-        <figcaption><b>Через VPN.</b> Видны доступность сайта, совпавшие списки и назначенный маршрут. Дополнительно можно проверить наличие адреса в реестре РКН через внешний сервис. Если он не ответил, панель не выдаёт это за отсутствие блокировки.</figcaption></figure>
-      <figure class="shot" style="margin-top:20px"><img loading="lazy" src="assets/img/check-nfqws.webp" alt="Проверка YouTube: прямой маршрут и участие nfqws2">
-        <figcaption><b>Напрямую с nfqws2.</b> Сайт открывается без VPN, а проверка показывает участие в списках обхода блокировок.</figcaption></figure>
-      <figure class="shot" style="margin-top:20px"><img loading="lazy" src="assets/img/check-direct.webp" alt="Проверка сайта с прямым маршрутом и исключением из nfqws2">
-        <figcaption><b>Обычное подключение.</b> Можно увидеть, что сайт идёт напрямую и исключён из обработки nfqws2.</figcaption></figure>
+      <figure class="shot"><img loading="lazy" src="assets/img/check-tunnel.webp?v=20260910-2" alt="Проверка сайта, направленного через группу VPN">
+        <figcaption><b>Через VPN.</b> Доступность сайта, совпавшие списки, назначенный маршрут и выполненная проверка реестра РКН через внешний сервис. На этом примере адрес найден в реестре, а фактический маршрут совпадает с выбранной группой VPN.</figcaption></figure>
+      <figure class="shot" style="margin-top:20px"><img loading="lazy" src="assets/img/check-nfqws.webp?v=20260910-2" alt="Проверка YouTube: прямой маршрут и участие nfqws2">
+        <figcaption><b>Напрямую с nfqws2.</b> Проверка YouTube показывает ответ сайта, участие в списках nfqws2 и наличие адреса в реестре блокировок. Маршрут при этом остаётся прямым, без VPN.</figcaption></figure>
+      <figure class="shot" style="margin-top:20px"><img loading="lazy" src="assets/img/check-direct.webp?v=20260910-2" alt="Проверка сайта с прямым маршрутом и исключением из nfqws2">
+        <figcaption><b>Обычное подключение.</b> Сайт идёт напрямую, исключён из обработки nfqws2, а выполненная проверка не находит адрес в реестре блокировок.</figcaption></figure>
     </div>
 
     <div class="panel" id="p8" hidden>
-      <figure class="shot"><img loading="lazy" src="assets/img/settings.webp" alt="Основные настройки маршрутизации и поведения при недоступности VPN">
+      <figure class="shot"><img loading="lazy" src="assets/img/settings.webp?v=20260910-2" alt="Основные настройки маршрутизации и поведения при недоступности VPN">
         <figcaption><b>Основные настройки.</b> Выберите поведение при недоступности VPN и общие параметры маршрутизации.</figcaption></figure>
-      <figure class="shot" style="margin-top:20px"><img loading="lazy" src="assets/img/settings-incoming.webp" alt="Настройки участия клиентов встроенных VPN-серверов Keenetic в маршрутизации">
+      <figure class="shot" style="margin-top:20px"><img loading="lazy" src="assets/img/settings-incoming.webp?v=20260910-2" alt="Настройки участия клиентов встроенных VPN-серверов Keenetic в маршрутизации">
         <figcaption><b>Доступ извне.</b> Для клиентов встроенного VPN-сервера Keenetic можно включить домашние правила keen-pbr-sb или оставить прямое подключение с nfqws2.</figcaption></figure>
-      <figure class="shot" style="margin-top:20px"><img loading="lazy" src="assets/img/settings-advanced.webp" alt="Дополнительные настройки: переподключение соединений после изменения маршрута">
+      <figure class="shot" style="margin-top:20px"><img loading="lazy" src="assets/img/settings-advanced.webp?v=20260910-2" alt="Дополнительные настройки: переподключение соединений после изменения маршрута">
         <figcaption><b>Дополнительные настройки.</b> Переподключение старых соединений после изменения маршрутов. Усиленное восстановление зависших сессий WhatsApp — экспериментальная возможность, результат зависит от сети.</figcaption></figure>
     </div>
 
     <div class="panel" id="p9" hidden>
-      <figure class="shot"><img loading="lazy" src="assets/img/dash-dark.webp" alt="Тот же главный экран в тёмной теме">
+      <figure class="shot"><img loading="lazy" src="assets/img/dash-dark.webp?v=20260910-2" alt="Тот же главный экран в тёмной теме">
         <figcaption><b>Тёмная тема.</b> Переключается в шапке панели. Оформление вдохновлено интерфейсом самого роутера, поэтому переход между веб-конфигуратором и keen-pbr-sb не требует привыкания.</figcaption></figure>
     </div>
 
@@ -550,7 +551,14 @@
 
     <div class="cards" style="margin-bottom:32px">
       <article class="card card--wide">
-        <h3>Сначала — Entware</h3>
+        <h3>Сначала — компоненты KeeneticOS и Entware</h3>
+        <p style="margin-bottom:14px">В настройках роутера откройте <b>«Управление → Настройки системы → Изменить набор компонентов»</b> и в группе <b>«Пакеты OPKG»</b> установите все три компонента:</p>
+        <ul style="padding-left:22px;line-height:1.7">
+          <li><b>Поддержка открытых пакетов</b>;</li>
+          <li><b>Модули ядра подсистемы Netfilter</b>;</li>
+          <li><b>Пакет расширений Xtables-addons для Netfilter</b>.</li>
+        </ul>
+        <p style="margin-bottom:14px">Они нужны для установки дополнительных программ и работы правил обработки трафика. Даже если Entware уже установлен, проверьте наличие всех трёх. Названия разделов зависят от версии прошивки.</p>
         <p style="margin-bottom:14px">
           keen-pbr-sb — это программа для роутера, а роутеру нужно место, куда её ставить. Такое место
           даёт Entware: небольшая система дополнительных пакетов для Keenetic. Ставится один раз,
@@ -698,6 +706,6 @@
   <img id="lbimg" src="" alt="">
 </div>
 
-<script src="assets/app.js" defer></script>
+<script src="assets/app.js?v=20260910-2" defer></script>
 </body>
 </html>
