@@ -5,6 +5,10 @@ scripts/ralph
 build/
 .codex
 
+# Local IDE preferences are not build inputs.
+/.idea/
+/.vscode/
+
 # CMake
 CMakeCache.txt
 CMakeFiles/
