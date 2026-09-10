@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 import re
 import subprocess
@@ -57,14 +58,35 @@ def tag_ref(repository: Path, name: str) -> str:
     return reference
 
 
-def stable_release_tag(repository: Path, source_sha: str) -> str:
-    """Read release identity from the tested commit, not the workflow checkout."""
+def source_version(repository: Path, source_sha: str) -> tuple[str, str]:
+    """Read version metadata from the tested commit, not the workflow checkout."""
     version_file = git(repository, "show", f"{source_sha}:version.mk")
     versions = re.findall(r"^KEEN_PBR_VERSION=([0-9]+\.[0-9]+\.[0-9]+)$", version_file, re.MULTILINE)
+    if len(versions) != 1:
+        raise ResolutionError("version.mk must define one numeric semantic version")
+    return versions[0], version_file
+
+
+def timestamp_release_tag(repository: Path, source_sha: str) -> str:
+    """Match resolve-version.sh: one UTC commit timestamp for every build job."""
+    version, _ = source_version(repository, source_sha)
+    committed_at = git(repository, "show", "-s", "--format=%ct", source_sha)
+    try:
+        stamp = datetime.fromtimestamp(int(committed_at), timezone.utc).strftime("%Y%m%d%H%M%S")
+    except (ValueError, OverflowError, OSError) as error:
+        raise ResolutionError("source commit has an invalid build timestamp") from error
+    if not re.fullmatch(r"[0-9]{14}", stamp):
+        raise ResolutionError("source commit must have a 14-digit UTC build timestamp")
+    return f"v{version}-{stamp}"
+
+
+def stable_release_tag(repository: Path, source_sha: str) -> str:
+    """Keep historical -sb.N tag builds pinned to their matching installer."""
+    version, version_file = source_version(repository, source_sha)
     releases = re.findall(r"^KEEN_PBR_RELEASE=([0-9]+)$", version_file, re.MULTILINE)
-    if len(versions) != 1 or len(releases) != 1 or int(releases[0]) > 0xFFFFFFFF:
+    if len(releases) != 1 or int(releases[0]) > 0xFFFFFFFF:
         raise ResolutionError("version.mk must define one numeric version and uint32 release counter")
-    tag = f"v{versions[0]}-sb.{int(releases[0])}"
+    tag = f"v{version}-sb.{int(releases[0])}"
     installer = git(repository, "show", f"{source_sha}:install.sh")
     pins = re.findall(r"^STABLE_RELEASE_TAG=['\"]([^'\"]+)['\"]$", installer, re.MULTILINE)
     if pins != [tag]:
@@ -102,13 +124,16 @@ def resolve_source(
     candidate = False
     channel = "stable" if is_release else "none"
     if is_release:
-        if release_tag != stable_release_tag(repository, source_sha):
+        expected_tag = timestamp_release_tag(repository, source_sha)
+        if re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+-sb\.[0-9]+", release_tag):
+            expected_tag = stable_release_tag(repository, source_sha)
+        if release_tag != expected_tag:
             raise ResolutionError("release_tag must match the stable release identity in source version.mk")
     if not is_release and event_name in ("push", "workflow_dispatch"):
         if ref == "refs/heads/main":
             channel = "stable"
             candidate = True
-            release_tag = stable_release_tag(repository, source_sha)
+            release_tag = timestamp_release_tag(repository, source_sha)
         elif ref in ("refs/heads/alpha", "refs/heads/next"):
             channel = ref.removeprefix("refs/heads/")
     single_architecture = not is_release and (

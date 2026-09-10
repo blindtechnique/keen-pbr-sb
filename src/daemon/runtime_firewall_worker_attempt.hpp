@@ -219,6 +219,8 @@ struct RuntimeFirewallWorkerRoutePreparation {
     bool required{false};
     bool observation_succeeded{false};
     std::optional<RuntimeRouteMutationAck> worker_mutation_ack;
+    // The combined route owner either did no writes or verified its rollback.
+    bool previous_routes_retained{false};
     std::string worker_mutation_failure_detail;
     bool checkpoint_published{false};
     // Control-loop acknowledgement of the already-completed worker mutation.
@@ -349,6 +351,13 @@ struct RuntimeFirewallWorkerAttemptResult {
         return !transaction.commit_entered;
     }
 
+    bool configuration_base_certainly_retained() const noexcept {
+        return previous_generation_certainly_retained() &&
+            (!route_preparation.required ||
+             !route_preparation.worker_mutation_ack.has_value() ||
+             route_preparation.previous_routes_retained);
+    }
+
     bool config_preapply_verified() const noexcept {
         if (operation_kind !=
                 RuntimeFirewallWorkerOperationKind::config_preapply ||
@@ -411,6 +420,7 @@ using RuntimeFirewallWorkerAttemptRunner =
 struct RuntimeRouteWorkerMutationResult final {
     RuntimeRouteMutationAck ack{RuntimeRouteMutationAck::mutation_failed};
     std::string failure_detail;
+    bool previous_routes_retained{false};
 };
 
 using RuntimeRouteWorkerMutationRunner = std::function<

@@ -347,7 +347,8 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn('gh release create "$RELEASE_TAG"', publish)
         self.assertIn('--target "$SOURCE_SHA" --prerelease --latest=false', publish)
         self.assertIn('git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG"', publish)
-        self.assertIn('advance KEEN_PBR_RELEASE', publish)
+        self.assertIn('push a new commit to main for a new timestamped release', publish)
+        self.assertNotIn('advance KEEN_PBR_RELEASE', publish)
         self.assertIn('"$tag_status" -ne 2', publish)
         self.assertNotIn('softprops/action-gh-release', job)
         self.assertNotIn('make_latest:', job)
@@ -390,6 +391,7 @@ gh() {
             ('new tag with release notes', 2, 0, True),
             ('new tag without matching notes', 2, 0, True),
             ('existing tag and release', 0, 0, False),
+            ('existing timestamp tag and release', 0, 0, False),
             ('remote failure', 128, 128, False),
         ):
             with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as temporary:
@@ -404,9 +406,10 @@ gh() {
                 elif scenario == 'new tag without matching notes':
                     (root / 'CHANGELOG.md').write_text(
                         '# Changelog\n\n## [3.3.0]\nDetailed implementation history.\n', encoding='utf-8')
+                release_tag = 'v3.3.2-20260910120000' if scenario == 'existing timestamp tag and release' else 'v3.3.0-sb.12'
                 environment = dict(os.environ)
                 environment.update({
-                    'SOURCE_SHA': 'a' * 40, 'RELEASE_TAG': 'v3.3.0-sb.12',
+                    'SOURCE_SHA': 'a' * 40, 'RELEASE_TAG': release_tag,
                     'GITHUB_REPOSITORY': 'blindtechnique/keen-pbr-sb',
                     'FIXTURE_TAG_STATUS': str(tag_status), 'FIXTURE_CALLS': str(calls),
                 })
@@ -431,7 +434,78 @@ gh() {
                         self.assertIn('aarch64-3.10, mips-3.4, mipsel-3.4', notes)
                 if tag_status == 0:
                     self.assertIn('already exists and was not changed', result.stdout)
-                    self.assertIn('advance KEEN_PBR_RELEASE', result.stdout)
+                    self.assertIn('push a new commit to main for a new timestamped release', result.stdout)
+
+    @unittest.skipUnless(shutil.which('bash') and shutil.which('awk'), 'release notes fixtures require bash and awk')
+    def test_both_publishers_extract_exact_notes_with_timestamp_only_base_fallback(self) -> None:
+        # Execute the real workflow snippets with local stubs: no GitHub,
+        # network, signing secret, package build, or release mutation involved.
+        cases = (
+            ('timestamp base fallback', 'v3.3.2-20260910120000',
+             '## [3x3x2]\nWrong regex match.\n'
+             '## [3.3.2]suffix\nWrong heading suffix.\n'
+             '## [3.3.20]\nWrong version prefix.\n'
+             '## [3.3.2-sb.12]\nWrong legacy notes.\n'
+             '## [3.3.2] — 10 September\nBase summary.\n### Fixed\n- Correct feature.\n'
+             '## [3.3.1]\nPrevious release.\n',
+             'Base summary.\n### Fixed\n- Correct feature.'),
+            ('timestamp exact preferred over earlier base', 'v3.3.2-20260910120000',
+             '## [3.3.2]\nBase summary.\n'
+             '## [3.3.2-20260910120000] — 10 September\nExact build summary.\n'
+             '## [3.3.2-20260910120001]\nNext build summary.\n',
+             'Exact build summary.'),
+            ('timestamp exact empty does not fall back to base', 'v3.3.2-20260910120000',
+             '## [3.3.2-20260910120000]\n'
+             '## [3.3.2]\nBase summary.\n', None),
+            ('legacy exact', 'v3.3.0-sb.12',
+             '## [3x3x0-sbx12]\nWrong regex match.\n'
+             '## [3.3.0-sb.12]\nLegacy summary.\n'
+             '## [3.3.0]\nBase summary.\n', 'Legacy summary.'),
+            ('legacy no base fallback', 'v3.3.0-sb.12',
+             '## [3.3.0]\nBase summary.\n', None),
+            ('ordinary version exact', 'v3.3.2',
+             '## [3.3.20]\nWrong version prefix.\n'
+             '## [3.3.2]\tRelease\nOrdinary summary.\n'
+             '## Other section\nUnrelated content.\n', 'Ordinary summary.'),
+            ('malformed timestamp no base fallback', 'v3.3.2-2026091012000',
+             '## [3.3.2]\nBase summary.\n', None),
+            ('missing changelog', 'v3.3.2-20260910120000', None, None),
+        )
+        fake_commands = '''
+git() {
+  case "$1" in
+    rev-parse) printf '%s\\n' "$SOURCE_SHA" ;;
+    ls-remote) return 2 ;;
+    *) return 99 ;;
+  esac
+}
+gh() { return 0; }
+'''
+        for job_name, step_name, output_name in (
+            ('publish-release', 'Extract release notes from CHANGELOG', 'RELEASE_BODY.md'),
+            ('upload-stable-candidate-artifact', 'Publish new Beta Pre-release', 'BETA_NOTES.md'),
+        ):
+            _, body = field(steps(self.jobs[job_name])[step_name], 'run', 8)
+            for scenario, release_tag, changelog, expected in cases:
+                with self.subTest(job=job_name, scenario=scenario), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    if changelog is not None:
+                        (root / 'CHANGELOG.md').write_text(changelog, encoding='utf-8')
+                    environment = dict(os.environ)
+                    environment.update({
+                        'SOURCE_SHA': 'a' * 40, 'RELEASE_TAG': release_tag,
+                        'GITHUB_REPOSITORY': 'blindtechnique/keen-pbr-sb',
+                    })
+                    result = subprocess.run(
+                        ['bash', '-c', fake_commands + textwrap.dedent(body)],
+                        cwd=root, env=environment, text=True, capture_output=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    notes = (root / output_name).read_text(encoding='utf-8').strip()
+                    if expected is not None:
+                        self.assertEqual(notes, expected)
+                    else:
+                        self.assertIn('CHANGELOG', notes)
+                        self.assertNotIn('Base summary.', notes)
 
     @unittest.skipUnless(shutil.which('bash'), 'workflow shell validation requires bash')
     def test_signing_steps_have_valid_runner_shell_syntax(self) -> None:

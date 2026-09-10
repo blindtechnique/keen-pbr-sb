@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Compatible tag to build a new Pre-release (for example v3.3.0-sb.12; published assets are not replaced)"
+        description: "Compatible tag to build a new Pre-release (for example v3.3.2-20260910120000; published assets are not replaced)"
         required: false
         type: string
 
@@ -487,12 +487,27 @@ jobs:
 
       - name: Extract release notes from CHANGELOG
         run: |
-          TAG="${RELEASE_TAG#v}"
-          awk -v ver="$TAG" '
-            $0 ~ "^## \\[" ver "\\]" {flag=1; next}
-            /^## \[/ {flag=0}
-            flag {print}
-          ' CHANGELOG.md > RELEASE_BODY.md
+          set -euo pipefail
+          notes_versions=("${RELEASE_TAG#v}")
+          if [[ "${notes_versions[0]}" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-[0-9]{14}$ ]]; then
+            notes_versions+=("${BASH_REMATCH[1]}")
+          fi
+          : > RELEASE_BODY.md
+          if [ -f CHANGELOG.md ]; then
+            for notes_version in "${notes_versions[@]}"; do
+              if awk -v heading="## [$notes_version]" '
+                /^## / {
+                  include = index($0, heading) == 1 && substr($0, length(heading) + 1) ~ /^([[:space:]]|$)/
+                  if (include) found = 1
+                  next
+                }
+                include {print}
+                END {exit found ? 0 : 1}
+              ' CHANGELOG.md > RELEASE_BODY.md; then
+                break
+              fi
+            done
+          fi
           if ! [ -s RELEASE_BODY.md ]; then
             echo "Автоматическая сборка $RELEASE_TAG. Подробности в CHANGELOG.md." > RELEASE_BODY.md
           fi
@@ -616,7 +631,7 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null; then
-            echo "::notice::$RELEASE_TAG already exists and was not changed. The candidate artifact is saved; advance KEEN_PBR_RELEASE for a new release."
+            echo "::notice::$RELEASE_TAG already exists and was not changed. The candidate artifact is saved; push a new commit to main for a new timestamped release."
             exit 0
           else
             tag_status=$?
@@ -625,12 +640,25 @@ jobs:
               exit "$tag_status"
             fi
           fi
+          notes_versions=("${RELEASE_TAG#v}")
+          if [[ "${notes_versions[0]}" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-[0-9]{14}$ ]]; then
+            notes_versions+=("${BASH_REMATCH[1]}")
+          fi
           : > BETA_NOTES.md
           if [ -f CHANGELOG.md ]; then
-            awk -v heading="## [${RELEASE_TAG#v}]" '
-              /^## \[/ {include = index($0, heading) == 1; next}
-              include {print}
-            ' CHANGELOG.md > BETA_NOTES.md
+            for notes_version in "${notes_versions[@]}"; do
+              if awk -v heading="## [$notes_version]" '
+                /^## / {
+                  include = index($0, heading) == 1 && substr($0, length(heading) + 1) ~ /^([[:space:]]|$)/
+                  if (include) found = 1
+                  next
+                }
+                include {print}
+                END {exit found ? 0 : 1}
+              ' CHANGELOG.md > BETA_NOTES.md; then
+                break
+              fi
+            done
           fi
           if ! [ -s BETA_NOTES.md ]; then
             printf 'Beta build from `%s`.\n\nKeenetic profiles: aarch64-3.10, mips-3.4, mipsel-3.4.\n\nAutomatic stable updates remain unchanged until promotion. See [CHANGELOG](https://github.com/%s/blob/%s/CHANGELOG.md).\n' \

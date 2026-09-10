@@ -642,6 +642,8 @@ execute_runtime_firewall_worker_attempt_with_route_preparation(
             auto mutation = run_route_mutation(
                 *observation.plan, input.route_reconcile_mode);
             route_preparation.worker_mutation_ack = mutation.ack;
+            route_preparation.previous_routes_retained =
+                mutation.previous_routes_retained;
             route_preparation.worker_mutation_failure_detail.swap(
                 mutation.failure_detail);
         } catch (const std::exception& error) {

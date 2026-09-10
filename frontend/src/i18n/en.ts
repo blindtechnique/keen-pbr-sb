@@ -373,6 +373,8 @@ export const enTranslation = {
       "The settings have changed. Refresh the panel data and review your changes before applying them.",
     recovery_required:
       "The operation could not be completed and recovery could not be confirmed. Check the service status on the dashboard before trying again.",
+    list_refresh_apply_failed:
+      "List refresh did not finish: changes could not be applied to routing. Check its dashboard status and the error details.",
     apply_unchanged:
       "The changes could not be applied. The working configuration is unchanged. See details for the cause.",
     rolled_back:
@@ -1212,6 +1214,12 @@ export const enTranslation = {
         "Could not check subscriptions. Other notifications are available.",
     },
     messages: {
+      runtimeApplyUnverified:
+        "The final routing state could not be determined while applying settings. The service marked routing as broken. Check its current dashboard status and the error details.",
+      runtimeFailed:
+        "The service reported a routing failure. Check its current dashboard status and the error details.",
+      runtimeStartFailed:
+        "Routing could not be started. Check its current dashboard status and the error details.",
       subscriptionRefreshFailed:
         "Automatic subscription refresh did not finish. Open Subscriptions and check the last check time and error details.",
       unknownError:

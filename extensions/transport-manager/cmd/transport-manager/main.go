@@ -20,11 +20,23 @@ import (
 
 func main() {
 	configPath := flag.String("config", "/opt/etc/keen-pbr/transports.json", "manager configuration file")
+	captureUpgrade := flag.String("capture-upgrade-state", "", "save current intent before a package upgrade and exit")
+	upgradeState := flag.String("upgrade-state", "", "restore intent for this package-transaction startup only")
 	flag.Parse()
 
 	cfg, configRevision, err := config.LoadWithRevision(*configPath)
 	if err != nil {
 		log.Fatalf("load config: %v", err)
+	}
+	if *captureUpgrade != "" {
+		if err := config.CaptureUpgradeState(context.Background(), cfg, configRevision, *captureUpgrade); err != nil {
+			log.Fatalf("capture upgrade state (services were not stopped): %v", err)
+		}
+		return
+	}
+	desired, err := config.ReadUpgradeState(*upgradeState, configRevision)
+	if err != nil {
+		log.Fatalf("read upgrade state: %v", err)
 	}
 
 	manager := transport.NewManager()
@@ -43,11 +55,12 @@ func main() {
 	}
 	var sharedGroup *transport.SharedSingBoxGroup
 	if cfg.SingBoxProcessMode == config.SingBoxProcessModeShared {
-		sharedGroup, err = transport.NewSharedSingBoxGroup(
+		sharedGroup, err = transport.NewSharedSingBoxGroupWithDesired(
 			cfg.Transports,
 			cfg.SingBoxBinary,
 			cfg.RuntimeDir,
 			cfg.HealthEndpoint(),
+			desired,
 		)
 		if err != nil {
 			log.Fatalf("create shared sing-box runtime: %v", err)
@@ -74,7 +87,11 @@ func main() {
 		if err := manager.Add(managed); err != nil {
 			log.Fatalf("register transport %q: %v", item.Tag, err)
 		}
-		supervisor.Register(item)
+		initialDesired := item.AutoStart
+		if previous, exists := desired[item.Tag]; exists {
+			initialDesired = previous
+		}
+		supervisor.RegisterWithDesired(item, initialDesired)
 	}
 
 	admin := config.NewAdminWithRevision(

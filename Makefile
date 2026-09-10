@@ -196,6 +196,7 @@ test: ## Build and run unit tests (doctest)
 
 test-package-dns: ## Run isolated Keenetic DNS and uninstall regressions without compiling
 	python3 -m unittest build_scripts.tests.test_installer_component_preservation -v
+	python3 -m unittest build_scripts.tests.test_transport_upgrade_state -v
 	$(BUSYBOX) sh tests/package_it/run-dnsmasq-helper-timing.sh packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/dnsmasq.sh
 	$(BUSYBOX) sh tests/package_it/run-dnsmasq-direct-fallback.sh packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/dnsmasq.sh
 	$(BUSYBOX) sh tests/package_it/run-installer-dns-rollback.sh install.sh

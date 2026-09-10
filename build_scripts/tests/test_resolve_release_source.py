@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 import os
 import shutil
 import subprocess
@@ -14,10 +15,10 @@ ROOT = Path(__file__).resolve().parents[2]
 RESOLVER = ROOT / "build_scripts" / "resolve-release-source.py"
 
 
-def git(repository: Path, *arguments: str) -> str:
+def git(repository: Path, *arguments: str, env: dict[str, str] | None = None) -> str:
     return subprocess.run(
         ["git", *arguments], cwd=repository, check=True, text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15, env=env,
     ).stdout.strip()
 
 
@@ -38,9 +39,12 @@ class ResolveReleaseSourceTest(unittest.TestCase):
         git(cls.repo, "config", "commit.gpgsign", "false")
         git(cls.repo, "config", "tag.gpgsign", "false")
         git(cls.repo, "remote", "add", "origin", str(cls.remote))
+        cls.commit_time = 1788998400
         cls.release_tag = "v3.3.0-sb.12"
         cls.release_sha = cls.commit_source("3.3.0", "12", cls.release_tag)
         git(cls.repo, "tag", cls.release_tag)
+        cls.timestamp_tag = cls.timestamp_tag_for("3.3.0", cls.release_sha)
+        git(cls.repo, "tag", cls.timestamp_tag)
         git(cls.repo, "tag", "releases/v-nested")
         for channel in ("alpha", "beta", "next"):
             git(cls.repo, "tag", f"{channel}-123-1")
@@ -48,6 +52,9 @@ class ResolveReleaseSourceTest(unittest.TestCase):
         cls.annotated_sha = cls.commit_source("3.3.1", "13", cls.annotated_tag)
         git(cls.repo, "tag", "-a", cls.annotated_tag, "-m", "annotated release")
         cls.annotated_object = git(cls.repo, "rev-parse", f"refs/tags/{cls.annotated_tag}")
+        cls.annotated_timestamp_tag = cls.timestamp_tag_for("3.3.1", cls.annotated_sha)
+        git(cls.repo, "tag", "-a", cls.annotated_timestamp_tag, "-m", "timestamp release")
+        cls.annotated_timestamp_object = git(cls.repo, "rev-parse", f"refs/tags/{cls.annotated_timestamp_tag}")
         cls.invalid_sources = {
             "missing installer pin": cls.commit_source("3.3.0", "12", None),
             "different installer pin": cls.commit_source("3.3.0", "12", "v3.3.0-sb.11"),
@@ -56,6 +63,7 @@ class ResolveReleaseSourceTest(unittest.TestCase):
         }
         cls.head_tag = "v3.3.2-sb.14"
         cls.head_sha = cls.commit_source("3.3.2", "14", cls.head_tag)
+        cls.head_timestamp_tag = cls.timestamp_tag_for("3.3.2", cls.head_sha)
         git(cls.repo, "branch", "alpha")
         git(cls.repo, "branch", "beta")
         git(cls.repo, "branch", "next")
@@ -76,6 +84,12 @@ class ResolveReleaseSourceTest(unittest.TestCase):
         )
 
     @classmethod
+    def timestamp_tag_for(cls, version: str, sha: str) -> str:
+        committed_at = int(git(cls.repo, "show", "-s", "--format=%ct", sha))
+        stamp = datetime.fromtimestamp(committed_at, timezone.utc).strftime("%Y%m%d%H%M%S")
+        return f"v{version}-{stamp}"
+
+    @classmethod
     def commit_source(cls, version: str, release: str, pin: str | None) -> str:
         (cls.repo / "version.mk").write_text(
             f"KEEN_PBR_VERSION={version}\nKEEN_PBR_RELEASE={release}\n", encoding="utf-8",
@@ -85,7 +99,13 @@ class ResolveReleaseSourceTest(unittest.TestCase):
             encoding="utf-8",
         )
         git(cls.repo, "add", "version.mk", "install.sh")
-        git(cls.repo, "commit", "-qm", "release identity fixture")
+        cls.commit_time += 1
+        environment = os.environ.copy()
+        # Distinct commits of the same semantic version must get distinct
+        # build tags; a non-UTC committer zone must not change their UTC ID.
+        environment["GIT_COMMITTER_DATE"] = f"@{cls.commit_time} +0530"
+        environment["GIT_AUTHOR_DATE"] = f"@{cls.commit_time - 3600} -0700"
+        git(cls.repo, "commit", "-qm", "release identity fixture", env=environment)
         return git(cls.repo, "rev-parse", "HEAD")
 
     @classmethod
@@ -122,7 +142,10 @@ class ResolveReleaseSourceTest(unittest.TestCase):
 
     def test_manual_release_uses_exact_remote_tag_from_each_branch(self) -> None:
         for ref in ("refs/heads/main", "refs/heads/alpha", "refs/heads/beta", "refs/heads/next"):
-            for tag, expected_sha in ((self.release_tag, self.release_sha), (self.annotated_tag, self.annotated_sha)):
+            for tag, expected_sha in (
+                (self.release_tag, self.release_sha), (self.annotated_tag, self.annotated_sha),
+                (self.timestamp_tag, self.release_sha), (self.annotated_timestamp_tag, self.annotated_sha),
+            ):
                 with self.subTest(ref=ref, tag=tag):
                     output = self.successful(self.resolve("workflow_dispatch", ref, tag=tag))
                     self.assertEqual(output["source_sha"], expected_sha)
@@ -186,6 +209,20 @@ class ResolveReleaseSourceTest(unittest.TestCase):
         annotated = self.successful(self.resolve("push", f"refs/tags/{self.annotated_tag}", sha=self.annotated_object))
         self.assertEqual(annotated["source_sha"], self.annotated_sha)
 
+    def test_timestamp_tags_must_match_their_event_commit_build_identity(self) -> None:
+        for event in ("push", "workflow_dispatch"):
+            with self.subTest(event=event):
+                output = self.successful(self.resolve(event, f"refs/tags/{self.timestamp_tag}", sha=self.release_sha))
+                self.assertEqual(output["source_sha"], self.release_sha)
+                self.assertEqual(output["release_tag"], self.timestamp_tag)
+                self.assertEqual(output["release"], "true")
+                self.assertEqual(output["candidate"], "false")
+                self.assert_architectures(output, ["aarch64", "mips", "mipsel"])
+        annotated = self.successful(self.resolve(
+            "push", f"refs/tags/{self.annotated_timestamp_tag}", sha=self.annotated_timestamp_object,
+        ))
+        self.assertEqual(annotated["source_sha"], self.annotated_sha)
+
     def test_manual_input_takes_precedence_over_dispatch_tag_ref(self) -> None:
         output = self.successful(self.resolve("workflow_dispatch", "refs/tags/other", tag=self.annotated_tag))
         self.assertEqual(output["source_sha"], self.annotated_sha)
@@ -198,7 +235,7 @@ class ResolveReleaseSourceTest(unittest.TestCase):
                     output = self.successful(self.resolve(event, f"refs/heads/{branch}", sha=self.release_sha))
                     self.assertEqual(output["source_sha"], self.release_sha)
                     self.assertEqual(output["release"], "false")
-                    self.assertEqual(output["release_tag"], self.release_tag if branch == "main" else "")
+                    self.assertEqual(output["release_tag"], self.timestamp_tag if branch == "main" else "")
                     self.assertEqual(output["candidate"], "true" if branch == "main" else "false")
                     self.assertEqual(output["channel"], {"main": "stable", "beta": "none"}.get(branch, branch))
                     self.assert_architectures(output, ["aarch64", "mips", "mipsel"] if branch in ("main", "beta") else ["aarch64"])
@@ -234,23 +271,53 @@ class ResolveReleaseSourceTest(unittest.TestCase):
         fields["build_matrix"] = json.loads(fields["build_matrix"])
         self.assertEqual(fields, output)
 
-    def test_stable_candidate_requires_version_and_standalone_installer_to_agree(self) -> None:
+    def test_main_timestamp_releases_do_not_require_legacy_installer_pin_or_counter(self) -> None:
         for reason, sha in self.invalid_sources.items():
             with self.subTest(reason=reason):
                 result = self.resolve("push", "refs/heads/main", sha=sha)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertEqual(result.stdout, "")
+                if reason == "invalid version":
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(result.stdout, "")
+                else:
+                    output = self.successful(result)
+                    self.assertEqual(output["release_tag"], self.timestamp_tag_for("3.3.0", sha))
+                    self.assertEqual(output["candidate"], "true")
                 # Development channels and PRs do not need a release pin.
                 for branch in ("alpha", "next"):
                     output = self.successful(self.resolve("push", f"refs/heads/{branch}", sha=sha))
                     self.assertEqual(output["candidate"], "false")
                 self.successful(self.resolve("pull_request", "refs/pull/23/merge", sha=sha))
 
+    def test_same_base_version_uses_newer_commit_utc_timestamp_without_release_bump(self) -> None:
+        first = self.successful(self.resolve("push", "refs/heads/main", sha=self.release_sha))
+        newer_sha = self.invalid_sources["missing installer pin"]
+        second = self.successful(self.resolve("push", "refs/heads/main", sha=newer_sha))
+        self.assertTrue(first["release_tag"].startswith("v3.3.0-"))
+        self.assertTrue(second["release_tag"].startswith("v3.3.0-"))
+        self.assertGreater(second["release_tag"], first["release_tag"])
+        repeated = self.successful(self.resolve("workflow_dispatch", "refs/heads/main", sha=newer_sha))
+        self.assertEqual(repeated["release_tag"], second["release_tag"])
+
+    @unittest.skipUnless(shutil.which("bash"), "bash is required")
+    def test_timestamp_tag_matches_shared_package_version_resolver(self) -> None:
+        environment = os.environ.copy()
+        environment.pop("KEEN_PBR_RELEASE_OVERRIDE", None)
+        environment["TZ"] = "Pacific/Honolulu"
+        result = subprocess.run(
+            ["bash", str(ROOT / "build_scripts" / "resolve-version.sh"), "release", str(self.repo)],
+            env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = self.successful(self.resolve("push", "refs/heads/main"))
+        self.assertEqual(output["release_tag"], f"v3.3.2-{result.stdout.strip()}")
+        self.assertEqual(output["release_tag"], self.head_timestamp_tag)
+
     def test_stable_tag_must_match_version_and_installer_in_the_event_commit(self) -> None:
         for tag, sha in (
             (self.release_tag, self.head_sha),
             ("releases/v-nested", self.release_sha),
             ("v3.3.0-20260910000000", self.release_sha),
+            (self.timestamp_tag, self.head_sha),
         ):
             with self.subTest(tag=tag):
                 result = self.resolve("push", f"refs/tags/{tag}", sha=sha)

@@ -107,6 +107,30 @@ struct ConfigRollbackEvidence {
     RuntimeFirewallLifecycleTerminal terminal;
 };
 
+// Retry only an untouched (or exactly restored) rollback-attempt preimage.
+// This is not proof that the original configuration has been restored: that
+// still requires a separately verified rollback terminal. An entered COMMIT
+// or lost ownership must never be replayed through this path.
+inline bool should_retry_config_rollback(
+    const ConfigRollbackEvidence& evidence,
+    unsigned retries,
+    bool shutdown_requested) noexcept {
+    return retries == 0U && !shutdown_requested &&
+           evidence.terminal.observed_config_identity &&
+           config_terminal_identity_matches(
+               evidence.expected_identity,
+               *evidence.terminal.observed_config_identity,
+               ConfigTerminalOperationKind::rollback) &&
+           evidence.exact_lease_owned &&
+           evidence.published_generation_current &&
+           evidence.terminal.outcome ==
+               RuntimeFirewallLifecycleOutcome::not_verified &&
+           evidence.terminal.transient &&
+           evidence.terminal.previous_generation_certainly_retained &&
+           !evidence.terminal.committed &&
+           !evidence.terminal.commit_ambiguous;
+}
+
 inline ConfigRollbackAction plan_config_rollback_terminal(
     const ConfigRollbackEvidence& evidence) noexcept {
     return evidence.terminal.observed_config_identity &&
@@ -130,6 +154,21 @@ enum class ConfigRuntimeTerminalAction : std::uint8_t {
     fail_closed,
     shutdown,
 };
+
+struct ConfigRoutePublicationPlan {
+    bool accepted{false};
+    bool refresh_required{false};
+};
+
+// A link/route event after the worker acknowledged its completed route write
+// requests reconciliation. It does not undo that acknowledgement or prove
+// that the configuration failed. In particular, a slow DNS reload must not
+// turn unrelated interface churn into a rollback of all routing rules.
+inline ConfigRoutePublicationPlan plan_config_route_publication(
+    bool checkpoint_verified, bool observation_epoch_current) noexcept {
+    return {checkpoint_verified,
+            checkpoint_verified && !observation_epoch_current};
+}
 
 enum class ConfigBootstrapTerminalAction : std::uint8_t {
     keep_running,

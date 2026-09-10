@@ -79,19 +79,26 @@ case "${1:-}" in
         ;;
 esac
 
+UPGRADE_STATE_ARGS=""
 case "${1:-}" in
     start)
         run_recovery_guard start || exit 1
+        upgrade_state=/opt/var/lib/keen-pbr/rescue/transport-upgrade-state.json
+        if [ -f "$upgrade_state" ] && [ ! -L "$upgrade_state" ] &&
+           { [ -f /opt/var/lib/keen-pbr/rescue/pending ] ||
+             [ "${PKG_UPGRADE:-0}" = 1 ]; }; then
+            UPGRADE_STATE_ARGS="-upgrade-state $upgrade_state"
+        fi
         # These flags describe this startup, not the lifetime of the daemon.
         # A leaked postinst flag would later block an ordinary WAL rollback.
         unset KEEN_PBR_PERSISTENT_TRANSACTION KEEN_PBR_PACKAGE_POSTINST \
-            KEEN_PBR_RESCUE_TRANSACTION KEEN_PBR_PACKAGE_UNKNOWN_RECOVERY
+            KEEN_PBR_RESCUE_TRANSACTION KEEN_PBR_PACKAGE_UNKNOWN_RECOVERY PKG_UPGRADE
         ;;
 esac
 
 ENABLED=yes
 PROCS=transport-manager
-ARGS="-config /opt/etc/keen-pbr/transports.json"
+ARGS="-config /opt/etc/keen-pbr/transports.json $UPGRADE_STATE_ARGS"
 PREARGS=""
 DESC="keen-pbr transport manager"
 PATH=/opt/sbin:/opt/bin:/opt/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin

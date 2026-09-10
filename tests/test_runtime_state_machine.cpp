@@ -705,10 +705,9 @@ TEST_CASE("a retry that will never be scheduled says so") {
           Decline::routing_inactive);
 }
 
-TEST_CASE("entering and leaving broken are the loud transitions") {
+TEST_CASE("entering broken warns while recovery is informational") {
     using Severity = RuntimeTransitionLogSeverity;
-    // The owner of a broken runtime and its recoverer are the two lines an
-    // operator greps for; everything else is routine lifecycle.
+    // Recovery must not look like a second failure in warning-only journals.
     CHECK(classify_runtime_transition_log(RuntimeState::running,
                                           RuntimeState::broken) ==
           Severity::warn);
@@ -717,10 +716,10 @@ TEST_CASE("entering and leaving broken are the loud transitions") {
           Severity::warn);
     CHECK(classify_runtime_transition_log(RuntimeState::broken,
                                           RuntimeState::applying) ==
-          Severity::warn);
+          Severity::info);
     CHECK(classify_runtime_transition_log(RuntimeState::broken,
                                           RuntimeState::starting) ==
-          Severity::warn);
+          Severity::info);
     CHECK(classify_runtime_transition_log(RuntimeState::starting,
                                           RuntimeState::running) ==
           Severity::info);

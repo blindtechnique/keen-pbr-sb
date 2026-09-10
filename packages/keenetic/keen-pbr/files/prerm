@@ -1,5 +1,28 @@
 #!/bin/sh
 
+# Future direct opkg upgrades use the installed manager's read-only capture.
+# Signed-installer upgrades already captured with the candidate binary during
+# rescue stage, including the first upgrade from a manager without this CLI.
+if [ "${PKG_UPGRADE:-0}" = 1 ] &&
+   [ ! -e /opt/var/lib/keen-pbr/rescue/pending ]; then
+    # Hold the existing lifecycle lease from observation through shutdown, so
+    # a concurrent UI action cannot replace the intent after it was captured.
+    if [ -f /opt/usr/lib/keen-pbr/lifecycle-lock.sh ]; then
+        . /opt/usr/lib/keen-pbr/lifecycle-lock.sh
+        enter_lifecycle_lock || exit 1
+        trap release_lifecycle_lock EXIT
+    fi
+    rm -f /opt/var/lib/keen-pbr/rescue/transport-upgrade-state.json || exit 1
+    if [ -x /opt/usr/bin/transport-manager ] &&
+       /opt/etc/init.d/S79transport-manager check >/dev/null 2>&1; then
+        /opt/usr/bin/transport-manager -config /opt/etc/keen-pbr/transports.json \
+            -capture-upgrade-state /opt/var/lib/keen-pbr/rescue/transport-upgrade-state.json || {
+            echo "Cannot preserve VPN state; package upgrade stopped before services were stopped." >&2
+            exit 1
+        }
+    fi
+fi
+
 echo "Stopping keen-pbr service..."
 stop_action=stop
 if [ "${PKG_UPGRADE:-0}" = 1 ]; then

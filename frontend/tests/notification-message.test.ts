@@ -10,6 +10,18 @@ import { ruTranslation } from "../src/i18n/ru"
 
 const liveIncidents = [
   [
+    "Runtime state running -> broken: configuration generation terminal is unknown",
+    "runtimeApplyUnverified",
+  ],
+  [
+    "Runtime state starting -> broken: runtime start failed",
+    "runtimeStartFailed",
+  ],
+  [
+    "Runtime state running -> broken: a new runtime failure reason",
+    "runtimeFailed",
+  ],
+  [
     "Urltest 'hysteria2_bound' candidate was rejected; the previous selection remains verified: exact runtime routing transaction did not commit",
     "groupSwitchRejected",
   ],
@@ -70,7 +82,8 @@ describe("notification message presentation", () => {
   })
 
   test("keeps the selected language and the original technical detail", async () => {
-    const raw = liveIncidents[1][0]
+    const raw =
+      "Urltest 'hysteria2_bound' candidate and exact rollback were not verified: URLTEST rollback was not verified"
     const result = await present(raw, "error", "en")
     expect(result.text).toContain("Neither switching group")
     expect(result.text).toContain("hysteria2_bound")

@@ -50,6 +50,22 @@ TEST_CASE("stable compatibility tags use the actual IPK build for discovery") {
     CHECK(release["tag_name"] == "v3.3.0-sb.13");
 }
 
+TEST_CASE("timestamp releases offer newer builds without changing the base version") {
+    const nlohmann::json release = {
+        {"tag_name", "v3.3.2-20260910120000"},
+        {"assets", {{{"name", "keen-pbr_3.3.2-20260910120000_keenetic_aarch64-3.10.ipk"}},
+                    {{"name", "keen-pbr_3.3.2-20260910120000_keenetic_mips-3.4.ipk"}},
+                    {{"name", "keen-pbr_3.3.2-20260910120000_keenetic_mipsel-3.4.ipk"}}}}};
+    const auto latest = published_fork_version(release);
+    CHECK(latest == "v3.3.2-20260910120000");
+    // Previously published intermediate release and locally accepted fix.
+    CHECK(is_newer_fork_version(latest, "v3.3.2-20260909233706"));
+    CHECK(is_newer_fork_version(latest, "v3.3.2-20260910095526"));
+    CHECK_FALSE(is_newer_fork_version(latest, latest));
+    CHECK_FALSE(is_newer_fork_version(latest, "v3.3.2-20260911120000"));
+    CHECK_FALSE(is_newer_fork_version(latest, "v3.3.3-20260910090000"));
+}
+
 TEST_CASE("legacy releases and metadata without package names remain readable") {
     CHECK(published_fork_version({{"tag_name", "v3.0.7-sb.11"},
                                   {"assets", {{{"name", "keen-pbr_3.0.7-11_keenetic_mips-3.4.ipk"}}}}})

@@ -6,6 +6,7 @@ import type {
 import type { NfqwsUpdateStatus } from "@/api/nfqws"
 import { presentNotificationMessage } from "@/components/layout/notification-message"
 import { presentSubscriptionNotice } from "@/components/layout/subscription-notices"
+import { isRuntimeTransitionProgress } from "@/components/layout/runtime-transition-message"
 
 export type SoftwareUpdateResponse = {
   available?: boolean
@@ -278,6 +279,10 @@ export function collectNotices(
       continue
     }
     const [, timestamp, marker, text] = match
+    // Old releases logged leaving broken as WARN. A requested restart is
+    // progress, not proof of a fresh failure or of completed recovery. Leave
+    // routine progress in the journal without producing a new bell notice.
+    if (isRuntimeTransitionProgress(text)) continue
     // Older builds recorded automatic recovery as warnings/errors. Keep those
     // historical details in the downloadable journal without showing them as
     // current, actionable notifications after an upgrade.

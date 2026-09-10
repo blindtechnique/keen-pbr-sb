@@ -35,6 +35,7 @@ PENDING_BASELINE_IPK="$RESCUE_DIR/pending-baseline.ipk"
 PENDING_BASELINE_CONFIG="$RESCUE_DIR/pending-baseline-config"
 PENDING_TARGET_IPK="$RESCUE_DIR/pending-target.ipk"
 PENDING_TARGET_CONFIG="$RESCUE_DIR/pending-target-config"
+TRANSPORT_UPGRADE_STATE="$RESCUE_DIR/transport-upgrade-state.json"
 SNAPSHOT_MANIFEST=".snapshot-manifest"
 SNAPSHOT_READY=".snapshot-ready"
 STABLE_METADATA_HELPER="${RESCUE_DIR}/portable-stat.sh"
@@ -624,13 +625,15 @@ cleanup_pending_artifacts() {
         return 1
     fi
     cleanup_status=0
-    rm -f "$CANDIDATE_IPK" "${CANDIDATE_IPK}.sha256" \
+    rm -f "$TRANSPORT_UPGRADE_STATE" \
+        "$CANDIDATE_IPK" "${CANDIDATE_IPK}.sha256" \
         "$PENDING_BASELINE_IPK" "${PENDING_BASELINE_IPK}.sha256" \
         "$PENDING_TARGET_IPK" "${PENDING_TARGET_IPK}.sha256" ||
         cleanup_status=1
     rm -rf "$PRE_UPDATE_CONFIG" "$PENDING_BASELINE_CONFIG" \
         "$PENDING_TARGET_CONFIG" || cleanup_status=1
     for artifact in \
+        "$TRANSPORT_UPGRADE_STATE" \
         "$CANDIDATE_IPK" "${CANDIDATE_IPK}.sha256" \
         "$PENDING_BASELINE_IPK" "${PENDING_BASELINE_IPK}.sha256" \
         "$PENDING_TARGET_IPK" "${PENDING_TARGET_IPK}.sha256" \
@@ -946,6 +949,33 @@ install_archive() {
     return 1
 }
 
+capture_candidate_transport_state() {
+    # This runs before opkg/prerm stops anything. Use the already authenticated
+    # candidate's static binary so the old installed manager needs no new CLI
+    # or API. Extraction mirrors the installer's existing gzip IPK bootstrap.
+    [ -x "${ROOT}/opt/usr/bin/transport-manager" ] &&
+        [ -f "$CONFIG_DIR/transports.json" ] || return 0
+    "$TRANSPORT_INIT" check >/dev/null 2>&1 || return 0
+    capture_dir="$RESCUE_DIR/.transport-upgrade-capture.$$"
+    mkdir "$capture_dir" && chmod 0700 "$capture_dir" || return 1
+    capture_status=0
+    if tar -xzOf "$CANDIDATE_IPK" ./data.tar.gz > "$capture_dir/data.tar.gz" &&
+       tar -xzOf "$capture_dir/data.tar.gz" ./opt/usr/bin/transport-manager \
+           > "$capture_dir/transport-manager" &&
+       chmod 0700 "$capture_dir/transport-manager"; then
+        "$capture_dir/transport-manager" -config "$CONFIG_DIR/transports.json" \
+            -capture-upgrade-state "$TRANSPORT_UPGRADE_STATE" || capture_status=1
+    else
+        capture_status=1
+    fi
+    rm -f "$capture_dir/data.tar.gz" "$capture_dir/transport-manager"
+    rmdir "$capture_dir" 2>/dev/null || true
+    if [ "$capture_status" -ne 0 ]; then
+        echo "Cannot preserve VPN state; package upgrade stopped before services were stopped." >&2
+    fi
+    return "$capture_status"
+}
+
 stage_candidate() {
     source_ipk=$1
     ensure_known_idle || return 3
@@ -978,6 +1008,10 @@ stage_candidate() {
         echo "Current rescue IPK is incomplete or corrupted" >&2
         return 2
     fi
+    capture_candidate_transport_state || {
+        cleanup_pending_artifacts
+        return 1
+    }
     write_pending candidate-staged || {
         pending_status=$?
         [ "$pending_status" -eq 74 ] ||
@@ -1051,6 +1085,9 @@ can_rollback_previous() {
 
 rollback_previous() {
     can_rollback_previous || return $?
+    # A completed direct opkg upgrade can leave an inert handoff. An explicit
+    # rollback selects another config snapshot, not that old runtime intent.
+    rm -f "$TRANSPORT_UPGRADE_STATE" || return 1
     replace_file_from "$CURRENT_IPK" "$PENDING_BASELINE_IPK" || return 1
     snapshot_config "$PENDING_BASELINE_CONFIG" || {
         cleanup_pending_artifacts

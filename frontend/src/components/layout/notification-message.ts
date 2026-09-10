@@ -1,4 +1,5 @@
 import { getOperationErrorPresentation } from "@/lib/api-errors"
+import { getRuntimeTransitionMessageKind } from "@/components/layout/runtime-transition-message"
 
 export type NotificationMessageLevel = "error" | "warning" | "info"
 export type NotificationMessagePresentation = {
@@ -34,6 +35,14 @@ function summarizeKnownMessage(
   raw: string,
   t: NotificationMessageTranslate
 ): string | undefined {
+  switch (getRuntimeTransitionMessageKind(raw)) {
+    case "unverified":
+      return t("notifications.messages.runtimeApplyUnverified")
+    case "failed":
+      return t("notifications.messages.runtimeFailed")
+    case "startFailed":
+      return t("notifications.messages.runtimeStartFailed")
+  }
   if (raw === "Subscription auto-refresh failed") {
     return t("notifications.messages.subscriptionRefreshFailed")
   }

@@ -169,6 +169,60 @@ TEST_CASE("list refresh endpoint carries force and exact one-list acceptance") {
     CHECK(requests.size() == 2);
 }
 
+TEST_CASE("list refresh endpoint propagates runtime apply failure instead of HTTP OK") {
+    ListsRefreshApiFixture fixture(test_support::isolated_api_port(4));
+    const ListRefreshOperationResult partial{
+        {"one"}, {"one"}, {}, false, {}};
+    for (const auto* stage : {"prepare", "owner_handoff", "terminal_wait", "terminal"}) {
+        for (const auto* runtime_result : {"unchanged", "rolled_back", "unknown"}) {
+            CAPTURE(stage);
+            CAPTURE(runtime_result);
+            fixture.context.refresh_lists_fn =
+                [&, stage, runtime_result](const api::ListRefreshRequest&)
+                    -> ListRefreshOperationResult {
+                throw make_list_refresh_apply_error(
+                    partial, stage, "retained exact terminal detail", runtime_result);
+            };
+            const auto response = fixture.client->Post(
+                "/api/lists/refresh", R"({"name":"one"})", "application/json");
+            REQUIRE(response != nullptr);
+            CHECK(response->status == 503);
+            const auto body = nlohmann::json::parse(response->body);
+            CHECK(body["code"] == "list_refresh_apply_failed");
+            CHECK(body["params"]["stage"] == stage);
+            CHECK(body["params"]["runtime_result"] == runtime_result);
+            CHECK(body["reloaded"] == false);
+            CHECK(body["changed_lists"] == nlohmann::json::array({"one"}));
+            CHECK(body["error"].get<std::string>().find(
+                      "retained exact terminal detail") != std::string::npos);
+            CHECK_FALSE(body.contains("status"));
+        }
+    }
+}
+
+TEST_CASE("list refresh endpoint allows successful cache-only updates") {
+    ListsRefreshApiFixture fixture(test_support::isolated_api_port(5));
+    for (const auto& result : {
+             ListRefreshOperationResult{{"one"}, {}, {}, false,
+                                        "Lists refreshed; no updates found"},
+             ListRefreshOperationResult{{"one"}, {"one"}, {}, false,
+                                        "Lists refreshed"},
+             ListRefreshOperationResult{{"one"}, {"one"}, {}, false,
+                 "Lists refreshed; runtime is stopped so changes will apply on next start"}}) {
+        fixture.context.refresh_lists_fn =
+            [&result](const api::ListRefreshRequest&) { return result; };
+        const auto response = fixture.client->Post(
+            "/api/lists/refresh", R"({"name":"one"})", "application/json");
+        REQUIRE(response != nullptr);
+        CHECK(response->status == 200);
+        const auto body = nlohmann::json::parse(response->body);
+        CHECK(body["status"] == "ok");
+        CHECK(body["message"] == result.message);
+        CHECK(body["reloaded"] == false);
+        CHECK_FALSE(body.contains("code"));
+    }
+}
+
 } // namespace keen_pbr3
 
 #endif // WITH_API

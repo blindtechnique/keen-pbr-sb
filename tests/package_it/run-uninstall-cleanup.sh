@@ -189,7 +189,22 @@ echo 'PASS bare opkg removal has no dangling helper reference'
 
 for upgrade in 1 0; do
     setup_case "reinstall_$upgrade"
+    mkdir -p "$ROOT/opt/usr/bin"
+    cat > "$ROOT/opt/usr/bin/transport-manager" <<'EOF'
+#!/bin/sh
+[ "$1" = -config ] && [ "$3" = -capture-upgrade-state ] || exit 99
+printf '%s\n' 'transport:capture-upgrade-state' >> "$ROOT/actions"
+printf '%s\n' '{"desired_up":{"stopped-vpn":false}}' > "$4"
+EOF
+    chmod 0755 "$ROOT/opt/usr/bin/transport-manager"
     PKG_UPGRADE=$upgrade "$SHELL_RUNNER" "$ROOT/prerm"
+    if [ "$upgrade" = 1 ]; then
+        awk '/transport:capture-upgrade-state/ { captured=1 }
+             /S80keen-pbr:stop-for-upgrade/ { if (!captured) exit 1; checked=1 }
+             END { if (!checked) exit 1 }' "$ROOT/actions"
+    else
+        ! grep -q 'transport:capture-upgrade-state' "$ROOT/actions"
+    fi
     assert_standalone_dns
     "$ROOT/opt/usr/lib/keen-pbr/dnsmasq-package.sh" restore
     cmp "$ROOT/original-dns" "$ROOT/opt/etc/dnsmasq.conf"
