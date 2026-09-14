@@ -334,7 +334,11 @@ nlohmann::json software_update_status(bool force_remote_check) {
         }
     }
 
-    const auto latest = release_string(release, "tag_name");
+    const auto release_tag = release_string(release, "tag_name");
+    const auto latest = published_fork_version(release);
+    if (latest.empty() && check_error.empty()) {
+        check_error = "Release metadata does not identify a single Keenetic package version";
+    }
     auto release_notes = release_string(release, "body");
     constexpr std::size_t kReleaseNotesLimit = 64U * 1024U;
     if (release_notes.size() > kReleaseNotesLimit) {
@@ -344,10 +348,10 @@ nlohmann::json software_update_status(bool force_remote_check) {
     const auto release_url = release_string(release, "html_url");
     const auto release_name = release_string(release, "name");
     const auto changelog_url =
-        safe_github_tag(latest)
+        safe_github_tag(release_tag)
             ? std::string(
                   "https://github.com/blindtechnique/keen-pbr-sb/blob/") +
-                  latest + "/CHANGELOG.md"
+                  release_tag + "/CHANGELOG.md"
             : std::string{};
 
     response.update(

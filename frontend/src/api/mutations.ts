@@ -1,4 +1,5 @@
 import {
+  type QueryClient,
   useIsMutating,
   useMutation,
   useQueryClient,
@@ -268,7 +269,14 @@ export const usePostListsRefreshMutation = (
 ) => {
   const queryClient = useQueryClient()
 
-  return usePostListsRefresh({
+  return usePostListsRefresh(withListRefreshInvalidation(queryClient, options))
+}
+
+export function withListRefreshInvalidation(
+  queryClient: Pick<QueryClient, "invalidateQueries">,
+  options?: UsePostListsRefreshOptions
+): UsePostListsRefreshOptions {
+  return {
     ...options,
     mutation: {
       ...options?.mutation,
@@ -284,8 +292,21 @@ export const usePostListsRefreshMutation = (
           context
         )
       },
+      onError: async (error, variables, onMutateResult, context) => {
+        // Downloading may have completed before runtime application failed.
+        // Request the current routing state even when the refresh returns 503.
+        for (const queryKey of invalidationKeysAfterListRefreshMutation) {
+          await queryClient.invalidateQueries({ queryKey })
+        }
+        await options?.mutation?.onError?.(
+          error,
+          variables,
+          onMutateResult,
+          context
+        )
+      },
     },
-  })
+  }
 }
 
 export const usePostConfigMutation = (options?: UsePostConfigOptions) => {

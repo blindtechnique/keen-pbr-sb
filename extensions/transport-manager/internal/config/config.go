@@ -815,18 +815,27 @@ func (a *Admin) updateLocked(ctx context.Context, tag string, spec transport.Tra
 		a.revision = revision
 		return nil
 	}
-	a.supervisor.Forget(tag)
+	previousDesired, registered := a.supervisor.Forget(tag)
+	if !registered {
+		previousDesired = oldSpec.AutoStart
+	}
+	nextDesired := spec.AutoStart
+	if registered && oldSpec.AutoStart == spec.AutoStart {
+		// Subscription endpoint/credential changes do not request Up or Down.
+		// Preserve manual intent just as shared ApplyInventory does.
+		nextDesired = previousDesired
+	}
 	if err := a.manager.Remove(ctx, tag); err != nil {
-		a.supervisor.Register(oldSpec)
+		a.supervisor.RegisterWithDesired(oldSpec, previousDesired)
 		return err
 	}
 	if err := a.manager.Add(managed); err != nil {
 		oldManaged, _ := transport.NewFromSpec(oldSpec, a.config.SingBoxBinary, a.config.RuntimeDir, a.config.HealthEndpoint())
 		_ = a.manager.Add(oldManaged)
-		a.supervisor.Register(oldSpec)
+		a.supervisor.RegisterWithDesired(oldSpec, previousDesired)
 		return err
 	}
-	a.supervisor.Register(spec)
+	a.supervisor.RegisterWithDesired(spec, nextDesired)
 	next := a.config
 	next.Transports = nextSpecs
 	revision, err := saveAdminConfig(a.path, next)
@@ -835,7 +844,7 @@ func (a *Admin) updateLocked(ctx context.Context, tag string, spec transport.Tra
 		_ = a.manager.Remove(ctx, tag)
 		oldManaged, _ := transport.NewFromSpec(oldSpec, a.config.SingBoxBinary, a.config.RuntimeDir, a.config.HealthEndpoint())
 		_ = a.manager.Add(oldManaged)
-		a.supervisor.Register(oldSpec)
+		a.supervisor.RegisterWithDesired(oldSpec, previousDesired)
 		return err
 	}
 	a.config = next
@@ -907,9 +916,12 @@ func (a *Admin) deleteLocked(ctx context.Context, tag string) error {
 	if a.shared != nil && isSharedSpec(oldSpec) {
 		return a.deleteSharedLocked(ctx, index, oldSpec)
 	}
-	a.supervisor.Forget(tag)
+	previousDesired, registered := a.supervisor.Forget(tag)
+	if !registered {
+		previousDesired = oldSpec.AutoStart
+	}
 	if err := a.manager.Remove(ctx, tag); err != nil {
-		a.supervisor.Register(oldSpec)
+		a.supervisor.RegisterWithDesired(oldSpec, previousDesired)
 		return err
 	}
 	next := a.config
@@ -919,7 +931,7 @@ func (a *Admin) deleteLocked(ctx context.Context, tag string) error {
 	if err != nil {
 		oldManaged, _ := transport.NewFromSpec(oldSpec, a.config.SingBoxBinary, a.config.RuntimeDir, a.config.HealthEndpoint())
 		_ = a.manager.Add(oldManaged)
-		a.supervisor.Register(oldSpec)
+		a.supervisor.RegisterWithDesired(oldSpec, previousDesired)
 		return err
 	}
 	a.config = next

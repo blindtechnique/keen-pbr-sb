@@ -37,7 +37,8 @@ KEEN_PBR_NFQWS_ROTATOR_LEARNED_PREFIX="$work/nfqws-rotator-learned-v1" \
 "$lua_bin" \
     "$repo_root/tests/nfqws_rotator_persistence_smoke.lua" \
     "$repo_root/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/nfqws-lua/rotator-telemetry.lua" \
-    "$fixture/zapret-auto.lua"
+    "$fixture/zapret-auto.lua" \
+    "$fixture/zapret-lib-host-ip.lua"
 
 "$lua_bin" \
     "$repo_root/tests/nfqws_circular_v103_semantics.lua" \
@@ -47,4 +48,40 @@ KEEN_PBR_NFQWS_ROTATOR_LEARNED_PREFIX="$work/nfqws-rotator-learned-v1" \
 "$lua_bin" \
     "$repo_root/tests/nfqws_legacy_udp_pool_semantics.lua" \
     "$fixture/zapret-auto.lua" \
+    "$repo_root/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/nfqws-strategies"
+
+"$lua_bin" \
+    "$repo_root/tests/nfqws_video_tcp_semantics.lua" \
+    "$fixture" \
+    "$repo_root/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/nfqws-strategies" \
+    "$repo_root/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/nfqws-lua/rotator-telemetry.lua"
+
+"$lua_bin" \
+    "$repo_root/tests/nfqws_discord_pool_semantics.lua" \
+    "$fixture" \
+    "$repo_root/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/nfqws-strategies" \
+    "$repo_root/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/nfqws-lua/rotator-telemetry.lua"
+
+"$lua_bin" \
+    "$repo_root/tests/nfqws_tcp_syn_semantics.lua" \
+    "$fixture" \
+    "$repo_root/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/nfqws-lua/rotator-telemetry.lua" \
+    "$repo_root/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/nfqws-strategies"
+
+"$lua_bin" \
+    "$repo_root/tests/nfqws_tcp_success_semantics.lua" \
+    "$fixture" \
+    "$repo_root/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/nfqws-lua/rotator-telemetry.lua"
+
+"$lua_bin" \
+    "$repo_root/tests/nfqws_tcp_tls_failure_semantics.lua" \
+    "$fixture" \
+    "$repo_root/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/nfqws-lua/rotator-telemetry.lua" \
+    "$repo_root/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/nfqws-strategies"
+
+"$lua_bin" \
+    "$repo_root/tests/nfqws_rotator_trace_semantics.lua" \
+    "$fixture" \
+    "$repo_root/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/nfqws-lua/rotator-telemetry.lua" \
+    "$repo_root/build_scripts/diagnostics/nfqws-rotator-trace.lua" \
     "$repo_root/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/nfqws-strategies"

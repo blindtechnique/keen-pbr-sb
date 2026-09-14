@@ -50,6 +50,7 @@ import { getRuleEditHref } from "@/lib/rule-route"
 import type { Dependency } from "@/lib/dependencies"
 import { ListDeleteReplacementPicker } from "@/components/lists/list-delete-replacement-picker"
 import { ListShrinkNotice } from "@/components/lists/list-shrink-notice"
+import { ListHints } from "@/components/lists/list-hints"
 import { OperationErrorMessage } from "@/components/shared/operation-error-message"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { PageHeader } from "@/components/shared/page-header"
@@ -571,6 +572,10 @@ export function ListsPage() {
       </PageActionBar>
 
       <ConfigSaveErrorAlert error={postConfigMutation.error} />
+
+      {loadedConfig && configRevision ? (
+        <ListHints config={loadedConfig} revision={configRevision} />
+      ) : null}
 
       {configQuery.isLoading || pageQuery.isPending ? (
         <TableSkeleton />

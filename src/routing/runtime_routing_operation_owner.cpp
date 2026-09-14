@@ -949,6 +949,24 @@ RuntimeRoutingOperationResult RuntimeRoutingOperationOwner::reconcile_exact(
         ? exact_result.published_journal->entries
         : exact_result.journal;
     for (const auto& entry : stable_entries) {
+        // A fresh owner has no in-memory Created receipts after a restart.
+        // Recover only the exact rule/anchor pair observed before any writes,
+        // and only after a complete commit. Ordinary authoritative applies
+        // must not adopt a foreign rule merely because an earlier candidate
+        // created a route beside it.
+        if ((current->outcome == RuntimeRoutingOperationOutcome::idle ||
+             (!prior_inventory_authoritative && entry.rule &&
+              std::none_of(rules_.get_rules().begin(), rules_.get_rules().end(),
+                  [&](const RuleSpec& known) {
+                      return logical_rule_covers(known, *entry.rule);
+                  }))) &&
+            exact_result.terminal == RuntimeRoutingTerminal::candidate_committed &&
+            entry.operation == RuntimeRoutingJournalOperation::add_candidate_rule &&
+            entry.state == RuntimeRoutingJournalState::verified &&
+            entry.receipt == RuntimeRoutingJournalReceipt::already_present &&
+            entry.rule) {
+            append_unique_rule(committed_owned_rules, *entry.rule);
+        }
         if (entry.operation !=
                 RuntimeRoutingJournalOperation::add_candidate_rule ||
             entry.state != RuntimeRoutingJournalState::completed ||

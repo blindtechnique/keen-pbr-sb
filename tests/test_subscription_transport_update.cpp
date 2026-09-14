@@ -53,6 +53,7 @@ public:
     int put_status{200};
     bool malformed_state{false};
     bool omit_reply_revision{false};
+    bool fail_reply_after_commit{false};
 
     explicit UpdateManager(json initial_specs) : specs(std::move(initial_specs)) {
         server.Get("/v1/config/transports/state", [this](const httplib::Request& request, httplib::Response& response) {
@@ -99,6 +100,12 @@ public:
                 redacted.erase("link");
                 *found = std::move(redacted);
                 revision = "updated-revision-" + std::to_string(puts.size());
+                if (fail_reply_after_commit) {
+                    // The manager committed, but its caller cannot establish
+                    // the result (e.g. a proxy lost the response during restart).
+                    response.status = 502;
+                    return;
+                }
                 json reply{{"status", "updated"}, {"tag", tag}};
                 if (!omit_reply_revision) reply["config_revision"] = revision;
                 response.set_content(reply.dump(), "application/json");
@@ -170,6 +177,32 @@ TEST_CASE("subscription transport state uses the same internal fingerprint as th
     CHECK(state[2].fingerprint.empty());
     CHECK(manager.puts.empty());
     CHECK(manager.unauthorized_count == 0);
+}
+
+TEST_CASE("disabled subscription node stays disabled across update uncertain reply and retry") {
+    for (bool lost_reply : {false, true}) {
+        CAPTURE(lost_reply);
+        auto disabled = existing_spec("disabled");
+        disabled["auto_start"] = false;
+        const auto healthy = existing_spec("healthy");
+        UpdateManager manager(json::array({disabled, healthy}));
+        manager.fail_reply_after_commit = lost_reply;
+        const auto first = update_subscription_transports(manager.endpoint(), {update_for("disabled")});
+        CHECK(first.error_code == (lost_reply ? "apply_failed" : ""));
+        REQUIRE(manager.puts.size() == 1);
+        CHECK(manager.puts.front().spec.at("auto_start") == false);
+        CHECK(manager.specs.at(0).at("auto_start") == false);
+        CHECK(manager.specs.at(1) == healthy);
+
+        // A restarted core retries the same pending provider update against
+        // the persisted manager inventory, not a reconstructed default spec.
+        const auto retry = update_subscription_transports(manager.endpoint(), {update_for("disabled")});
+        CHECK(retry.error_code.empty());
+        CHECK(retry.applied_tags == std::vector<std::string>{"disabled"});
+        CHECK(manager.puts.size() == 1);
+        CHECK(manager.specs.at(0).at("auto_start") == false);
+        CHECK(manager.specs.at(1) == healthy);
+    }
 }
 
 TEST_CASE("subscription inventory cannot report a partial or unavailable manager as empty") {

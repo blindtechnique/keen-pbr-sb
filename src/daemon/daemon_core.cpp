@@ -46,6 +46,7 @@
 #include "../log/nfqws_log_maintenance.hpp"
 #ifdef WITH_API
 #include "../config/subscription_refresh.hpp"
+#include "../api/handler_transports.hpp"
 #endif
 #include "../dns/dns_router.hpp"
 #include "../dns/dnsmasq_access_policy.hpp"
@@ -443,6 +444,7 @@ struct DaemonConfigGenerationTransaction final {
     bool rollback_cleanup_scope_prepared{false};
     OwnedSnatRecovery post_terminal_snat_recovery;
     bool post_terminal_refresh_required{false};
+    unsigned rollback_retries{0U};
     bool post_terminal_full_refresh{false};
     bool candidate_resolver_may_have_changed{false};
     bool candidate_published{false};
@@ -4417,6 +4419,12 @@ void Daemon::complete_runtime_cold_boot_attempt(
     }
     const bool terminal_transient = terminal.transient;
     const bool terminal_ambiguous = terminal.commit_ambiguous;
+    // Preserve the failure before moving the terminal into the planner below.
+    std::string terminal_failure_detail;
+    try {
+        terminal_failure_detail = terminal.detail;
+    } catch (...) {
+    }
     RuntimeColdBootCandidateAction action =
         RuntimeColdBootCandidateAction::request_fresh_recovery;
     try {
@@ -4482,6 +4490,18 @@ void Daemon::complete_runtime_cold_boot_attempt(
             schedule_runtime_cold_boot_recovery(
                 transaction, "transient clean cold-boot failure");
             return;
+        }
+        // This attempt has finished: do not leave an idle service in starting,
+        // which would also reject the user's normal Start action indefinitely.
+        try {
+            runtime_state_store_.set_routing_runtime_active(false);
+            const auto detail = terminal_failure_detail.empty()
+                ? std::string("startup routing initialization failed")
+                : terminal_failure_detail;
+            transition_runtime_or_throw(RuntimeState::broken, detail.c_str());
+            publish_runtime_state();
+            Logger::instance().error("Startup routing initialization failed: {}", detail);
+        } catch (...) {
         }
         open_runtime_cold_boot_services(transaction, /*runtime_ready=*/false);
         return;
@@ -7572,6 +7592,30 @@ void Daemon::complete_preowned_runtime_firewall_config_rollback(
     const bool verified_rollback =
         plan_config_rollback_terminal(evidence) ==
         ConfigRollbackAction::accept_verified_rollback;
+    if (!verified_rollback && should_retry_config_rollback(
+            evidence, transaction->rollback_retries,
+            runtime_firewall_owner_->shutdown_requested())) {
+        // Retry only a zero-write/verified-preimage failure. Once rollback
+        // COMMIT is entered, the original candidate is no longer an exact
+        // preimage and must never be blindly replayed.
+        ++transaction->rollback_retries;
+        RuntimeFirewallPreownedTerminalContinuation retry_continuation;
+        try {
+            retry_continuation = RuntimeFirewallPreownedTerminalContinuation{
+                [this, transaction](RuntimeFirewallLifecycleTerminal retry_terminal,
+                    std::unique_ptr<RuntimeMutationAdmission::Lease> exact) noexcept {
+                    complete_preowned_runtime_firewall_config_rollback(
+                        transaction, std::move(retry_terminal), std::move(exact));
+                }};
+            if (start_preowned_runtime_firewall_config_phase(
+                    transaction, RuntimeFirewallLifecycleKind::config_rollback,
+                    lease, retry_continuation)) {
+                return;
+            }
+        } catch (...) {
+            // Report the original failure if retry preparation is unavailable.
+        }
+    }
     if (!verified_rollback) {
         evidence.terminal.outcome =
             RuntimeFirewallLifecycleOutcome::not_verified;
@@ -9391,12 +9435,14 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                                 std::memory_order_acquire);
                         if (runtime_firewall_owner_->shutdown_requested()) {
                             result.ack = RuntimeRouteMutationAck::shutdown;
+                            result.previous_routes_retained = true;
                             return result;
                         }
                         if (!exact_worker_input ||
                             current_generation != plan.runtime_generation ||
                             current_route_epoch != plan.route_epoch) {
                             result.ack = RuntimeRouteMutationAck::stale;
+                            result.previous_routes_retained = true;
                             return result;
                         }
 
@@ -9409,6 +9455,7 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                                 result.ack = RuntimeRouteMutationAck::stale;
                                 result.failure_detail =
                                     "runtime routing inventory is missing";
+                                result.previous_routes_retained = true;
                                 return result;
                             }
 
@@ -9546,6 +9593,12 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                                                 mutation_failed;
                                         break;
                                     }
+                                    result.previous_routes_retained =
+                                        operation.exact_journal &&
+                                        operation.exact_journal->acquire_terminal() ==
+                                            RuntimeRoutingTerminal::candidate_committed &&
+                                        !operation.exact_journal->mutation_started.load(
+                                            std::memory_order_acquire);
                                     if (runtime_firewall_owner_
                                             ->shutdown_requested()) {
                                         result.ack =
@@ -9567,6 +9620,10 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                                     break;
                                 case RuntimeRoutingOperationOutcome::
                                     exact_candidate_rolled_back:
+                                    result.previous_routes_retained =
+                                        classify_runtime_routing_inventory(
+                                            operation.inventory) ==
+                                        RuntimeRoutingInventoryAuthority::authoritative;
                                     if (runtime_firewall_owner_
                                             ->shutdown_requested()) {
                                         result.ack =
@@ -9589,6 +9646,10 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                                     break;
                                 case RuntimeRoutingOperationOutcome::
                                     exact_precondition_failed:
+                                    result.previous_routes_retained =
+                                        classify_runtime_routing_inventory(
+                                            operation.inventory) ==
+                                        RuntimeRoutingInventoryAuthority::authoritative;
                                     if (runtime_firewall_owner_
                                             ->shutdown_requested()) {
                                         result.ack =
@@ -9620,6 +9681,7 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                                     rejected_replay:
                                 case RuntimeRoutingOperationOutcome::
                                     rejected_stale_inventory:
+                                    result.previous_routes_retained = true;
                                     result.ack =
                                         runtime_firewall_owner_
                                                 ->shutdown_requested()
@@ -13383,8 +13445,6 @@ void Daemon::drain_runtime_firewall_terminal(
         const bool exact_route_checkpoint =
             context->worker_input && worker_result &&
             context->worker_input->route_health_request.route_epoch != 0U &&
-            routing_observation_epoch_.load(std::memory_order_acquire) ==
-                context->worker_input->route_health_request.route_epoch &&
             worker_result->route_preparation.required &&
             worker_result->route_preparation.worker_mutation_ack ==
                 std::optional<RuntimeRouteMutationAck>{
@@ -13393,18 +13453,32 @@ void Daemon::drain_runtime_firewall_terminal(
             worker_result->route_preparation.mutation_ack ==
                 std::optional<RuntimeRouteMutationAck>{
                     RuntimeRouteMutationAck::applied};
+        const auto route_publication = plan_config_route_publication(
+            exact_route_checkpoint,
+            context->worker_input &&
+                routing_observation_epoch_.load(std::memory_order_acquire) ==
+                    context->worker_input->route_health_request.route_epoch);
         const bool verified = !shutdown && exact_generation &&
-            exact_route_checkpoint &&
-            context->worker_succeeded &&
+            route_publication.accepted && context->worker_succeeded &&
             state.lifecycle_resolver_verified;
+        if (verified && route_publication.refresh_required &&
+            state.config_generation_transaction) {
+            // The committed checkpoint remains valid evidence. A newer
+            // interface event needs a fresh reconciliation after this exact
+            // transaction releases its lease, not a rollback of all lists.
+            state.config_generation_transaction
+                ->post_terminal_refresh_required = true;
+            state.config_generation_transaction
+                ->post_terminal_full_refresh = true;
+        }
         if (!verified && context->worker_succeeded &&
             state.lifecycle_resolver_verified &&
-            !exact_route_checkpoint &&
+            !route_publication.accepted &&
             state.worker_failure_detail.empty()) {
             try {
                 state.worker_failure_detail =
-                    "configuration route observation changed before "
-                    "candidate publication";
+                    "configuration route checkpoint was not verified "
+                    "before candidate publication";
             } catch (...) {
             }
         }
@@ -13533,19 +13607,16 @@ void Daemon::drain_runtime_firewall_terminal(
             return;
         }
 
-        const bool stopped_base_certainly_retained =
-            context->lifecycle_kind ==
-                RuntimeFirewallLifecycleKind::
-                    config_bootstrap_from_stopped &&
+        const bool base_certainly_retained = state.worker_result_valid &&
             worker_result &&
-            worker_result->previous_generation_certainly_retained();
+            worker_result->configuration_base_certainly_retained();
         auto config_terminal = prepare_config_generation_terminal(
             shutdown
                 ? RuntimeFirewallLifecycleOutcome::shutdown
                 : (verified
                        ? RuntimeFirewallLifecycleOutcome::verified_success
                        : RuntimeFirewallLifecycleOutcome::not_verified),
-            stopped_base_certainly_retained);
+            base_certainly_retained);
         if (verified) {
             config_terminal.committed = true;
             config_terminal.commit_ambiguous = false;
@@ -15040,11 +15111,12 @@ void Daemon::run() {
                 if (maintenance_pending->exchange(true)) return;
 #ifdef WITH_API
                 const auto subscriptions = api_ctx_ ? api_ctx_->subscription_refresh_service : nullptr;
+                auto* native_metadata_context = routing_runtime_active() ? api_ctx_.get() : nullptr;
 #endif
                 const bool queued = blocking_executor_.try_post("log-subscription-maintenance",
                     [this, maintenance_pending
 #ifdef WITH_API
-                     , subscriptions
+                     , subscriptions, native_metadata_context
 #endif
                     ]() {
                         struct Finish {
@@ -15066,6 +15138,17 @@ void Daemon::run() {
                                 }
                             } catch (...) {
                                 Logger::instance().warn("Subscription auto-refresh failed");
+                            }
+                        }
+                        if (native_metadata_context && running_.load()) {
+                            try {
+                                reconcile_deleted_native_transports(*native_metadata_context);
+                            } catch (const ApiError& error) {
+                                // User work owns the ordinary commit lane first.
+                                // The next existing maintenance tick can retry.
+                                Logger::instance().debug("Native metadata cleanup deferred: {}", error.what());
+                            } catch (...) {
+                                Logger::instance().debug("Native metadata cleanup is not available this pass");
                             }
                         }
 #endif

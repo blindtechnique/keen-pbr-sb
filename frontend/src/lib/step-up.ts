@@ -1,3 +1,31 @@
+import { authCredentialsMayBeCollected, type AuthStatus } from "./auth-status"
+
+// Refreshing an equivalent status/TTL must not cancel an open password prompt.
+// A real provider/session/local-authority change still revokes it immediately.
+export function stepUpAuthorityKey(
+  status: AuthStatus | null,
+  now = Date.now(),
+  secureHttps?: boolean
+) {
+  if (!status?.enabled || !status.authenticated) return null
+  if (!authCredentialsMayBeCollected(status, now, secureHttps)) return null
+  return JSON.stringify([
+    status!.enabled,
+    status!.authenticated,
+    status!.provider,
+    status!.trustedLocalConnectionGeneration,
+  ])
+}
+
+export class StepUpNotAdmittedError extends Error {
+  readonly requestNotAdmitted = true
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : "step-up request failed", {
+      cause,
+    })
+  }
+}
+
 export type StepUpCredentials = {
   username: string
   password: string
@@ -18,7 +46,8 @@ export const setStepUpPrompt = (handler: StepUpPrompt | null) => {
 // One grant request at a time. A page that fires several privileged requests
 // at once would otherwise open a stack of identical password dialogs, and the
 // user answering the first would still be looking at the rest.
-let pendingGrant: Promise<boolean> | null = null
+type StepUpGrantResult = boolean | Response
+let pendingGrant: Promise<StepUpGrantResult> | null = null
 let protectedTransportUnavailableHandler: (() => void) | null = null
 
 export const setProtectedTransportUnavailableHandler = (
@@ -47,9 +76,9 @@ export const isStepUpRequired = (status: number, payload: unknown): boolean => {
 export const isReplayable = (body: BodyInit | null | undefined): boolean =>
   body === null || body === undefined || typeof body === "string"
 
-export const requestStepUpGrant = async (
+const requestStepUpGrantResult = async (
   fetchImpl: typeof fetch = fetch
-): Promise<boolean> => {
+): Promise<StepUpGrantResult> => {
   if (pendingGrant) {
     return pendingGrant
   }
@@ -87,7 +116,7 @@ export const requestStepUpGrant = async (
         protectedTransportUnavailableHandler?.()
       }
     }
-    return response.ok
+    return response.ok ? true : response
   })()
 
   try {
@@ -98,6 +127,12 @@ export const requestStepUpGrant = async (
     pendingGrant = null
   }
 }
+
+// Keep the boolean API for callers that only ask whether authority was granted.
+// The fetch wrapper also needs the actual refusal, including its status/body.
+export const requestStepUpGrant = async (
+  fetchImpl: typeof fetch = fetch
+): Promise<boolean> => (await requestStepUpGrantResult(fetchImpl)) === true
 
 /**
  * fetch() that answers a step-up requirement and replays the request once.
@@ -129,9 +164,21 @@ export const fetchWithStepUp = async (
     return response
   }
 
-  const granted = await requestStepUpGrant(fetchImpl)
+  let granted: StepUpGrantResult
+  try {
+    granted = await requestStepUpGrantResult(fetchImpl)
+  } catch (cause) {
+    // The original operation was explicitly refused before the grant request.
+    // A failed grant exchange is not an ambiguous accepted mutation.
+    throw new StepUpNotAdmittedError(cause)
+  }
   if (!granted) {
     return response
+  }
+  if (granted !== true) {
+    // A shared grant refusal may have several callers. Each gets its own body
+    // instead of the original step_up_required response or a consumed stream.
+    return granted.clone()
   }
 
   // Exactly once. A second refusal is the answer, not an invitation to prompt

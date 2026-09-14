@@ -8,12 +8,12 @@
 import type { RoutingTestNfqwsMatchRole } from './routingTestNfqwsMatchRole';
 
 export interface RoutingTestNfqwsMatch {
-  /** Path of the list file, as nfqws2.conf names it. */
+  /** Path of the list file, or the inline flag such as --hostlist-domains. */
   list: string;
   /** The flag that named this file. The role is taken from the flag and never from the file name: an operator may add lists of their own, and `user.list` is a convention rather than a contract.
    */
   role: RoutingTestNfqwsMatchRole;
-  /** false for the two exclude roles. An exclude match is not coverage - it is the reason coverage does not apply - so it is reported as itself rather than folded into the same answer.
+  /** false for the two exclude roles. An exclusion belongs only to its profile; it must never override a match in another profile.
    */
   includes: boolean;
   /** The line that matched, as written in the file, so it can be found and edited.

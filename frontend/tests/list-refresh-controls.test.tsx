@@ -87,6 +87,38 @@ describe("URL list refresh intents", () => {
       false
     )
   })
+
+  test("a downloaded list with failed routing apply is not a completed refresh", () => {
+    const data = {
+      status: "ok",
+      refreshed_lists: ["work"],
+      changed_lists: ["work"],
+      failed_lists: [],
+      reloaded: false,
+      code: "list_refresh_apply_failed",
+      error: "Routing apply failed after refreshing lists",
+      params: { stage: "terminal", runtime_result: "unknown" },
+    }
+    expect(didListRefreshComplete({ status: 503, data }, "work")).toBe(false)
+    // A contradictory HTTP200 response must not produce a success toast either.
+    expect(didListRefreshComplete({ status: 200, data }, "work")).toBe(false)
+    // No reload is needed when routing is off or list contents are unchanged.
+    expect(
+      didListRefreshComplete(
+        {
+          status: 200,
+          data: {
+            status: "ok",
+            refreshed_lists: ["work"],
+            changed_lists: [],
+            failed_lists: [],
+            reloaded: false,
+          },
+        },
+        "work"
+      )
+    ).toBe(true)
+  })
 })
 
 describe("per-source shrink thresholds", () => {

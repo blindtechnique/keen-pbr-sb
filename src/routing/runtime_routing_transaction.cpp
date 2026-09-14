@@ -390,6 +390,37 @@ bool all_rule_dependencies_present(
         });
 }
 
+bool table_has_unaccounted_rule_dependency(
+    const RouteSpec& obsolete,
+    const RuntimeRoutingTransactionRequest& request,
+    const std::vector<DumpedRule>& live_rules,
+    const std::vector<DumpedRoute>& live_routes) {
+    return std::any_of(
+        live_rules.begin(), live_rules.end(), [&](const DumpedRule& live) {
+            if (live.table != obsolete.table || live.family != obsolete.family) {
+                return false;
+            }
+            // Desired rules retain their independently verified desired route
+            // anchor. They must not pin every obsolete metric in a reused
+            // table. Unclassified, complex and duplicate rules still protect
+            // the table, as does a desired rule whose anchor has disappeared.
+            return !live.exact_identity_representable || std::none_of(
+                request.desired_rules.begin(), request.desired_rules.end(),
+                [&](const RuleSpec& logical) {
+                    if (logical.family != 0 && logical.family != live.family) {
+                        return false;
+                    }
+                    RuleSpec concrete = logical;
+                    concrete.family = live.family;
+                    return policy_rule_detail::rule_matches_live(concrete, live) &&
+                        exact_rule_state(concrete, live_rules) ==
+                            ExactSlotState::exact_single &&
+                        desired_managed_anchor(concrete, request.desired_routes) &&
+                        rule_dependency_present(request, concrete, live_routes);
+                });
+        });
+}
+
 std::string exception_detail(const char* stage) {
     try {
         throw;
@@ -628,6 +659,25 @@ std::optional<Plan> build_plan(
     for (const auto& candidate : desired_concrete) {
         const auto live_state = exact_rule_state(candidate, live_rules);
         if (live_state == ExactSlotState::exact_single) {
+            // Record restart evidence from the pre-mutation inventory, never
+            // from a route that this candidate is about to create. The owner
+            // may adopt this rule only after a complete recovery commit.
+            const bool recovered_anchor = candidate.priority == candidate.table &&
+                std::any_of(request.desired_routes.begin(), request.desired_routes.end(),
+                    [&](const RouteSpec& route) {
+                        return route.table == candidate.table &&
+                            route.family == candidate.family &&
+                            route.protocol == KEEN_PBR_GENERATED_ROUTE_PROTOCOL &&
+                            exact_slot_state(route, live_routes) ==
+                                ExactSlotState::exact_single;
+                    });
+            if (recovered_anchor) {
+                auto observed = rule_entry(
+                    RuntimeRoutingJournalOperation::add_candidate_rule, candidate);
+                observed.state = RuntimeRoutingJournalState::verified;
+                observed.receipt = RuntimeRoutingJournalReceipt::already_present;
+                journal(plan).push_back(std::move(observed));
+            }
             continue;
         }
         if (live_state == ExactSlotState::mismatch) {
@@ -1503,27 +1553,21 @@ RuntimeRoutingTransactionResult execute_runtime_routing_transaction(
                 continue;
             }
             try {
-                // Policy rules have no ownership protocol. Even a rule which
-                // did not satisfy the generated-rule heuristic is a live
-                // dependency on this exact table; retain the protocol-186
-                // route anchor rather than orphaning an unclassified rule.
                 const auto current_rules = rule_netlink.dump_policy_rules();
-                const bool table_still_referenced = std::any_of(
-                    current_rules.begin(), current_rules.end(),
-                    [&](const DumpedRule& rule) {
-                        return rule.table == cleanup.stale.table &&
-                               rule.family == cleanup.stale.family;
-                    });
+                const auto before = route_netlink.dump_routes(cleanup.stale.family);
+                const bool table_still_referenced =
+                    table_has_unaccounted_rule_dependency(
+                        cleanup.stale, request, current_rules, before);
                 if (table_still_referenced) {
                     entry.state = RuntimeRoutingJournalState::skipped;
                     result.stale_rule_absence_proven = false;
                     cleanup_pending = true;
                     cleanup_failure_stage =
                         RuntimeRoutingFailureStage::cleanup_route;
+                    retain_result_detail(
+                        "routing cleanup_route blocked by an unaccounted policy-rule dependency");
                     continue;
                 }
-                const auto before = route_netlink.dump_routes(
-                    cleanup.stale.family);
                 const auto before_state = exact_slot_state(
                     cleanup.stale, before);
                 if (before_state == ExactSlotState::empty) {
@@ -1591,6 +1635,7 @@ RuntimeRoutingTransactionResult execute_runtime_routing_transaction(
         if (final_fence != FenceProbeState::current) {
             cleanup_pending = true;
             cleanup_failure_stage = RuntimeRoutingFailureStage::fence;
+            retain_result_detail("routing fence changed during cleanup");
         }
         if (!all_desired_exact(request, live_routes, live_rules)) {
             journal(plan)[plan.committed_verify_journal].state =
@@ -1599,6 +1644,8 @@ RuntimeRoutingTransactionResult execute_runtime_routing_transaction(
             plan.published_journal->failure_stage.store(
                 RuntimeRoutingFailureStage::committed_verify,
                 std::memory_order_relaxed);
+            retain_result_detail(
+                "routing committed_verify: desired route/rule state is not exact");
         } else {
             journal(plan)[plan.committed_verify_journal].state =
                 RuntimeRoutingJournalState::verified;
@@ -1617,12 +1664,8 @@ RuntimeRoutingTransactionResult execute_runtime_routing_transaction(
             const bool stale_table_still_referenced = std::any_of(
                 plan.stale_routes.begin(), plan.stale_routes.end(),
                 [&](const PlannedCleanupRoute& cleanup) {
-                    return std::any_of(
-                        live_rules.begin(), live_rules.end(),
-                        [&](const DumpedRule& rule) {
-                            return rule.table == cleanup.stale.table &&
-                                   rule.family == cleanup.stale.family;
-                        });
+                    return table_has_unaccounted_rule_dependency(
+                        cleanup.stale, request, live_rules, live_routes);
                 });
             cleanup_pending = cleanup_pending || stale_route_remains ||
                 stale_rule_remains || stale_table_still_referenced;
@@ -1645,6 +1688,24 @@ RuntimeRoutingTransactionResult execute_runtime_routing_transaction(
         plan.published_journal->failure_stage.store(
             RuntimeRoutingFailureStage::committed_verify,
             std::memory_order_relaxed);
+        retain_result_detail(
+            "routing committed_verify: final route/rule observation failed");
+    }
+    if (result.terminal != RuntimeRoutingTerminal::candidate_committed &&
+        result.detail.empty()) {
+        switch (plan.published_journal->failure_stage.load(std::memory_order_relaxed)) {
+            case RuntimeRoutingFailureStage::cleanup_rule:
+                retain_result_detail(
+                    "routing cleanup_rule: stale policy-rule absence was not verified");
+                break;
+            case RuntimeRoutingFailureStage::fence:
+                retain_result_detail("routing fence changed during cleanup");
+                break;
+            default:
+                retain_result_detail(
+                    "routing cleanup_route: obsolete route cleanup was not verified");
+                break;
+        }
     }
     plan.published_journal->terminal.store(
         result.terminal, std::memory_order_release);

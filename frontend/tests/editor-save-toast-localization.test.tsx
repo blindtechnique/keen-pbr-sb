@@ -50,9 +50,18 @@ describe("settings and DNS rule save error presentation", () => {
       )
       expect(source).toContain("clearFormServerErrors(form)")
       expect(source).toContain("getUnmappedFormErrors(state.errorMap.onServer)")
-      expect(source).toContain(
-        "<ServerValidationAlert errors={unmappedServerErrors} />"
+      const validationAlert = source.match(
+        /<ServerValidationAlert\b[\s\S]*?\/>/
+      )?.[0]
+      expect(validationAlert).toBeDefined()
+      expect(validationAlert).toMatch(
+        /\berrors\s*=\s*\{\s*unmappedServerErrors\s*\}/
       )
+      if (page === "dns-rule-upsert-page") {
+        expect(validationAlert).toMatch(
+          /\bmessage\s*=\s*\{\s*targetUnavailable\s*\?\s*t\("common\.ruleEditTargetChanged"\)\s*:\s*undefined\s*\}/
+        )
+      }
     })
   }
 })

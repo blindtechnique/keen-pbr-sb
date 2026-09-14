@@ -33,9 +33,14 @@ export function didListRefreshComplete(
   requestedName?: string
 ): boolean {
   if (response.status !== 200 || !response.data) return false
-  const data = response.data as Partial<ListRefreshResponse>
+  const data = response.data as Partial<ListRefreshResponse> & {
+    code?: unknown
+    error?: unknown
+  }
   return (
     data.status === "ok" &&
+    !data.code &&
+    !data.error &&
     Array.isArray(data.failed_lists) &&
     data.failed_lists.length === 0 &&
     Array.isArray(data.refreshed_lists) &&

@@ -14,6 +14,11 @@ openwrt_init=$4
 openwrt_firewall=$5
 openwrt_hotplug=$6
 
+if [ "$(id -u)" -ne 0 ]; then
+    echo 'SKIP: netfilter ownership fixture needs uid 0 in an isolated container (release CI runs it with BusyBox).' >&2
+    exit 77
+fi
+
 work=$(mktemp -d)
 trap 'rm -rf "$work"' 0 HUP INT TERM
 

@@ -1024,6 +1024,124 @@ TEST_CASE("runtime routing transaction never deletes an old same-slot replacemen
         netlink.events.end());
 }
 
+TEST_CASE("runtime routing group deletion retires fallback metrics in a reused table") {
+    ScriptedRoutingNetlink netlink;
+    const auto forward = [](std::uint32_t table, const char* interface,
+                            std::uint32_t metric = 0U) {
+        auto route = transaction_route(table);
+        route.blackhole = false;
+        route.interface = interface;
+        route.metric = metric;
+        return route;
+    };
+    const auto closure = [](std::uint32_t table) {
+        auto route = transaction_route(table);
+        route.blackhole = false;
+        route.unreachable = true;
+        route.metric = 65535U;
+        return route;
+    };
+    // Deleting the group at160 compacts the following interface from161 to160.
+    // Its new default replaces the old primary but not the old metric1 backup.
+    const auto group_primary = forward(160U, "group-primary");
+    const auto group_backup = forward(160U, "group-backup", 1U);
+    const auto old_interface = forward(161U, "survivor");
+    for (const auto& route : {group_primary, group_backup, closure(160U),
+                             old_interface, closure(161U)}) {
+        netlink.seed_route(route);
+    }
+    const auto group_rule = transaction_rule(160U, 0x00020000U);
+    const auto old_rule = transaction_rule(161U, 0x00030000U);
+    netlink.seed_rule(group_rule);
+    netlink.seed_rule(old_rule);
+    const auto desired_route = forward(160U, "survivor");
+    const auto desired_rule = transaction_rule(160U, 0x00050000U);
+    auto request = transaction_request(
+        {desired_route, closure(160U)}, {desired_rule});
+    request.prior_owned_rules = {group_rule, old_rule};
+
+    const auto result = run_transaction(request, netlink);
+
+    CHECK(result.terminal == RuntimeRoutingTerminal::candidate_committed);
+    CHECK(result.candidate_exact_verified);
+    CHECK(result.stale_rule_absence_proven);
+    CHECK(result.detail.empty());
+    CHECK(netlink.has_route(desired_route));
+    CHECK(netlink.has_route(closure(160U)));
+    CHECK(netlink.has_exact_rule(desired_rule));
+    CHECK_FALSE(netlink.has_exact_rule(group_rule));
+    CHECK_FALSE(netlink.has_exact_rule(old_rule));
+    CHECK_FALSE(netlink.has_route(group_backup));
+    CHECK_FALSE(netlink.has_route(old_interface));
+    CHECK_FALSE(netlink.has_route(closure(161U)));
+}
+
+TEST_CASE("runtime routing stale metrics retain unaccounted same-table rule dependencies") {
+    ScriptedRoutingNetlink netlink;
+    const auto desired_route = transaction_route(150U);
+    auto obsolete = desired_route;
+    obsolete.metric = 1U;
+    const auto desired_rule = transaction_rule(150U);
+    const auto foreign_rule = transaction_rule(150U, 0x00090000U);
+    netlink.seed_route(desired_route);
+    netlink.seed_route(obsolete);
+    netlink.seed_rule(desired_rule);
+    netlink.seed_rule(foreign_rule);
+    SUBCASE("representable foreign rule") {}
+    SUBCASE("unrepresentable foreign rule") {
+        netlink.rules.back().exact_identity_representable = false;
+    }
+
+    const auto result = run_transaction(
+        transaction_request({desired_route}, {desired_rule}), netlink);
+
+    CHECK(result.terminal == RuntimeRoutingTerminal::committed_cleanup_pending);
+    CHECK(result.candidate_exact_verified);
+    CHECK_FALSE(result.route_cleanup_attempted);
+    CHECK(netlink.has_route(obsolete));
+    CHECK(netlink.has_route(desired_route));
+    CHECK(netlink.rules.size() == 2U);
+    CHECK(result.detail.find("cleanup_route") != std::string::npos);
+    CHECK(result.detail.find("unaccounted") != std::string::npos);
+}
+
+TEST_CASE("runtime routing stale metric cleanup rechecks the desired route anchor") {
+    ScriptedRoutingNetlink netlink;
+    const auto desired_route = transaction_route(150U);
+    auto obsolete = desired_route;
+    obsolete.metric = 1U;
+    const auto rule = transaction_rule(150U);
+    netlink.seed_route(desired_route);
+    netlink.seed_route(obsolete);
+    netlink.seed_rule(rule);
+    RuntimeRoutingPublishedJournalPtr published;
+    bool removed_anchor = false;
+    netlink.before_dump_routes = [&](int) {
+        if (removed_anchor || !published ||
+            !published->candidate_exact_verified.load()) return;
+        removed_anchor = true;
+        netlink.routes.erase(std::remove_if(netlink.routes.begin(), netlink.routes.end(),
+            [&](const DumpedRoute& route) {
+                return fake_exact_route_match(desired_route, route);
+            }), netlink.routes.end());
+    };
+    const auto fence = current_fence();
+    const auto result = execute_runtime_routing_transaction(
+        transaction_request({desired_route}, {rule}), [fence]() { return fence; },
+        netlink, netlink, [&](const RuntimeRoutingPublishedJournalPtr& journal) {
+            published = journal;
+            return true;
+        });
+
+    CHECK(removed_anchor);
+    CHECK(result.candidate_exact_verified);
+    CHECK(result.terminal == RuntimeRoutingTerminal::partial_unknown);
+    CHECK_FALSE(result.route_cleanup_attempted);
+    CHECK(netlink.has_route(obsolete));
+    CHECK(netlink.has_exact_rule(rule));
+    CHECK(result.detail.find("committed_verify") != std::string::npos);
+}
+
 TEST_CASE("runtime routing transaction retains a different-mark route dependency") {
     ScriptedRoutingNetlink netlink;
     const auto old_route = transaction_route(150U);
@@ -1138,6 +1256,7 @@ TEST_CASE("runtime routing exact-delete race retains a complex rule and its rout
         result.terminal ==
         RuntimeRoutingTerminal::committed_cleanup_pending);
     CHECK(result.candidate_exact_verified);
+    CHECK(result.detail.find("cleanup_rule") != std::string::npos);
     CHECK_FALSE(result.stale_rule_absence_proven);
     CHECK_FALSE(result.route_cleanup_attempted);
     CHECK(netlink.has_route(old_route));

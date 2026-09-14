@@ -681,7 +681,7 @@ TEST_CASE("exact routing owner does not publish desired state while cleanup is p
     CHECK(netlink.rules.front().table == 151U);
 }
 
-TEST_CASE("exact routing owner adopts only policy rules with a Created receipt") {
+TEST_CASE("exact routing owner preserves foreign rules without pre-mutation recovery evidence") {
     SUBCASE("an identical pre-existing rule remains foreign") {
         ExactOwnerNetlink netlink;
         const auto logical = exact_owner_rule(151U);
@@ -699,6 +699,22 @@ TEST_CASE("exact routing owner adopts only policy rules with a Created receipt")
             exact_owner_request(1U, 101U, 1U, 11U, 151U);
         REQUIRE(
             run_exact(owner, request, 0U).outcome ==
+            RuntimeRoutingOperationOutcome::exact_candidate_committed);
+
+        // The first apply created an adjacent route, not this rule. Neither
+        // another ordinary apply nor later recovery may reinterpret it as ours.
+        auto repeated = exact_owner_request(2U, 102U, 2U, 12U, 151U);
+        REQUIRE(run_exact(owner, repeated, 1U).outcome ==
+            RuntimeRoutingOperationOutcome::exact_candidate_committed);
+        netlink.fail_route_add_after_effect = true;
+        const auto failing = exact_owner_request(
+            3U, 103U, owner.snapshot()->revision, 13U, 152U);
+        REQUIRE(run_exact(owner, failing, 2U).outcome ==
+            RuntimeRoutingOperationOutcome::exact_partial_unknown);
+        netlink.fail_route_add_after_effect = false;
+        const auto recovery = exact_owner_request(
+            4U, 104U, owner.snapshot()->revision, 14U, 151U);
+        REQUIRE(run_exact(owner, recovery, 3U).outcome ==
             RuntimeRoutingOperationOutcome::exact_candidate_committed);
 
         netlink.events.clear();
@@ -737,4 +753,99 @@ TEST_CASE("exact routing owner adopts only policy rules with a Created receipt")
                 return event.find("rule:delete:") == 0U;
             }));
     }
+}
+
+TEST_CASE("fresh exact routing owner recovers pre-existing desired generated rule ownership") {
+    ExactOwnerNetlink netlink;
+    auto request = exact_owner_request(1U, 101U, 1U, 11U, 151U);
+    auto ipv6 = request.desired_routes.front();
+    ipv6.family = AF_INET6;
+    ipv6.metric = 1024U;
+    request.desired_routes.push_back(ipv6);
+    request.desired_rules.front().family = 0;
+    for (const auto& route : request.desired_routes) {
+        netlink.add_route(route);
+        netlink.add_rule_for_family(request.desired_rules.front(), route.family);
+    }
+    netlink.events.clear();
+    RuntimeRoutingOperationOwner owner(netlink, netlink);
+    const auto recovered = run_exact(owner, request, 0U);
+    REQUIRE(recovered.outcome ==
+        RuntimeRoutingOperationOutcome::exact_candidate_committed);
+    CHECK(netlink.events.empty());
+
+    SUBCASE("next generation deletes the recovered outbound") {
+        auto removed = exact_owner_request(2U, 102U, recovered.inventory->revision, 12U, 151U);
+        removed.desired_routes.clear();
+        removed.desired_rules.clear();
+        const auto result = run_exact(owner, removed, 1U);
+        CHECK(result.outcome == RuntimeRoutingOperationOutcome::exact_candidate_committed);
+    }
+    SUBCASE("graceful clear deletes the recovered outbound") {
+        const auto cleared = owner.clear();
+        CHECK(cleared->outcome == RuntimeRoutingOperationOutcome::cleared);
+    }
+    CHECK(netlink.rules.empty());
+    CHECK(netlink.routes.empty());
+    CHECK(netlink.broad_rule_deletes == 0U);
+    CHECK(netlink.broad_route_deletes == 0U);
+    CHECK(netlink.exact_rule_deletes == request.desired_routes.size());
+    CHECK(netlink.exact_route_deletes == request.desired_routes.size());
+}
+
+TEST_CASE("fresh exact routing owner does not recover a rule from another-family anchor") {
+    ExactOwnerNetlink netlink;
+    auto unrelated = exact_owner_route(151U);
+    unrelated.family = AF_INET6;
+    unrelated.metric = 1024U;
+    netlink.add_route(unrelated);
+    netlink.add_rule_for_family(exact_owner_rule(151U), AF_INET);
+    RuntimeRoutingOperationOwner owner(netlink, netlink);
+    REQUIRE(run_exact(owner, exact_owner_request(1U, 101U, 1U, 11U, 151U), 0U).outcome ==
+        RuntimeRoutingOperationOutcome::exact_candidate_committed);
+    netlink.events.clear();
+    (void)owner.clear();
+    CHECK(netlink.rules.size() == 1U);
+    CHECK(netlink.exact_rule_deletes == 0U);
+}
+
+TEST_CASE("fresh exact routing owner does not adopt recovery evidence from a failed candidate") {
+    ExactOwnerNetlink netlink;
+    netlink.add_route(exact_owner_route(151U));
+    netlink.add_rule_for_family(exact_owner_rule(151U), AF_INET);
+    auto request = exact_owner_request(1U, 101U, 1U, 11U, 151U);
+    request.desired_routes.push_back(exact_owner_route(152U));
+    request.desired_rules.push_back(exact_owner_rule(152U));
+    netlink.fail_rule_add_before_effect = true;
+    RuntimeRoutingOperationOwner owner(netlink, netlink);
+
+    const auto result = run_exact(owner, request, 0U);
+    REQUIRE(result.outcome != RuntimeRoutingOperationOutcome::exact_candidate_committed);
+    (void)owner.clear();
+
+    REQUIRE(netlink.rules.size() == 1U);
+    CHECK(netlink.rules.front().table == 151U);
+    REQUIRE(netlink.routes.size() == 1U);
+    CHECK(netlink.routes.front().table == 151U);
+    CHECK(netlink.exact_rule_deletes == 0U);
+    CHECK(netlink.broad_rule_deletes == 0U);
+}
+
+TEST_CASE("fresh exact routing owner never adopts an external-table rule") {
+    ExactOwnerNetlink netlink;
+    auto foreign = exact_owner_route(151U);
+    foreign.protocol = 4U;
+    netlink.add_route(foreign);
+    netlink.add_rule_for_family(exact_owner_rule(151U), AF_INET);
+    auto request = exact_owner_request(1U, 101U, 1U, 11U, 151U);
+    request.desired_routes.clear();
+    request.authorized_external_tables = {{151U, AF_INET}};
+    RuntimeRoutingOperationOwner owner(netlink, netlink);
+    REQUIRE(run_exact(owner, request, 0U).outcome ==
+        RuntimeRoutingOperationOutcome::exact_candidate_committed);
+    (void)owner.clear();
+    CHECK(netlink.rules.size() == 1U);
+    CHECK(netlink.routes.size() == 1U);
+    CHECK(netlink.exact_rule_deletes == 0U);
+    CHECK(netlink.exact_route_deletes == 0U);
 }

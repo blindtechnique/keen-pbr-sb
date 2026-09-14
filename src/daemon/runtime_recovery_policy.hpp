@@ -2848,18 +2848,18 @@ inline bool resolver_reload_schedule_decline_is_notable(
 // by 09:55:38 with five candidate owners, and not one had written its name
 // anywhere - runtime reasons appeared in no log line at all.
 enum class RuntimeTransitionLogSeverity : std::uint8_t {
-    // Entering broken names the owner; leaving it names the recoverer. Both
-    // are the lines an operator greps for first, so they must stand out.
+    // Only entering a failure is a warning. Starting recovery is not a new
+    // fault and must not create another warning in the notification bell.
     warn,
     info,
 };
 
 inline RuntimeTransitionLogSeverity classify_runtime_transition_log(
     const RuntimeState previous, const RuntimeState next) noexcept {
-    return next == RuntimeState::broken ||
-                   previous == RuntimeState::broken
-               ? RuntimeTransitionLogSeverity::warn
-               : RuntimeTransitionLogSeverity::info;
+    (void)previous;
+    return next == RuntimeState::broken
+        ? RuntimeTransitionLogSeverity::warn
+        : RuntimeTransitionLogSeverity::info;
 }
 
 inline const char* resolver_reload_schedule_decline_name(

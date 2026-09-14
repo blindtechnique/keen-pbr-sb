@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include "../src/daemon/runtime_firewall_worker_attempt.hpp"
+#include "../src/daemon/runtime_config_terminal_policy.hpp"
 #include "../src/lists/list_entry_visitor.hpp"
 
 #include <chrono>
@@ -293,6 +294,9 @@ bool wait_until_plan_ready(
 } // namespace
 
 TEST_CASE("route preparation admits firewall backend only after applied acknowledgement") {
+    bool routes_unchanged = false;
+    SUBCASE("route candidate changed kernel state") {}
+    SUBCASE("route candidate was a verified no-op") { routes_unchanged = true; }
     WorkerAttemptTempDirectory temp;
     auto input = worker_attempt_input(temp.path() / "cache");
     enable_route_preparation(input);
@@ -315,6 +319,7 @@ TEST_CASE("route preparation admits firewall backend only after applied acknowle
                     RuntimeRouteWorkerMutationResult result;
                     result.ack = RuntimeRouteMutationAck::applied;
                     result.failure_detail = route_detail;
+                    result.previous_routes_retained = routes_unchanged;
                     return result;
                 },
                 [&]() {
@@ -356,6 +361,10 @@ TEST_CASE("route preparation admits firewall backend only after applied acknowle
           RuntimeRouteMutationAck::applied);
     CHECK(result->route_preparation.worker_mutation_failure_detail ==
           route_detail);
+    CHECK(result->route_preparation.previous_routes_retained == routes_unchanged);
+    // The stubbed firewall rejected before COMMIT. Only the no-op route
+    // candidate can retain the full configuration without a rollback.
+    CHECK(result->configuration_base_certainly_retained() == routes_unchanged);
     CHECK_FALSE(result->route_preparation.observation_failure.failed());
     CHECK(result->route_preparation.observation_failure.detail.empty());
     CHECK(result->route_preparation.checkpoint_published);
@@ -461,6 +470,7 @@ TEST_CASE("route preparation rejects stale acknowledgement before firewall backe
     CHECK_FALSE(result->transaction_executed);
     CHECK_FALSE(result->transaction.commit_entered);
     CHECK(result->previous_generation_certainly_retained());
+    CHECK_FALSE(result->configuration_base_certainly_retained());
     CHECK(result->operation_kind ==
           RuntimeFirewallWorkerOperationKind::config_preapply);
     CHECK(result->owned_conntrack_cleanup_mode ==
@@ -505,6 +515,7 @@ TEST_CASE("route preparation shutdown before publish never enters firewall backe
     CHECK_FALSE(result->transaction_executed);
     CHECK_FALSE(result->transaction.commit_entered);
     CHECK(result->previous_generation_certainly_retained());
+    CHECK(result->configuration_base_certainly_retained());
     CHECK(route_mutation_calls == 0);
     CHECK(result->route_preparation.observation_succeeded);
     CHECK_FALSE(result->route_preparation.checkpoint_published);
@@ -539,6 +550,7 @@ TEST_CASE("route worker mutation failure never publishes or enters firewall") {
     CHECK_FALSE(result->transaction_executed);
     CHECK_FALSE(result->transaction.commit_entered);
     CHECK(result->previous_generation_certainly_retained());
+    CHECK_FALSE(result->configuration_base_certainly_retained());
     CHECK(result->route_preparation.observation_succeeded);
     REQUIRE(result->route_preparation.worker_mutation_ack.has_value());
     CHECK(*result->route_preparation.worker_mutation_ack ==
@@ -548,6 +560,89 @@ TEST_CASE("route worker mutation failure never publishes or enters firewall") {
     CHECK_FALSE(result->route_preparation.checkpoint_published);
     CHECK(input.route_mutation_checkpoint->state() ==
           RuntimeRouteMutationCheckpointState::empty);
+}
+
+TEST_CASE("list refresh route rejection preserves the running base only with exact proof") {
+    for (const bool retained : {false, true}) {
+        for (const auto ack : {RuntimeRouteMutationAck::stale,
+                               RuntimeRouteMutationAck::route_unavailable}) {
+            CAPTURE(retained);
+            CAPTURE(static_cast<int>(ack));
+            WorkerAttemptTempDirectory temp;
+            auto input = worker_attempt_input(temp.path() / "cache");
+            enable_route_preparation(input);
+            input.operation_kind = RuntimeFirewallWorkerOperationKind::config_candidate;
+            WorkerAttemptRouteHealthServices route_services;
+            int firewall_calls = 0;
+            const auto result =
+                execute_runtime_firewall_worker_attempt_durable_with_route_preparation(
+                    input, route_services,
+                    [=](const RuntimeRouteHealthPlan&, RouteReconcileMode) {
+                        RuntimeRouteWorkerMutationResult mutation;
+                        mutation.ack = ack;
+                        mutation.previous_routes_retained = retained;
+                        return mutation;
+                    },
+                    [&]() {
+                        ++firewall_calls;
+                        return RuntimeFirewallWorkerAttemptResult{};
+                    });
+            REQUIRE(result);
+            CHECK(firewall_calls == 0);
+            CHECK(result->configuration_base_certainly_retained() == retained);
+
+            ConfigCandidateEvidence evidence;
+            evidence.expected_identity =
+                {ConfigTerminalOperationKind::candidate, 11U, 7U, 8U};
+            evidence.exact_lease_owned = true;
+            evidence.published_generation_current = true;
+            evidence.exact_rollback_available = true;
+            evidence.terminal.observed_config_identity = evidence.expected_identity;
+            evidence.terminal.outcome = RuntimeFirewallLifecycleOutcome::not_verified;
+            evidence.terminal.commit_ambiguous = false;
+            evidence.terminal.previous_generation_certainly_retained =
+                result->configuration_base_certainly_retained();
+            CHECK(plan_config_candidate_terminal(evidence) ==
+                  (retained ? ConfigCandidateAction::reject_runtime_unchanged
+                            : ConfigCandidateAction::begin_exact_rollback));
+            if (retained) {
+                CHECK(plan_config_runtime_terminal(false, evidence.terminal) ==
+                      ConfigRuntimeTerminalAction::keep_active);
+            }
+        }
+    }
+}
+
+TEST_CASE("configuration base proof never hides an entered firewall commit") {
+    RuntimeFirewallWorkerAttemptResult result;
+    result.route_preparation.required = true;
+    result.route_preparation.worker_mutation_ack = RuntimeRouteMutationAck::stale;
+    result.route_preparation.previous_routes_retained = true;
+    REQUIRE(result.configuration_base_certainly_retained());
+    result.transaction.commit_entered = true;
+    CHECK_FALSE(result.configuration_base_certainly_retained());
+}
+
+TEST_CASE("route worker exception cannot claim the configuration base survived") {
+    WorkerAttemptTempDirectory temp;
+    auto input = worker_attempt_input(temp.path() / "cache");
+    enable_route_preparation(input);
+    WorkerAttemptRouteHealthServices route_services;
+    int firewall_calls = 0;
+    const auto result =
+        execute_runtime_firewall_worker_attempt_durable_with_route_preparation(
+            input, route_services,
+            [](const RuntimeRouteHealthPlan&, RouteReconcileMode)
+                -> RuntimeRouteWorkerMutationResult {
+                throw std::runtime_error("route write failed after a partial change");
+            },
+            [&]() {
+                ++firewall_calls;
+                return RuntimeFirewallWorkerAttemptResult{};
+            });
+    REQUIRE(result);
+    CHECK(firewall_calls == 0);
+    CHECK_FALSE(result->configuration_base_certainly_retained());
 }
 
 TEST_CASE("worker attempt keeps observations and commit in exact order") {

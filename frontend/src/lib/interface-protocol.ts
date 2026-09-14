@@ -24,6 +24,13 @@ export interface InterfaceProtocolDisplay {
   readonly exact: boolean
 }
 
+/** Merge member and runtime labels without treating a whole group as one label. */
+export function joinInterfaceProtocolLabels(labels: readonly string[]): string {
+  return [
+    ...new Set(labels.flatMap((label) => label.split("+")).filter(Boolean)),
+  ].join("+")
+}
+
 const NDMS_KIND_PROTOCOLS = {
   amnezia_wireguard: "amneziawg",
   // Current NDMS inventory reports both vanilla WireGuard and AmneziaWG as

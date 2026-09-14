@@ -528,6 +528,95 @@ TEST_CASE("config rollback terminal policy accepts only exact verified proof") {
     }
 }
 
+TEST_CASE("config rollback retries exactly once after a transient untouched attempt") {
+    ConfigRollbackEvidence evidence;
+    evidence.expected_identity = rollback_identity();
+    evidence.exact_lease_owned = true;
+    evidence.published_generation_current = true;
+    evidence.terminal = unverified_terminal("route observation became stale");
+    evidence.terminal.commit_ambiguous = false;
+    evidence.terminal.observed_config_identity = rollback_identity();
+    evidence.terminal.previous_generation_certainly_retained = true;
+
+    CHECK(should_retry_config_rollback(evidence, 0U, false));
+    CHECK_FALSE(should_retry_config_rollback(evidence, 1U, false));
+    CHECK_FALSE(should_retry_config_rollback(evidence, 2U, false));
+    CHECK_FALSE(should_retry_config_rollback(evidence, ~0U, false));
+    CHECK_FALSE(should_retry_config_rollback(evidence, 0U, true));
+    // Retrying preserves the attempt preimage; it does not turn that
+    // unverified terminal into a successfully restored configuration.
+    CHECK(plan_config_rollback_terminal(evidence) ==
+          ConfigRollbackAction::recovery_required);
+}
+
+TEST_CASE("config rollback retry requires exact identity lease and generation") {
+    ConfigRollbackEvidence evidence;
+    evidence.expected_identity = rollback_identity();
+    evidence.exact_lease_owned = true;
+    evidence.published_generation_current = true;
+    evidence.terminal = unverified_terminal("temporary failure");
+    evidence.terminal.commit_ambiguous = false;
+    evidence.terminal.observed_config_identity = rollback_identity();
+    evidence.terminal.previous_generation_certainly_retained = true;
+    REQUIRE(should_retry_config_rollback(evidence, 0U, false));
+
+    auto invalid = evidence;
+    invalid.exact_lease_owned = false;
+    CHECK_FALSE(should_retry_config_rollback(invalid, 0U, false));
+    invalid = evidence;
+    invalid.published_generation_current = false;
+    CHECK_FALSE(should_retry_config_rollback(invalid, 0U, false));
+    invalid = evidence;
+    invalid.terminal.observed_config_identity.reset();
+    CHECK_FALSE(should_retry_config_rollback(invalid, 0U, false));
+    invalid = evidence;
+    invalid.expected_identity = {};
+    CHECK_FALSE(should_retry_config_rollback(invalid, 0U, false));
+
+    for (unsigned field = 0U; field != 5U; ++field) {
+        CAPTURE(field);
+        invalid = evidence;
+        auto& identity = *invalid.terminal.observed_config_identity;
+        switch (field) {
+        case 0U: identity.kind = ConfigTerminalOperationKind::candidate; break;
+        case 1U: ++identity.operation_serial; break;
+        case 2U: ++identity.base_runtime_generation; break;
+        case 3U: ++identity.target_runtime_generation; break;
+        default: identity.operation_serial = 0U; break;
+        }
+        CHECK_FALSE(should_retry_config_rollback(invalid, 0U, false));
+        // Matching malformed or non-rollback identities are not authority.
+        if (field == 0U || field == 4U) {
+            invalid.expected_identity = identity;
+            CHECK_FALSE(should_retry_config_rollback(invalid, 0U, false));
+        }
+    }
+}
+
+TEST_CASE("config rollback retry rejects committed ambiguous permanent and shutdown outcomes") {
+    ConfigRollbackEvidence evidence;
+    evidence.expected_identity = rollback_identity();
+    evidence.exact_lease_owned = true;
+    evidence.published_generation_current = true;
+    evidence.terminal.observed_config_identity = rollback_identity();
+    for (const auto outcome : {LifecycleOutcome::not_verified,
+                               LifecycleOutcome::verified_success,
+                               LifecycleOutcome::shutdown}) {
+        for (unsigned flags = 0U; flags != 16U; ++flags) {
+            CAPTURE(outcome);
+            CAPTURE(flags);
+            evidence.terminal.outcome = outcome;
+            evidence.terminal.transient = (flags & 1U) != 0U;
+            evidence.terminal.previous_generation_certainly_retained =
+                (flags & 2U) != 0U;
+            evidence.terminal.committed = (flags & 4U) != 0U;
+            evidence.terminal.commit_ambiguous = (flags & 8U) != 0U;
+            CHECK(should_retry_config_rollback(evidence, 0U, false) ==
+                  (outcome == LifecycleOutcome::not_verified && flags == 3U));
+        }
+    }
+}
+
 TEST_CASE("config runtime terminal policy fails closed on unknown state") {
     auto candidate = verified_terminal("candidate");
     candidate.observed_config_identity = candidate_identity();
@@ -573,6 +662,23 @@ TEST_CASE("config runtime terminal policy fails closed on unknown state") {
     shutdown.outcome = LifecycleOutcome::shutdown;
     CHECK(plan_config_runtime_terminal(false, shutdown) ==
           ConfigRuntimeTerminalAction::shutdown);
+}
+
+TEST_CASE("config route publication reconciles later interface events without rejecting a verified commit") {
+    for (const bool epoch_current : {false, true}) {
+        CAPTURE(epoch_current);
+        const auto committed = plan_config_route_publication(true, epoch_current);
+        REQUIRE(committed.accepted);
+        CHECK(committed.refresh_required == !epoch_current);
+        auto terminal = verified_terminal("list refresh committed");
+        terminal.observed_config_identity = candidate_identity();
+        CHECK(plan_config_runtime_terminal(true, terminal) ==
+              ConfigRuntimeTerminalAction::keep_active);
+
+        const auto missing_checkpoint = plan_config_route_publication(false, epoch_current);
+        CHECK_FALSE(missing_checkpoint.accepted);
+        CHECK_FALSE(missing_checkpoint.refresh_required);
+    }
 }
 
 TEST_CASE("stopped config bootstrap publishes running only from exact candidate proof") {

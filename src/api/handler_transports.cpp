@@ -13,6 +13,9 @@
 #include "../config/subscription_store.hpp"
 #include "../crypto/sha256.hpp"
 #include "../keenetic/ndms_wireguard_identity.hpp"
+#ifdef USE_KEENETIC_API
+#include "../keenetic/ndms_catalog_cache.hpp"
+#endif
 #include "../util/display_name.hpp"
 #include "../util/safe_exec.hpp"
 #include "../update/sing_box_install_observation.hpp"
@@ -1312,6 +1315,56 @@ std::vector<bool> validate_linked_transport_create_items(
     TransportManagerClient client(load_endpoint(ctx.config_path));
     const auto expected_revision = client.current_revision();
     return client.validate_create_items(transports, expected_revision);
+}
+
+void reconcile_deleted_native_transports(ApiContext& ctx) {
+#ifdef USE_KEENETIC_API
+    if (!ctx.get_active_config_fn || ctx.get_staged_config_cas_snapshot()) return;
+    const auto catalog = shared_ndms_catalog_cache().get();
+    const auto absent = [](const NdmsCatalogSnapshot& snapshot,
+                           const std::string& interface_name) {
+        return snapshot.status == NdmsCatalogCacheStatus::fresh &&
+            ndms_catalog_proves_wireguard_absent(snapshot.catalog, interface_name);
+    };
+    if (catalog.status != NdmsCatalogCacheStatus::fresh) return;
+    TransportManagerClient client(load_endpoint(ctx.config_path));
+    const auto inventory = client.configuration();
+    const auto config = ctx.get_active_config_fn();
+    for (const auto& spec : inventory) {
+        if (!spec.is_object() || spec.value("type", std::string{}) != "native") continue;
+        const auto interface_name = spec.value("interface", std::string{});
+        const auto tag = spec.value("tag", std::string{});
+        if (tag.empty() || !absent(catalog, interface_name) ||
+            !interface_outbounds_are_unreferenced(config, interface_name)) continue;
+        // The normal config commit serializes this metadata cleanup with user
+        // edits/imports. Recheck under that existing lease, not a new lock.
+        (void)commit_prepared_config(ctx, "native-metadata-cleanup", [&]() {
+            if (ctx.get_staged_config_cas_snapshot() ||
+                !absent(shared_ndms_catalog_cache().force_refresh(), interface_name) ||
+                !interface_outbounds_are_unreferenced(ctx.get_active_config_fn(), interface_name)) {
+                throw ConfigCommitNoMutationConflict("Native VPN metadata changed", 409);
+            }
+            const auto inspected_revision = client.current_revision();
+            const auto current = client.configuration();
+            const bool same = std::any_of(current.begin(), current.end(), [&](const auto& item) {
+                return item.is_object() && item.value("tag", std::string{}) == tag &&
+                    item.value("type", std::string{}) == "native" &&
+                    item.value("interface", std::string{}) == interface_name;
+            });
+            if (!same) throw ConfigCommitNoMutationConflict("Native VPN metadata changed", 409);
+            auto prepared = prepare_linked_transport_delete(ctx, tag);
+            if (!prepared.transport || prepared.transport->base_revision != inspected_revision) {
+                throw ConfigCommitNoMutationConflict("Native VPN metadata changed", 409);
+            }
+            return prepared;
+        });
+        // Keep one bounded commit per maintenance pass; subsequent stale links
+        // are handled by the same existing timer without blocking user work.
+        return;
+    }
+#else
+    (void)ctx;
+#endif
 }
 
 static void register_transports_handler_impl(

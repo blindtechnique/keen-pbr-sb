@@ -18,6 +18,7 @@ import {
 import { countEnabledRouteRuleListsByOutbound } from "@/components/overview/dashboard-outbound-relevance"
 import { Badge } from "@/components/ui/badge"
 import { useInterfaceProtocols } from "@/hooks/use-interface-protocols"
+import { joinInterfaceProtocolLabels } from "@/lib/interface-protocol"
 import {
   createOutboundDisplayNameMap,
   getOutboundDisplayName,
@@ -62,13 +63,10 @@ export function OutboundStateList({
     const runtimeProtocols = (runtime?.interfaces ?? [])
       .map((member) => protocolOf(member.interface_name))
       .filter(Boolean)
-    const protocol = [
-      ...new Set(
-        configuredProtocol
-          ? [configuredProtocol, ...runtimeProtocols]
-          : runtimeProtocols
-      ),
-    ].join("+")
+    const protocol = joinInterfaceProtocolLabels([
+      configuredProtocol,
+      ...runtimeProtocols,
+    ])
     return {
       outbound,
       runtime,

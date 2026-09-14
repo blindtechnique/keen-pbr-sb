@@ -15,8 +15,14 @@ included in the keen-pbr-sb runtime package.
 `lua/zapret-lib.lua:388-390` from the same tag. The complete upstream
 `zapret-lib.lua` has SHA-256
 `2740b1bc0e728c4283846df94783844082eabd503ce1f86e3429159e1b4e8de3`.
-Only this function is needed by the bounded semantic harness, so the remaining
-92 KiB library is not vendored.
+`zapret-lib-host-ip.lua` is the exact, unmodified `host_ip` function at
+`lua/zapret-lib.lua:1394-1396` from the same tag. It reads the normalized remote
+target for both packet directions. Its content also matches the installed
+nfqws2 v1.2.6 helper inspected during the video TCP investigation.
+
+Only these two functions are needed by the bounded semantic harnesses, so the
+remaining 92 KiB library is not vendored. All fixture hashes are checked before
+the Lua tests run.
 
 The harness supplies deterministic stand-ins for nfqws execution-plan,
 packet-position and logging primitives. The circular orchestrator, failure and

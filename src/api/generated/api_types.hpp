@@ -917,6 +917,38 @@ namespace api {
         ListDeleteStageSummaryClass summary;
     };
 
+    struct ListHint {
+        std::string code;
+        std::optional<std::string> entry;
+        std::string list;
+        std::optional<std::string> other_entry;
+        std::optional<std::string> other_list;
+        std::optional<std::string> other_outbound;
+        std::optional<int64_t> other_rule_index;
+        std::optional<std::string> outbound;
+        std::optional<int64_t> rule_index;
+    };
+
+    struct ListHintSourceIssue {
+        std::string list;
+        std::string reason;
+    };
+
+    struct ListHintsResponse {
+        int64_t conditional_rules = 0;
+        int64_t elapsed_ms = 0;
+        bool hints_limited = false;
+        bool is_draft = false;
+        std::vector<ListHint> items;
+        std::string revision;
+        bool scan_limited = false;
+        int64_t scanned_entries = 0;
+        int64_t scanned_lists = 0;
+        std::vector<ListHintSourceIssue> source_issues;
+        bool source_issues_limited = false;
+        int64_t total_lists = 0;
+    };
+
     struct ListPageItem {
         std::optional<std::string> display_name;
         int64_t domain_count = 0;
@@ -1857,9 +1889,21 @@ namespace api {
         RoutingTestNfqwsMatchRole role;
     };
 
+    struct RoutingTestNfqwsProfileElement {
+        bool auto_hostlist = false;
+        std::vector<std::string> filters;
+        bool has_actions = false;
+        bool hostname_required = false;
+        int64_t index = 0;
+        std::string list_result;
+        std::vector<RoutingTestNfqwsMatchElement> matches;
+        std::string name;
+    };
+
     struct RoutingTestNfqws {
         bool available = false;
         std::vector<RoutingTestNfqwsMatchElement> matches;
+        std::optional<std::vector<RoutingTestNfqwsProfileElement>> profiles;
         std::optional<std::string> reason;
     };
 
@@ -2521,6 +2565,9 @@ namespace api {
         std::optional<ListDeleteStageResponse> list_delete_stage_response;
         std::optional<ListDeleteStageSummaryClass> list_delete_stage_summary;
         std::optional<ListDeleteTargetElement> list_delete_target;
+        std::optional<ListHint> list_hint;
+        std::optional<ListHintSourceIssue> list_hint_source_issue;
+        std::optional<ListHintsResponse> list_hints_response;
         std::optional<ListPage> list_page;
         std::optional<ListPageItem> list_page_item;
         std::optional<ListQueryRequest> list_query_request;
@@ -2651,6 +2698,7 @@ namespace api {
         std::optional<ListMatch> routing_test_list_match;
         std::optional<RoutingTestNfqws> routing_test_nfqws;
         std::optional<RoutingTestNfqwsMatchElement> routing_test_nfqws_match;
+        std::optional<RoutingTestNfqwsProfileElement> routing_test_nfqws_profile;
         std::optional<RoutingTestPolicyRuleElement> routing_test_policy_rule;
         std::optional<PolicyRules> routing_test_policy_rules;
         std::optional<RoutingTestRequest> routing_test_request;
@@ -2995,6 +3043,15 @@ void to_json(json & j, const ListDeleteStageSummaryClass & x);
 void from_json(const json & j, ListDeleteStageResponse & x);
 void to_json(json & j, const ListDeleteStageResponse & x);
 
+void from_json(const json & j, ListHint & x);
+void to_json(json & j, const ListHint & x);
+
+void from_json(const json & j, ListHintSourceIssue & x);
+void to_json(json & j, const ListHintSourceIssue & x);
+
+void from_json(const json & j, ListHintsResponse & x);
+void to_json(json & j, const ListHintsResponse & x);
+
 void from_json(const json & j, ListPageItem & x);
 void to_json(json & j, const ListPageItem & x);
 
@@ -3219,6 +3276,9 @@ void to_json(json & j, const RoutingTestHttpProbe & x);
 
 void from_json(const json & j, RoutingTestNfqwsMatchElement & x);
 void to_json(json & j, const RoutingTestNfqwsMatchElement & x);
+
+void from_json(const json & j, RoutingTestNfqwsProfileElement & x);
+void to_json(json & j, const RoutingTestNfqwsProfileElement & x);
 
 void from_json(const json & j, RoutingTestNfqws & x);
 void to_json(json & j, const RoutingTestNfqws & x);
@@ -5568,6 +5628,73 @@ namespace api {
         j["summary"] = x.summary;
     }
 
+    inline void from_json(const json & j, ListHint& x) {
+        x.code = j.at("code").get<std::string>();
+        x.entry = get_stack_optional<std::string>(j, "entry");
+        x.list = j.at("list").get<std::string>();
+        x.other_entry = get_stack_optional<std::string>(j, "other_entry");
+        x.other_list = get_stack_optional<std::string>(j, "other_list");
+        x.other_outbound = get_stack_optional<std::string>(j, "other_outbound");
+        x.other_rule_index = get_stack_optional<int64_t>(j, "other_rule_index");
+        x.outbound = get_stack_optional<std::string>(j, "outbound");
+        x.rule_index = get_stack_optional<int64_t>(j, "rule_index");
+    }
+
+    inline void to_json(json & j, const ListHint & x) {
+        j = json::object();
+        j["code"] = x.code;
+        j["entry"] = x.entry;
+        j["list"] = x.list;
+        j["other_entry"] = x.other_entry;
+        j["other_list"] = x.other_list;
+        j["other_outbound"] = x.other_outbound;
+        j["other_rule_index"] = x.other_rule_index;
+        j["outbound"] = x.outbound;
+        j["rule_index"] = x.rule_index;
+    }
+
+    inline void from_json(const json & j, ListHintSourceIssue& x) {
+        x.list = j.at("list").get<std::string>();
+        x.reason = j.at("reason").get<std::string>();
+    }
+
+    inline void to_json(json & j, const ListHintSourceIssue & x) {
+        j = json::object();
+        j["list"] = x.list;
+        j["reason"] = x.reason;
+    }
+
+    inline void from_json(const json & j, ListHintsResponse& x) {
+        x.conditional_rules = j.at("conditional_rules").get<int64_t>();
+        x.elapsed_ms = j.at("elapsed_ms").get<int64_t>();
+        x.hints_limited = j.at("hints_limited").get<bool>();
+        x.is_draft = j.at("is_draft").get<bool>();
+        x.items = j.at("items").get<std::vector<ListHint>>();
+        x.revision = j.at("revision").get<std::string>();
+        x.scan_limited = j.at("scan_limited").get<bool>();
+        x.scanned_entries = j.at("scanned_entries").get<int64_t>();
+        x.scanned_lists = j.at("scanned_lists").get<int64_t>();
+        x.source_issues = j.at("source_issues").get<std::vector<ListHintSourceIssue>>();
+        x.source_issues_limited = j.at("source_issues_limited").get<bool>();
+        x.total_lists = j.at("total_lists").get<int64_t>();
+    }
+
+    inline void to_json(json & j, const ListHintsResponse & x) {
+        j = json::object();
+        j["conditional_rules"] = x.conditional_rules;
+        j["elapsed_ms"] = x.elapsed_ms;
+        j["hints_limited"] = x.hints_limited;
+        j["is_draft"] = x.is_draft;
+        j["items"] = x.items;
+        j["revision"] = x.revision;
+        j["scan_limited"] = x.scan_limited;
+        j["scanned_entries"] = x.scanned_entries;
+        j["scanned_lists"] = x.scanned_lists;
+        j["source_issues"] = x.source_issues;
+        j["source_issues_limited"] = x.source_issues_limited;
+        j["total_lists"] = x.total_lists;
+    }
+
     inline void from_json(const json & j, ListPageItem& x) {
         x.display_name = get_stack_optional<std::string>(j, "display_name");
         x.domain_count = j.at("domain_count").get<int64_t>();
@@ -7227,9 +7354,33 @@ namespace api {
         j["role"] = x.role;
     }
 
+    inline void from_json(const json & j, RoutingTestNfqwsProfileElement& x) {
+        x.auto_hostlist = j.at("auto_hostlist").get<bool>();
+        x.filters = j.at("filters").get<std::vector<std::string>>();
+        x.has_actions = j.at("has_actions").get<bool>();
+        x.hostname_required = j.at("hostname_required").get<bool>();
+        x.index = j.at("index").get<int64_t>();
+        x.list_result = j.at("list_result").get<std::string>();
+        x.matches = j.at("matches").get<std::vector<RoutingTestNfqwsMatchElement>>();
+        x.name = j.at("name").get<std::string>();
+    }
+
+    inline void to_json(json & j, const RoutingTestNfqwsProfileElement & x) {
+        j = json::object();
+        j["auto_hostlist"] = x.auto_hostlist;
+        j["filters"] = x.filters;
+        j["has_actions"] = x.has_actions;
+        j["hostname_required"] = x.hostname_required;
+        j["index"] = x.index;
+        j["list_result"] = x.list_result;
+        j["matches"] = x.matches;
+        j["name"] = x.name;
+    }
+
     inline void from_json(const json & j, RoutingTestNfqws& x) {
         x.available = j.at("available").get<bool>();
         x.matches = j.at("matches").get<std::vector<RoutingTestNfqwsMatchElement>>();
+        x.profiles = get_stack_optional<std::vector<RoutingTestNfqwsProfileElement>>(j, "profiles");
         x.reason = get_stack_optional<std::string>(j, "reason");
     }
 
@@ -7237,6 +7388,7 @@ namespace api {
         j = json::object();
         j["available"] = x.available;
         j["matches"] = x.matches;
+        j["profiles"] = x.profiles;
         j["reason"] = x.reason;
     }
 
@@ -8382,6 +8534,9 @@ namespace api {
         x.list_delete_stage_response = get_stack_optional<ListDeleteStageResponse>(j, "ListDeleteStageResponse");
         x.list_delete_stage_summary = get_stack_optional<ListDeleteStageSummaryClass>(j, "ListDeleteStageSummary");
         x.list_delete_target = get_stack_optional<ListDeleteTargetElement>(j, "ListDeleteTarget");
+        x.list_hint = get_stack_optional<ListHint>(j, "ListHint");
+        x.list_hint_source_issue = get_stack_optional<ListHintSourceIssue>(j, "ListHintSourceIssue");
+        x.list_hints_response = get_stack_optional<ListHintsResponse>(j, "ListHintsResponse");
         x.list_page = get_stack_optional<ListPage>(j, "ListPage");
         x.list_page_item = get_stack_optional<ListPageItem>(j, "ListPageItem");
         x.list_query_request = get_stack_optional<ListQueryRequest>(j, "ListQueryRequest");
@@ -8512,6 +8667,7 @@ namespace api {
         x.routing_test_list_match = get_stack_optional<ListMatch>(j, "RoutingTestListMatch");
         x.routing_test_nfqws = get_stack_optional<RoutingTestNfqws>(j, "RoutingTestNfqws");
         x.routing_test_nfqws_match = get_stack_optional<RoutingTestNfqwsMatchElement>(j, "RoutingTestNfqwsMatch");
+        x.routing_test_nfqws_profile = get_stack_optional<RoutingTestNfqwsProfileElement>(j, "RoutingTestNfqwsProfile");
         x.routing_test_policy_rule = get_stack_optional<RoutingTestPolicyRuleElement>(j, "RoutingTestPolicyRule");
         x.routing_test_policy_rules = get_stack_optional<PolicyRules>(j, "RoutingTestPolicyRules");
         x.routing_test_request = get_stack_optional<RoutingTestRequest>(j, "RoutingTestRequest");
@@ -8673,6 +8829,9 @@ namespace api {
         j["ListDeleteStageResponse"] = x.list_delete_stage_response;
         j["ListDeleteStageSummary"] = x.list_delete_stage_summary;
         j["ListDeleteTarget"] = x.list_delete_target;
+        j["ListHint"] = x.list_hint;
+        j["ListHintSourceIssue"] = x.list_hint_source_issue;
+        j["ListHintsResponse"] = x.list_hints_response;
         j["ListPage"] = x.list_page;
         j["ListPageItem"] = x.list_page_item;
         j["ListQueryRequest"] = x.list_query_request;
@@ -8803,6 +8962,7 @@ namespace api {
         j["RoutingTestListMatch"] = x.routing_test_list_match;
         j["RoutingTestNfqws"] = x.routing_test_nfqws;
         j["RoutingTestNfqwsMatch"] = x.routing_test_nfqws_match;
+        j["RoutingTestNfqwsProfile"] = x.routing_test_nfqws_profile;
         j["RoutingTestPolicyRule"] = x.routing_test_policy_rule;
         j["RoutingTestPolicyRules"] = x.routing_test_policy_rules;
         j["RoutingTestRequest"] = x.routing_test_request;

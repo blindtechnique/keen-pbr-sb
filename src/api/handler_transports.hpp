@@ -36,6 +36,10 @@ PreparedConfigCommit prepare_linked_transport_creates(
 PreparedConfigCommit prepare_linked_transport_delete(
     ApiContext& ctx, const std::string& tag);
 
+// One pass of the existing background maintenance task. Only obsolete,
+// unreferenced WG/AWG metadata is retired; no firmware delete is dispatched.
+void reconcile_deleted_native_transports(ApiContext& ctx);
+
 // Runs one loopback manager request and returns one parser verdict per item.
 // It never forwards manager error text, which may contain share-link secrets.
 std::vector<bool> validate_linked_transport_create_items(

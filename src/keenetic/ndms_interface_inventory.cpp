@@ -18,6 +18,18 @@
 
 namespace keen_pbr3 {
 
+bool ndms_catalog_proves_wireguard_absent(
+    const NdmsInterfaceCatalog& catalog, std::string_view kernel_interface) {
+    if (!catalog.firmware_available || !catalog.wireguard_slot_evidence_complete ||
+        kernel_interface.substr(0, 3) != "nwg") return false;
+    const auto identity = parse_ndms_wireguard_identity(
+        "Wireguard" + std::string(kernel_interface.substr(3)));
+    // Allocator-reserved low slots may still have panel metadata. This only
+    // retires that metadata after external deletion; it never deletes a slot.
+    return identity && identity->slot != 0U &&
+        catalog.wireguard_slots[identity->slot].state == NdmsWireguardCatalogSlotState::absent;
+}
+
 namespace {
 
 std::string trim_ascii_whitespace(const std::string& value) {

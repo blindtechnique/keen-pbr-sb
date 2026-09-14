@@ -7,6 +7,7 @@ import type { RoutingTestNfqws } from "@/api/generated/model"
 
 import {
   nfqwsVerdict,
+  nfqwsProfileResult,
   registryVerdict,
   summariseNfqwsCoverage,
 } from "./target-facts-model"
@@ -99,21 +100,82 @@ export function TargetFacts({
             ? t("overview.targetFacts.nfqwsChecking")
             : t(`overview.targetFacts.nfqws.${verdict}`)}
         </p>
-        {/* The entry, not just the fact: it is what an operator edits, and a
-            parent domain matching is different from the domain itself. */}
-        {[...coverage.excluding, ...coverage.covering].map((match) => (
-          <p
-            className="text-xs [overflow-wrap:anywhere] break-words text-muted-foreground"
-            key={`${match.list}:${match.entry}:${match.matched}`}
-          >
-            {t("overview.targetFacts.nfqwsMatch", {
-              entry: match.entry,
-              list: match.list,
-              matched: match.matched,
-              role: t(`overview.targetFacts.role.${match.role}`),
-            })}
-          </p>
-        ))}
+        <p className="text-xs text-muted-foreground">
+          {t("overview.targetFacts.nfqwsScope")}
+        </p>
+        {coverage.profiles.length > 0 ? (
+          <details className="text-xs text-muted-foreground">
+            <summary className="cursor-pointer">
+              {t("overview.targetFacts.nfqwsProfiles", {
+                count: coverage.profiles.length,
+              })}
+            </summary>
+            <div className="mt-2 space-y-3">
+              {coverage.profiles.map((profile) => (
+                <div
+                  className="space-y-1 [overflow-wrap:anywhere]"
+                  key={profile.index}
+                >
+                  <p className="font-medium">
+                    {profile.name
+                      ? t("overview.targetFacts.nfqwsProfileNamed", {
+                          index: profile.index,
+                          name: profile.name,
+                        })
+                      : t("overview.targetFacts.nfqwsProfile", {
+                          index: profile.index,
+                        })}
+                    {": "}
+                    {t(
+                      "overview.targetFacts.nfqwsProfileResults." +
+                        nfqwsProfileResult(profile)
+                    )}
+                  </p>
+                  <p>{(profile.filters ?? []).join(" · ")}</p>
+                  {!profile.has_actions ? (
+                    <p>{t("overview.targetFacts.nfqwsPassThrough")}</p>
+                  ) : null}
+                  {profile.hostname_required ? (
+                    <p>{t("overview.targetFacts.nfqwsVisibleHost")}</p>
+                  ) : null}
+                  {(profile.matches ?? []).map((match) => (
+                    <p
+                      key={[
+                        match.role,
+                        match.list,
+                        match.entry,
+                        match.matched,
+                      ].join(":")}
+                    >
+                      {t("overview.targetFacts.nfqwsMatch", {
+                        entry: match.entry,
+                        list: match.list,
+                        matched: match.matched,
+                        role: t("overview.targetFacts.role." + match.role),
+                      })}
+                    </p>
+                  ))}
+                </div>
+              ))}
+            </div>
+          </details>
+        ) : (
+          [...coverage.excluding, ...coverage.covering].map((match) => (
+            <p
+              className="text-xs [overflow-wrap:anywhere] break-words text-muted-foreground"
+              key={[match.role, match.list, match.entry, match.matched].join(
+                ":"
+              )}
+            >
+              {t("overview.targetFacts.nfqwsMatch", {
+                entry: match.entry,
+                list: match.list,
+                matched: match.matched,
+                role: t(`overview.targetFacts.role.${match.role}`),
+              })}
+            </p>
+          ))
+        )}
       </div>
 
       <div className="space-y-1">

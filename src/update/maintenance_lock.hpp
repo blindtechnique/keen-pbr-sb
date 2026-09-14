@@ -54,6 +54,13 @@ public:
     virtual std::string borrow_token() const { return {}; }
 };
 
+// Explicit child handoff; ordinary daemon operations never read ambient lock
+// environment. The recovery CLI obtains this capability from its init caller.
+struct MaintenanceLeaseHandoff {
+    pid_t owner_pid{-1};
+    std::string token;
+};
+
 #ifdef KEEN_PBR3_TESTING
 struct MaintenanceCoordinatorTestOptions {
     std::filesystem::path helper_path;
@@ -69,17 +76,19 @@ struct MaintenanceCoordinatorTestOptions {
 };
 #endif
 
-// Owns a protocol-3 maintenance lease. The authoritative lock record belongs
-// to this long-lived process; the guardian only observes the control pipe and
-// performs the normal release on EOF. No shell command string is constructed:
-// the trusted helper is always posix_spawn(3)'d directly.
+// Owns a protocol-3 maintenance lease. Ordinary leases have a guardian which
+// observes the control pipe and releases on EOF. Explicit handoffs transfer the
+// same record to this child PID and return it on destruction. No shell command
+// string is constructed: the trusted helper is posix_spawn(3)'d directly.
 class MaintenanceCoordinator final : public MaintenanceLease {
 public:
-    explicit MaintenanceCoordinator(std::string operation);
+    explicit MaintenanceCoordinator(
+        std::string operation, MaintenanceLeaseHandoff handoff = {});
 #ifdef KEEN_PBR3_TESTING
     MaintenanceCoordinator(
         std::string operation,
-        MaintenanceCoordinatorTestOptions options);
+        MaintenanceCoordinatorTestOptions options,
+        MaintenanceLeaseHandoff handoff = {});
 #endif
     ~MaintenanceCoordinator() noexcept;
 
@@ -92,11 +101,11 @@ public:
     const std::string& operation() const noexcept;
     std::uint32_t base_generation() const noexcept override;
 
-    // Reserves exactly expected_generation + 1. Parent ownership and guardian
-    // liveness are checked immediately before every compare-and-swap.
+    // Reserves exactly expected_generation + 1. Ownership and the guardian
+    // (when present) are checked immediately before every compare-and-swap.
     std::uint32_t reserve(std::uint32_t expected_generation) override;
 
-    // Checks both observer liveness and parent protocol ownership. Throws on
+    // Checks protocol ownership and the observer when present. Throws on
     // guardian death or on an unsafe/mismatched lock record.
     void verify_held() override;
 
@@ -117,6 +126,7 @@ private:
     std::uint32_t base_generation_{0};
     pid_t owner_pid_{-1};
     pid_t guardian_pid_{-1};
+    pid_t handoff_parent_pid_{-1};
     int control_fd_{-1};
     std::int64_t command_timeout_ms_{3000};
     std::int64_t durability_timeout_ms_{15000};

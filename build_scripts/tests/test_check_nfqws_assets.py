@@ -192,6 +192,26 @@ class NfqwsAssetsGateFixture(unittest.TestCase):
                     self.assertEqual(generated, checked_in)
                     self.assertNotIn(b"\r\n", generated)
 
+    def test_generated_modes_and_ip_profiles_honor_domain_exclusions(self) -> None:
+        generator = runpy.run_path(str(REPO_ROOT / "build_scripts/build-nfqws-strategies.py"))
+        for name, spec in generator["PROFILES"].items():
+            text, _ = generator["build"](name, spec)
+            values = dict(re.findall(r'^([A-Z_]+)="([^"]*)"', text, re.MULTILINE))
+            exclude = "--hostlist-exclude=/opt/etc/nfqws2/lists/exclude.list"
+            with self.subTest(profile=name):
+                self.assertIn(exclude, values["NFQWS_ARGS_IPSET"])
+                self.assertIn(exclude, values["MODE_LIST"])
+                # MTProto has no hostname. A hostlist on its IP-selected path
+                # would disable it as soon as exclude.list becomes nonempty.
+                custom = re.split(r'--new(?:=[^\s]+)?\s+', " ".join(values["NFQWS_ARGS_CUSTOM"].split()))
+                mtproto = [part for part in custom if "--filter-l7=mtproto " in part]
+                self.assertEqual(len(mtproto), 1)
+                self.assertNotIn("--hostlist", mtproto[0])
+                self.assertIn("--ipset=/opt/etc/nfqws2/lists/ipset.list", mtproto[0])
+                self.assertIn("--ipset-exclude=/opt/etc/nfqws2/lists/ipset_exclude.list", mtproto[0])
+                self.assertIn("--ipset-ip=0.0.0.0", mtproto[0])
+                self.assertNotIn("--hostlist", values["NFQWS_ARGS_UDP"])
+
     def test_generated_profiles_use_conservative_tcp_retransmission_baseline(self) -> None:
         generator = REPO_ROOT / "build_scripts" / "build-nfqws-strategies.py"
         with tempfile.TemporaryDirectory() as raw:
@@ -268,8 +288,9 @@ class NfqwsAssetsGateFixture(unittest.TestCase):
                 revisions = re.findall(
                     r"kpbr_rev=([0-9a-f]{16})(?=[\s\"])", config
                 )
-                self.assertEqual(len(revisions), 3, profile)
-                self.assertEqual(len(set(revisions)), 3, profile)
+                expected_count = 6 if profile == "03 max" else 3
+                self.assertEqual(len(revisions), expected_count, profile)
+                self.assertEqual(len(set(revisions)), expected_count, profile)
                 for key in ("gv_tcp", "yt_tcp", "yt_quic"):
                     self.assertRegex(
                         config,
@@ -306,6 +327,34 @@ class NfqwsAssetsGateFixture(unittest.TestCase):
                 self.assertIn("fails=1", yt_tcp.group(0))
                 self.assertIn("retrans=2", yt_tcp.group(0))
                 self.assertIn("reset=1", yt_tcp.group(0))
+
+    def test_video_tcp_recovery_is_endpoint_scoped_and_bounded(self) -> None:
+        namespace = runpy.run_path(str(REPO_ROOT / "build_scripts" / "build-nfqws-strategies.py"))
+        for profile in ("02 balanced", "03 max"):
+            config, _ = namespace["build"](profile, namespace["PROFILES"][profile])
+            pools = {
+                re.search(r":key=([^:]+)", token).group(1): token
+                for token in re.findall(r"--lua-desync=circular:[^\s\"]+", config)
+            }
+            video = pools["gv_tcp"]
+            self.assertIn(":hostkey=host_ip:", video, profile)
+            self.assertNotIn(":nld=", video, profile)
+            self.assertIn(":reset=1:", video, profile)
+            self.assertIn(":fails=2:", video, profile)
+            self.assertIn(":retrans=2:", video, profile)
+            self.assertIn(":inseq=8192:", video, profile)
+            self.assertIn(":maxseq=65536:", video, profile)
+            # A domain-wide learned slot must not seed a new endpoint policy.
+            self.assertNotIn(":kpbr_rev=564517f3bf011b11", video, profile)
+            # Confirmed success and native seq/ack fake offsets are part of the
+            # learned-policy revision; QUIC keeps its persisted selections.
+            self.assertTrue(pools["yt_tcp"].endswith(":kpbr_rev=96b488aa125cd228"), profile)
+            self.assertTrue(pools["yt_quic"].endswith(":kpbr_rev=91b4ca6d3577b68d"), profile)
+            for key, token in pools.items():
+                if key not in ("gv_tcp", "discord_tcp_exp", "discord_media_tcp_exp", "discord_udp_exp"):
+                    self.assertNotIn(":hostkey=host_ip", token, (profile, key))
+                if key not in ("gv_tcp", "yt_tcp"):
+                    self.assertNotIn(":reset=", token, (profile, key))
 
     def test_git_attributes_keep_http_packet_bytes_binary(self) -> None:
         relative = Path(

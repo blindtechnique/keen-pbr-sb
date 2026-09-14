@@ -4,6 +4,7 @@
 #include "handler_health_service.hpp"
 #include "handler_lists_refresh.hpp"
 #include "handler_lists_query.hpp"
+#include "handler_list_hints.hpp"
 #include "handler_list_preview.hpp"
 #include "handler_reload.hpp"
 #include "handler_config.hpp"
@@ -50,6 +51,7 @@ void register_api_handlers(ApiServer& server, ApiContext& ctx) {
     register_reload_handler(server, ctx);
     register_lists_refresh_handler(server, ctx);
     register_lists_query_handler(server, ctx);
+    register_list_hints_handler(server, ctx);
     register_list_preview_handler(server, ctx);
     register_config_handler(server, ctx);
     register_dependency_analysis_handler(server, ctx);

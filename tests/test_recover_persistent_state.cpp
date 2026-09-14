@@ -294,7 +294,10 @@ TEST_CASE("persistent recovery refuses to restore while affected runtime is acti
           "runtime_still_active");
 }
 
-TEST_CASE("config-save recovery uses the full managed runtime boundary") {
+TEST_CASE("config-save recovery leaves unrelated nfqws running") {
+    const std::vector<std::string> config_expected{
+        "keen-pbr", "transport-manager", "sing-box",
+    };
     const std::vector<std::string> expected{
         "keen-pbr",
         "transport-manager",
@@ -306,7 +309,7 @@ TEST_CASE("config-save recovery uses the full managed runtime boundary") {
     CHECK(
         recovery_managed_process_names_for_testing(
             backup::RecoveryOperation::config_save) ==
-        expected);
+        config_expected);
     CHECK(
         recovery_managed_process_names_for_testing(
             backup::RecoveryOperation::backup_restore) ==

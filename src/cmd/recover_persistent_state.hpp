@@ -41,9 +41,7 @@ int run_recover_persistent_state(
 int run_recover_persistent_state_command();
 
 #ifdef KEEN_PBR3_TESTING
-// A config-save journal may include transports.json. Recovery intentionally
-// uses the conservative full managed-stack boundary because the lightweight
-// preflight does not parse the journal effects before checking /proc.
+// Config-save may own transports.json; only backup restore also owns nfqws.
 std::vector<std::string>
 recovery_managed_process_names_for_testing(
     backup::RecoveryOperation operation);

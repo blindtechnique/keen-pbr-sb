@@ -6,6 +6,7 @@ import type {
 } from "../src/api/generated/model"
 import {
   buildInterfaceProtocolIndex,
+  joinInterfaceProtocolLabels,
   protocolForFirmwareType,
   protocolForKernelName,
   protocolForManagedTransport,
@@ -13,6 +14,32 @@ import {
 } from "../src/lib/interface-protocol"
 
 describe("interface protocol display", () => {
+  test("deduplicates repeated group member protocols without changing their order", () => {
+    expect(
+      joinInterfaceProtocolLabels([
+        "AWG/WG",
+        "AWG/WG",
+        "HYSTERIA2",
+        "AWG/WG",
+        "HYSTERIA2",
+        "",
+      ])
+    ).toBe("AWG/WG+HYSTERIA2")
+  })
+
+  test("merges a group label and runtime labels as individual protocols", () => {
+    expect(
+      joinInterfaceProtocolLabels([
+        "AWG/WG+VLESS+AWG/WG",
+        "AWG/WG",
+        "VLESS",
+        "TUIC",
+        "",
+      ])
+    ).toBe("AWG/WG+VLESS+TUIC")
+    expect(joinInterfaceProtocolLabels(["", ""])).toBe("")
+  })
+
   test("does not overclaim a generic NDMS WireGuard family", () => {
     expect(protocolForNdmsKind("wireguard")).toMatchObject({
       kind: "wireguard_ambiguous",

@@ -68,6 +68,28 @@ api::ListRefreshRequest parse_list_refresh_request(const std::string& body) {
     return request;
 }
 
+ApiError make_list_refresh_apply_error(
+    const ListRefreshOperationResult& partial,
+    const char* stage,
+    const std::string& detail,
+    const char* runtime_result) {
+    std::string message =
+        "Lists were refreshed, but routing changes were not applied";
+    if (!detail.empty()) {
+        message += ": ";
+        message += detail;
+    }
+    return ApiError(message, 503, nlohmann::json{
+        {"error", message},
+        {"code", "list_refresh_apply_failed"},
+        {"params", {{"stage", stage}, {"runtime_result", runtime_result}}},
+        {"refreshed_lists", partial.refreshed_lists},
+        {"changed_lists", partial.changed_lists},
+        {"failed_lists", partial.failed_lists},
+        {"reloaded", false},
+    }.dump());
+}
+
 void register_lists_refresh_handler(ApiServer& server, ApiContext& ctx) {
     server.post("/api/lists/refresh", [&ctx](const std::string& body) -> std::string {
         const auto request = parse_list_refresh_request(body);

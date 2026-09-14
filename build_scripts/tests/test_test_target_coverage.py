@@ -23,6 +23,8 @@ PACKAGE_DNS_FIXTURES = {
     "run-dnsmasq-direct-fallback.sh",
     "run-installer-dns-rollback.sh",
     "run-uninstall-cleanup.sh",
+    "run-keenetic-fastnat-lifecycle.sh",
+    "run-dnsmasq-helper-lkg.sh",
 }
 
 
@@ -178,6 +180,19 @@ class TestTargetCoverage(unittest.TestCase):
         self.assertCountEqual(fixtures, PACKAGE_DNS_FIXTURES)
         for fixture in fixtures:
             self.assertTrue((REPO_ROOT / "tests" / "package_it" / fixture).is_file())
+        receipt_loop = re.search(r"@for helper in (.*?)\tdone", recipe, re.S)
+        self.assertIsNotNone(receipt_loop)
+        self.assertIn(
+            '$(BUSYBOX) sh tests/test_dnsmasq_attempt_receipt.sh "$$helper" || exit 1',
+            receipt_loop.group(1),
+        )
+        for helper in (
+            "packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/dnsmasq.sh",
+            "packages/openwrt/keen-pbr/files/usr/lib/keen-pbr/dnsmasq.sh",
+            "packages/debian/files/usr/lib/keen-pbr/dnsmasq.sh",
+        ):
+            self.assertEqual(receipt_loop.group(1).count(helper), 1)
+        self.assertTrue((REPO_ROOT / "tests/test_dnsmasq_attempt_receipt.sh").is_file())
         self.assertNotRegex(recipe, r"\|\|\s*true|^\t-", "fixture failures must fail the gate")
 
     def test_release_backend_uses_the_default_test_gate(self):
@@ -185,6 +200,28 @@ class TestTargetCoverage(unittest.TestCase):
         backend = re.search(r"^  backend:\n(.*?)(?=^  [\w-]+:)", workflow, re.M | re.S)
         self.assertIsNotNone(backend)
         self.assertRegex(backend.group(1), r"run: >-\n\s+make test\b")
+
+    def test_ctest_discovery_and_execution_are_in_the_default_gate(self):
+        recipe = make_recipe("test")
+        self.assertIn("python3 build_scripts/check-ctest-discovery.py --build-dir $(GCC_BUILD_DIR)", recipe)
+        self.assertIn("keen-pbr-tests crash-diagnostics-smoke $(NARROW_TEST_TARGETS)", recipe)
+        self.assertIn("ctest --test-dir $(GCC_BUILD_DIR) --output-on-failure --no-tests=error", recipe)
+        self.assertIn("-L '^(native|package-lifecycle)$$'", recipe)
+        self.assertNotRegex(recipe, r"\|\|\s*true|^\t-", "CTest failures must fail the gate")
+
+    def test_root_ownership_fixture_still_runs_in_release_container(self):
+        workflow = (REPO_ROOT / ".github/workflows/release-keenetic.yml").read_text(encoding="utf-8")
+        invocation = "sh /workspace/tests/package_it/run-netfilter-hook-signals.sh"
+        self.assertIn(invocation, workflow)
+        end = workflow.index(invocation)
+        start = workflow.rfind("docker run --rm", 0, end)
+        self.assertGreaterEqual(start, 0)
+        container = workflow[start:end]
+        self.assertIn("busybox:1.37", container)
+        self.assertNotIn("--user", container, "ownership fixture must run as container root")
+        fixture = (REPO_ROOT / "tests/package_it/run-netfilter-hook-signals.sh").read_text(encoding="utf-8")
+        self.assertIn('if [ "$(id -u)" -ne 0 ]; then', fixture)
+        self.assertIn("exit 77", fixture)
 
     def test_every_declared_target_is_gated(self):
         declared = declared_targets()

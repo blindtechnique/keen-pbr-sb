@@ -29,6 +29,10 @@ REQUIRED_EXECUTABLES = {
     "opt/etc/init.d/S79transport-manager",
     "opt/etc/init.d/S80keen-pbr",
     "opt/etc/init.d/S52keen-pbr-ssh-guard",
+    "opt/etc/init.d/S53keen-pbr-nfqws-tcp",
+    "opt/etc/ndm/netfilter.d/099-keen-pbr-nfqws-tcp.sh",
+    "opt/etc/ndm/netfilter.d/110-keen-pbr-nfqws-tcp.sh",
+    "opt/usr/lib/keen-pbr/nfqws-tcp-window.sh",
     "opt/etc/ndm/netfilter.d/50-keen-pbr-routing.sh",
     "opt/usr/lib/keen-pbr/self-update.sh",
     "opt/usr/lib/keen-pbr/release-verify.sh",
@@ -39,6 +43,8 @@ REQUIRED_EXECUTABLES = {
     "opt/usr/lib/keen-pbr/portable-stat.sh",
 }
 REQUIRED_FILES = REQUIRED_EXECUTABLES | {
+    "opt/usr/lib/keen-pbr/libkeen-pbr-connndmmark.so",
+    "opt/usr/lib/keen-pbr/nfqws-tcp-window.awk",
     "opt/etc/keen-pbr/keys/release-public.pem",
     "opt/etc/keen-pbr/config.json",
     "opt/etc/keen-pbr/transports.json",
@@ -368,7 +374,8 @@ def validate(path: Path, arch: str, expected_commit: str | None = None) -> None:
             if not entries[name].isfile() or not entries[name].mode & stat.S_IXUSR:
                 raise ValidationError(f"{name} is not executable")
 
-        for binary in ("opt/usr/bin/keen-pbr", "opt/usr/bin/transport-manager"):
+        for binary in ("opt/usr/bin/keen-pbr", "opt/usr/bin/transport-manager",
+                       "opt/usr/lib/keen-pbr/libkeen-pbr-connndmmark.so"):
             stream = data_tar.extractfile(entries[binary])
             if stream is None:
                 raise ValidationError(f"cannot read {binary}")

@@ -99,10 +99,10 @@ fetch_url() {
     output=$1
     url=$2
     if [ -x /opt/bin/curl ]; then
-        /opt/bin/curl -fL --connect-timeout 15 --max-time 90 \
+        /opt/bin/curl -fsSL --connect-timeout 15 --max-time 90 \
             --retry 3 -o "$output" "$url"
     elif command -v curl >/dev/null 2>&1; then
-        curl -fL --connect-timeout 15 --max-time 90 \
+        curl -fsSL --connect-timeout 15 --max-time 90 \
             --retry 3 -o "$output" "$url"
     elif [ -x /opt/bin/wget ]; then
         /opt/bin/wget -T 30 -O "$output" "$url"

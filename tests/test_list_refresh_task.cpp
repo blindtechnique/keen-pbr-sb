@@ -258,6 +258,58 @@ TEST_CASE("preempted list download cannot be upgraded by a later reload") {
     CHECK(coordinator.force_reconcile_requested(next.task.id));
 }
 
+TEST_CASE("successive list refreshes ignore stale terminals without losing current publication") {
+    ListRefreshTaskCoordinator coordinator;
+    RuntimeMutationAdmission admission;
+    std::vector<ListRefreshTaskSnapshot> terminals;
+    coordinator.set_publish_callback([&](const auto& snapshot) {
+        if (list_refresh_task_status_is_terminal(snapshot.status))
+            terminals.push_back(snapshot);
+    });
+    std::string previous;
+    for (const auto* name : {"telegram", "docker", "telegram"}) {
+        const auto download = coordinator.begin(1, std::nullopt, true, true);
+        REQUIRE(download.accepted);
+        REQUIRE(coordinator.mark_running(download.task.id, name));
+        CHECK_FALSE(admission.active());
+        auto publication = admission.try_acquire(
+            "lists-refresh-publication", RuntimeMutationAdmission::Kind::Background);
+        REQUIRE(publication);
+        REQUIRE(coordinator.mark_applying(download.task.id));
+        if (!previous.empty()) {
+            // A delayed failure/cancellation from the preceding download must
+            // not publish a spurious terminal or release this task's owner.
+            CHECK_FALSE(coordinator.fail(previous, "late reply"));
+            CHECK_FALSE(coordinator.finish_cancelled(previous));
+            CHECK_FALSE(coordinator.succeed(previous, {}, false));
+            CHECK(admission.owns(*publication));
+            REQUIRE(coordinator.active());
+            CHECK(coordinator.active()->id == download.task.id);
+        }
+        RemoteListsRefreshResult result;
+        result.refreshed_lists = {name};
+        if (previous.empty()) result.changed_lists = {name};
+        // The second/third downloads model HTTP 304: an explicit reload still
+        // retains the reconcile intent through this task's terminal result.
+        REQUIRE(should_reconcile_committed_list_cache(true,
+            coordinator.force_reconcile_requested(download.task.id), true,
+            !result.changed_lists.empty()));
+        REQUIRE(coordinator.succeed(download.task.id, result, true));
+        publication.reset();
+        CHECK_FALSE(coordinator.active());
+        CHECK_FALSE(admission.active());
+        previous = download.task.id;
+    }
+    REQUIRE(terminals.size() == 3);
+    CHECK(coordinator.terminal_history().size() == 3);
+    for (const auto& terminal : terminals) {
+        CHECK(terminal.status == ListRefreshTaskStatus::Succeeded);
+        REQUIRE(terminal.terminal_result);
+        CHECK(terminal.terminal_result->error.empty());
+        CHECK(terminal.terminal_result->reloaded);
+    }
+}
+
 TEST_CASE("deferred reload keeps force after the read-only task terminalizes") {
     ListRefreshTaskCoordinator coordinator;
     const auto read_only = coordinator.begin(1);

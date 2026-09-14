@@ -14,9 +14,9 @@ ROOT = Path(__file__).resolve().parents[2]
 SOURCE = (ROOT / "install.sh").read_text()
 
 
-def function(name):
-    start = SOURCE.index(name + "() {\n")
-    return SOURCE[start:SOURCE.index("\n}\n", start) + 3]
+def function(name, source=SOURCE):
+    start = source.index(name + "() {\n")
+    return source[start:source.index("\n}\n", start) + 3]
 
 
 @unittest.skipUnless(shutil.which("busybox"), "BusyBox shell required")
@@ -78,6 +78,50 @@ die() {{ printf '%s\\n' "$*" >&2; exit 1; }}
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout.strip(), "old-working-version")
         self.assertEqual(list((self.opt / "bin").glob(".keen-pbr-sing-box.*")), [])
+
+    def test_download_curl_hides_progress_but_preserves_errors_and_exit_status(self):
+        updater = (ROOT / "packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/self-update.sh").read_text()
+        url = "https://example.invalid/release.ipk?fixture=1&version=2"
+        destination = str(self.root / "download with spaces.ipk")
+        captured_args = self.root / "curl-arguments"
+        for source, name, max_time, arguments in (
+            (SOURCE, "fetch", "180", f"'{url}' '{destination}'"),
+            (updater, "fetch_url", "90", f"'{destination}' '{url}'"),
+        ):
+            for branch in ("path", "opt"):
+                for exit_code in (0, 22, 7):
+                    with self.subTest(function=name, branch=branch, exit_code=exit_code):
+                        fake_curl = self.root / "fake-curl"
+                        self.executable(fake_curl, f'''printf '%s\\n' "$@" > '{captured_args}'
+if [ {exit_code} -ne 0 ]; then
+    printf 'curl: ({exit_code}) fixture download failure\\n' >&2
+fi
+exit {exit_code}''')
+                        opt_curl = self.opt / "bin/curl"
+                        opt_curl.unlink(missing_ok=True)
+                        if branch == "opt":
+                            shutil.copy2(fake_curl, opt_curl)
+                        body = function(name, source).replace("/opt/", str(self.opt) + "/")
+                        # Control both discovery branches; the real host's
+                        # curl/wget and network must never be used by this test.
+                        script = f'''set -eu
+command() {{ [ "$1" = -v ] && [ "$2" = curl ] && [ '{branch}' = path ]; }}
+curl() {{ '{fake_curl}' "$@"; }}
+die() {{ printf '%s\\n' "$*" >&2; exit 99; }}
+{body}
+{name} {arguments}
+printf 'continued\\n'
+'''
+                        result = subprocess.run(
+                            [shutil.which("busybox"), "sh", "-c", script],
+                            capture_output=True, text=True, timeout=10)
+                        self.assertEqual(result.returncode, exit_code, result.stderr)
+                        self.assertEqual(captured_args.read_text().splitlines(), [
+                            "-fsSL", "--connect-timeout", "15", "--max-time", max_time,
+                            "--retry", "3", "-o", destination, url])
+                        self.assertEqual(result.stdout, "continued\n" if exit_code == 0 else "")
+                        self.assertEqual(result.stderr, "" if exit_code == 0 else
+                                         f"curl: ({exit_code}) fixture download failure\n")
 
     def test_bad_candidate_preserves_working_binary_and_wrapper(self):
         self.old_pair()
@@ -216,6 +260,65 @@ fetch() {{
         self.assertEqual(self.feed.read_bytes(), self.old_feed)
         self.assertFalse(self.work.exists())
 
+    def configure_nfqws(self, overrides=""):
+        return self.run_shell(("cleanup", "configure_nfqws2"),
+                              "trap cleanup EXIT\ntrap 'exit 129' HUP\nconfigure_nfqws2",
+                              'ask() { printf "y\\n"; }\n' + overrides)
+
+    def test_configure_feed_restored_when_update_or_dependencies_fail(self):
+        self.prepare_feed()
+        for phase in ("update", "install"):
+            with self.subTest(phase=phase):
+                self.work.mkdir(exist_ok=True)
+                self.executable(self.opt / "bin/opkg", f'''case "$1" in
+status) echo 'Status: install ok installed'; exit 0;;
+update|install) [ ! -e '{self.feed}' ] || exit 99;;
+esac
+[ "$1" != "{phase}" ] || exit 1
+exit 0''')
+                result = self.configure_nfqws()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.feed.read_bytes(), self.old_feed)
+                self.assertEqual(self.feed.stat().st_mode & 0o777, 0o640)
+                self.assertFalse(self.work.exists())
+
+    def test_configure_feed_symlink_restored_after_dependency_failure(self):
+        target = self.root / "user-feed.conf"
+        target.write_bytes(self.old_feed)
+        self.feed.symlink_to(target)
+        self.executable(self.opt / "bin/opkg", '[ "$1" != install ] || exit 1\nexit 0')
+        result = self.configure_nfqws()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(self.feed.is_symlink())
+        self.assertEqual(self.feed.resolve(), target)
+        self.assertEqual(target.read_bytes(), self.old_feed)
+        self.assertFalse(self.work.exists())
+
+    def test_configure_hangup_after_feed_move_restores_original(self):
+        self.prepare_feed()
+        self.executable(self.opt / "bin/opkg", "exit 0")
+        fault = self.root / "configure-move-interrupted"
+        move_then_hangup = f'''mv() {{
+    command mv "$@" || return 1
+    if [ ! -f '{fault}' ]; then
+        touch '{fault}'
+        kill -HUP $$
+    fi
+}}'''
+        result = self.configure_nfqws(move_then_hangup)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.feed.read_bytes(), self.old_feed)
+        self.assertFalse(self.work.exists())
+
+    def test_configure_success_keeps_new_canonical_feed(self):
+        self.prepare_feed()
+        self.executable(self.opt / "bin/opkg", "echo 'Status: install ok installed'\nexit 0")
+        result = self.configure_nfqws()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.feed.read_bytes(),
+                         b"src/gz nfqws2-keenetic https://nfqws.github.io/nfqws2-keenetic/all\n")
+        self.assertFalse(self.work.exists())
+
     def test_hangup_after_feed_move_restores_original(self):
         self.prepare_feed()
         self.executable(self.opt / "bin/opkg", "exit 0")
@@ -255,6 +358,86 @@ exit 0""")
         result = self.run_shell((), SOURCE[start:end],
             'UPDATE_ONLY=1\nrepair_interrupted_nfqws_bootstrap() { exit 99; }\nensure_release_verifier() { :; }')
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def release_dependency(self, *, present=False, fail_phase="", update=True):
+        self.prepare_feed()
+        self.old_pair()
+        config = self.opt / "etc/keen-pbr/config.json"
+        config.write_bytes(b'{"user_configuration":"preserve"}\n')
+        effects = self.root / "effects"
+        openssl = self.opt / "bin/openssl"
+        if present:
+            self.executable(openssl, "exit 0")
+        self.executable(self.opt / "bin/opkg", f'''printf 'opkg %s\\n' "$*" >> '{effects}'
+[ "$1" != '{fail_phase}' ] || exit 1
+case "$*" in
+    update) exit 0;;
+    'install openssl-util')
+        printf '#!/bin/sh\\nexit 0\\n' > '{openssl}'
+        chmod 0755 '{openssl}'
+        exit 0;;
+    *) exit 99;;
+esac''')
+        # Hide the host's OpenSSL; only our temporary /opt executable exists
+        # after fake Entware successfully installs the verifier dependency.
+        overrides = f'''UPDATE_ONLY={1 if update else 0}
+command() {{ return 1; }}
+prepare_release_verifier() {{ printf 'prepare verifier\\n' >> '{effects}'; }}'''
+        result = self.run_shell(("ensure_release_verifier",),
+            f"ensure_release_verifier\nprintf 'package verification phase\\n' >> '{effects}'", overrides)
+        self.assertEqual(self.feed.read_bytes(), self.old_feed)
+        self.assertEqual(self.feed.stat().st_mode & 0o777, 0o640)
+        self.assertEqual(config.read_bytes(), b'{"user_configuration":"preserve"}\n')
+        self.assert_old_pair()
+        return result, effects.read_text().splitlines() if effects.exists() else []
+
+    def test_legacy_update_bootstraps_only_openssl_before_package_verification(self):
+        result, effects = self.release_dependency()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(effects, ["opkg update", "opkg install openssl-util",
+                                   "prepare verifier", "package verification phase"])
+        self.assertTrue((self.opt / "bin/openssl").exists())
+
+    def test_existing_openssl_needs_no_entware_mutation_on_update(self):
+        result, effects = self.release_dependency(present=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(effects, ["prepare verifier", "package verification phase"])
+
+    def test_openssl_bootstrap_failure_stops_before_verifier_or_package_actions(self):
+        for phase in ("update", "install"):
+            with self.subTest(phase=phase):
+                effects_path = self.root / "effects"
+                effects_path.unlink(missing_ok=True)
+                result, effects = self.release_dependency(fail_phase=phase)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Установка keen-pbr-sb не началась", result.stderr)
+                expected = ["opkg update"]
+                if phase == "install":
+                    expected.append("opkg install openssl-util")
+                self.assertEqual(effects, expected)
+                self.assertFalse((self.opt / "bin/openssl").exists())
+
+    def test_first_install_keeps_existing_openssl_bootstrap_behavior(self):
+        result, effects = self.release_dependency(update=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(effects[:2], ["opkg update", "opkg install openssl-util"])
+
+    def test_signed_self_updater_still_requires_preinstalled_openssl(self):
+        source = (ROOT / "packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/self-update.sh").read_text()
+        start = source.index('if [ ! -r "$RELEASE_VERIFIER" ]')
+        end = source.index('\nfetch_url "$RELEASE_JSON" "$RELEASE_API"', start)
+        verifier = self.root / "verifier"
+        key = self.root / "key"
+        verifier.write_text("fixture")
+        key.write_text("fixture")
+        effects = self.root / "signed-effects"
+        self.executable(self.opt / "bin/opkg", f"printf opkg >> '{effects}'")
+        check = source[start:end].replace("/opt/", str(self.opt) + "/")
+        result = self.run_shell((), check + f"\nprintf package >> '{effects}'",
+            f"command() {{ return 1; }}\nRELEASE_VERIFIER='{verifier}'\nRELEASE_PUBLIC_KEY='{key}'")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("не найден OpenSSL", result.stdout)
+        self.assertFalse(effects.exists())
 
 
 if __name__ == "__main__":

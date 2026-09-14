@@ -96,7 +96,7 @@ resolver_attempt_is_valid() {
 }
 
 active_conf_line() {
-    attempt_id="$(tr -d '[:space:]' < "$ATTEMPT_FILE" 2>/dev/null || true)"
+    attempt_id="$(tr -d '[:space:]' 2>/dev/null < "$ATTEMPT_FILE" || true)"
     if resolver_attempt_is_valid "$attempt_id"; then
         ACTIVE_ATTEMPT_ID="$attempt_id"
         KEEN_PBR_RESOLVER_ATTEMPT_ID="$attempt_id" \
@@ -141,7 +141,7 @@ wait_for_resolver_attempt_acceptance() {
     fi
     waited=0
     while [ "$waited" -lt "$wait_limit" ]; do
-        accepted="$(tr -d '[:space:]' < "$ATTEMPT_ACCEPTED_FILE" 2>/dev/null || true)"
+        accepted="$(tr -d '[:space:]' 2>/dev/null < "$ATTEMPT_ACCEPTED_FILE" || true)"
         [ "$accepted" = "$expected" ] && return 0
         if [ "$wait_delay" = microseconds ]; then
             usleep 100000

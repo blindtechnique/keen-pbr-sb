@@ -26,18 +26,13 @@ namespace {
 
 constexpr auto kCredentialSnapshotMaximumAge = std::chrono::seconds{5};
 
-// Linux UAPI route attributes are append-only.  The Keenetic Entware
-// toolchain ships headers which stop at RTA_MFC_STATS, while current kernels
-// may still return the later attributes below.  Keep their stable UAPI values
-// available without requiring newer build-host headers.
-constexpr std::uint16_t kRouteAttributeVia =
-    static_cast<std::uint16_t>(RTA_MFC_STATS + 1);
-constexpr std::uint16_t kRouteAttributeNewDestination =
-    static_cast<std::uint16_t>(RTA_MFC_STATS + 2);
-constexpr std::uint16_t kRouteAttributeEncapsulationType =
-    static_cast<std::uint16_t>(RTA_MFC_STATS + 4);
-constexpr std::uint16_t kRouteAttributeEncapsulation =
-    static_cast<std::uint16_t>(RTA_MFC_STATS + 5);
+// Stable Linux UAPI wire values, independent of the build headers. MIPS
+// Entware's Linux 3.4 headers stop at RTA_MARK and lack even RTA_MFC_STATS;
+// newer kernels may nevertheless return the attributes below.
+constexpr std::uint16_t kRouteAttributeVia = 18U;                // RTA_VIA
+constexpr std::uint16_t kRouteAttributeNewDestination = 19U;     // RTA_NEWDST
+constexpr std::uint16_t kRouteAttributeEncapsulationType = 21U;  // RTA_ENCAP_TYPE
+constexpr std::uint16_t kRouteAttributeEncapsulation = 22U;      // RTA_ENCAP
 
 bool indirect_route_attribute(const std::uint16_t type) noexcept {
     return type == RTA_GATEWAY || type == RTA_MULTIPATH ||

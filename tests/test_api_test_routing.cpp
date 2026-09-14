@@ -387,6 +387,108 @@ TEST_CASE("a concurrent routing test does not enter a second nfqws scan") {
     CHECK(body.at("nfqws").at("matches").empty());
 }
 
+TEST_CASE("nfqws gzip lists are unknown to the bounded text cache") {
+    const std::string compressed("\x1f\x8b\x08\x00", 4);
+    CHECK_FALSE(nfqws_cached_list_footprint_for_testing(compressed).has_value());
+    CHECK(nfqws_cached_list_footprint_for_testing("# empty list\n").has_value());
+}
+
+TEST_CASE("nfqws profile evidence retains its boundaries through the API wire format") {
+    const nlohmann::json wire = {
+        {"available", true}, {"matches", nlohmann::json::array()},
+        // The generated serializer emits null for an absent optional reason.
+        {"reason", nullptr},
+        {"profiles", nlohmann::json::array({
+            {{"index", 1}, {"name", "ip"}, {"filters", {"--filter-tcp=443"}},
+             {"has_actions", true}, {"hostname_required", false},
+             {"auto_hostlist", false}, {"list_result", "matched"},
+             {"matches", nlohmann::json::array()}},
+            {{"index", 2}, {"name", "domains"}, {"filters", {"--filter-l7=tls"}},
+             {"has_actions", true}, {"hostname_required", true},
+             {"auto_hostlist", false}, {"list_result", "excluded"},
+             {"matches", nlohmann::json::array({
+                 {{"list", "--hostlist-exclude-domains"}, {"role", "hostlist_exclude"},
+                  {"entry", "^example.test"}, {"matched", "example.test"},
+                  {"exact", true}, {"includes", false}}
+             })}}
+        })}
+    };
+    const auto parsed = wire.get<api::RoutingTestNfqws>();
+    REQUIRE(parsed.profiles);
+    REQUIRE(parsed.profiles->size() == 2);
+    CHECK(parsed.profiles->at(0).list_result == "matched");
+    CHECK(parsed.profiles->at(1).list_result == "excluded");
+    CHECK(nlohmann::json(parsed) == wire);
+    auto without_reason = wire;
+    without_reason.erase("reason");
+    CHECK(nlohmann::json(without_reason.get<api::RoutingTestNfqws>()) == wire);
+    const auto legacy = nlohmann::json{
+        {"available", true}, {"matches", nlohmann::json::array()}
+    }.get<api::RoutingTestNfqws>();
+    CHECK_FALSE(legacy.profiles);
+    CHECK_FALSE(legacy.reason);
+}
+
+TEST_CASE("nfqws API evaluation preserves local exclusions and unavailable partial data") {
+    TestRoutingResult result;
+    result.target = "example.test";
+    result.is_domain = true;
+    result.resolved_ips = {"203.0.113.7", "203.0.113.7"};
+    const auto profiles = nfqws::parse_profile_references({
+        "--ipset-ip=203.0.113.0/24", "--lua-desync=fake",
+        "--new=domains", "--hostlist-exclude-domains=^example.test",
+        "--lua-desync=fake"});
+    auto coverage = nfqws_profile_coverage_for_testing(result, profiles, {});
+    CHECK(coverage.available);
+    REQUIRE(coverage.profiles);
+    REQUIRE(coverage.profiles->size() == 2);
+    CHECK(coverage.profiles->at(0).list_result == "matched");
+    CHECK(coverage.profiles->at(1).list_result == "excluded");
+    CHECK(coverage.matches.size() == 2); // duplicate resolved IP is not duplicated
+    const nlohmann::json body = coverage;
+    CHECK(body.at("profiles").at(1).at("matches").at(0).at("includes") == false);
+    CHECK(body.at("profiles").at(1).at("matches").at(0).at("exact") == true);
+
+    auto partial = profiles;
+    partial.back().lists = nfqws::parse_list_references({"--hostlist=/lists/unreadable"});
+    coverage = nfqws_profile_coverage_for_testing(result, partial, {});
+    CHECK_FALSE(coverage.available); // also safe for an old, flat-only UI
+    CHECK(coverage.reason == "unavailable");
+    REQUIRE(coverage.profiles);
+    CHECK(coverage.profiles->at(0).list_result == "matched");
+    CHECK(coverage.profiles->at(1).list_result == "unknown");
+    CHECK(coverage.profiles->at(1).matches.empty());
+
+    result.is_domain = false;
+    result.target = "203.0.113.7";
+    coverage = nfqws_profile_coverage_for_testing(result, profiles, {});
+    REQUIRE(coverage.profiles);
+    CHECK(coverage.profiles->at(1).list_result == "hostname_required");
+}
+
+TEST_CASE("nfqws API diagnostic budget never turns truncated evidence into a verdict") {
+    TestRoutingResult result;
+    result.target = "example.test";
+    result.is_domain = true;
+    const auto profiles = nfqws::parse_profile_references({
+        "--ipset-ip=203.0.113.0/24", "--lua-desync=fake",
+        "--new", "--ipset-ip=203.0.113.0/24", "--lua-desync=fake",
+        "--new", "--ipset-ip=203.0.113.0/24", "--lua-desync=fake"});
+    for (int i = 1; i <= 33; ++i) {
+        result.resolved_ips.push_back("203.0.113." + std::to_string(i));
+    }
+    auto coverage = nfqws_profile_coverage_for_testing(result, profiles, {});
+    CHECK_FALSE(coverage.available);
+    CHECK_FALSE(coverage.profiles);
+    CHECK(coverage.matches.empty());
+    result.resolved_ips.pop_back(); // addresses fit, but nested matches do not
+    coverage = nfqws_profile_coverage_for_testing(result, profiles, {});
+    CHECK_FALSE(coverage.available);
+    CHECK_FALSE(coverage.profiles);
+    CHECK(coverage.matches.empty());
+    CHECK(coverage.reason == "unavailable");
+}
+
 } // namespace keen_pbr3
 
 #endif // WITH_API

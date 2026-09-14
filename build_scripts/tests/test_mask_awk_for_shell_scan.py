@@ -1,4 +1,7 @@
 import unittest
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
 from build_scripts.mask_awk_for_shell_scan import (
@@ -78,6 +81,51 @@ class MaskAwkForShellScanTests(unittest.TestCase):
     def test_quoted_comment_marker_inside_option_does_not_end_awk_command(self):
         source = "awk -F '\\t' -v wanted=\"#not a comment\" 'function helper() { return 1 }' input\n"
         self.assertNotIn("function helper", mask_single_quoted_awk_programs(source))
+
+
+@unittest.skipUnless(shutil.which("bash") and shutil.which("busybox"),
+                     "shell gate fixtures require bash and busybox")
+class ShellGateCommentTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="keen-pbr-shell-comments-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        scripts = self.root / "build_scripts"
+        scripts.mkdir()
+        source_root = Path(__file__).resolve().parents[2]
+        for name in ("check-shell-busybox.sh", "mask_awk_for_shell_scan.py"):
+            (scripts / name).write_text(
+                (source_root / "build_scripts" / name).read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+
+    def run_gate(self, source):
+        (self.root / "install.sh").write_text(source, encoding="utf-8")
+        return subprocess.run(
+            ["bash", "build_scripts/check-shell-busybox.sh"],
+            cwd=self.root, text=True, capture_output=True, timeout=30,
+        )
+
+    def test_comment_only_bashisms_are_not_commands(self):
+        result = self.run_gate(
+            "#!/bin/sh\n"
+            "# stable11 downloads this source through its release tag but passes only\n"
+            "  \t# source ./ignored.sh; function ignored { declare value; }\n"
+            ". /dev/null\n"
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("FAIL bashism", result.stdout)
+
+    def test_real_source_commands_remain_visible_with_original_line_numbers(self):
+        for command in ("source ./config.sh", "  source ./config.sh # comment",
+                        "printf '#marker'; source ./config.sh"):
+            with self.subTest(command=command):
+                result = self.run_gate(
+                    "#!/bin/sh\n# source in a comment\n\n" + command + "\n"
+                )
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(f"FAIL bashism: install.sh:4:{command}", result.stdout)
+                self.assertIn("`source` is bash-only", result.stdout)
 
 
 if __name__ == "__main__":

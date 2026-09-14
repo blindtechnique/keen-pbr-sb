@@ -6,6 +6,7 @@ umask 077
 PROJECT_REPOSITORY="${MYKEENPBR_REPOSITORY:-blindtechnique/keen-pbr-sb}"
 TRUSTED_RELEASE_REPOSITORY="blindtechnique/keen-pbr-sb"
 GITHUB_API="https://api.github.com/repos"
+STABLE_RELEASE_TAG='v3.3.2-sb.12'
 SING_BOX_PINNED_VERSION="1.13.14"
 TMP_DIR=
 TRANSPORT_CONFIG="/opt/etc/keen-pbr/transports.json"
@@ -15,6 +16,7 @@ LOCK_HELPER="$RESCUE_DIR/update-lock.sh"
 METADATA_HELPER="$RESCUE_DIR/portable-stat.sh"
 LOCK_DIR="/opt/var/run/keen-pbr-update.lock"
 UPDATE_ONLY=0
+RELEASE_CHANNEL=stable
 REQUESTED_RELEASE_TAG=${KEEN_PBR_UPDATE_RELEASE_TAG:-}
 # This one-shot handoff must not leak through opkg/postinst into new services.
 unset KEEN_PBR_UPDATE_RELEASE_TAG
@@ -25,11 +27,21 @@ LOCK_RETURN_PID=
 LOCK_HELPER_V2=0
 FALLBACK_CLEANUP_OWNED=0
 
-case "${1:-}" in
-    --update) UPDATE_ONLY=1 ;;
-    "") ;;
-    *) printf '%s\n' "ОШИБКА: неизвестный параметр: $1" >&2; exit 2 ;;
-esac
+for argument in "$@"; do
+    case "$argument" in
+        --update) UPDATE_ONLY=1 ;;
+        --alpha) RELEASE_CHANNEL=alpha ;;
+        *) printf '%s\n' "ОШИБКА: неизвестный параметр: $argument" >&2; exit 2 ;;
+    esac
+done
+
+# stable11 downloads this source through its release tag but passes only
+# --update. Keep that legacy handoff on this release even if Latest changes;
+# modern signed updaters already pass the exact verified tag explicitly.
+if [ "$UPDATE_ONLY" = "1" ] && [ "$RELEASE_CHANNEL" = stable ] &&
+   [ -z "$REQUESTED_RELEASE_TAG" ]; then
+    REQUESTED_RELEASE_TAG=$STABLE_RELEASE_TAG
+fi
 
 cleanup() {
     status=$?
@@ -410,10 +422,10 @@ fetch() {
     url="$1"
     output="$2"
     if command -v curl >/dev/null 2>&1; then
-        curl -fL --connect-timeout 15 --max-time 180 \
+        curl -fsSL --connect-timeout 15 --max-time 180 \
             --retry 3 -o "$output" "$url"
     elif [ -x /opt/bin/curl ]; then
-        /opt/bin/curl -fL --connect-timeout 15 --max-time 180 \
+        /opt/bin/curl -fsSL --connect-timeout 15 --max-time 180 \
             --retry 3 -o "$output" "$url"
     elif command -v wget >/dev/null 2>&1; then
         wget -T 60 -O "$output" "$url"
@@ -480,7 +492,7 @@ rv_localfile=$2
 
 # Restrict context before passing it through awk -v (which interprets escapes).
 case "$rv_repository" in ''|*[!A-Za-z0-9_./-]*) release_verify_fail 'invalid repository' ;; esac
-case "$rv_channel" in stable|alpha|next) ;; *) release_verify_fail 'invalid channel' ;; esac
+case "$rv_channel" in stable|alpha|beta|next) ;; *) release_verify_fail 'invalid channel' ;; esac
 case "$rv_release" in ''|*[!A-Za-z0-9._-]*) release_verify_fail 'invalid release' ;; esac
 case "$rv_kind" in installer|package) ;; *) release_verify_fail 'invalid file kind' ;; esac
 case "$rv_arch" in any|aarch64|armv7|mipsel|mips|x64) ;; *) release_verify_fail 'invalid architecture' ;; esac
@@ -588,8 +600,10 @@ ensure_release_verifier() {
     [ "$PROJECT_REPOSITORY" = "$TRUSTED_RELEASE_REPOSITORY" ] ||
         die "Этот установщик проверяет только выпуски blindtechnique/keen-pbr-sb. Для другого проекта нужен его доверенный установщик."
     if ! command -v openssl >/dev/null 2>&1 && [ ! -x /opt/bin/openssl ]; then
-        [ "$UPDATE_ONLY" = "0" ] ||
-            die "Не найден OpenSSL для проверки выпуска. Установите пакет Entware openssl-util и повторите обновление."
+        # The unsigned stable11 updater enters this installer with --update
+        # before openssl-util was a package dependency. Establish that local
+        # verifier dependency from Entware before downloading/checking the IPK;
+        # the signed self-updater still requires its packaged dependency first.
         say "Устанавливаю OpenSSL для проверки подписи пакета..."
         /opt/bin/opkg update && /opt/bin/opkg install openssl-util ||
             die "Не удалось установить OpenSSL для проверки подписи. Установка keen-pbr-sb не началась."
@@ -597,11 +611,25 @@ ensure_release_verifier() {
     prepare_release_verifier
 }
 
+select_alpha_release() {
+    # Only public, immutable workflow alpha tags. Never fall back to Latest.
+    # GitHub returns recent releases first; an absent alpha is an explicit error.
+    fetch "$GITHUB_API/$PROJECT_REPOSITORY/releases?per_page=100" "$TMP_DIR/releases.json"
+    REQUESTED_RELEASE_TAG=$(tr ',' '\n' < "$TMP_DIR/releases.json" \
+        | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\(alpha-[0-9][0-9]*-[0-9][0-9]*\)".*/\1/p' \
+        | sort -t - -k2,2n -k3,3n | tail -n 1)
+    [ -n "$REQUESTED_RELEASE_TAG" ] ||
+        die "Подписанный Alpha-выпуск не найден среди последних 100 выпусков. Stable вместо него установлен не будет."
+}
+
 download_package() {
     [ "$PROJECT_REPOSITORY" = "$TRUSTED_RELEASE_REPOSITORY" ] ||
         die "Этот установщик проверяет только выпуски blindtechnique/keen-pbr-sb. Для другого проекта нужен его доверенный установщик."
     release_json="$TMP_DIR/release.json"
     release_url="$GITHUB_API/$PROJECT_REPOSITORY/releases/latest"
+    if [ "${RELEASE_CHANNEL:-stable}" = alpha ] && [ -z "$REQUESTED_RELEASE_TAG" ]; then
+        select_alpha_release
+    fi
     if [ -n "$REQUESTED_RELEASE_TAG" ]; then
         case "$REQUESTED_RELEASE_TAG" in
             *[!A-Za-z0-9._-]*) die "Получен некорректный тег обновления. Пакет не загружен; повторите проверку обновлений." ;;
@@ -640,7 +668,7 @@ download_package() {
     fetch "$release_base/release-manifest.sig" "$TMP_DIR/release-manifest.sig"
     /bin/sh "$RELEASE_VERIFIER" "$TMP_DIR/release-manifest.tsv" \
         "$TMP_DIR/release-manifest.sig" "$RELEASE_PUBLIC_KEY" \
-        "$TRUSTED_RELEASE_REPOSITORY" stable "$RELEASE_TAG" \
+        "$TRUSTED_RELEASE_REPOSITORY" "${RELEASE_CHANNEL:-stable}" "$RELEASE_TAG" \
         package "$KEEN_ARCH" "$KEEN_ABI" "$(basename "$PACKAGE_FILE")" "$PACKAGE_FILE" ||
         die "Подпись пакета не подтверждена. Установка не началась; попробуйте загрузить выпуск позднее."
 }
@@ -650,7 +678,8 @@ bootstrap_rescue_helpers() {
     helper_tree="$TMP_DIR/package-helpers"
     mkdir "$helper_tree" || die "не удалось подготовить каталог rescue helper"
     chmod 0700 "$helper_tree" || die "не удалось защитить каталог rescue helper"
-    tar -xOf "$PACKAGE_FILE" ./data.tar.gz > "$payload" ||
+    # BusyBox tar needs explicit gzip mode for the Entware IPK outer archive.
+    tar -xzOf "$PACKAGE_FILE" ./data.tar.gz > "$payload" ||
         die "проверенный IPK не содержит data.tar.gz"
     [ -s "$payload" ] || die "data.tar.gz в проверенном IPK пуст"
     tar -xzf "$payload" -C "$helper_tree" \
@@ -669,11 +698,23 @@ bootstrap_rescue_helpers() {
         [ -f "$lock_source" ] && [ ! -L "$lock_source" ] &&
         [ -f "$metadata_source" ] && [ ! -L "$metadata_source" ] ||
         die "rescue helper в IPK имеет небезопасный тип"
-    /bin/sh -n "$rescue_source" || die "получен повреждённый rescue helper"
-    /bin/sh -n "$startup_guard_source" ||
+    # Some Keenetic firmware shells reject -n. Prefer Entware's POSIX shell,
+    # and probe syntax-check support before attributing failure to a helper.
+    rescue_syntax_shell=""
+    for rescue_shell_candidate in /opt/bin/sh /opt/bin/ash /bin/sh /bin/ash; do
+        if [ -x "$rescue_shell_candidate" ] &&
+            "$rescue_shell_candidate" -n -c ':' >/dev/null 2>&1; then
+            rescue_syntax_shell="$rescue_shell_candidate"
+            break
+        fi
+    done
+    [ -n "$rescue_syntax_shell" ] ||
+        die "не найдена оболочка для проверки синтаксиса; файлы восстановления не изменены"
+    "$rescue_syntax_shell" -n "$rescue_source" || die "получен повреждённый rescue helper"
+    "$rescue_syntax_shell" -n "$startup_guard_source" ||
         die "получен повреждённый startup guard"
-    /bin/sh -n "$lock_source" || die "получен повреждённый update lock helper"
-    /bin/sh -n "$metadata_source" ||
+    "$rescue_syntax_shell" -n "$lock_source" || die "получен повреждённый update lock helper"
+    "$rescue_syntax_shell" -n "$metadata_source" ||
         die "получен повреждённый metadata helper"
 
     [ ! -L "$RESCUE_DIR" ] &&
@@ -1055,14 +1096,21 @@ configure_nfqws2() {
     say "Подготавливаю HTTPS и официальный репозиторий nfqws2..."
     # Старый wget из Entware понимает только HTTP/FTP. Сначала обновляем
     # обычные feeds и заменяем его на SSL-вариант, и только после этого
-    # добавляем HTTPS-feed nfqws2. Удаление feed также чинит повторный запуск
+    # добавляем HTTPS-feed nfqws2. Временное перемещение feed чинит повторный запуск
     # после ранее прерванной установки.
     mkdir -p /opt/etc/opkg
-    rm -f /opt/etc/opkg/nfqws2-keenetic.conf
+    if [ -f /opt/etc/opkg/nfqws2-keenetic.conf ] ||
+       [ -L /opt/etc/opkg/nfqws2-keenetic.conf ]; then
+        NFQWS_SAVED_FEED="$TMP_DIR/nfqws2-keenetic.conf"
+        mv /opt/etc/opkg/nfqws2-keenetic.conf "$NFQWS_SAVED_FEED"
+    else
+        rm -f /opt/etc/opkg/nfqws2-keenetic.conf
+    fi
     /opt/bin/opkg update || die "не удалось обновить список пакетов Entware"
     /opt/bin/opkg install ca-certificates wget-ssl || die "не удалось установить HTTPS-зависимости nfqws2"
     /opt/bin/opkg remove wget-nossl >/dev/null 2>&1 || true
     printf '%s\n' 'src/gz nfqws2-keenetic https://nfqws.github.io/nfqws2-keenetic/all' > /opt/etc/opkg/nfqws2-keenetic.conf
+    NFQWS_SAVED_FEED=
     /opt/bin/opkg update || die "не удалось загрузить официальный репозиторий nfqws2"
     say "Устанавливаю пакет nfqws2..."
     if /opt/bin/opkg status nfqws2-keenetic 2>/dev/null | grep -q '^Status:.* installed'; then

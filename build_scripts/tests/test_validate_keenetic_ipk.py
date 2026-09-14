@@ -210,6 +210,8 @@ def make_ipk(
             ),
             "opt/etc/keen-pbr/config.json": (b"{}", 0o600),
             "opt/etc/keen-pbr/transports.json": (config, 0o600),
+            "opt/usr/lib/keen-pbr/nfqws-tcp-window.awk": (b"# test planner\n", 0o644),
+            "opt/usr/lib/keen-pbr/libkeen-pbr-connndmmark.so": (elf(), 0o644),
             "opt/usr/share/keen-pbr/catalog.json": (
                 bundled_catalog() if catalog is None else catalog,
                 0o644,
@@ -551,6 +553,26 @@ class ValidateKeeneticIpkTest(unittest.TestCase):
             make_ipk(package, transport_binary=elf(machine=62))
             with self.assertRaisesRegex(VALIDATOR.ValidationError, "incompatible ELF"):
                 VALIDATOR.validate(package, "aarch64")
+
+    def test_rejects_missing_or_wrong_keenetic_ndm_adapter(self) -> None:
+        adapter = "opt/usr/lib/keen-pbr/libkeen-pbr-connndmmark.so"
+        for replacement in (None, elf(machine=62), b"not an ELF library"):
+            with self.subTest(replacement=replacement), tempfile.TemporaryDirectory() as directory:
+                package = Path(directory) / "keen-pbr.ipk"
+                make_ipk(package)
+                members = VALIDATOR.read_ar(package)
+                with tarfile.open(fileobj=io.BytesIO(members["data.tar.gz"]), mode="r:*") as source:
+                    files = {
+                        VALIDATOR.normalized(item.name): (source.extractfile(item).read(), item.mode)
+                        for item in source.getmembers()
+                        if item.isfile() and VALIDATOR.normalized(item.name) != adapter
+                    }
+                if replacement is not None:
+                    files[adapter] = (replacement, 0o644)
+                members["data.tar.gz"] = tar_archive(files)
+                package.write_bytes(ar_archive(members))
+                with self.assertRaisesRegex(VALIDATOR.ValidationError, "connndmmark"):
+                    VALIDATOR.validate(package, "aarch64")
 
     def test_accepts_entware_tar_ipk(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -1000,7 +1000,8 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_L
   target_link_libraries(keen-pbr-component-recovery-tests PRIVATE stdc++fs)
 endif()
 keen_pbr_apply_project_options(keen-pbr-component-recovery-tests)
-add_test(NAME keen-pbr-component-recovery-tests COMMAND keen-pbr-component-recovery-tests)
+# Manual EXCLUDE_FROM_ALL aggregate; its cases also run in keen-pbr-tests.
+# Like the routing-list and list-query aggregates, build/run it explicitly.
 
 # Keep the asynchronous Keenetic DNS coordinator independently buildable.
 # This exercises its concurrency and generation-fence contract without
@@ -1044,7 +1045,7 @@ add_test(
 
 # Pull-only task diagnostics: exercise actual timerfd and registry/API projection
 # without linking the daemon or the unrelated HTTP/authentication stack.
-add_executable(keen-pbr-background-task-diagnostics-tests EXCLUDE_FROM_ALL
+add_executable(keen-pbr-background-task-diagnostics-tests
   test_main.cpp
   test_periodic_task_metrics.cpp
   test_scheduler.cpp
@@ -1086,9 +1087,8 @@ target_compile_options(keen-pbr-background-task-diagnostics-tests PRIVATE
 target_link_options(keen-pbr-background-task-diagnostics-tests PRIVATE
   -Wl,--gc-sections -Wl,--no-export-dynamic)
 keen_pbr_apply_project_options(keen-pbr-background-task-diagnostics-tests)
-# This optional focused executable is run explicitly after building its target.
-# Do not register an EXCLUDE_FROM_ALL binary in default CTest: the same source
-# tests already belong to keen-pbr-tests, and CI must not expect an unbuilt file.
+add_test(NAME keen-pbr-background-task-diagnostics-tests
+  COMMAND keen-pbr-background-task-diagnostics-tests)
 
 # Keep the router overview's RCI cache independently buildable. These tests
 # exercise cold-load single-flight, event invalidation and failure retry.
@@ -2130,7 +2130,7 @@ if(WITH_API)
   target_link_options(keen-pbr-connections-history-tests PRIVATE
     -Wl,--gc-sections -Wl,--no-export-dynamic)
   add_test(NAME keen-pbr-connections-history-tests COMMAND
-    keen-pbr-connections-history-tests "--test-case-exclude=*[network]*")
+    keen-pbr-connections-history-tests)
 
   # Manual focused aggregate: each test is also in the normal keen-pbr-tests
   # gate. Keep list pagination and the shared connection case-fold contract
@@ -2599,6 +2599,35 @@ target_link_libraries(crash-diagnostics-smoke PRIVATE
   keen_pbr_libunwind
 )
 keen_pbr_apply_project_options(crash-diagnostics-smoke)
+add_test(NAME keen-pbr-tests COMMAND keen-pbr-tests)
+add_test(NAME crash-diagnostics-smoke COMMAND crash-diagnostics-smoke)
+
+# Existing fixtures use loopback ports and some process-global paths. CTest
+# must run them from the same directory as `make test`, even with `ctest -j`.
+# Keep manual aggregates, fuzzers and the privileged netns harness separate.
+get_property(_keen_pbr_tests DIRECTORY PROPERTY TESTS)
+foreach(_test IN LISTS _keen_pbr_tests)
+  set_tests_properties(${_test} PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    RUN_SERIAL TRUE
+    TIMEOUT 1800)
+  if(TARGET ${_test})
+    set_tests_properties(${_test} PROPERTIES LABELS "native")
+  else()
+    set_tests_properties(${_test} PROPERTIES LABELS "package-dns" TIMEOUT 180)
+  endif()
+endforeach()
+set_tests_properties(
+  keen-pbr-netfilter-hook-signals
+  keen-pbr-service-start-environment
+  keen-pbr-keenetic-iptables-wait
+  keen-pbr-keenetic-startup-dependencies
+  keen-pbr-keenetic-meta-udp443-cleanup
+  PROPERTIES LABELS "package-lifecycle")
+# This fixture exercises root-owned metadata checks in the real shell helper.
+# A non-root host skips it explicitly; release CI also runs it as root in its
+# existing BusyBox container step. It does not need a privileged container.
+set_tests_properties(keen-pbr-netfilter-hook-signals PROPERTIES SKIP_RETURN_CODE 77)
 
 if(LIBATOMIC)
   target_link_libraries(keen-pbr-tests PRIVATE ${LIBATOMIC})
@@ -2617,6 +2646,7 @@ if(WITH_API)
     test_api_reload.cpp
     test_api_lists_refresh.cpp
     test_list_query.cpp
+    test_list_hints.cpp
     test_api_notifications.cpp
     test_list_refresh_request.cpp
     test_api_catalog_setup.cpp
@@ -2644,6 +2674,8 @@ if(WITH_API)
     ../src/api/handler_reload.cpp
     ../src/api/handler_lists_refresh.cpp
     ../src/api/handler_lists_query.cpp
+    ../src/api/handler_list_hints.cpp
+    ../src/lists/list_hints.cpp
     ../src/api/handler_list_preview.cpp
     test_api_list_preview.cpp
     ../src/api/handler_logs.cpp

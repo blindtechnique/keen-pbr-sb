@@ -135,7 +135,6 @@ TEST_CASE("every protected entry names a method that endpoint serves") {
 }
 
 TEST_CASE("the package and access operations require a step-up") {
-    CHECK(requires_step_up("POST", "/api/system/update"));
     CHECK(requires_step_up("POST", "/api/system/update/rollback"));
     CHECK(requires_step_up("POST", "/api/system/naive-component"));
     CHECK(requires_step_up("POST", "/api/transports/sing-box/install"));
@@ -173,6 +172,18 @@ TEST_CASE("the package and access operations require a step-up") {
     // state, so handing it out is closer to exfiltration than to a status
     // query. A POST because the body selects which groups to export.
     CHECK(requires_step_up("POST", "/api/backup"));
+}
+
+TEST_CASE("normal signed self-update uses the existing authenticated session") {
+    CHECK_FALSE(requires_step_up("POST", "/api/system/update"));
+    CHECK_FALSE(requires_step_up("POST", "/api/system/update/"));
+    CHECK_FALSE(requires_step_up("POST", "/api/system/update?source=latest"));
+    // Neither exporting credentials nor selecting a rollback is part of the
+    // updater's internal, non-exported rollback capture.
+    CHECK(requires_step_up("POST", "/api/backup"));
+    CHECK(requires_step_up("POST", "/api/backup/restore"));
+    CHECK(requires_step_up("POST", "/api/backup/rollback"));
+    CHECK(requires_step_up("POST", "/api/system/update/rollback"));
 }
 
 TEST_CASE("reading what an update would do costs nothing") {

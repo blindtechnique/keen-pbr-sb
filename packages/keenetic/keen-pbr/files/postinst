@@ -227,6 +227,10 @@ fi
 echo ""
 
 echo "Installation complete!"
+# nfqws2 may have stayed running throughout our own package upgrade.
+if [ -x /opt/usr/lib/keen-pbr/nfqws-tcp-window.sh ]; then
+    /opt/usr/lib/keen-pbr/nfqws-tcp-window.sh apply >/dev/null 2>&1 || true
+fi
 echo "Config path: /opt/etc/keen-pbr/config.json"
 echo "Web API: http://my.keenetic.net:12121"
 

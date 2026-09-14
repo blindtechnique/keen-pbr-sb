@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace keen_pbr3 {
@@ -107,6 +108,11 @@ struct NdmsInterfaceCatalog {
     // the runtime-name input. It is empty on an unresolved catalog.
     nlohmann::json names;
 };
+
+// Uses firmware slot evidence, not Linux link presence: stopped WG/AWG
+// interfaces remain occupied and must not be treated as externally deleted.
+bool ndms_catalog_proves_wireguard_absent(
+    const NdmsInterfaceCatalog& catalog, std::string_view kernel_interface);
 
 // Parses /rci/show/interface defensively. Only explicit tunnel and proxy types
 // enter `tunnels`; bridges, VLANs, switch ports and Wi-Fi interfaces remain in

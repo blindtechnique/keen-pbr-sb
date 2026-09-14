@@ -47,7 +47,7 @@ import {
 import { getListSearchText, sortListIdsByDisplayName } from "@/lib/list-display"
 import { sortOutboundsByDisplayName } from "@/lib/outbound-display"
 import { makeTechnicalId } from "@/lib/technical-id"
-import { resolveRuleRouteIndex } from "@/lib/rule-route"
+import { useRuleEditTarget } from "@/hooks/use-rule-edit-target"
 import {
   Select,
   SelectContent,
@@ -58,6 +58,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import {
+  areRouteRulesSemanticallyEqual,
   createRouteRuleDraft,
   getRouteRuleDisplayName,
   normalizeRouteRuleDraft,
@@ -106,10 +107,14 @@ export function RoutingRuleUpsertPage({
   const configQuery = useGetConfig()
   const loadedConfig = selectConfig(configQuery.data)
   const rules = loadedConfig?.route?.rules ?? []
-  const parsedRuleIndex =
-    mode === "edit" ? resolveRuleRouteIndex(rules, ruleId) : -1
-  const existingRule =
-    mode === "edit" && parsedRuleIndex >= 0 ? rules[parsedRuleIndex] : undefined
+  const editTarget = useRuleEditTarget(
+    rules,
+    mode === "edit" ? ruleId : undefined,
+    Boolean(loadedConfig),
+    (left, right) => areRouteRulesSemanticallyEqual([left], [right])
+  )
+  const parsedRuleIndex = editTarget.index
+  const existingRule = mode === "edit" ? editTarget.rule : undefined
 
   if (mode === "edit" && loadedConfig && !existingRule) {
     return (
@@ -174,7 +179,7 @@ export function RoutingRuleUpsertPage({
           ? t("pages.routingRuleUpsert.createTitle")
           : t("pages.routingRuleUpsert.editCardTitle", {
               name: existingRule
-                ? getRouteRuleDisplayName(existingRule, parsedRuleIndex)
+                ? getRouteRuleDisplayName(existingRule, editTarget.displayIndex)
                 : "",
             })
       }
@@ -253,6 +258,7 @@ function RoutingRuleForm({
   }))
 
   const postConfigMutation = usePostConfigMutation()
+  const targetUnavailable = mode === "edit" && parsedRuleIndex < 0
 
   // Удаление правила из самой формы. В конфигураторе так и сделано: в строке
   // только карандаш, а удаление живёт в диалоге, который он открывает.
@@ -320,6 +326,9 @@ function RoutingRuleForm({
     validators: {
       onSubmitAsync: async ({ value }) => {
         clearFormServerErrors(form)
+        if (targetUnavailable) {
+          return { form: t("common.ruleEditTargetChanged"), fields: {} }
+        }
         const displayNameError = validateDisplayName(value.displayName, t)
         if (displayNameError) {
           setFormServerErrors(form, {
@@ -960,7 +969,11 @@ function RoutingRuleForm({
       </FieldGroup>
       <ServerValidationAlert
         errors={unmappedServerErrors}
-        message={submitErrorMessage}
+        message={
+          targetUnavailable
+            ? t("common.ruleEditTargetChanged")
+            : submitErrorMessage
+        }
       />
 
       <div className="flex justify-end gap-3" data-upsert-actions>
@@ -968,6 +981,7 @@ function RoutingRuleForm({
           <UpsertDeleteAction
             confirmLabel={t("pages.routingRuleUpsert.delete.confirm")}
             description={t("pages.routingRuleUpsert.delete.description")}
+            disabled={targetUnavailable}
             impactItems={[]}
             isPending={postConfigMutation.isPending}
             label={t("common.delete")}
@@ -981,7 +995,12 @@ function RoutingRuleForm({
         <form.Subscribe selector={(state) => state.canSubmit}>
           {(canSubmit) => (
             <Button
-              disabled={postConfigMutation.isPending || !isDirty || !canSubmit}
+              disabled={
+                targetUnavailable ||
+                postConfigMutation.isPending ||
+                !isDirty ||
+                !canSubmit
+              }
               size="xl"
               type="submit"
             >

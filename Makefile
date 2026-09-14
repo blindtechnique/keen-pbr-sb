@@ -37,6 +37,8 @@ CLANG_FEATURE_CMAKE_FLAGS := -DWITH_API=ON -DUSE_KEENETIC_API=ON
         check-warnings check-shell check-ndmc-env check-openapi-parity \
         check-nfqws-assets \
         check-nfqws-rotator-lua \
+        check-nfqws-tcp-reply-native \
+        check-nfqws-tcp-fake-kernel \
         sanitize fuzz \
         cross-setup cross-build cross-deploy \
         help
@@ -99,6 +101,8 @@ check-warnings: ## Build with -Wall -Wextra -Werror (native compilers only)
 check-shell: ## Parse every shipped shell script with the target BusyBox and scan for bashisms
 	python3 -m unittest build_scripts.tests.test_mask_awk_for_shell_scan -v
 	bash build_scripts/check-shell-busybox.sh
+	BUSYBOX="$(BUSYBOX)" python3 -m unittest build_scripts.tests.test_signed_update_integration.InstallerBootstrapArchiveTest build_scripts.tests.test_signed_update_integration.InstallerBootstrapSyntaxTest -v
+	BUSYBOX="$(BUSYBOX)" python3 -m unittest build_scripts.tests.test_persistent_recovery_boundary -v
 
 check-ndmc-env: ## Prove the shipped installer/uninstaller run ndmc with a scrubbed LD_LIBRARY_PATH
 	sh tests/package_it/run-ndmc-env-contract.sh install.sh uninstall.sh
@@ -109,9 +113,22 @@ check-openapi-parity: ## Fail when a registered API route is missing from docs/o
 check-nfqws-assets: ## Verify nfqws2 preset/blob invariants and their exact-waiver contract
 	python3 build_scripts/check-nfqws-assets.py
 	python3 -m unittest build_scripts.tests.test_check_nfqws_assets -v
+	python3 -m unittest build_scripts.tests.test_nfqws_discord_profile -v
+	python3 -m unittest build_scripts.tests.test_nfqws_tcp_profile -v
+	python3 -m unittest build_scripts.tests.test_nfqws_tcp_window -v
 
 check-nfqws-rotator-lua: ## Check telemetry and pinned zapret2 circular semantics
 	bash build_scripts/check-nfqws-rotator-lua.sh
+
+# Explicit disposable-container acceptance; never downloads upstream or runs
+# against the host/router network. See docs/NFQWS_ROTATOR_DIAGNOSTICS.ru.md.
+NFQWS_NATIVE_OUTPUT ?= build/nfqws-tcp-reply-native
+check-nfqws-tcp-fake-kernel: ## Check fake isolation in a disposable network-none container (NET_RAW)
+	python3 build_scripts/tests/nfqws_tcp_fake_kernel.py
+
+check-nfqws-tcp-reply-native: ## Test the TCP reply helper with a supplied official nfqws2 binary
+	@test -n "$(NFQWS_UPSTREAM)" || (echo "Set NFQWS_UPSTREAM to an extracted zapret2 v1.0.5 tree"; exit 1)
+	python3 build_scripts/tests/nfqws_tcp_reply_native.py --upstream "$(NFQWS_UPSTREAM)" --output "$(NFQWS_NATIVE_OUTPUT)"
 
 # Отдельный каталог сборки: санитайзеры не должны попасть в router/IPK binary.
 sanitize: ## Build and run the unit suite under AddressSanitizer + UndefinedBehaviorSanitizer
@@ -177,26 +194,38 @@ test: ## Build and run unit tests (doctest)
 	sh -n install.sh
 	python3 -m unittest build_scripts.tests.test_build_identity -v
 	python3 -m unittest build_scripts.tests.test_test_target_coverage -v
+	python3 -m unittest build_scripts.tests.test_ctest_discovery -v
 	python3 -m unittest build_scripts.tests.test_pinned_versions -v
+	python3 -m unittest build_scripts.tests.test_netlink_uapi_compat -v
 	$(MAKE) test-package-dns
 	cmake -S . -B $(GCC_BUILD_DIR) $(GCC_CMAKE_FLAGS) -DBUILD_TESTS=ON \
 		-DWITH_API=ON -DUSE_KEENETIC_API=ON $(TEST_CMAKE_FLAGS)
 	cmake --build $(GCC_BUILD_DIR) --parallel $(BUILD_JOBS) --target keen-pbr keen-pbr-tests crash-diagnostics-smoke $(NARROW_TEST_TARGETS)
 	@test "$$($(GCC_BUILD_DIR)/keen-pbr --version)" = \
 	  "keen-pbr $(KEEN_PBR_VERSION) (build $(KEEN_PBR_RELEASE), commit $(KEEN_PBR_COMMIT))"
-	$(GCC_BUILD_DIR)/tests/keen-pbr-tests
-	$(GCC_BUILD_DIR)/tests/crash-diagnostics-smoke
-	@for target in $(NARROW_TEST_TARGETS); do \
-		echo "== $$target =="; \
-		$(GCC_BUILD_DIR)/tests/$$target || exit 1; \
-	done
+	python3 build_scripts/check-ctest-discovery.py --build-dir $(GCC_BUILD_DIR) \
+		keen-pbr-tests crash-diagnostics-smoke $(NARROW_TEST_TARGETS)
+	ctest --test-dir $(GCC_BUILD_DIR) --output-on-failure --no-tests=error \
+		-L '^(native|package-lifecycle)$$'
 
 test-package-dns: ## Run isolated Keenetic DNS and uninstall regressions without compiling
 	python3 -m unittest build_scripts.tests.test_installer_component_preservation -v
+	python3 -m unittest build_scripts.tests.test_transport_upgrade_state -v
 	$(BUSYBOX) sh tests/package_it/run-dnsmasq-helper-timing.sh packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/dnsmasq.sh
 	$(BUSYBOX) sh tests/package_it/run-dnsmasq-direct-fallback.sh packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/dnsmasq.sh
 	$(BUSYBOX) sh tests/package_it/run-installer-dns-rollback.sh install.sh
 	$(BUSYBOX) sh tests/package_it/run-uninstall-cleanup.sh "$(CURDIR)"
+	$(BUSYBOX) sh tests/package_it/run-keenetic-fastnat-lifecycle.sh packages/keenetic/keen-pbr/files/opt/etc/init.d/S80keen-pbr packages/keenetic/keen-pbr/files/prerm
+	$(BUSYBOX) sh tests/package_it/run-dnsmasq-helper-lkg.sh \
+		packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/dnsmasq.sh \
+		packages/openwrt/keen-pbr/files/usr/lib/keen-pbr/dnsmasq.sh \
+		packages/debian/files/usr/lib/keen-pbr/dnsmasq.sh
+	@for helper in \
+		packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/dnsmasq.sh \
+		packages/openwrt/keen-pbr/files/usr/lib/keen-pbr/dnsmasq.sh \
+		packages/debian/files/usr/lib/keen-pbr/dnsmasq.sh; do \
+		$(BUSYBOX) sh tests/test_dnsmasq_attempt_receipt.sh "$$helper" || exit 1; \
+	done
 
 test-api-operation-errors: ## Check additive API error codes without rebuilding the daemon
 	cmake -S . -B $(GCC_BUILD_DIR) $(GCC_CMAKE_FLAGS) -DBUILD_TESTS=ON -DWITH_API=ON

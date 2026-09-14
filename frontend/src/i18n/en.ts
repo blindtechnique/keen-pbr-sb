@@ -1,4 +1,46 @@
 export const enTranslation = {
+  listHints: {
+    title: "List hints",
+    description:
+      "Check on demand for broad networks, matching domains and lists with no settings references. Reads current settings, local files and cached lists without downloading anything or changing rules.",
+    check: "Check lists",
+    loading: "Checking lists. Settings and routing remain unchanged…",
+    failed:
+      "Could not get list hints. Try again later. No settings were changed.",
+    stale:
+      "Settings changed during the check. Check again to get current hints.",
+    done: "Check complete. Hints: {{count}}.",
+    scope:
+      "These are examples to review, not errors. Matching domains do not prove a conflict or the actual traffic path. Results describe the time of this check; it is fine to leave the settings as they are.",
+    draft:
+      "Checked the current settings draft, which has not been applied to routing yet.",
+    stats:
+      "Lists inspected: {{lists}} of {{total}}; entries and lines: {{entries}}.",
+    partial:
+      "This check is incomplete: some sources are unavailable or the analysis reached its size or time budget. This does not affect the lists themselves.",
+    samples:
+      "Only representative examples are shown, not every possible overlap.",
+    conditions:
+      "Rules with extra conditions: {{count}}. Only rules with identical protocol, addresses, ports and DSCP are compared; overlaps between different conditions are not checked here.",
+    empty: "No hints in the inspected portion of the lists.",
+    unused:
+      "No references in the service settings: routing, DNS or automated actions. This list may be kept for later; you do not have to delete it.",
+    wide: "Network {{entry}} covers many addresses. Check whether the whole range is intended. This check highlights IPv4 /16 or broader and IPv6 /32 or broader; these ranges are valid in themselves.",
+    overlap:
+      "Domains “{{entry}}” and “{{otherEntry}}” match or include one another. Rule #{{earlier}} → “{{outbound}}” comes before rule #{{later}} → “{{otherOutbound}}”. Check whether this order is intended; both rules have identical extra conditions.",
+    unknown:
+      "This list has a new hint type whose details are not supported by this panel yet.",
+    sources: {
+      title: "Sources not fully inspected",
+      changed:
+        "The source changed or the file was updated while being read. Check again after the list has finished loading.",
+      large:
+        "Source omitted: it exceeds the remaining size budget of this optional check.",
+      invalid: "Some content could not be parsed in the selected format.",
+      unavailable:
+        "The local file or a matching cached list is currently unavailable.",
+    },
+  },
   backgroundTasks: {
     title: "Background tasks",
     description:
@@ -373,6 +415,8 @@ export const enTranslation = {
       "The settings have changed. Refresh the panel data and review your changes before applying them.",
     recovery_required:
       "The operation could not be completed and recovery could not be confirmed. Check the service status on the dashboard before trying again.",
+    list_refresh_apply_failed:
+      "List refresh did not finish: changes could not be applied to routing. Check its dashboard status and the error details.",
     apply_unchanged:
       "The changes could not be applied. The working configuration is unchanged. See details for the cause.",
     rolled_back:
@@ -678,7 +722,7 @@ export const enTranslation = {
       details: "Details",
       poolSummary: "Traffic pools: {{count}}",
       domainPools: "dedicated pools for YouTube, Discord and others",
-      sharedPools: "one shared pool per protocol",
+      sharedPools: "shared pools without per-service splits",
       tier: {
         safe: "Safe",
         balanced: "Balanced",
@@ -688,7 +732,7 @@ export const enTranslation = {
         safe: "The familiar conservative behaviour without the defects and risky techniques of the old presets. Use it as a fallback if a stronger profile causes trouble.",
         balanced:
           "Dedicated pools for YouTube, googlevideo and Discord let each traffic group choose its bypass independently. Recommended for most setups.",
-        max: "Everything in Balanced plus extra techniques such as syndata, IP fragmentation and QUIC replacement. Experimental: some providers may drop the connection.",
+        max: "Everything in Balanced plus extra bypass techniques and separate choices for Discord: opening the app and starting a voice connection. Experimental: calls are not guaranteed to work, and some providers may drop the connection. If things get worse, apply your previous strategy.",
       },
     },
     strategyDisplayNames: {
@@ -973,6 +1017,8 @@ export const enTranslation = {
     },
   },
   common: {
+    ruleEditTargetChanged:
+      "This rule changed, was deleted, or is no longer uniquely identifiable. Your draft is still here. Copy any changes you need, then reopen the rule from the list before saving or deleting it.",
     // Labels of shared interface primitives. They used to be hardcoded in
     // English inside components/ui/*, so a Russian user saw "Close" on the
     // dialog close button.
@@ -1210,6 +1256,12 @@ export const enTranslation = {
         "Could not check subscriptions. Other notifications are available.",
     },
     messages: {
+      runtimeApplyUnverified:
+        "The final routing state could not be determined while applying settings. The service marked routing as broken. Check its current dashboard status and the error details.",
+      runtimeFailed:
+        "The service reported a routing failure. Check its current dashboard status and the error details.",
+      runtimeStartFailed:
+        "Routing could not be started. Check its current dashboard status and the error details.",
       subscriptionRefreshFailed:
         "Automatic subscription refresh did not finish. Open Subscriptions and check the last check time and error details.",
       unknownError:
@@ -1395,8 +1447,9 @@ export const enTranslation = {
       nativeDescription:
         "These are existing router-firmware interfaces. keen-pbr-sb currently only shows them and lets you point a route at them; create, edit, start, restart or delete the interface itself in the Keenetic web configurator.",
       orphan: "Routes without a tunnel",
+      nativeInterfaceNotFound: "KeeneticOS interface not found",
       orphanDescription:
-        "Normally there are none: a route is created together with its tunnel. These point at interfaces keen-pbr does not manage - for example, another Entware package's tunnel.",
+        "These saved routes have no linked tunnel in the panel, for example after a VPN was deleted in KeeneticOS or for another Entware package. Open a route to change its interface or delete it after reviewing its dependencies.",
     },
     refresh: "Refresh",
     add: "Add proxy or connect VPN",
@@ -2837,16 +2890,39 @@ export const enTranslation = {
         },
       },
       nfqwsTitle: "nfqws",
-      nfqwsChecking: "Checking whether DPI circumvention applies…",
+      nfqwsChecking: "Checking nfqws lists…",
       nfqws: {
         busy: "Another nfqws coverage check is already running. This routing result is still valid; try the check again.",
         unknown:
-          "The nfqws configuration or an active list could not be read safely, so coverage is unknown.",
+          "Not all nfqws conditions could be checked: some data is unavailable or needs connection details.",
         covered:
-          "This target is in an nfqws list, so DPI circumvention applies to it.",
+          "List conditions match in at least one nfqws processing profile.",
         excluded:
-          "This target is on an nfqws exclude list, so circumvention does not apply - even though another list also matches it.",
-        uncovered: "This target is in no active nfqws list.",
+          "An exclusion matches. It applies only within its own profile, not across all nfqws settings.",
+        uncovered:
+          "No list-condition matches were found in nfqws processing profiles.",
+        mixed:
+          "Results differ between profiles or IP addresses. This does not mean the target is excluded from all nfqws processing.",
+      },
+      nfqwsScope:
+        "Lists were checked against the saved settings. Actual processing also depends on the protocol, port, visible hostname and profile order. This check does not confirm successful circumvention.",
+      nfqwsProfiles: "Profile details: {{count}}",
+      nfqwsProfile: "Profile {{index}}",
+      nfqwsProfileNamed: "Profile {{index}} — {{name}}",
+      nfqwsPassThrough: "This profile has no DPI circumvention actions.",
+      nfqwsVisibleHost:
+        "Domain conditions apply only when nfqws can see the hostname in the connection.",
+      nfqwsProfileResults: {
+        matched: "List conditions match",
+        excluded: "Excluded within this profile",
+        unmatched: "List conditions do not match",
+        unrestricted: "Include lists do not restrict this profile",
+        mixed: "Results differ between IP addresses",
+        unknown: "List conditions could not be checked",
+        hostname_required:
+          "A visible hostname is needed to determine the result",
+        ip_required: "An IP address is needed",
+        auto_pending: "No match yet; this profile uses an automatic hostlist",
       },
       nfqwsMatch: "{{role}}: {{entry}} matched {{matched}} ({{list}})",
       role: {
@@ -3733,7 +3809,18 @@ export const enTranslation = {
           "The operation could not be completed. Check the current version before trying again.",
         progressUnavailable:
           "Update progress is unavailable. The panel will keep checking automatically.",
-        downloadBackupBefore: "Download a backup before installing",
+        downloadBackup: "Download backup",
+        backupFailed:
+          "Could not download the backup. The update was not started.",
+        reconnecting:
+          "Reconnecting to the panel to check update progress. Do not start the update again.",
+        admissionUnknown:
+          "Checking whether the update started. Do not start it again.",
+        resultUnknown:
+          "The update result could not be confirmed yet. Check its status again or reopen the panel later. Do not start the installation again.",
+        checkProgress: "Check status",
+        stopMonitoring: "Stop monitoring",
+        stopMonitoringHint: "This does not stop the update on the router.",
         progressLabel: "Update progress",
         inProgress: "Update in progress",
         title: "keen-pbr-sb update",
@@ -3746,7 +3833,7 @@ export const enTranslation = {
         availableToast: "Update {{version}} is available.",
         install: "Install update",
         running:
-          "The update is running. The web UI may be unavailable for a few seconds and will reconnect automatically.",
+          "During the update, the panel, routing and DNS may be temporarily unavailable. The panel will reconnect automatically.",
         upToDate: "The latest published version is installed.",
         newerThanPublished:
           "The installed version is newer than the latest published release. A downgrade will not be offered.",

@@ -45,6 +45,41 @@ async function renderError(
 
 describe("operation error presentation", () => {
   test.each(["ru", "en"] as const)(
+    "explains failed list routing apply in %s without claiming a rollback",
+    async (language) => {
+      const messages = language === "ru" ? ruTranslation : enTranslation
+      const payload = {
+        code: "list_refresh_apply_failed",
+        error: "Routing apply failed: exact generation was not verified",
+        params: {
+          stage: "terminal",
+          runtime_result: "unknown",
+          url: "https://example.test/private-token",
+        },
+        refreshed_lists: ["work"],
+        changed_lists: ["work"],
+        failed_lists: [],
+        reloaded: false,
+      }
+      for (const error of [
+        { status: 503, message: payload.error, details: payload },
+        { status: 503, data: payload },
+      ]) {
+        const html = await renderError(error, language)
+        expect(html.split("<details")[0]).toContain(
+          messages.operationErrors.list_refresh_apply_failed
+        )
+        expect(html).toContain(payload.error)
+        expect(html).toContain("stage: terminal")
+        expect(html).toContain("runtime_result: unknown")
+        expect(html).not.toContain("private-token")
+        expect(html).not.toContain(messages.operationErrors.rolled_back)
+        expect(html).not.toContain(messages.operationErrors.apply_unchanged)
+      }
+    }
+  )
+
+  test.each(["ru", "en"] as const)(
     "explains required schema migration in %s without hiding recovery or raw details",
     async (language) => {
       const messages = language === "ru" ? ruTranslation : enTranslation

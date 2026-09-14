@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 #include <fcntl.h>
@@ -446,6 +447,7 @@ void install_runtime_mocks(const fs::path& root) {
         "while [ \"$#\" -gt 0 ]; do\n"
         "  case \"$1\" in\n"
         "    -o) output_file=${2:-}; shift 2 ;;\n"
+        "    http://*) printf '%s\\n' \"$1\" >> \"$KEEN_PBR_RESCUE_ROOT/curl-urls\"; shift ;;\n"
         "    *) shift ;;\n"
         "  esac\n"
         "done\n"
@@ -735,10 +737,15 @@ int run_postrm(const fs::path& root,
                       final_remove);
 }
 
-void prepare_two_generations(const fs::path& root) {
+constexpr const char* kApiConfigA =
+    "{\"api\":{\"enabled\":true},\"fixture\":\"config-a\"}\n";
+constexpr const char* kApiConfigB =
+    "{\"api\":{\"enabled\":true},\"fixture\":\"config-b\"}\n";
+
+void prepare_two_generations(const fs::path& root, bool with_api = false) {
     const auto rescue = rescue_dir(root);
     const auto config = config_dir(root);
-    write_file(config / "config.json", "config-a\n");
+    write_file(config / "config.json", with_api ? kApiConfigA : "config-a\n");
     write_file(config / "transports.json", "transport-a\n");
     write_file(config / "hook.sh", "#!/bin/sh\n# generation a\n", 0755);
     write_file(rescue / "current.ipk", "package-a\n");
@@ -746,7 +753,7 @@ void prepare_two_generations(const fs::path& root) {
     REQUIRE(run_rescue(root,
                        {"stage", (root / "candidate-source.ipk").string()}) ==
             0);
-    write_file(config / "config.json", "config-b\n");
+    write_file(config / "config.json", with_api ? kApiConfigB : "config-b\n");
     write_file(config / "transports.json", "transport-b\n");
     write_file(config / "auth.json", "candidate-only\n");
     write_file(config / "hook.sh", "# generation b\n", 0640);
@@ -766,7 +773,7 @@ TEST_CASE("runtime verification accepts a healthy authentication status") {
     const auto root = directory.path;
     install_runtime_mocks(root);
     write_file(config_dir(root) / "config.json",
-               R"({"api":{"listen":"0.0.0.0:12121"}})");
+               R"({"api":{"enabled":true,"listen":"0.0.0.0:12121"}})");
 
     CHECK(run_rescue(root, {"verify"}) == 0);
 }
@@ -776,7 +783,7 @@ TEST_CASE("runtime verification rejects a misconfigured authentication state") {
     const auto root = directory.path;
     install_runtime_mocks(root);
     write_file(config_dir(root) / "config.json",
-               R"({"api":{"listen":"0.0.0.0:12121"}})");
+               R"({"api":{"enabled":true,"listen":"0.0.0.0:12121"}})");
 
     CHECK(run_rescue(root,
                      {"verify"},
@@ -786,6 +793,86 @@ TEST_CASE("runtime verification rejects a misconfigured authentication state") {
                      false,
                      false,
                      true) == 1);
+}
+
+TEST_CASE("runtime verification selects only the top-level API listen port") {
+    const std::vector<std::pair<std::string, std::string>> configurations{
+        {R"({"api":{"enabled":true,"listen":"0.0.0.0:13001"},"dns":{"dns_test_server":{"listen":"127.0.0.88:12153"}}})",
+         "13001"},
+        {R"({
+  "dns": {"dns_test_server": {"listen": "127.0.0.88:12153"}},
+  "api": {
+    "enabled": true,
+    "listen": "0.0.0.0:13002"
+  }
+})", "13002"},
+        {R"({"description":"quoted \"api\":{\"listen\":\"0.0.0.0:9\"} \\ []","nested":[{"api":{"listen":"0.0.0.0:8"}}],"api":{"enabled":true,"listen":"0.0.0.0:13003"},"dns":{"dns_test_server":{"listen":"127.0.0.88:12153"}}})",
+         "13003"},
+        {R"({"\u0061pi":{"enabled":true,"\u006cisten":"0.0.0.0:\u00313004"},"dns":{"dns_test_server":{"listen":"127.0.0.88:12153"}}})",
+         "13004"},
+        {R"({"api":{"enabled":true},"dns":{"dns_test_server":{"listen":"127.0.0.88:12153"}}})",
+         "12121"},
+        {R"({"api":{"enabled":true,"listen":null},"dns":{"dns_test_server":{"listen":"127.0.0.88:12153"}}})",
+         "12121"},
+        {R"({"api":{"listen":"0.0.0.0:9"},"api":{"enabled":true},"dns":{"dns_test_server":{"listen":"127.0.0.88:12153"}}})",
+         "12121"},
+        {R"({"api":{"enabled":true,"listen":"0.0.0.0:9","listen":null}})", "12121"},
+        {R"({
+  /* Ignore "api": {"listen": "0.0.0.0:9"} and stray [ braces.
+     The config parser accepts multiline comments. */
+  "api": {"enabled": true, "listen": "0.0.0.0:13005"}, // "listen": "0.0.0.0:8"
+  "dns": {"dns_test_server": {"listen": "127.0.0.88:12153"}}
+})", "13005"},
+    };
+    for (const auto& configuration : configurations) {
+        CAPTURE(configuration.first);
+        TempDirectory directory;
+        const auto root = directory.path;
+        install_runtime_mocks(root);
+        write_file(config_dir(root) / "config.json", configuration.first);
+
+        REQUIRE(run_rescue(root, {"verify"}) == 0);
+        const auto expected = "http://127.0.0.1:" + configuration.second +
+                              "/api/auth/status\n";
+        CHECK(read_file(root / "curl-urls") == expected + expected + expected);
+    }
+}
+
+TEST_CASE("runtime verification skips HTTP only when API is not enabled") {
+    for (const auto& configuration : std::vector<std::string>{
+             R"({"api":{"enabled":false,"listen":"0.0.0.0:13001"}})",
+             R"({"api":{"listen":"0.0.0.0:13001"}})",
+             R"({"dns":{"dns_test_server":{"listen":"127.0.0.88:12153"}}})",
+             R"({"api":{"enabled":true},"api":null})",
+             R"({"api":{"enabled":true,"enabled":false}})",
+             R"({"api":{"enabled":true,"enabled":null}})",
+         }) {
+        CAPTURE(configuration);
+        TempDirectory directory;
+        const auto root = directory.path;
+        install_runtime_mocks(root);
+        write_file(config_dir(root) / "config.json", configuration);
+
+        REQUIRE(run_rescue(root, {"verify"}) == 0);
+        CHECK_FALSE(fs::exists(root / "curl-count"));
+        CHECK_FALSE(fs::exists(root / "curl-urls"));
+    }
+}
+
+TEST_CASE("runtime verification still requires both services without API") {
+    TempDirectory directory;
+    const auto root = directory.path;
+    install_runtime_mocks(root);
+    write_file(config_dir(root) / "config.json", R"({"api":{"enabled":false}})");
+    const char* failed_service = nullptr;
+    SUBCASE("keen-pbr is stopped") { failed_service = "S80keen-pbr"; }
+    SUBCASE("transport manager is stopped") { failed_service = "S79transport-manager"; }
+    REQUIRE(failed_service != nullptr);
+    write_file(root / "opt/etc/init.d" / failed_service,
+               "#!/bin/sh\nexit 1\n", 0700);
+
+    CHECK(run_rescue(root, {"verify"}) == 1);
+    CHECK_FALSE(fs::exists(root / "curl-count"));
 }
 
 TEST_CASE("rescue stage publishes a complete private snapshot before pending state") {
@@ -994,10 +1081,10 @@ TEST_CASE("health failure after opkg success compensates package and live config
     const auto rescue = rescue_dir(root);
     const auto config = config_dir(root);
     install_runtime_mocks(root);
-    prepare_two_generations(root);
+    prepare_two_generations(root, true);
 
     CHECK(run_rescue(root, {"rollback-previous"}, 0, 15) == 1);
-    CHECK(read_file(config / "config.json") == "config-b\n");
+    CHECK(read_file(config / "config.json") == kApiConfigB);
     CHECK(read_file(config / "transports.json") == "transport-b\n");
     CHECK(fs::exists(config / "auth.json"));
     CHECK(read_file(rescue / "current.ipk") == "package-b\n");

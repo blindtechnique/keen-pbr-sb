@@ -118,6 +118,38 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/lists/hints:
+    post:
+      summary: Inspect optional list hints without changing configuration
+      description: >
+        Reads one visible configuration and existing local/cached list sources.
+        Never downloads, resolves DNS, creates a draft, changes routing, or
+        publishes notifications. URL bodies must match the configured source;
+        missing or unreadable sources are reported as partial coverage.
+        Domain examples compare enabled routing rules with identical additional
+        conditions and different outbounds. Original rule order is retained;
+        examples are not proof of runtime traffic or erroneous configuration.
+        References from disabled rules, DNS, reconnect policy and tunnel probe
+        count as usage. Wide CIDRs mean IPv4 prefix <=16 or IPv6 prefix <=32.
+        The report is bounded to 100 hints, 100 source issues, 100000 entries and
+        index owners, 8 MiB aggregate input, 2 MiB per file, and a cooperative
+        two-second analysis budget. Cache verification and file I/O may extend
+        elapsed wall time. Limits affect only this optional diagnostic.
+      operationId: postListHints
+      responses:
+        "200":
+          description: Bounded read-only report, possibly partial
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListHintsResponse"
+        "503":
+          description: Another optional list analysis is in progress
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/lists/preview:
     post:
       summary: Preview a remote or inline list in an explicitly selected format
@@ -1380,14 +1412,18 @@ paths:
         Starts the self-update helper in the background and returns as soon as
         the helper has actually started, not when the update finishes - poll
         `/api/system/update/status` for progress. A full rollback backup is
-        captured before the helper runs.
+        captured locally before the helper runs; no backup credentials are
+        returned to the caller. The existing authenticated session is enough:
+        this operation does not require step-up reauthentication. The installed
+        helper verifies the signed release before replacing software; the
+        caller cannot provide an installer or package URL. Explicit backup
+        export and package rollback still require step-up reauthentication.
 
 
         Refused rather than attempted when the helper is not installed, when an
         update or rollback is already running, or when package recovery is
         pending or in an unknown state, because a second concurrent update is
-        how a router ends up with a half-replaced package. Requires step-up
-        reauthentication.
+        how a router ends up with a half-replaced package.
       operationId: postSystemUpdate
       responses:
         "200":
@@ -8028,7 +8064,7 @@ components:
       properties:
         list:
           type: string
-          description: Path of the list file, as nfqws2.conf names it.
+          description: Path of the list file, or the inline flag such as --hostlist-domains.
         role:
           type: string
           enum: [hostlist, hostlist_auto, hostlist_exclude, ipset, ipset_exclude]
@@ -8039,9 +8075,8 @@ components:
         includes:
           type: boolean
           description: >
-            false for the two exclude roles. An exclude match is not coverage -
-            it is the reason coverage does not apply - so it is reported as
-            itself rather than folded into the same answer.
+            false for the two exclude roles. An exclusion belongs only to its
+            profile; it must never override a match in another profile.
         entry:
           type: string
           description: >
@@ -8059,12 +8094,52 @@ components:
             true when the entry is the domain or address itself rather than a
             parent domain or a wider prefix.
 
+    RoutingTestNfqwsProfile:
+      type: object
+      required: [index, name, filters, has_actions, hostname_required, auto_hostlist, list_result, matches]
+      description: >
+        One saved startup profile, in --new order. Only list predicates are
+        evaluated, separately for each resolved IP. This is not a claim that
+        the profile wins for a live packet: protocol, port, visible hostname,
+        earlier profiles, queue admission and running state also matter.
+      properties:
+        index:
+          type: integer
+          minimum: 1
+        name:
+          type: string
+        filters:
+          type: array
+          items:
+            type: string
+          description: Saved --filter-* selectors, shown as conditions rather than observed traffic.
+        has_actions:
+          type: boolean
+          description: Whether the profile contains a strategy action; false for a pass-through profile.
+        hostname_required:
+          type: boolean
+          description: Nonempty domain filters or an auto hostlist require a hostname visible to nfqws.
+        auto_hostlist:
+          type: boolean
+        list_result:
+          type: string
+          pattern: "^(matched|excluded|unmatched|unrestricted|mixed|unknown|hostname_required|ip_required|auto_pending)$"
+          description: >
+            Result of the list predicates only. Host and IP includes intersect;
+            exclusions are local to this profile. mixed means different IPs
+            have different results. Empty static includes are unrestricted,
+            while an empty auto hostlist still waits for learning.
+        matches:
+          type: array
+          items:
+            $ref: "#/components/schemas/RoutingTestNfqwsMatch"
+
     RoutingTestNfqws:
       type: object
       required: [available, matches]
       description: >
-        Which nfqws lists cover this target. Read from the files on disk, so it
-        says what nfqws is configured to act on - not whether nfqws is running
+        Which nfqws list predicates match this target in each saved startup
+        profile. Read from the files on disk, not whether nfqws is running
         or whether its strategy works, which are separate questions with
         separate answers. At most one request scans the bounded cached lists;
         concurrent requests keep the routing result but report this sub-result
@@ -8083,8 +8158,14 @@ components:
             or parsed safely.
         matches:
           type: array
+          description: Legacy flat evidence only; do not derive global exclusion precedence from it.
           items:
             $ref: "#/components/schemas/RoutingTestNfqwsMatch"
+        profiles:
+          type: array
+          description: Profile-scoped evidence; absent on older service versions.
+          items:
+            $ref: "#/components/schemas/RoutingTestNfqwsProfile"
 
     RegistryCheckRequest:
       type: object
@@ -10443,6 +10524,90 @@ components:
         revision:
           type: string
           description: The same visible configuration revision returned by GET /api/config.
+
+    ListHint:
+      title: ListHint
+      type: object
+      required: [code, list]
+      properties:
+        code:
+          type: string
+          description: "Known codes: unused, wide_cidr, domain_overlap. Informational only."
+        list:
+          type: string
+          description: Stable list ID; for overlap this belongs to the earlier rule.
+        other_list:
+          type: string
+        entry:
+          type: string
+          maxLength: 253
+        other_entry:
+          type: string
+          maxLength: 253
+        rule_index:
+          type: integer
+          minimum: 0
+          description: Zero-based position in the analyzed configuration, not a mutable action target.
+        other_rule_index:
+          type: integer
+          minimum: 0
+        outbound:
+          type: string
+        other_outbound:
+          type: string
+
+    ListHintSourceIssue:
+      title: ListHintSourceIssue
+      type: object
+      required: [list, reason]
+      properties:
+        list:
+          type: string
+        reason:
+          type: string
+          description: "Known reasons: unavailable, source_changed, size_limit, invalid_source. No paths, source URLs or exception text."
+
+    ListHintsResponse:
+      title: ListHintsResponse
+      type: object
+      required: [revision, is_draft, items, source_issues, source_issues_limited, hints_limited, scan_limited, scanned_lists, total_lists, scanned_entries, conditional_rules, elapsed_ms]
+      properties:
+        revision:
+          type: string
+        is_draft:
+          type: boolean
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/ListHint"
+        source_issues:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/ListHintSourceIssue"
+        source_issues_limited:
+          type: boolean
+        hints_limited:
+          type: boolean
+        scan_limited:
+          type: boolean
+        scanned_lists:
+          type: integer
+          minimum: 0
+        total_lists:
+          type: integer
+          minimum: 0
+        scanned_entries:
+          type: integer
+          minimum: 0
+        conditional_rules:
+          type: integer
+          minimum: 0
+          description: Enabled rules with additional conditions; different condition groups are not compared.
+        elapsed_ms:
+          type: integer
+          minimum: 0
 
     ListRefreshRequest:
       type: object

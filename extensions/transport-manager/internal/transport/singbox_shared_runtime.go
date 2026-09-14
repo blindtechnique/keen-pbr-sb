@@ -185,7 +185,31 @@ func NewSharedSingBoxGroup(
 	runtimeDir string,
 	health RoutingHealthEndpoint,
 ) (*SharedSingBoxGroup, error) {
-	return newSharedSingBoxGroup(specs, binary, runtimeDir, health, defaultSharedRuntimeHooks())
+	return NewSharedSingBoxGroupWithDesired(specs, binary, runtimeDir, health, nil)
+}
+
+// The package-upgrade handoff changes initial intent, never the stored
+// auto_start preference used by later inventory updates and ordinary boots.
+func NewSharedSingBoxGroupWithDesired(
+	specs []TransportSpec,
+	binary string,
+	runtimeDir string,
+	health RoutingHealthEndpoint,
+	desired map[string]bool,
+) (*SharedSingBoxGroup, error) {
+	group, err := newSharedSingBoxGroup(specs, binary, runtimeDir, health, defaultSharedRuntimeHooks())
+	if err == nil {
+		group.restoreInitialDesired(desired)
+	}
+	return group, err
+}
+
+func (g *SharedSingBoxGroup) restoreInitialDesired(desired map[string]bool) {
+	for tag, value := range desired {
+		if _, exists := g.specs[tag]; exists {
+			g.desired[tag] = value
+		}
+	}
 }
 
 func newSharedSingBoxGroup(

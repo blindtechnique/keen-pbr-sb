@@ -1,11 +1,9 @@
 import type { Outbound } from "@/api/generated/model"
-import {
-  useGetNdmsInterfaceInventory,
-  useGetTransports,
-} from "@/api/queries"
+import { useGetNdmsInterfaceInventory, useGetTransports } from "@/api/queries"
 import { useInterfaceNames } from "@/hooks/use-interface-names"
 import {
   buildInterfaceProtocolIndex,
+  joinInterfaceProtocolLabels,
   protocolForFirmwareType,
   protocolForKernelName,
 } from "@/lib/interface-protocol"
@@ -30,10 +28,7 @@ export function useInterfaceProtocols() {
     ndmsInventoryQuery.data?.status === 200
       ? ndmsInventoryQuery.data.data.interfaces
       : []
-  const byInterface = buildInterfaceProtocolIndex(
-    transports,
-    nativeInterfaces
-  )
+  const byInterface = buildInterfaceProtocolIndex(transports, nativeInterfaces)
 
   const protocolOf = (interfaceName?: string): string => {
     if (!interfaceName) return ""
@@ -47,14 +42,17 @@ export function useInterfaceProtocols() {
   return {
     protocolOf,
     /** Для группы резервирования — метки её участников через плюс. */
-    protocolOfGroup: (outbound: Outbound, interfaceOf: (tag: string) => string) => {
+    protocolOfGroup: (
+      outbound: Outbound,
+      interfaceOf: (tag: string) => string
+    ) => {
       const members = (outbound.outbound_groups ?? []).flatMap(
         (group) => group.outbounds ?? []
       )
       const labels = members
         .map((tag) => protocolOf(interfaceOf(tag)))
         .filter(Boolean)
-      return labels.join("+")
+      return joinInterfaceProtocolLabels(labels)
     },
   }
 }

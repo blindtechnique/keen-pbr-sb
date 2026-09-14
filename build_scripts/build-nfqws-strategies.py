@@ -75,6 +75,7 @@ STOCK_BLOBS = {"quic_initial", "tls_clienthello"}
 YT_DOMAINS = ("youtube.com,youtu.be,ytimg.com,ggpht.com,"
               "youtubei.googleapis.com,jnn-pa.googleapis.com,yt-video-upload.l.google.com")
 GV_DOMAINS = "googlevideo.com,gvt1.com,gvt2.com"
+DISCORD_DOMAINS = "discord.com,discord.gg,discordapp.com,discordapp.net,discord.media"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Тиры TCP (общий пул). Каждый тир — список действий без :strategy=N,
@@ -82,8 +83,13 @@ GV_DOMAINS = "googlevideo.com,gvt1.com,gvt2.com"
 # ─────────────────────────────────────────────────────────────────────────────
 
 TCP_TIERS = [
-    # 1-5 — наши тиры, проверенные в ver9/ver10, оставлены без изменений
-    ["fake:blob=tls_clienthello:optional:tls_mod=rnd,dupsid,sni=fonts.google.com:tcp_seq=10000",
+    # 1-5 — исходные тиры ver9/ver10 с исправленной изоляцией fake.
+    # +10000 alone is valid out-of-order TCP data and can corrupt the stream.
+    # Negative offsets prevented that in a Linux model, but repeatedly broke
+    # GitHub TLS on the real Keenetic WAN. Keep the working positive offset
+    # with an independent invalid checksum: the peer must discard fake data.
+    # This is a preset candidate, not a promise of bypass on every network.
+    ["fake:blob=tls_clienthello:optional:tls_mod=rnd,dupsid,sni=fonts.google.com:tcp_seq=10000:badsum",
      "multisplit:pos=1,midsld:seqovl=1:seqovl_pattern=tls_clienthello:tcp_ts_up"],
 
     ["fake:blob=tls_clienthello:optional:tcp_ack=-66000:tls_mod=rnd,dupsid,sni=www.google.com:tcp_ts_up:repeats=2",
@@ -94,25 +100,28 @@ TCP_TIERS = [
 
     ["multidisorder:pos=1,midsld:seqovl=3:seqovl_pattern=tls_clienthello:tcp_ts_up"],
 
-    ["fake:blob=tls_clienthello:optional:tls_mod=rnd,dupsid,sni=www.microsoft.com:tcp_seq=10000:ip_autottl=1,3-12",
+    ["fake:blob=tls_clienthello:optional:tls_mod=rnd,dupsid,sni=www.microsoft.com:tcp_seq=10000:badsum:ip_autottl=1,3-12",
      "multisplit:pos=1,midsld:seqovl=1:seqovl_pattern=tls_clienthello:tcp_ts_up"],
 
     # 6-8 — наши тиры из ver10, тир 8 с ИСПРАВЛЕННЫМ max.ru
     ["multisplit:pos=2:seqovl=681:seqovl_pattern=tls_google:optional"],
 
-    ["fake:blob=stun_fake:optional:tcp_seq=10000:repeats=6",
+    ["fake:blob=stun_fake:optional:tcp_seq=10000:badsum:repeats=6",
      "multisplit:pos=2,midsld:seqovl=1:seqovl_pattern=tls_clienthello:tcp_ts_up"],
 
     ["fake:blob=tls_max:optional:tcp_ack=-66000:tcp_ts_up:repeats=2",
      "fake:blob=tls_4pda:optional:tcp_ack=-66000:tcp_ts_up",
      "multisplit:pos=2,midsld:tcp_ts_up"],
 
-    # 9-12 — заимствованы у z2k, все техники нативные для zapret2.
+    # 9-12 — идеи из z2k, адаптированные к API zapret2.
+    # Stock zapret2 ignores nfqws1's badseq / badseq_increment arguments.
+    # Explicit negative seq/ack offsets keep these fake bytes behind the
+    # real stream; badsum remains an independent part of these candidates.
     # seqovl подобран под точный размер блоба: onetrust=664 Б, activated=655 Б.
-    ["fake:blob=tls_onetrust:optional:repeats=8:badseq:badsum:badseq_increment=0",
+    ["fake:blob=tls_onetrust:optional:repeats=8:tcp_seq=-10000:tcp_ack=-66000:badsum",
      "multisplit:pos=1:seqovl=664:seqovl_pattern=tls_onetrust:optional"],
 
-    ["fake:blob=tls_activated:optional:repeats=8:badseq:badsum:badseq_increment=0",
+    ["fake:blob=tls_activated:optional:repeats=8:tcp_seq=-10000:tcp_ack=-66000:badsum",
      "multisplit:pos=1:seqovl=654:seqovl_pattern=tls_activated:optional"],
 
     ["fake:blob=tls_vk:optional:tcp_ts=-1000:badsum",
@@ -129,9 +138,9 @@ YT_TCP_TIERS = [
     ["multisplit:pos=1,sniext+1:seqovl=1"],
     ["fake:blob=tls_google:optional:repeats=6:tcp_ts=-1000:badsum:ip_id=zero",
      "multisplit:pos=1:seqovl=681:seqovl_pattern=tls_google:optional"],
-    ["fake:blob=tls_google:optional:tls_mod=rnd,dupsid,sni=ggpht.com:badsum:badseq",
+    ["fake:blob=tls_google:optional:tls_mod=rnd,dupsid,sni=ggpht.com:tcp_seq=-10000:tcp_ack=-66000:badsum",
      "multisplit:pos=2,sld:seqovl=620:seqovl_pattern=tls_google:optional"],
-    ["fake:blob=tls_onetrust:optional:repeats=8:badseq:badsum",
+    ["fake:blob=tls_onetrust:optional:repeats=8:tcp_seq=-10000:tcp_ack=-66000:badsum",
      "multisplit:pos=1:seqovl=664:seqovl_pattern=tls_onetrust:optional"],
     ["fake:blob=tls_clienthello:optional:tls_mod=rnd,dupsid,sni=www.google.com:badsum",
      "multidisorder:pos=1,midsld"],
@@ -192,6 +201,24 @@ DISCORD_TIERS = [
     ["fake:blob=zero256:optional:repeats=2"],
 ]
 
+# An experimental comparison inside Max, not a separate selectable strategy.
+# Keep the same six repeats for both UDP candidates to isolate the blob.
+# ACTIVE_DISCORD_UDP.bin from the nfqws1 example is our existing quic_steam.
+DISCORD_EXPERIMENT_UDP_TIERS = [
+    ["fake:blob=quic_initial:repeats=6"],
+    ["fake:blob=quic_steam:optional:repeats=6"],
+]
+DISCORD_EXPERIMENT_TCP_TIERS = [
+    TCP_TIERS[0],
+    # Adapt the idea, not nfqws1's --dpi-desync / badseq_increment options.
+    # nfqws2's stock fooling uses explicit old-data sequence/ack offsets so
+    # fake bytes are not queued ahead of the real stream. These candidates are not
+    # evidence that TLS, voice negotiation or actual Discord media works.
+    ["fake:blob=stun_fake:optional:tcp_seq=-10000:tcp_ack=-66000:repeats=6",
+     "fake:blob=tls_google:optional:tcp_seq=-10000:tcp_ack=-66000:repeats=6",
+     "multisplit:pos=1,midsld"],
+]
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Профили
 # ─────────────────────────────────────────────────────────────────────────────
@@ -200,7 +227,8 @@ PROFILES = {
     "01 safe": dict(
         title="БЕЗОПАСНЫЙ",
         note=("Ровно то же поведение, что у прежних пресетов, но без их дефектов. "
-              "Один общий пул на протокол, без отдельных пулов под YouTube и Discord, "
+              "Общие пулы TCP/QUIC/UDP и отдельная IP-ветвь MTProto, "
+              "без отдельных пулов под YouTube и Discord, "
               "без рискованных техник (syndata, ipfrag, подмена оригинала). "
               "Точка отката: если после перехода что-то сломалось — вернитесь сюда."),
         tcp=5, quic=3, udp=3, custom=False, http_fake=False,
@@ -214,11 +242,15 @@ PROFILES = {
     ),
     "03 max": dict(
         title="МАКСИМАЛЬНЫЙ",
-        note=("Всё из обычного плюс четыре дополнительных тира TCP (включая syndata — "
-              "данные в SYN), фрагментация IP и подмена оригинала в QUIC. "
-              "Экспериментальный: часть провайдеров и часть серверов на syndata реагируют "
-              "разрывом. Ставьте, только если обычный не справляется."),
-        tcp=12, quic=6, udp=4, custom=True, http_fake=True,
+        note=("Всё из обычного плюс четыре дополнительных тира TCP, "
+              "фрагментация IP и подмена оригинала в QUIC. Последний TCP-вариант "
+              "пробует syndata только на первом SYN к HTTPS/443; повторные неудачи "
+              "учитываются для перехода к следующему варианту в новом соединении. "
+              "Для Discord — отдельные TCP-пулы и два UDP-кандидата для начала соединения. "
+              "Экспериментальный: syndata может не поддерживаться по пути, а кэш "
+              "имён для SYN не различает домены на общем IP. "
+              "Ставьте, только если обычный не справляется."),
+        tcp=12, quic=6, udp=4, custom=True, http_fake=True, discord_experiment=True,
     ),
 }
 
@@ -245,6 +277,9 @@ def circular(
     retrans=2,
     udp=False,
     maxseq=None,
+    hostkey=None,
+    failure_detector=None,
+    tcp_window=False,
 ):
     """circular с обязательным key= (стабильное пространство состояний)."""
     parts = [f"fails={fails}", "time=300"]
@@ -258,7 +293,15 @@ def circular(
             parts.append(f"maxseq={maxseq}")
     if reset:
         parts.append("reset=1")
-    parts += ["nld=2", f"key={key}"]
+    parts += [f"hostkey={hostkey}"] if hostkey else ["nld=2"]
+    if failure_detector:
+        parts.append(f"failure_detector={failure_detector}")
+    if not udp:
+        parts.append("success_detector=keen_pbr_tcp_success_detector")
+    if tcp_window:
+        parts.append("kpbr_tcp_window=96")
+        parts.append("kpbr_tcp_reply=postnat_v1")
+    parts.append(f"key={key}")
     return "--lua-desync=circular:" + ":".join(parts)
 
 
@@ -268,6 +311,65 @@ def revisioned_circular(key, matcher, actions, **options):
     material = "\0".join([*matcher, detector, *actions]).encode("utf-8")
     revision = hashlib.sha256(material).hexdigest()[:16]
     return f"{detector}:kpbr_rev={revision}"
+
+
+def tcp_pool(count, payload, *, syn=False):
+    """SYN is a separate packet phase of slot 12, never a ClientHello action.
+
+    A declined SYN-with-data attempt must not repeat forever: try it only on
+    the first packet. Its connection-local detector counts SYN retries so the
+    ordinary fails=2 circle can leave this slot on a subsequent connection.
+    MTProto is selected after classification and cannot use the SYN phase.
+    """
+    result = []
+    for slot, tier in enumerate(TCP_TIERS[:count], 1):
+        for action in tier:
+            if action.startswith("syndata:"):
+                if syn:
+                    result += ["--payload=empty", "--out-range=-n1",
+                               "--lua-desync=keen_pbr_" + action + f":strategy={slot}",
+                               "--out-range=-s66996", f"--payload={payload}"]
+            else:
+                result.append(f"--lua-desync={action}:strategy={slot}")
+    return result
+
+
+def discord_experiment_blocks():
+    """Narrow, independently learned pools inside the existing Max profile.
+
+    Observe replies/retries, but act only on outbound handshake payloads.
+    Do not widen NFQUEUE ports, process arbitrary UDP/media or send TCP RSTs.
+    Common STUN ports and the WebRTC passthrough keep their previous behavior.
+    """
+    blocks = []
+    for key, ports, domains in (
+        ("discord_tcp_exp", "443", DISCORD_DOMAINS),
+        ("discord_media_tcp_exp", "2053,2083,2087,2096,8443", "discord.media"),
+    ):
+        matcher = [f"--filter-tcp={ports}", "--filter-l7=tls",
+                   f"--hostlist-domains={domains}",
+                   f"--hostlist-exclude={LISTS}/exclude.list",
+                   "--payload=all", "--out-range=-s66996",
+                   f"--in-range=-s{ROTATOR_TCP_REPLY_RANGE_SEQ}"]
+        actions = ["--in-range=x", "--payload=tls_client_hello"] + pool(
+            DISCORD_EXPERIMENT_TCP_TIERS, 2)
+        blocks.append([f"--new={key}"] + matcher + [revisioned_circular(
+            key, matcher, actions, hostkey="host_ip",
+            inseq=ROTATOR_TCP_SUCCESS_INSEQ, maxseq=65536,
+        )] + actions)
+
+    # Deliberately no STUN-wide 3478/5349 capture. The protocol check is also
+    # required: sharing these ports is not proof that a packet is Discord.
+    matcher = ["--filter-udp=50000-50099,19294-19344",
+               "--filter-l7=discord,stun", "--payload=all",
+               "--out-range=-n4", "--in-range=-n2"]
+    actions = ["--in-range=x", "--out-range=<n2",
+               "--payload=discord_ip_discovery,stun"] + pool(
+                   DISCORD_EXPERIMENT_UDP_TIERS, 2)
+    blocks.append(["--new=discord_udp_exp"] + matcher + [revisioned_circular(
+        "discord_udp_exp", matcher, actions, hostkey="host_ip", udp=True,
+    )] + actions)
+    return blocks
 
 
 def legacy_rotation_pools():
@@ -336,15 +438,27 @@ def wrap(name, tokens, indent=None):
 def build(profile_name, spec):
     tcp_n, quic_n, udp_n = spec["tcp"], spec["quic"], spec["udp"]
 
-    base_pool = pool(TCP_TIERS, tcp_n)
+    with_syn = profile_name == "03 max"
+    base_pool = tcp_pool(tcp_n, "tls_client_hello,mtproto_initial", syn=with_syn)
     quic_pool = pool(QUIC_TIERS, quic_n)
     udp_pool = pool(UDP_TIERS, udp_n)
 
     # ── NFQWS_ARGS: общий TCP-пул (РКН и всё остальное) ──────────────────────
-    args = [f"--filter-tcp={FILTER_TCP}", "--filter-l7=http,tls,mtproto",
-            "--payload=tls_client_hello,mtproto_initial",
-            circular("tcp_general", inseq=26000, maxseq=65536)] + base_pool
-    args += ["--payload=http_req"]
+    # Observe server replies, empty RSTs and retransmitted application data.
+    # The actions remain handshake-only. Keep HTTP out of this orchestrator:
+    # circular consumes the rest of the execution plan, including untagged
+    # HTTP actions, so --payload=all here would silently disable plain HTTP.
+    # Do not lower inseq to 8 KiB: a TCP 16-20 freeze can happen after that.
+    args = [f"--filter-tcp={FILTER_TCP}",
+            "--filter-l7=" + ("unknown," if with_syn else "") + "http,tls,mtproto",
+            "--payload=tls_client_hello,tls_server_hello,mtproto_initial,unknown,empty",
+            "--in-range=-s27460", "--out-range=-s66996",
+            circular("tcp_general", inseq=26000, maxseq=65536,
+                     tcp_window=profile_name in ("02 balanced", "03 max"),
+                     hostkey="keen_pbr_tcp_endpoint" if with_syn else None,
+                     failure_detector="keen_pbr_syn_failure_detector" if with_syn else None),
+            "--in-range=x", "--payload=tls_client_hello,mtproto_initial"] + base_pool
+    args += ["--out-range=a", "--payload=http_req"]
     if spec["http_fake"]:
         args += ["--lua-desync=fake:blob=http_iana:optional:badsum"]
     args += ["--lua-desync=http_methodeol:badsum"]
@@ -406,7 +520,8 @@ def build(profile_name, spec):
         ] + pool(YT_QUIC_TIERS, yq_n)
 
         # ВАЖНО про --new. Init-скрипт собирает строку как
-        #   ... $NFQWS_BASE_ARGS $NFQWS_ARGS_CUSTOM --new $NFQWS_ARGS ... --new $NFQWS_ARGS_QUIC ...
+        #   BASE CUSTOM --new UDP --new QUIC+IPSET --new QUIC+EXTRA
+        #   --new TCP+IPSET --new TCP+EXTRA
         # то есть перед CUSTOM разделителя НЕТ (первый блок делит профиль с BASE_ARGS,
         # а там только --lua-init и --blob, они глобальные), и --new ставится ПОСЛЕ секции.
         # Поэтому первый блок идёт без имени, а каждый следующий начинается с --new=<имя>.
@@ -418,6 +533,14 @@ def build(profile_name, spec):
                 "gv_tcp",
                 gv_matcher,
                 gv_actions,
+                # A healthy googlevideo CDN must not erase another endpoint's
+                # failure. Use the stock remote-IP key (also direction-stable
+                # for IPv6), not a shared googlevideo.com domain record. Release
+                # only the failed TCP attempt after the stock retransmission
+                # threshold; keep two failed sessions before rotating a slot.
+                hostkey="host_ip",
+                reset=True,
+                fails=2,
                 inseq=ROTATOR_TCP_SUCCESS_INSEQ,
                 retrans=2,
                 maxseq=65536,
@@ -450,7 +573,24 @@ def build(profile_name, spec):
             ["--new=webrtc_passthrough", "--filter-udp=49152-65535", "--filter-l7=stun"],
         ]
         for block in blocks:
+            if spec.get("discord_experiment") and block[0] == "--new=discord_udp":
+                for experimental in discord_experiment_blocks():
+                    custom += experimental
             custom += block
+
+    # IP-selected MTProto has no hostname. Keep its existing TCP actions on a
+    # separate IP-only branch before adding host exclusions to TCP/QUIC IPSET.
+    # Otherwise a nonempty exclude.list would also disable unrelated MTProto.
+    mtproto = [f"--filter-tcp={FILTER_TCP}", "--filter-l7=mtproto",
+               f"--ipset={LISTS}/ipset.list",
+               f"--ipset-exclude={LISTS}/ipset_exclude.list",
+               "--ipset-ip=0.0.0.0", "--payload=all",
+               "--in-range=-s27460", "--out-range=-s66996",
+               circular("tcp_mtproto", inseq=26000, maxseq=65536),
+               "--in-range=x", "--payload=mtproto_initial"] + tcp_pool(tcp_n, "mtproto_initial")
+    if custom:
+        custom += ["--new=mtproto_ip"]
+    custom += mtproto
 
     # ── блобы, которые нужны именно этому профилю ────────────────────────────
     text = " ".join(args + quic + udp + custom)
@@ -468,10 +608,16 @@ def build(profile_name, spec):
                f"--blob=tls_clienthello:@{BLOBS}/tls_clienthello.bin"]
     for alias in sorted(a for a in used if a in BLOB_FILES):
         declare.append(f"--blob={alias}:@{BLOBS}/{BLOB_FILES[alias]}")
+    if with_syn:
+        # Stock cache supplies host-list selection before TLS reveals SNI.
+        # It is not authoritative on shared CDN IPs; Max documents this limit.
+        declare.append("--ipcache-hostname")
 
-    tiers_note = (f"TCP {tcp_n} · QUIC {quic_n} · UDP {udp_n}"
+    tiers_note = (f"TCP {tcp_n} · QUIC {quic_n} · UDP {udp_n} · IP-ветвь MTProto"
                   + (" · отдельные пулы: googlevideo, youtube, youtube-QUIC, discord, "
-                     "сквозной WebRTC" if spec["custom"] else " · без отдельных пулов"))
+                     "сквозной WebRTC" if spec["custom"] else " · без доменных пулов"))
+    if spec.get("discord_experiment"):
+        tiers_note += " · эксперимент: Discord TCP 2, discord.media TCP 2, Discord UDP 2"
 
     head = "\n".join([
         f"# keen-pbr-sb · профиль «{spec['title']}»",
@@ -479,7 +625,7 @@ def build(profile_name, spec):
         *[f"# {line}" for line in _wrap_text(spec["note"], 88)],
         "#",
         f"# Глубина пулов: {tiers_note}",
-        "# Пулы разделены по группам доменов: у каждого свой circular со своим key=.",
+        "# Пулы разделены по группам трафика: у каждого свой circular со своим key=.",
         "# У TCP-пулов есть inseq= под ожидаемый объём входящего трафика; UDP его не использует.",
         "#",
         "# Сгенерировано build-nfqws-strategies.py — правьте генератор, а не этот файл.",
@@ -510,8 +656,8 @@ def build(profile_name, spec):
     if custom:
         body += [
             "# Отдельные пулы. Собираются ПЕРЕД основными, поэтому матчатся первыми.",
-            "# Списки режимов (user.list/auto.list) сюда не подставляются — у каждого",
-            "# пула свой --hostlist-domains, но общий exclude.list уважается.",
+            "# Доменные пулы учитывают exclude.list; MTProto без имени домена",
+            "# использует только IP-списки. К UDP без имени домена hostlist не применяется.",
             wrap("NFQWS_ARGS_CUSTOM", custom, indent=19),
             "",
         ]
@@ -520,18 +666,18 @@ def build(profile_name, spec):
 
     body += [
         "# Режимы работы, не менять",
-        f'MODE_LIST="--hostlist={LISTS}/user.list"',
+        f'MODE_LIST="--hostlist={LISTS}/user.list --hostlist-exclude={LISTS}/exclude.list"',
         f'MODE_ALL="--hostlist-exclude={LISTS}/exclude.list"',
         f'MODE_AUTO="$MODE_LIST --hostlist-auto={LISTS}/auto.list '
-        f'--hostlist-auto-debug=/opt/var/log/nfqws2.log $MODE_ALL"',
+        f'--hostlist-auto-debug=/opt/var/log/nfqws2.log"',
         "",
         "# $MODE_AUTO — сам находит заблокированные домены и дописывает в auto.list",
         "# $MODE_LIST — только домены из user.list",
         "# $MODE_ALL  — весь трафик, кроме exclude.list",
         'NFQWS_EXTRA_ARGS="$MODE_AUTO"',
         "",
-        "# IP-списки",
-        f'NFQWS_ARGS_IPSET="--ipset={LISTS}/ipset.list --ipset-exclude={LISTS}/ipset_exclude.list"',
+        "# IP-списки HTTP/TLS/QUIC также учитывают исключения по видимому имени домена.",
+        f'NFQWS_ARGS_IPSET="--ipset={LISTS}/ipset.list --ipset-exclude={LISTS}/ipset_exclude.list --hostlist-exclude={LISTS}/exclude.list"',
         "",
         "# IPv6 — одинаково во всех профилях, переключение пресета его не трогает",
         # Keenetic-first alpha follows the installed legacy majority and the

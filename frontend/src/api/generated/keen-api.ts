@@ -60,6 +60,7 @@ import type {
   ListContentImportResponse,
   ListDeleteStageRequest,
   ListDeleteStageResponse,
+  ListHintsResponse,
   ListPage,
   ListQueryRequest,
   ListRefreshRequest,
@@ -684,6 +685,97 @@ export const useQueryLists = <TError = ErrorResponse,
         TContext
       > => {
       return useMutation(getQueryListsMutationOptions(options), queryClient);
+    }
+
+/**
+ * Reads one visible configuration and existing local/cached list sources. Never downloads, resolves DNS, creates a draft, changes routing, or publishes notifications. URL bodies must match the configured source; missing or unreadable sources are reported as partial coverage. Domain examples compare enabled routing rules with identical additional conditions and different outbounds. Original rule order is retained; examples are not proof of runtime traffic or erroneous configuration. References from disabled rules, DNS, reconnect policy and tunnel probe count as usage. Wide CIDRs mean IPv4 prefix <=16 or IPv6 prefix <=32. The report is bounded to 100 hints, 100 source issues, 100000 entries and index owners, 8 MiB aggregate input, 2 MiB per file, and a cooperative two-second analysis budget. Cache verification and file I/O may extend elapsed wall time. Limits affect only this optional diagnostic.
+
+ * @summary Inspect optional list hints without changing configuration
+ */
+export type postListHintsResponse200 = {
+  data: ListHintsResponse
+  status: 200
+}
+
+export type postListHintsResponse503 = {
+  data: ErrorResponse
+  status: 503
+}
+
+export type postListHintsResponseSuccess = (postListHintsResponse200) & {
+  headers: Headers;
+};
+export type postListHintsResponseError = (postListHintsResponse503) & {
+  headers: Headers;
+};
+
+export type postListHintsResponse = (postListHintsResponseSuccess | postListHintsResponseError)
+
+export const getPostListHintsUrl = () => {
+
+
+
+
+  return `/api/lists/hints`
+}
+
+export const postListHints = async ( options?: RequestInit): Promise<postListHintsResponse> => {
+
+  return apiFetch<postListHintsResponse>(getPostListHintsUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+export const getPostListHintsMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postListHints>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postListHints>>, TError,void, TContext> => {
+
+const mutationKey = ['postListHints'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postListHints>>, void> = () => {
+
+
+          return  postListHints(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostListHintsMutationResult = NonNullable<Awaited<ReturnType<typeof postListHints>>>
+
+    export type PostListHintsMutationError = ErrorResponse
+
+    /**
+ * @summary Inspect optional list hints without changing configuration
+ */
+export const usePostListHints = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postListHints>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postListHints>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getPostListHintsMutationOptions(options), queryClient);
     }
 
 /**
@@ -3525,9 +3617,9 @@ export function useGetSystemUpdate<TData = Awaited<ReturnType<typeof getSystemUp
 
 
 /**
- * Starts the self-update helper in the background and returns as soon as the helper has actually started, not when the update finishes - poll `/api/system/update/status` for progress. A full rollback backup is captured before the helper runs.
+ * Starts the self-update helper in the background and returns as soon as the helper has actually started, not when the update finishes - poll `/api/system/update/status` for progress. A full rollback backup is captured locally before the helper runs; no backup credentials are returned to the caller. The existing authenticated session is enough: this operation does not require step-up reauthentication. The installed helper verifies the signed release before replacing software; the caller cannot provide an installer or package URL. Explicit backup export and package rollback still require step-up reauthentication.
 
-Refused rather than attempted when the helper is not installed, when an update or rollback is already running, or when package recovery is pending or in an unknown state, because a second concurrent update is how a router ends up with a half-replaced package. Requires step-up reauthentication.
+Refused rather than attempted when the helper is not installed, when an update or rollback is already running, or when package recovery is pending or in an unknown state, because a second concurrent update is how a router ends up with a half-replaced package.
 
  * @summary Start the keen-pbr-sb self-update
  */

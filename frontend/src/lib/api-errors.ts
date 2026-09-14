@@ -98,6 +98,7 @@ export type OperationErrorKind =
   | "draft_pending"
   | "draft_changed"
   | "recovery_required"
+  | "list_refresh_apply_failed"
   | "apply_unchanged"
   | "rolled_back"
   | "validation"
@@ -173,6 +174,7 @@ function operationErrorKind(
       case "draft_pending":
       case "draft_changed":
       case "recovery_required":
+      case "list_refresh_apply_failed":
       case "validation":
       case "unauthenticated":
       case "reauthentication_required":
@@ -270,7 +272,12 @@ export function getOperationErrorPresentation(
   if (typeof error === "string" && !error.trim()) return null
 
   const outer = operationErrorRecord(error)
-  const payload = operationErrorRecord(outer?.details) ?? outer
+  const payload =
+    operationErrorRecord(outer?.details) ??
+    (typeof outer?.status === "number"
+      ? operationErrorRecord(outer.data)
+      : null) ??
+    outer
   const thrownText =
     typeof error === "string"
       ? error
@@ -306,6 +313,26 @@ export function getOperationErrorPresentation(
   ] as const) {
     const text = operationErrorText(payload?.[field])
     if (text) parts.add(`${field}: ${text}`)
+  }
+  if (payload?.code === "list_refresh_apply_failed") {
+    const params = operationErrorRecord(payload.params)
+    // Only these finite diagnostic fields belong to this error contract.
+    // Do not serialize arbitrary API metadata or a request payload.
+    if (
+      params?.stage === "prepare" ||
+      params?.stage === "owner_handoff" ||
+      params?.stage === "terminal_wait" ||
+      params?.stage === "terminal"
+    ) {
+      parts.add(`stage: ${params.stage}`)
+    }
+    if (
+      params?.runtime_result === "unchanged" ||
+      params?.runtime_result === "rolled_back" ||
+      params?.runtime_result === "unknown"
+    ) {
+      parts.add(`runtime_result: ${params.runtime_result}`)
+    }
   }
   const validationErrors = getValidationErrors(payload)
   if (validationErrors.length > 0) {

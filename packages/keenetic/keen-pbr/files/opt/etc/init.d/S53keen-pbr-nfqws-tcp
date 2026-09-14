@@ -1,0 +1,10 @@
+#!/bin/sh
+# One boot event after S51nfqws2, not a resident service or a watchdog.
+helper=/opt/usr/lib/keen-pbr/nfqws-tcp-window.sh
+[ -x "$helper" ] || exit 0
+case "$1" in
+    start|restart|reload) "$helper" apply >/dev/null 2>&1 || true ;;
+    stop|kill) "$helper" remove >/dev/null 2>&1 || true ;;
+    status|check) "$helper" status ;;
+esac
+exit 0

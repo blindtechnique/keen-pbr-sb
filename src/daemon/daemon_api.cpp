@@ -17,6 +17,7 @@
 #include "../api/handler_connections.hpp"
 #include "../api/handler_config.hpp"
 #include "../api/handler_health_service.hpp"
+#include "../api/handler_lists_refresh.hpp"
 #include "../api/handler_nfqws.hpp"
 #include "../api/handler_subscriptions.hpp"
 #include "../api/subscription_transport_update.hpp"
@@ -47,6 +48,7 @@
 #include "../api/handler_diagnostic_tasks.hpp"
 #include "../api/routing_firewall_evidence_view.hpp"
 #include "../lists/list_streamer.hpp"
+#include "../lists/list_hints.hpp"
 #include "../log/logger.hpp"
 #include "../util/system_info.hpp"
 #include "../util/time_utils.hpp"
@@ -1442,6 +1444,22 @@ ListRefreshOperationResult Daemon::refresh_lists_via_api(const api::ListRefreshR
             }
         };
 
+        const auto apply_failure = [&operation_result](
+            const char* stage,
+            const std::string& detail,
+            const char* runtime_result = "unknown") {
+            try {
+                Logger::instance().error(
+                    "Lists refresh (api) runtime apply failed: stage={} "
+                    "runtime_result={} detail={}",
+                    stage, runtime_result, detail);
+            } catch (...) {
+                // Logging must not replace the structured operation failure.
+            }
+            return make_list_refresh_apply_error(
+                operation_result, stage, detail, runtime_result);
+        };
+
         std::shared_ptr<PreparedRuntimeInputs> candidate_prepared;
         try {
             candidate_prepared = std::make_shared<PreparedRuntimeInputs>(
@@ -1451,13 +1469,7 @@ ListRefreshOperationResult Daemon::refresh_lists_via_api(const api::ListRefreshR
         } catch (const std::exception& error) {
             mutation.release();
             schedule_force_reconcile();
-            Logger::instance().error(
-                "Lists refresh (api) candidate preparation failed after "
-                "the cache commit: {}",
-                error.what());
-            operation_result.message =
-                "Lists refreshed; runtime reload preparation failed and recovery was scheduled";
-            return operation_result;
+            throw apply_failure("prepare", error.what(), "unchanged");
         }
 
         struct ReturnedLeaseSlot final {
@@ -1558,17 +1570,15 @@ ListRefreshOperationResult Daemon::refresh_lists_via_api(const api::ListRefreshR
             }
             schedule_force_reconcile();
             if (!handoff_task_completed) {
-                operation_result.message =
-                    "Lists refreshed; runtime owner handoff failed and recovery was scheduled";
+                if (handoff_error.empty()) {
+                    handoff_error = "runtime owner handoff did not complete";
+                }
             } else if (stale_runtime) {
-                operation_result.message =
-                    "Lists refreshed; runtime changed and recovery was scheduled";
-            } else {
-                operation_result.message = handoff_error.empty()
-                    ? "Lists refreshed; runtime reload was deferred"
-                    : "Lists refreshed; runtime owner rejected the reload and recovery was scheduled";
+                handoff_error = "runtime changed before list reload admission";
+            } else if (handoff_error.empty()) {
+                handoff_error = "runtime owner did not accept the list reload";
             }
-            return operation_result;
+            throw apply_failure("owner_handoff", handoff_error);
         }
 
         RuntimeFirewallLifecycleTerminal terminal;
@@ -1579,12 +1589,7 @@ ListRefreshOperationResult Daemon::refresh_lists_via_api(const api::ListRefreshR
                 returned->lease.reset();
             }
             schedule_force_reconcile();
-            Logger::instance().error(
-                "Lists refresh (api) terminal could not be read: {}",
-                error.what());
-            operation_result.message =
-                "Lists refreshed; runtime result was not available";
-            return operation_result;
+            throw apply_failure("terminal_wait", error.what());
         }
 
         const bool exact_lease_returned =
@@ -1620,6 +1625,31 @@ ListRefreshOperationResult Daemon::refresh_lists_via_api(const api::ListRefreshR
             // the deferred path still waits for admission before its bounded
             // reconcile against the current generation.
             schedule_force_reconcile();
+            const bool runtime_unchanged = exact_lease_returned &&
+                terminal.outcome ==
+                    RuntimeFirewallLifecycleOutcome::not_verified &&
+                terminal.previous_generation_certainly_retained &&
+                !terminal.committed && !terminal.commit_ambiguous;
+            try {
+                Logger::instance().error(
+                    "Lists refresh (api) runtime terminal: outcome={} "
+                    "committed={} ambiguous={} previous_retained={} "
+                    "exact_lease={} rollback_verified={}",
+                    static_cast<unsigned>(terminal.outcome), terminal.committed,
+                    terminal.commit_ambiguous,
+                    terminal.previous_generation_certainly_retained,
+                    exact_lease_returned, rollback_verified);
+            } catch (...) {
+            }
+            throw apply_failure(
+                "terminal",
+                terminal.detail.empty()
+                    ? (rollback_verified
+                           ? "list runtime reload was rolled back"
+                           : "list runtime reload was not verified")
+                    : terminal.detail,
+                rollback_verified ? "rolled_back"
+                    : (runtime_unchanged ? "unchanged" : "unknown"));
         }
 
         if (!target_selection.ok()) {
@@ -1629,24 +1659,8 @@ ListRefreshOperationResult Daemon::refresh_lists_via_api(const api::ListRefreshR
             operation_result.message = "No URL-backed lists to refresh";
         } else if (!operation_result.failed_lists.empty()) {
             operation_result.message = "Lists refreshed with failures";
-        } else if (stale_runtime) {
-            operation_result.message =
-                "Lists refreshed; runtime changed before reload could be applied";
-        } else if (operation_result.changed_lists.empty()) {
-            operation_result.message = "Lists refreshed; no updates found";
-        } else if (operation_result.reloaded) {
-            operation_result.message = "Lists refreshed and runtime reloaded";
-        } else if (rollback_verified) {
-            operation_result.message =
-                "Lists refreshed; runtime reload was rolled back and recovery was scheduled";
-        } else if (exact_lease_returned) {
-            operation_result.message =
-                "Lists refreshed; runtime reload was not verified and recovery was scheduled";
-        } else if (refresh_result.any_relevant_changed()) {
-            operation_result.message =
-                "Lists refreshed; runtime reload did not return its owner lease and recovery was scheduled";
         } else {
-            operation_result.message = "Lists refreshed";
+            operation_result.message = "Lists refreshed and runtime reloaded";
         }
 
         return operation_result;
@@ -2011,6 +2025,9 @@ void Daemon::setup_api() {
         [this](const std::string& target, const std::string& ip) {
             return run_api_routing_test(target, ip);
         };
+    api_ctx_->get_list_hints_fn = [this](const Config& config) {
+        return build_list_hints(config, &list_service_.cache_manager());
+    };
     api_ctx_->get_diagnostic_tasks_fn = [this]() {
         // Read existing timer state only. Do not inspect control-loop task IDs
         // or infer deadlines from metrics: a queued worker may have no timer.

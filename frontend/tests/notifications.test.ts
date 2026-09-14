@@ -6,6 +6,74 @@ const t = (key: string, options?: Record<string, unknown>) =>
   `${key}:${String(options?.version ?? "")}`
 
 describe("notification collector", () => {
+  test("keeps the routing failure but not the subsequent routine recovery notice", () => {
+    const failure =
+      "Runtime state running -> broken: configuration generation terminal is unknown"
+    const notices = collectNotices(
+      [
+        `2026-09-10 05:19:14.270 [W] ${failure}`,
+        "2026-09-10 05:19:56.359 [W] Runtime state broken -> starting: runtime start requested",
+        "2026-09-10 05:19:57.000 [I] Runtime state starting -> running: runtime start complete",
+      ],
+      undefined,
+      undefined,
+      undefined,
+      ["failure", "recovery", "started"],
+      new Set(),
+      t
+    )
+    expect(notices).toHaveLength(1)
+    expect(notices[0]).toMatchObject({
+      id: "failure",
+      level: "warning",
+      details: failure,
+      text: "notifications.messages.runtimeApplyUnverified:",
+      timestamp: "2026-09-10 05:19:14.270",
+    })
+  })
+
+  test("does not hide a failed recovery or an unknown transition reason", () => {
+    const details = [
+      "Runtime state starting -> broken: runtime start failed",
+      "Runtime state broken -> starting: unexpected recovery condition",
+      "Worker failed: Runtime state broken -> starting: runtime start requested",
+      "Runtime state running -> broken: runtime start requested",
+    ]
+    const notices = collectNotices(
+      details.map(
+        (text, index) => `2026-09-10 05:20:0${index}.000 [E] ${text}`
+      ),
+      undefined,
+      undefined,
+      undefined,
+      [],
+      new Set(),
+      t
+    )
+    expect(notices).toHaveLength(details.length)
+    expect(notices.map((notice) => notice.details)).toEqual(
+      [...details].reverse()
+    )
+    expect(notices.every((notice) => notice.level === "error")).toBe(true)
+  })
+
+  test("routine startup and verified shutdown stay in the journal only", () => {
+    const notices = collectNotices(
+      [
+        "2026-09-10 05:19:56.359 [W] Runtime state broken -> starting: cold-boot recovery attempt admitted",
+        "2026-09-10 05:19:57.000 [W] Runtime state broken -> running: runtime start complete",
+        "2026-09-10 05:19:58.000 [W] Runtime state shutting_down -> stopped: daemon shutdown cleanup verified",
+      ],
+      undefined,
+      undefined,
+      undefined,
+      [],
+      new Set(),
+      t
+    )
+    expect(notices).toEqual([])
+  })
+
   test("keeps an exact dismissed record hidden when its tail index changes", () => {
     const incident = "2026-09-05 15:16:00.000 [E] Managed route repair failed"
     const lines = ["2026-09-05 15:15:00.000 [I] Background check", incident]

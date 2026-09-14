@@ -25,4 +25,9 @@ struct InterfaceOutboundDeletePlan {
 InterfaceOutboundDeletePlan plan_native_interface_outbound_delete(
     const Config& config, const std::string& kernel_interface);
 
+// External firmware deletion may retire unused local links, never references
+// still used by a rule, group, DNS detour or fallback (including disabled ones).
+bool interface_outbounds_are_unreferenced(
+    const Config& config, const std::string& kernel_interface);
+
 } // namespace keen_pbr3

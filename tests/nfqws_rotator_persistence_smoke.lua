@@ -1,5 +1,6 @@
 local companion = assert(arg[1], "companion path is required")
 local auto_path = assert(arg[2], "zapret-auto.lua path is required")
+local host_ip_path = assert(arg[3], "host_ip fixture path is required")
 local writable = assert(os.getenv("WRITABLE"), "WRITABLE is required")
 local persistent_prefix = assert(
     os.getenv("KEEN_PBR_NFQWS_ROTATOR_LEARNED_PREFIX"),
@@ -48,6 +49,9 @@ local seed_rows = {
     {"yt_tcp", REVISION, "googleapis.com", 2, 3, confirmed_at},
     {"yt_tcp", REVISION, "mismatch.example", 3, 3, confirmed_at},
     {"yt_tcp", REVISION, "waiting.example", 2, 3, confirmed_at},
+    {"gv_tcp", REVISION, "198.51.100.10", 3, 3, confirmed_at},
+    {"gv_tcp", REVISION, "2001:db8::10", 2, 3, confirmed_at},
+    {"gv_tcp", OTHER_REVISION, "googlevideo.com", 3, 3, confirmed_at},
     {
         "yt_tcp",
         REVISION,
@@ -144,6 +148,10 @@ function seq_ge(left, right)
     return left >= right
 end
 
+function ntop(address)
+    return address
+end
+
 function bitand(left, right)
     local result = 0
     local place = 1
@@ -186,6 +194,7 @@ function plan_instance_execute(desync, verdict, instance)
     return verdict
 end
 
+assert(loadfile(host_ip_path), "host_ip has a syntax error")()
 assert(loadfile(auto_path), "zapret-auto.lua has a syntax error")()
 local stock_host_record = automate_host_record
 local stock_success_detector = standard_success_detector
@@ -213,14 +222,16 @@ local function run_event(hostname, revision, slot_count, kind, options)
     local outgoing = kind ~= "success" and kind ~= "failure"
     local desync = {
         arg = {
-            key = "yt_tcp",
+            key = options.pool or "yt_tcp",
             kpbr_rev = revision,
-            nld = "2",
+            nld = options.hostkey == nil and "2" or nil,
+            hostkey = options.hostkey,
             fails = tostring(options.fails or 2),
             time = "300",
             retrans = "2",
             maxseq = "32768",
             inseq = tostring(options.inseq or 4096),
+            success_detector = options.detector,
         },
         dis = {
             tcp = {th_flags = kind == "failure" and TH_RST or 0},
@@ -229,6 +240,7 @@ local function run_event(hostname, revision, slot_count, kind, options)
             payload = outgoing and "" or "serverhello",
         },
         func_instance = "persistence-smoke",
+        target = {ip = options.ip, ip6 = options.ip6},
         outgoing = outgoing,
         plan = make_plan(slot_count),
         test_sequence = options.sequence
@@ -239,11 +251,10 @@ local function run_event(hostname, revision, slot_count, kind, options)
             lua_state = {},
         },
     }
-    assert(desync.arg.success_detector == nil,
-        "eligible pools must use the stock detector without a reporter arg")
     circular(nil, desync)
-    local host_key = assert(dissect_nld(hostname, 2))
-    local host_record = assert(autostate.yt_tcp[host_key])
+    local generator = options.hostkey and _G[options.hostkey] or standard_hostkey
+    local host_key = assert(generator(desync))
+    local host_record = assert(autostate[desync.arg.key][host_key])
     return desync.test_selected_strategy, host_record
 end
 
@@ -301,8 +312,41 @@ selected = run_event(
     {fails = 1, inseq = 8192, sequence = 8193})
 assert_equal(selected, 2, "new bounded success keeps rotated slot 2")
 
-selected = run_event("fresh.example", REVISION, 3, "success")
+selected = run_event("fresh.example", REVISION, 3, "success",
+    {detector = "keen_pbr_tcp_success_detector"})
 assert_equal(selected, 1, "new host starts on stock slot 1")
+run_event("unconfirmed.example", REVISION, 3, "original",
+    {detector = "keen_pbr_tcp_success_detector", sequence = 65537})
+
+-- Video learning follows the same remote-IP key as the stock orchestrator.
+-- Neither the old domain-wide record nor another endpoint can seed this one.
+local video_options = {pool = "gv_tcp", hostkey = "host_ip", ip = "198.51.100.10",
+    detector = "keen_pbr_tcp_success_detector"}
+selected = run_event("rr1.googlevideo.com", REVISION, 3, "original", video_options)
+assert_equal(selected, 3, "IPv4 endpoint restores its confirmed selection")
+selected = run_event("rr2.googlevideo.com", REVISION, 3, "original",
+    {pool = "gv_tcp", hostkey = "host_ip", ip = "198.51.100.11"})
+assert_equal(selected, 1, "another endpoint cannot inherit domain or peer learning")
+autostate.gv_tcp["198.51.100.10"] = nil -- a fresh process/policy, not a live edit
+selected = run_event("rr1.googlevideo.com", OTHER_REVISION, 3, "original", video_options)
+assert_equal(selected, 1, "endpoint learning is still bound to its exact revision")
+autostate.gv_tcp["198.51.100.10"] = nil
+selected = run_event("rr1.googlevideo.com", REVISION, 2, "original", video_options)
+assert_equal(selected, 1, "endpoint strategy count mismatch cannot restore a slot")
+autostate.gv_tcp["198.51.100.10"] = nil
+selected = run_event("rr1.googlevideo.com", REVISION, 3, "original", video_options)
+assert_equal(selected, 3, "restore the valid endpoint record for failure testing")
+run_event("rr1.googlevideo.com", REVISION, 3, "failure", video_options)
+selected = run_event("rr1.googlevideo.com", REVISION, 3, "failure", video_options)
+assert_equal(selected, 1, "restored endpoint can still rotate on stock failures")
+selected = run_event("rr2.googlevideo.com", REVISION, 3, "success", video_options)
+assert_equal(selected, 1, "only confirmed endpoint success can update the durable slot")
+selected = run_event("rr1.googlevideo.com", REVISION, 3, "original",
+    {pool = "gv_tcp", hostkey = "host_ip", ip6 = "2001:db8::10"})
+assert_equal(selected, 2, "IPv6 endpoint restores its own confirmed selection")
+selected = run_event("rr1.googlevideo.com", REVISION, 3, "original",
+    {pool = "gv_tcp", hostkey = "host_ip", ip6 = "2001:db8::11"})
+assert_equal(selected, 1, "IPv6 endpoint learning is not shared with a sibling")
 
 timer_callback("keen_pbr_rotator_telemetry", nil)
 assert_equal(persistent_writes, 0, "first dirty debounce at zero seconds")
@@ -314,9 +358,20 @@ timer_callback("keen_pbr_rotator_telemetry", nil)
 assert_equal(persistent_writes, 1, "first learned-state publication")
 
 local first_persisted = read_file(persistent_prefix .. ".0")
-assert(string.match(first_persisted, "^KPRS1\t8\t%d+\t6\n"))
+assert(string.match(first_persisted, "^KPRS1\t8\t%d+\t9\n"))
+assert(string.find(first_persisted,
+    "S\t" .. hex_encode("gv_tcp") .. "\t" .. REVISION .. "\t"
+        .. hex_encode("198.51.100.10") .. "\t1\t3\t", 1, true),
+    "confirmed endpoint selection was not saved under its remote-IP key")
+assert(not string.find(first_persisted, hex_encode("198.51.100.11"), 1, true),
+    "an unproven endpoint was persisted")
+local aggregate = read_file(writable .. "/rotator-state.0")
+assert(not string.find(aggregate, hex_encode("198.51.100.10"), 1, true),
+    "endpoint identity leaked into public aggregate telemetry")
 assert(string.find(
     first_persisted, hex_encode("fresh.example"), 1, true))
+assert(not string.find(first_persisted, hex_encode("unconfirmed.example"), 1, true),
+    "an attempted upload without a server response was persisted")
 assert(string.find(
     first_persisted, hex_encode("visibility.example"), 1, true))
 assert(not string.find(

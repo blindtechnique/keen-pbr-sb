@@ -4,6 +4,9 @@
 
 #include "handlers.hpp"
 #include "server.hpp"
+#ifdef KEEN_PBR3_TESTING
+#include "../nfqws/list_match.hpp"
+#endif
 
 #include <cstddef>
 #include <functional>
@@ -33,6 +36,13 @@ bool nfqws_list_path_confined_for_testing(const std::string& path);
 // production bounds. nullopt means no partial parse can enter the cache.
 std::optional<std::size_t> nfqws_cached_list_footprint_for_testing(
     const std::string& contents);
+
+// Production profile evaluation/serialization with an in-memory list reader;
+// tests do not create nfqws files in /opt or change running services.
+api::RoutingTestNfqws nfqws_profile_coverage_for_testing(
+    const TestRoutingResult& result,
+    const std::vector<nfqws::ProfileReference>& profiles,
+    const nfqws::ListLoader& load);
 #endif
 
 } // namespace keen_pbr3

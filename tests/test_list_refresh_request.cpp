@@ -121,4 +121,53 @@ TEST_CASE("list refresh parser requires two exact lowercase SHA256 digests") {
     }
 }
 
+TEST_CASE("list refresh apply errors preserve partial cache success without claiming runtime success") {
+    const ListRefreshOperationResult partial{
+        {"one", "two"}, {"one"}, {"three"}, false, "download completed"};
+    struct FailureCase {
+        const char* stage;
+        const char* runtime_result;
+    };
+    for (const auto failure : {
+             FailureCase{"prepare", "unchanged"},
+             FailureCase{"owner_handoff", "unknown"},
+             FailureCase{"terminal_wait", "unknown"},
+             FailureCase{"terminal", "unchanged"},
+             FailureCase{"terminal", "rolled_back"},
+             FailureCase{"terminal", "unknown"}}) {
+        CAPTURE(failure.stage);
+        CAPTURE(failure.runtime_result);
+        const std::string detail = "exact runtime failure detail";
+        const auto error = make_list_refresh_apply_error(
+            partial, failure.stage, detail, failure.runtime_result);
+        CHECK(error.status() == 503);
+        REQUIRE(error.body().has_value());
+        const auto body = nlohmann::json::parse(*error.body());
+        CHECK(body["code"] == "list_refresh_apply_failed");
+        CHECK(body["params"]["stage"] == failure.stage);
+        CHECK(body["params"]["runtime_result"] == failure.runtime_result);
+        CHECK(body["refreshed_lists"] == partial.refreshed_lists);
+        CHECK(body["changed_lists"] == partial.changed_lists);
+        CHECK(body["failed_lists"] == partial.failed_lists);
+        CHECK(body["reloaded"] == false);
+        CHECK_FALSE(body.contains("status"));
+        CHECK(body["error"].get<std::string>().find(detail) != std::string::npos);
+        CHECK(body["error"] == error.what());
+        const auto compatible = body.get<api::ErrorResponse>();
+        CHECK(compatible.code == "list_refresh_apply_failed");
+        CHECK(compatible.error == error.what());
+    }
+}
+
+TEST_CASE("list refresh apply error without terminal detail still has a diagnostic") {
+    const auto error = make_list_refresh_apply_error({}, "terminal", {});
+    CHECK(error.status() == 503);
+    CHECK(std::string(error.what()) ==
+          "Lists were refreshed, but routing changes were not applied");
+    REQUIRE(error.body().has_value());
+    const auto body = nlohmann::json::parse(*error.body());
+    CHECK(body["params"]["runtime_result"] == "unknown");
+    CHECK(body["reloaded"] == false);
+}
+
 #endif // WITH_API

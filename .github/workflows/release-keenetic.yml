@@ -4,19 +4,21 @@ on:
   push:
     tags:
       - "v*"
-    # Alpha and next produce only an aarch64 test IPK. Release tags build every
-    # published architecture. Main is published only through a version tag.
+    # Alpha and next produce an aarch64 test IPK. Main builds an all-profile
+    # Beta prerelease; promotion to Latest separately reuses its signed assets.
     branches:
       - alpha
+      - main
       - next
   pull_request:
     branches:
       - alpha
+      - main
       - next
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Existing tag to rebuild and publish (for example v3.0.7-sb.11)"
+        description: "Compatible tag to build a new Pre-release (for example v3.3.2-20260910120000; published assets are not replaced)"
         required: false
         type: string
 
@@ -30,6 +32,7 @@ jobs:
       source_sha: ${{ steps.resolve.outputs.source_sha }}
       release_tag: ${{ steps.resolve.outputs.release_tag }}
       release: ${{ steps.resolve.outputs.release }}
+      candidate: ${{ steps.resolve.outputs.candidate }}
       channel: ${{ steps.resolve.outputs.channel }}
       build_matrix: ${{ steps.resolve.outputs.build_matrix }}
     steps:
@@ -114,14 +117,14 @@ jobs:
 
       - name: Install native build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          sh build_scripts/ci-install-ubuntu-deps.sh \
             libcurl4-openssl-dev \
             libnl-3-dev \
             libnl-route-3-dev \
             libunwind-dev \
             busybox-static \
             lua5.3 \
+            libxtables-dev \
             pkg-config \
             zlib1g-dev
 
@@ -140,6 +143,9 @@ jobs:
 
       - name: Run IPK validator unit tests
         run: python3 -m unittest build_scripts.tests.test_validate_keenetic_ipk -v
+
+      - name: Check Keenetic connndmmark ABI adapter
+        run: python3 -m unittest build_scripts.tests.test_connndmmark_compat -v
 
       - name: Run Keenetic BusyBox package-script smoke tests
         run: |
@@ -219,8 +225,7 @@ jobs:
 
       - name: Install native build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          sh build_scripts/ci-install-ubuntu-deps.sh \
             libcurl4-openssl-dev \
             libnl-3-dev \
             libnl-route-3-dev \
@@ -257,8 +262,7 @@ jobs:
 
       - name: Install Clang build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          sh build_scripts/ci-install-ubuntu-deps.sh \
             clang \
             libcurl4-openssl-dev \
             libnl-3-dev \
@@ -487,46 +491,188 @@ jobs:
 
       - name: Extract release notes from CHANGELOG
         run: |
-          TAG="${RELEASE_TAG#v}"
-          awk -v ver="$TAG" '
-            $0 ~ "^## \\[" ver "\\]" {flag=1; next}
-            /^## \[/ {flag=0}
-            flag {print}
-          ' CHANGELOG.md > RELEASE_BODY.md
+          set -euo pipefail
+          notes_versions=("${RELEASE_TAG#v}")
+          if [[ "${notes_versions[0]}" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-[0-9]{14}$ ]]; then
+            notes_versions+=("${BASH_REMATCH[1]}")
+          fi
+          : > RELEASE_BODY.md
+          if [ -f CHANGELOG.md ]; then
+            for notes_version in "${notes_versions[@]}"; do
+              if awk -v heading="## [$notes_version]" '
+                /^## / {
+                  include = index($0, heading) == 1 && substr($0, length(heading) + 1) ~ /^([[:space:]]|$)/
+                  if (include) found = 1
+                  next
+                }
+                include {print}
+                END {exit found ? 0 : 1}
+              ' CHANGELOG.md > RELEASE_BODY.md; then
+                break
+              fi
+            done
+          fi
           if ! [ -s RELEASE_BODY.md ]; then
             echo "Автоматическая сборка $RELEASE_TAG. Подробности в CHANGELOG.md." > RELEASE_BODY.md
           fi
           cat RELEASE_BODY.md
 
-      - name: Drop stale assets from existing release
+      - name: Create GitHub Pre-release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # Recheck after validation/notes, immediately before the first write.
-          # A moved or deleted tag must not receive this run's old packages.
+          # Create only: a rerun must never replace assets or downgrade a
+          # release that has already been promoted to Latest.
           git fetch --no-tags --depth=1 origin "refs/tags/$RELEASE_TAG"
           test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$SOURCE_SHA"
-          if gh release view -- "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release view --json assets -q '.assets[].name' -- "$RELEASE_TAG" |
-              while IFS= read -r asset; do
-                echo "Removing stale asset: $asset"
-                gh release delete-asset -y -- "$RELEASE_TAG" "$asset" || true
-              done
-          fi
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --target "$SOURCE_SHA" --verify-tag --prerelease --latest=false \
+            --title "keen-pbr-sb $RELEASE_TAG — Beta" --notes-file RELEASE_BODY.md \
+            release-assets/keen-pbr_*.ipk release-assets/SHA256SUMS \
+            release-assets/install.sh release-assets/release-manifest.tsv \
+            release-assets/release-manifest.sig
 
-      - name: Create or update GitHub Release
-        uses: softprops/action-gh-release@v2
+  upload-stable-candidate-artifact:
+    if: github.repository == 'blindtechnique/keen-pbr-sb' && github.event_name != 'pull_request' && needs.resolve-source.outputs.candidate == 'true'
+    needs:
+      - resolve-source
+      - build
+      - backend
+      - crash-diagnostics-smoke
+      - clang-thread-safety
+      - firewall-integration
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ needs.resolve-source.outputs.release_tag }}
+      SOURCE_SHA: ${{ needs.resolve-source.outputs.source_sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
         with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          target_commitish: ${{ needs.resolve-source.outputs.source_sha }}
-          name: "keen-pbr-sb ${{ env.RELEASE_TAG }}"
-          body_path: RELEASE_BODY.md
-          files: |
+          ref: ${{ needs.resolve-source.outputs.source_sha }}
+
+      - name: Checkout reviewed release signing tools
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: .release-signing-tools
+          sparse-checkout: |
+            build_scripts
+            packages/keys
+            packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr
+          persist-credentials: false
+
+      - name: Download all candidate IPKs
+        uses: actions/download-artifact@v8
+        with:
+          pattern: keenetic-ipk-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Verify all candidate IPKs and create checksums
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          EXPECTED_COMMIT=$(git rev-parse --short=12 "$SOURCE_SHA")
+          shopt -s nullglob
+          packages=(release-assets/keen-pbr_*.ipk)
+          test "${#packages[@]}" -eq 3
+          for config in aarch64-3.10 mips-3.4 mipsel-3.4; do
+            packages=(release-assets/keen-pbr_*_keenetic_${config}.ipk)
+            test "${#packages[@]}" -eq 1
+            python3 build_scripts/validate-keenetic-ipk.py "${packages[0]}" \
+              --arch "${config%%-*}" --expected-commit "$EXPECTED_COMMIT"
+          done
+          cd release-assets
+          sha256sum keen-pbr_*.ipk > SHA256SUMS
+
+      - name: Sign stable candidate manifest and installer
+        env:
+          KEENETIC_RELEASE_SIGNING_KEY: ${{ secrets.KEENETIC_RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          if [ -z "${KEENETIC_RELEASE_SIGNING_KEY:-}" ]; then
+            echo "::error::KEENETIC_RELEASE_SIGNING_KEY is not configured; candidate was not signed."
+            exit 1
+          fi
+          signing_key=$(mktemp "$RUNNER_TEMP/keenetic-release-key.XXXXXX")
+          trap 'rm -f -- "$signing_key"' EXIT
+          printf '%s\n' "$KEENETIC_RELEASE_SIGNING_KEY" > "$signing_key"
+          unset KEENETIC_RELEASE_SIGNING_KEY
+          python3 .release-signing-tools/build_scripts/embed-release-verifier.py \
+            --installer install.sh \
+            --verifier .release-signing-tools/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/release-verify.sh \
+            --public-key .release-signing-tools/packages/keys/keenetic-release-public.pem --check
+          python3 .release-signing-tools/build_scripts/sign-keenetic-release.py \
+            --assets release-assets --installer install.sh \
+            --key "$signing_key" \
+            --public-key .release-signing-tools/packages/keys/keenetic-release-public.pem \
+            --repository "$GITHUB_REPOSITORY" --channel stable \
+            --release "$RELEASE_TAG" --source "$SOURCE_SHA" \
+            --build "github-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+
+      - name: Upload stable candidate workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: keen-pbr-stable-candidate-ipk
+          path: |
             release-assets/keen-pbr_*.ipk
             release-assets/SHA256SUMS
             release-assets/install.sh
             release-assets/release-manifest.tsv
+            release-assets/release-manifest.sig
+          if-no-files-found: error
+
+      - name: Publish new Beta Pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null; then
+            echo "::notice::$RELEASE_TAG already exists and was not changed. The candidate artifact is saved; push a new commit to main for a new timestamped release."
+            exit 0
+          else
+            tag_status=$?
+            if [ "$tag_status" -ne 2 ]; then
+              echo "::error::Unable to check the release tag; no release was created."
+              exit "$tag_status"
+            fi
+          fi
+          notes_versions=("${RELEASE_TAG#v}")
+          if [[ "${notes_versions[0]}" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-[0-9]{14}$ ]]; then
+            notes_versions+=("${BASH_REMATCH[1]}")
+          fi
+          : > BETA_NOTES.md
+          if [ -f CHANGELOG.md ]; then
+            for notes_version in "${notes_versions[@]}"; do
+              if awk -v heading="## [$notes_version]" '
+                /^## / {
+                  include = index($0, heading) == 1 && substr($0, length(heading) + 1) ~ /^([[:space:]]|$)/
+                  if (include) found = 1
+                  next
+                }
+                include {print}
+                END {exit found ? 0 : 1}
+              ' CHANGELOG.md > BETA_NOTES.md; then
+                break
+              fi
+            done
+          fi
+          if ! [ -s BETA_NOTES.md ]; then
+            printf 'Beta build from `%s`.\n\nKeenetic profiles: aarch64-3.10, mips-3.4, mipsel-3.4.\n\nAutomatic stable updates remain unchanged until promotion. See [CHANGELOG](https://github.com/%s/blob/%s/CHANGELOG.md).\n' \
+              "$SOURCE_SHA" "$GITHUB_REPOSITORY" "$SOURCE_SHA" > BETA_NOTES.md
+          fi
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --target "$SOURCE_SHA" --prerelease --latest=false \
+            --title "keen-pbr-sb $RELEASE_TAG — Beta" --notes-file BETA_NOTES.md \
+            release-assets/keen-pbr_*.ipk release-assets/SHA256SUMS \
+            release-assets/install.sh release-assets/release-manifest.tsv \
             release-assets/release-manifest.sig
 
   upload-next-artifact:
@@ -609,6 +755,8 @@ jobs:
 
   upload-alpha-artifact:
     if: github.repository == 'blindtechnique/keen-pbr-sb' && github.event_name != 'pull_request' && needs.resolve-source.outputs.channel == 'alpha'
+    permissions:
+      contents: write
     needs:
       - resolve-source
       - build
@@ -684,3 +832,33 @@ jobs:
             release-assets/release-manifest.tsv
             release-assets/release-manifest.sig
           if-no-files-found: error
+
+      - name: Publish immutable Alpha Pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ needs.resolve-source.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          RELEASE_TAG="alpha-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null; then
+            echo "::notice::$RELEASE_TAG already exists and was not changed."
+            exit 0
+          else
+            tag_status=$?
+            if [ "$tag_status" -ne 2 ]; then
+              echo "::error::Unable to check the alpha tag; no release was created."
+              exit "$tag_status"
+            fi
+          fi
+          package=$(basename release-assets/keen-pbr_*.ipk)
+          version=${package#keen-pbr_}
+          version=${version%_keenetic_aarch64-3.10.ipk}
+          printf 'Alpha %s. Keenetic/Netcraze: aarch64-3.10.\n\nSource: `%s`.\n\nSigned manifest and SHA256SUMS are attached. This prerelease does not change Stable/Latest.\n\nInstallation with wget or curl, requirements and known limitations: [Alpha README](https://github.com/%s/blob/%s/README.md#установка-alpha).\n' \
+            "$version" "$SOURCE_SHA" "$GITHUB_REPOSITORY" "$SOURCE_SHA" > ALPHA_NOTES.md
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --target "$SOURCE_SHA" --prerelease --latest=false \
+            --title "keen-pbr-sb $version — Alpha" --notes-file ALPHA_NOTES.md \
+            release-assets/keen-pbr_*.ipk release-assets/SHA256SUMS \
+            release-assets/install.sh release-assets/release-manifest.tsv \
+            release-assets/release-manifest.sig

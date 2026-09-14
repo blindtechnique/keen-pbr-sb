@@ -933,6 +933,68 @@ TEST_CASE("a prepared-hook refusal stops the install before opkg runs it") {
     CHECK(result.output.find("journal could not record") != std::string::npos);
 }
 
+TEST_CASE("failed https bootstrap restores the existing canonical feed") {
+    NfqwsPackageFixture fixture;
+    // The pre-existing no-LF form and its permissions must survive a failed
+    // attempt, not merely be replaced with a new default feed definition.
+    std::string original = kTestFeedConfContent;
+    original.pop_back();
+    {
+        std::ofstream conf(fixture.feed_conf(), std::ios::binary);
+        conf << original;
+    }
+    const auto original_permissions = std::filesystem::perms::owner_read |
+                                      std::filesystem::perms::owner_write |
+                                      std::filesystem::perms::group_read;
+    std::filesystem::permissions(fixture.feed_conf(), original_permissions);
+
+    std::string failed_command;
+    std::size_t expected_commands = 0;
+    SUBCASE("Entware update fails") {
+        failed_command = "update";
+        expected_commands = 1;
+    }
+    SUBCASE("HTTPS dependency installation fails") {
+        failed_command = "install";
+        expected_commands = 2;
+    }
+    SUBCASE("wget removal termination is uncertain") {
+        failed_command = "remove";
+        expected_commands = 3;
+    }
+    bool package_installed = false;
+    const auto execute = fixture.executor([&] {
+        package_installed = true;
+        return ExecCaptureResult{};
+    });
+    const auto result = run_nfqws_install_for_testing(
+        [&](const std::vector<std::string>& argv, SafeExecTimeouts timeouts,
+            const std::filesystem::path& cwd) {
+            auto execution = execute(argv, timeouts, cwd);
+            if (argv[1] == failed_command) {
+                execution.exit_code = 2;
+                if (failed_command == "remove") {
+                    execution.timed_out = true;
+                    execution.termination_uncertain = true;
+                }
+            }
+            return execution;
+        },
+        fixture.store_root(), fixture.feed_list(), fixture.feed_conf());
+
+    CHECK(result.status != 0);
+    CHECK_FALSE(result.install_started);
+    CHECK_FALSE(package_installed);
+    CHECK_FALSE(result.feed_conf_written);
+    CHECK(fixture.commands.size() == expected_commands);
+    for (bool present : fixture.feed_conf_present_at_command) {
+        CHECK_FALSE(present);
+    }
+    CHECK(fixture.read_feed_conf() == original);
+    CHECK(std::filesystem::status(fixture.feed_conf()).permissions() ==
+          original_permissions);
+}
+
 TEST_CASE("failed https prerequisites stop the install before the component is touched") {
     NfqwsPackageFixture fixture;
     fixture.serve("1.2.4", "bytes of 1.2.4");

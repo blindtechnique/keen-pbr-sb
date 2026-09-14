@@ -26,7 +26,7 @@ rv_localfile=$2
 
 # Restrict context before passing it through awk -v (which interprets escapes).
 case "$rv_repository" in ''|*[!A-Za-z0-9_./-]*) release_verify_fail 'invalid repository' ;; esac
-case "$rv_channel" in stable|alpha|next) ;; *) release_verify_fail 'invalid channel' ;; esac
+case "$rv_channel" in stable|alpha|beta|next) ;; *) release_verify_fail 'invalid channel' ;; esac
 case "$rv_release" in ''|*[!A-Za-z0-9._-]*) release_verify_fail 'invalid release' ;; esac
 case "$rv_kind" in installer|package) ;; *) release_verify_fail 'invalid file kind' ;; esac
 case "$rv_arch" in any|aarch64|armv7|mipsel|mips|x64) ;; *) release_verify_fail 'invalid architecture' ;; esac

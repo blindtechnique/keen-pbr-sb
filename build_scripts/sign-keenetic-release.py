@@ -48,8 +48,8 @@ def digest(path: Path) -> str:
 def manifest(args: argparse.Namespace) -> bytes:
     if not REPOSITORY.fullmatch(args.repository) or len(args.repository) > 160:
         raise SigningError("repository must be an owner/repository name")
-    if args.channel not in {"stable", "alpha", "next"}:
-        raise SigningError("channel must be stable, alpha, or next")
+    if args.channel not in {"stable", "alpha", "beta", "next"}:
+        raise SigningError("channel must be stable, alpha, beta, or next")
     if not TOKEN.fullmatch(args.release) or not TOKEN.fullmatch(args.build):
         raise SigningError("release and build must be bounded portable identifiers")
     if not re.fullmatch(r"[0-9a-f]{40}", args.source):

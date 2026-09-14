@@ -247,6 +247,9 @@ struct ApiContext {
     std::function<TestRoutingResult(const std::string&, const std::string&)>
         compute_test_routing_with_http_fn;
 
+    // Optional read-only report over the existing list cache, never a new owner.
+    std::function<api::ListHintsResponse(const Config&)> get_list_hints_fn;
+
     Config get_visible_config() const {
         return get_visible_config_fn();
     }

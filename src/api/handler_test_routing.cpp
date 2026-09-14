@@ -130,6 +130,8 @@ constexpr std::size_t kMaxParsedListBytes = 4U * 1024U * 1024U;
 constexpr std::size_t kMaxCachedParsedListBytes = 8U * 1024U * 1024U;
 constexpr std::size_t kMaxCachedLists = 16U;
 constexpr std::size_t kMaxActiveListReferences = 32U;
+constexpr std::size_t kMaxCoverageProfiles = 64U;
+constexpr std::size_t kMaxCoverageAddresses = 32U;
 constexpr std::size_t kMaxCoverageMatches = 64U;
 
 struct FileIdentity {
@@ -351,6 +353,11 @@ std::optional<BoundedFile> read_bounded_list_file(
 
 std::optional<nfqws::BoundedHostlist> parse_list_for_cache(
     const std::string& contents) {
+    // nfqws supports gzip lists; this bounded text reader does not decompress
+    // them. Compressed bytes are unknown, never evidence of an empty list.
+    if (contents.size() >= 2 &&
+        static_cast<unsigned char>(contents[0]) == 0x1f &&
+        static_cast<unsigned char>(contents[1]) == 0x8b) return std::nullopt;
     return nfqws::parse_hostlist_bounded(
         contents,
         kMaxParsedListEntries,
@@ -360,7 +367,7 @@ std::optional<nfqws::BoundedHostlist> parse_list_for_cache(
 
 class NfqwsCoverageCache {
 public:
-    std::optional<std::vector<nfqws::ListReference>> active_references() {
+    std::optional<std::vector<nfqws::ProfileReference>> active_profiles() {
         std::lock_guard<std::mutex> lock(mutex_);
         const auto current =
             inspect_regular_file(kNfqwsConfigPath, kMaxNfqwsConfigBytes);
@@ -368,8 +375,8 @@ public:
         if (config_identity_.has_value() &&
             *config_identity_ == *current) {
             return config_available_
-                       ? std::optional<std::vector<nfqws::ListReference>>(
-                             references_)
+                       ? std::optional<std::vector<nfqws::ProfileReference>>(
+                             profiles_)
                        : std::nullopt;
         }
 
@@ -382,26 +389,26 @@ public:
         // malformed config would force a complete parse on every API call.
         config_identity_ = file->identity;
         config_available_ = false;
-        references_.clear();
+        profiles_.clear();
         if (!validate_nfqws_candidate(file->contents).empty()) {
             return std::nullopt;
         }
-        auto references = nfqws::parse_list_references(
-            build_nfqws_dry_run_args(file->contents));
-        references.erase(
-            std::remove_if(
-                references.begin(),
-                references.end(),
+        const auto argv = build_nfqws_dry_run_args(file->contents);
+        const auto references = nfqws::parse_list_references(argv);
+        if (references.size() > kMaxActiveListReferences ||
+            std::any_of(references.begin(), references.end(),
                 [](const nfqws::ListReference& reference) {
                     return !is_confined_list_path(reference.path);
-                }),
-            references.end());
-        if (references.size() > kMaxActiveListReferences) {
+                })) {
             return std::nullopt;
         }
-        references_ = std::move(references);
+        profiles_ = nfqws::parse_profile_references(argv);
+        if (profiles_.size() > kMaxCoverageProfiles) {
+            profiles_.clear();
+            return std::nullopt;
+        }
         config_available_ = true;
-        return references_;
+        return profiles_;
     }
 
     std::optional<std::shared_ptr<const std::vector<std::string>>> list_entries(
@@ -470,7 +477,7 @@ private:
     std::mutex mutex_;
     std::optional<FileIdentity> config_identity_;
     bool config_available_{false};
-    std::vector<nfqws::ListReference> references_;
+    std::vector<nfqws::ProfileReference> profiles_;
     std::map<std::string, CachedList> lists_;
     // Source buffers are transient. This budget tracks the conservative heap
     // footprint that remains resident in the parsed-vector cache.
@@ -532,26 +539,14 @@ api::RoutingTestNfqwsMatchRole to_api_role(nfqws::ListRole role) {
 // add lists of their own, and address lists are matched by prefix while
 // hostlists are matched by domain.
 //
-// Exclude lists are reported too, and reported as themselves. They are not
-// coverage - they are the reason coverage does not apply - and folding the two
-// into one answer would invert the meaning for every domain on them.
-api::RoutingTestNfqws nfqws_coverage(const TestRoutingResult& result) {
+// Profile boundaries are retained. These are saved list predicates, not a
+// prediction of the winning profile without protocol/port/packet context.
+api::RoutingTestNfqws evaluate_nfqws_coverage(
+    const TestRoutingResult& result,
+    const std::vector<nfqws::ProfileReference>& profiles,
+    const nfqws::ListLoader& load) {
     api::RoutingTestNfqws coverage;
-    std::unique_lock<std::mutex> admission(
-        nfqws_coverage_admission_mutex(), std::try_to_lock);
-    if (!admission.owns_lock()) {
-        coverage.available = false;
-        coverage.reason = "busy";
-        return coverage;
-    }
-    invoke_nfqws_coverage_hook();
-
-    const auto references = nfqws_coverage_cache().active_references();
-    coverage.available = references.has_value();
-    if (!references.has_value()) {
-        coverage.reason = "unavailable";
-        return coverage;
-    }
+    coverage.available = true;
 
     // The target itself when it is an address, plus everything it resolved to:
     // a domain is handled by nfqws through its hostlists, but its addresses can
@@ -562,48 +557,83 @@ api::RoutingTestNfqws nfqws_coverage(const TestRoutingResult& result) {
                      result.resolved_ips.begin(),
                      result.resolved_ips.end());
 
-    for (const auto& reference : *references) {
-        const auto entries =
-            nfqws_coverage_cache().list_entries(reference.path);
-        if (!entries.has_value()) {
-            // Skipping an unreadable or over-budget active list would turn
-            // "unknown" into a false "uncovered" verdict.
+    std::sort(addresses.begin(), addresses.end());
+    addresses.erase(std::unique(addresses.begin(), addresses.end()), addresses.end());
+    if (addresses.size() > kMaxCoverageAddresses) {
+        coverage.available = false;
+        coverage.reason = "unavailable";
+        return coverage;
+    }
+    coverage.profiles.emplace();
+    std::size_t match_count = 0;
+    for (const auto& profile : profiles) {
+        const auto evaluated = nfqws::evaluate_profile_lists(
+            profile, result.is_domain ? result.target : std::string{},
+            addresses, load);
+        api::RoutingTestNfqwsProfileElement detail;
+        detail.index = static_cast<std::int64_t>(profile.index);
+        detail.name = profile.name;
+        detail.filters = profile.filters;
+        detail.has_actions = profile.has_actions;
+        detail.hostname_required = evaluated.hostname_required;
+        detail.auto_hostlist = evaluated.auto_hostlist;
+        detail.list_result = evaluated.result;
+        if (evaluated.result == "unknown") {
+            // Keep partial profile details for the new UI, but legacy clients
+            // must not mistake an unreadable list for proven absence.
             coverage.available = false;
             coverage.reason = "unavailable";
-            coverage.matches.clear();
-            return coverage;
         }
-
-        const auto append = [&](const nfqws::HostlistMatch& hit,
-                                const std::string& matched) {
+        for (const auto& match : evaluated.matches) {
             api::RoutingTestNfqwsMatchElement element;
-            element.list = reference.path;
-            element.role = to_api_role(reference.role);
-            element.includes = nfqws::role_includes(reference.role);
-            element.entry = hit.entry;
-            element.matched = matched;
-            element.exact = hit.exact;
-            coverage.matches.push_back(std::move(element));
-        };
-
-        if (nfqws::role_is_hostlist(reference.role)) {
-            if (!result.is_domain) continue;
-            if (const auto hit =
-                    nfqws::match_hostlist(**entries, result.target)) {
-                append(*hit, result.target);
-            }
-        } else {
-            for (const auto& address : addresses) {
-                if (const auto hit =
-                        nfqws::match_ipset(**entries, address)) {
-                    append(*hit, address);
-                    break;
-                }
+            element.list = match.reference.path;
+            element.role = to_api_role(match.reference.role);
+            element.includes = nfqws::role_includes(match.reference.role);
+            element.entry = match.hit.entry;
+            element.matched = match.matched;
+            element.exact = match.hit.exact;
+            detail.matches.push_back(element);
+            const bool duplicate = std::any_of(
+                coverage.matches.begin(), coverage.matches.end(),
+                [&](const api::RoutingTestNfqwsMatchElement& previous) {
+                    return previous.list == element.list &&
+                           previous.role == element.role &&
+                           previous.entry == element.entry &&
+                           previous.matched == element.matched;
+                });
+            if (!duplicate) coverage.matches.push_back(std::move(element));
+            if (++match_count > kMaxCoverageMatches) {
+                coverage.available = false;
+                coverage.reason = "unavailable";
+                coverage.matches.clear();
+                coverage.profiles.reset();
+                return coverage;
             }
         }
-        if (coverage.matches.size() >= kMaxCoverageMatches) break;
+        coverage.profiles->push_back(std::move(detail));
     }
     return coverage;
+}
+
+api::RoutingTestNfqws nfqws_coverage(const TestRoutingResult& result) {
+    api::RoutingTestNfqws coverage;
+    std::unique_lock<std::mutex> admission(
+        nfqws_coverage_admission_mutex(), std::try_to_lock);
+    if (!admission.owns_lock()) {
+        coverage.reason = "busy";
+        return coverage;
+    }
+    invoke_nfqws_coverage_hook();
+    const auto profiles = nfqws_coverage_cache().active_profiles();
+    if (!profiles) {
+        coverage.reason = "unavailable";
+        return coverage;
+    }
+    return evaluate_nfqws_coverage(result, *profiles,
+        [](const std::string& path) -> nfqws::ListEntries {
+            const auto entries = nfqws_coverage_cache().list_entries(path);
+            return entries ? *entries : nullptr;
+        });
 }
 
 api::ListMatch to_api_list_match(const ListMatchInfo& match) {
@@ -634,6 +664,13 @@ std::optional<std::size_t> nfqws_cached_list_footprint_for_testing(
     const auto parsed = parse_list_for_cache(contents);
     if (!parsed.has_value()) return std::nullopt;
     return parsed->conservative_bytes;
+}
+
+api::RoutingTestNfqws nfqws_profile_coverage_for_testing(
+    const TestRoutingResult& result,
+    const std::vector<nfqws::ProfileReference>& profiles,
+    const nfqws::ListLoader& load) {
+    return evaluate_nfqws_coverage(result, profiles, load);
 }
 #endif
 
