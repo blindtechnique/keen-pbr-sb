@@ -527,10 +527,15 @@ class ReplyWindowTest(unittest.TestCase):
     def test_ndm_pre_post_hooks_are_family_scoped_and_nonfatal(self):
         hooks = ROOT / 'packages/keenetic/keen-pbr/files/opt/etc/ndm/netfilter.d'
         runtime_path = '/opt/usr/lib/keen-pbr/nfqws-tcp-window.sh'
+        # The IPK Makefile uses INSTALL_BIN. A source checkout (especially
+        # Windows/Docker vs Linux CI) need not expose the same executable bits.
+        installed_helper = self.f.bin / 'nfqws-tcp-window.sh'
+        shutil.copyfile(LIB / 'nfqws-tcp-window.sh', installed_helper)
+        installed_helper.chmod(0o755)
         for name in ('099-keen-pbr-nfqws-tcp.sh', '110-keen-pbr-nfqws-tcp.sh'):
             # Relocate only the fixed installed path in this isolated fixture.
             script = self.f.bin / name
-            script.write_text((hooks / name).read_text().replace(runtime_path, str(LIB / 'nfqws-tcp-window.sh')))
+            script.write_text((hooks / name).read_text().replace(runtime_path, str(installed_helper)))
         def event(name, table='mangle'):
             result = subprocess.run(['sh', str(self.f.bin / name)],
                                     env={**self.f.env, 'table': table, 'type': 'iptables'}, timeout=8)

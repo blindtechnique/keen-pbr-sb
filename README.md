@@ -2,7 +2,7 @@
 
 <img src="logo2.png" alt="keen-pbr-sb" width="200">
 
-# keen-pbr-sb 3.3.2-20260914061956 · Alpha
+# keen-pbr-sb 3.3.2-20260914062602 · Alpha
 
 **Policy routing, нативные VPN Keenetic, sing-box и nfqws2 — одна система управления, разные границы ответственности.**
 
