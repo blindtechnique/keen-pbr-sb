@@ -346,19 +346,33 @@ sing-box и nfqws2 опциональны. Базовый сценарий со 
 
 **Alpha — тестовый канал. Сейчас его полный IPK публикуется для `aarch64-3.10`; MIPS/MIPSEL не подменяются этим пакетом.** Перед установкой выполните требования выше, сохраните резервную копию keen-pbr-sb и экспорт KeeneticOS. Команды запускаются от `root` по SSH в Entware, не в командной строке KeeneticOS.
 
+Команды ниже скачивают установщик из ветки `alpha` и устанавливают **последний опубликованный Alpha IPK** для вашей архитектуры. Номер выпуска в ссылке менять не нужно; параметр `--alpha` выбирает именно тестовый канал, а не Stable/Latest.
+
 Первая установка через **wget**:
 
 ```sh
-(umask 077; f=$(mktemp /tmp/keen-pbr-alpha.XXXXXX) || exit 1; wget -O "$f" https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/refs/heads/alpha/install.sh && sh "$f" --alpha; rc=$?; rm -f "$f"; exit "$rc")
+sh -c "$(wget -qO- https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/alpha/install.sh)" -- --alpha
 ```
 
 Или через **curl**:
 
 ```sh
-(umask 077; f=$(mktemp /tmp/keen-pbr-alpha.XXXXXX) || exit 1; curl -fL --retry 3 -o "$f" https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/refs/heads/alpha/install.sh && sh "$f" --alpha; rc=$?; rm -f "$f"; exit "$rc")
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/alpha/install.sh)" -- --alpha
 ```
 
-**Если keen-pbr-sb уже установлен**, включая переход со Stable, используйте режим обновления: замените `sh "$f" --alpha` в выбранной команде на `sh "$f" --alpha --update`. Он не запускает заново первичную настройку авторизации, DNS, sing-box и nfqws2. Во время установки панель и сетевые службы могут быть временно недоступны; не запускайте вторую установку, пока первая не завершилась.
+**Если keen-pbr-sb уже установлен**, включая переход со Stable, добавьте `--update`. Готовая команда через **wget**:
+
+```sh
+sh -c "$(wget -qO- https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/alpha/install.sh)" -- --alpha --update
+```
+
+Или через **curl**:
+
+```sh
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/alpha/install.sh)" -- --alpha --update
+```
+
+Режим `--update` не запускает заново первичную настройку авторизации, DNS, sing-box и nfqws2. Во время установки панель и сетевые службы могут быть временно недоступны; не запускайте вторую установку, пока первая не завершилась.
 
 Установщик выбирает самый новый alpha-тег по номеру запуска/попытки среди 100 последних публичных выпусков, затем фиксирует этот тег, проверяет архитектуру, SHA256 и подпись манифеста **именно канала alpha**. Если подходящего выпуска нет или проверка не пройдена, установка прекращается — скрытого перехода на Stable нет. HTTPS-проверку отключать не нужно; для wget требуется поддержка HTTPS и актуальные CA-сертификаты Entware.
 
