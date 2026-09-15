@@ -26,6 +26,12 @@ LOCK_OWNED=0
 LOCK_RETURN_PID=
 LOCK_HELPER_V2=0
 FALLBACK_CLEANUP_OWNED=0
+DNS_SETUP_CHOICE=
+NFQWS_SETUP_CHOICE=
+DNS_BOOTSTRAP=0
+DNS_INSTALL_ROLLBACK=0
+FIRST_PACKAGE_STARTED=0
+RESUME_FIRST_INSTALL=0
 
 for argument in "$@"; do
     case "$argument" in
@@ -45,6 +51,20 @@ fi
 
 cleanup() {
     status=$?
+    if [ "${DNS_INSTALL_ROLLBACK:-0}" = 1 ]; then
+        # First-install DNS was prepared before postinst. If installation did
+        # not complete, return port 53 and the old config to their prior owner.
+        if [ "${FIRST_PACKAGE_STARTED:-0}" = 1 ] &&
+           [ -x /opt/etc/init.d/S80keen-pbr ]; then
+            /opt/etc/init.d/S80keen-pbr stop >/dev/null 2>&1 || true
+        fi
+        restore_dns_setup "$INSTALL_DNS_OVERRIDE" "$INSTALL_DNS_RUNNING" \
+            "$INSTALL_DNS_CONFIG" "$INSTALL_DNS_BACKUP" \
+            "$INSTALL_DNS_HAD_CONFIG" "$INSTALL_DNS_RESTARTED" || {
+                printf '%s\n' "Не удалось полностью вернуть прежний DNS. Резервная копия: $INSTALL_DNS_BACKUP" >&2
+                status=1
+            }
+    fi
     # A failed HTTPS bootstrap must not discard the user's original feed with
     # the temporary downloads (including an interruption during opkg).
     if [ -n "${NFQWS_SAVED_FEED:-}" ] &&
@@ -1027,7 +1047,10 @@ restore_dns_setup() {
 }
 
 configure_dns() {
-    answer=$(ask "Включить Keenetic DNS Override и настроить dnsmasq Entware? [Y/n]:" "Y")
+    answer=${DNS_SETUP_CHOICE:-}
+    if [ -z "$answer" ]; then
+        answer=$(ask "Включить Keenetic DNS Override и настроить dnsmasq Entware? [Y/n]:" "Y")
+    fi
     case "$answer" in
         n|N|no|NO) return 0 ;;
     esac
@@ -1036,7 +1059,7 @@ configure_dns() {
         die "не удалось прочитать текущее состояние DNS Override; настройки DNS не изменены"
     dns_was_running=N
     if pidof dnsmasq >/dev/null 2>&1; then dns_was_running=Y; fi
-    template=/opt/usr/lib/keen-pbr/dnsmasq.conf.template
+    template=${1:-/opt/usr/lib/keen-pbr/dnsmasq.conf.template}
     config=/opt/etc/dnsmasq.conf
     [ -f "$template" ] || die "шаблон dnsmasq отсутствует"
     /opt/sbin/dnsmasq --test --conf-file="$template" >/dev/null 2>&1 || die "сгенерированная конфигурация dnsmasq некорректна"
@@ -1066,17 +1089,33 @@ configure_dns() {
         rm -f "$candidate" || true
         die "не удалось записать конфигурацию dnsmasq; настройки DNS не изменены"
     fi
+    if [ "${DNS_BOOTSTRAP:-0}" = 1 ]; then
+        INSTALL_DNS_OVERRIDE=$previous_override
+        INSTALL_DNS_RUNNING=$dns_was_running
+        INSTALL_DNS_CONFIG=$config
+        INSTALL_DNS_BACKUP=$backup
+        INSTALL_DNS_HAD_CONFIG=$had_config
+        INSTALL_DNS_RESTARTED=N
+        DNS_INSTALL_ROLLBACK=1
+    fi
     if ! run_ndmc "opkg dns-override" ||
        ! run_ndmc "system configuration save"; then
-        restore_dns_setup "$previous_override" "$dns_was_running" \
-            "$config" "$backup" "$had_config" N ||
+        if restore_dns_setup "$previous_override" "$dns_was_running" \
+            "$config" "$backup" "$had_config" N; then
+            DNS_INSTALL_ROLLBACK=0
+        else
             say "ПРЕДУПРЕЖДЕНИЕ: восстановление прежнего DNS завершено не полностью; проверьте DNS в Keenetic." >&2
+        fi
         die "не удалось включить opkg dns-override"
     fi
-    if ! /opt/etc/init.d/S56dnsmasq restart >/dev/null 2>&1; then
-        restore_dns_setup "$previous_override" "$dns_was_running" \
-            "$config" "$backup" "$had_config" Y ||
+    INSTALL_DNS_RESTARTED=Y
+    if ! /opt/etc/init.d/S56dnsmasq restart; then
+        if restore_dns_setup "$previous_override" "$dns_was_running" \
+            "$config" "$backup" "$had_config" Y; then
+            DNS_INSTALL_ROLLBACK=0
+        else
             say "ПРЕДУПРЕЖДЕНИЕ: восстановление прежнего DNS завершено не полностью; проверьте DNS в Keenetic." >&2
+        fi
         die "dnsmasq не запустился; выполнен возврат к прежним настройкам DNS"
     fi
     if ! nslookup google.com 127.0.0.1 >/dev/null 2>&1; then
@@ -1085,12 +1124,73 @@ configure_dns() {
     fi
 }
 
-configure_nfqws2() {
+choose_optional_setup() {
+    DNS_SETUP_CHOICE=$(ask "Включить Keenetic DNS Override и настроить dnsmasq Entware? [Y/n]:" "Y")
     if /opt/bin/opkg status nfqws2-keenetic 2>/dev/null | grep -q '^Status:.* installed'; then
-        answer=$(ask "nfqws2 уже установлен. Обновить его из официального репозитория? [y/N]:" "N")
+        NFQWS_SETUP_CHOICE=$(ask "nfqws2 уже установлен. Обновить его из официального репозитория? [y/N]:" "N")
     else
-        answer=$(ask "Установить nfqws2 из официального репозитория nfqws/nfqws2-keenetic? [y/N]:" "N")
+        NFQWS_SETUP_CHOICE=$(ask "Установить nfqws2 из официального репозитория nfqws/nfqws2-keenetic? [y/N]:" "N")
     fi
+}
+
+prepare_first_install_dns() {
+    # A working/fully configured package keeps its existing DNS until the
+    # optional setup at the end. --update never enters this first-run path.
+    if /opt/bin/opkg status keen-pbr 2>/dev/null | grep -q '^Status:.* installed'; then
+        return 0
+    fi
+    case "$DNS_SETUP_CHOICE" in
+        n|N|no|NO)
+            # Respect manual DNS setups, but explain an unmet prerequisite
+            # before opkg leaves an unpacked package with a failed postinst.
+            if [ -x /opt/sbin/dnsmasq ] && pidof dnsmasq >/dev/null 2>&1; then
+                return 0
+            fi
+            die "Для первого запуска нужен работающий dnsmasq. Повторите установку и разрешите настройку DNS Override либо сначала настройте dnsmasq вручную. Пакет keen-pbr ещё не устанавливался."
+            ;;
+    esac
+
+    say "Подготавливаю DNS перед первым запуском keen-pbr-sb..."
+    if [ ! -x /opt/sbin/dnsmasq ] || [ ! -x /opt/etc/init.d/S56dnsmasq ]; then
+        /opt/bin/opkg install dnsmasq || die "не удалось установить dnsmasq; DNS Keenetic не изменён"
+    fi
+    [ -x /opt/sbin/dnsmasq ] && [ -x /opt/etc/init.d/S56dnsmasq ] ||
+        die "dnsmasq не установлен; DNS Keenetic не изменён"
+
+    # Use the already authenticated IPK, not another download or an installed
+    # helper which does not exist on a clean router yet. The package's existing
+    # standalone block is reattached by its unchanged postinst after unpacking.
+    local first_template="$TMP_DIR/first-dnsmasq.template"
+    local first_fallback="$TMP_DIR/first-dnsmasq.fallback"
+    local first_config="$TMP_DIR/first-dnsmasq.conf"
+    tar -xzOf "$TMP_DIR/data.tar.gz" ./opt/usr/lib/keen-pbr/dnsmasq.conf.template > "$first_template" &&
+        tar -xzOf "$TMP_DIR/data.tar.gz" ./opt/etc/keen-pbr/dnsmasq-fallback.conf > "$first_fallback" ||
+        die "в проверенном IPK отсутствуют файлы начальной настройки DNS"
+    # An existing fallback may contain deliberate operator settings. Preserve
+    # its directives instead of substituting the packaged bootstrap resolver.
+    if [ -f /opt/etc/keen-pbr/dnsmasq-fallback.conf ]; then
+        cp /opt/etc/keen-pbr/dnsmasq-fallback.conf "$first_fallback" ||
+            die "не удалось прочитать существующую резервную конфигурацию DNS"
+    fi
+    awk -v fallback="$first_fallback" '
+        $0 == "conf-script=/opt/usr/lib/keen-pbr/dnsmasq.sh dnsmasq-config-entry" {
+            print "# BEGIN keen-pbr standalone DNS fallback v1"
+            while ((getline line < fallback) > 0) print line
+            close(fallback)
+            print "# END keen-pbr standalone DNS fallback v1"
+            found++
+            next
+        }
+        { print }
+        END { if (found != 1) exit 1 }
+    ' "$first_template" > "$first_config" ||
+        die "не удалось подготовить начальную конфигурацию DNS"
+    DNS_BOOTSTRAP=1
+    configure_dns "$first_config"
+}
+
+configure_nfqws2() {
+    answer=${NFQWS_SETUP_CHOICE:-N}
     case "$answer" in y|Y|yes|YES|д|Д|да|ДА) ;; *) return 0 ;; esac
 
     say "Подготавливаю HTTPS и официальный репозиторий nfqws2..."
@@ -1121,6 +1221,35 @@ configure_nfqws2() {
     say "nfqws2 установлен. Управление доступно в разделе «nfqws2» веб-интерфейса keen-pbr-sb."
 }
 
+prepare_first_install_retry() {
+    RESUME_FIRST_INSTALL=0
+    if [ ! -e "$RESCUE_DIR/pending" ] && [ ! -L "$RESCUE_DIR/pending" ] &&
+       [ ! -e "$RESCUE_DIR/UNKNOWN" ] && [ ! -L "$RESCUE_DIR/UNKNOWN" ]; then
+        return 0
+    fi
+    # Resume only the identical, freshly authenticated first-install IPK.
+    # There is no older package to roll back to. Do not erase its journal or
+    # configuration snapshot, and do not treat a failed upgrade as this case.
+    local item
+    for item in current.ipk current.ipk.sha256 previous.ipk previous.ipk.sha256 \
+        pending-baseline.ipk pending-baseline.ipk.sha256; do
+        [ ! -e "$RESCUE_DIR/$item" ] && [ ! -L "$RESCUE_DIR/$item" ] ||
+            die "Незавершённое обновление имеет предыдущий пакет; требуется его восстановление. Первая установка не начата."
+    done
+    [ -f "$RESCUE_DIR/pending" ] && [ ! -L "$RESCUE_DIR/pending" ] &&
+        [ "$(cat "$RESCUE_DIR/pending")" = candidate-staged ] &&
+        [ -f "$RESCUE_DIR/candidate.ipk" ] && [ ! -L "$RESCUE_DIR/candidate.ipk" ] &&
+        cmp -s "$PACKAGE_FILE" "$RESCUE_DIR/candidate.ipk" ||
+        die "Незавершённая установка относится к другому пакету или этапу. Сохранённые файлы не изменены."
+    if [ -e "$RESCUE_DIR/UNKNOWN" ] || [ -L "$RESCUE_DIR/UNKNOWN" ]; then
+        [ -f "$RESCUE_DIR/UNKNOWN" ] && [ ! -L "$RESCUE_DIR/UNKNOWN" ] &&
+            [ "$(cat "$RESCUE_DIR/UNKNOWN")" = 'candidate rollback has no verified baseline' ] ||
+            die "Причина незавершённой установки отличается от сбоя первого запуска. Сохранённые файлы не изменены."
+    fi
+    RESUME_FIRST_INSTALL=1
+    say "Завершаю прежнюю первую установку тем же подписанным IPK; настройки и резервная копия сохраняются."
+}
+
 install_package_transactionally() {
     [ ! -L "$RESCUE_DIR" ] &&
         { [ ! -e "$RESCUE_DIR" ] || [ -d "$RESCUE_DIR" ]; } ||
@@ -1130,22 +1259,40 @@ install_package_transactionally() {
         die "не удалось защитить каталог rescue"
     [ -x "$RESCUE_HELPER" ] ||
         die "rescue helper не установлен"
-    "$RESCUE_HELPER" stage "$PACKAGE_FILE"
+    if [ "${RESUME_FIRST_INSTALL:-0}" != 1 ]; then
+        "$RESCUE_HELPER" stage "$PACKAGE_FILE"
+    fi
+
+    local recovery_capability=
+    if [ "${RESUME_FIRST_INSTALL:-0}" = 1 ]; then
+        recovery_capability=recover-pending-v1
+    fi
+    FIRST_PACKAGE_STARTED=1
 
     if PKG_UPGRADE=1 \
            KEEN_PBR_RESCUE_TRANSACTION=1 \
+           KEEN_PBR_PACKAGE_UNKNOWN_RECOVERY="$recovery_capability" \
            KEEN_PBR_REPLACE_DNSMASQ_DEFAULTS=N \
            /opt/bin/opkg --force-reinstall install "$PACKAGE_FILE" &&
        [ -x "$RESCUE_HELPER" ] &&
        "$RESCUE_HELPER" verify; then
+        # The no-baseline marker is cleared only after the same signed package
+        # has actually started and passed the existing runtime verification.
+        if [ "${RESUME_FIRST_INSTALL:-0}" = 1 ]; then
+            rm -f "$RESCUE_DIR/UNKNOWN" && sync || return 1
+        fi
         if "$RESCUE_HELPER" promote; then
+            DNS_INSTALL_ROLLBACK=0
             return 0
         fi
         say "ОШИБКА: пакет работает, но rescue-снимок не удалось зафиксировать."
     fi
 
     say "ОШИБКА: новый пакет не прошёл проверку после установки."
-    if [ -x "$RESCUE_HELPER" ] &&
+    if [ ! -e "$RESCUE_DIR/pending-baseline.ipk" ] &&
+       [ ! -L "$RESCUE_DIR/pending-baseline.ipk" ]; then
+        say "Первая установка не завершена. Предыдущего IPK ещё нет; сохранённую установку можно продолжить повторным запуском этой команды."
+    elif [ -x "$RESCUE_HELPER" ] &&
        "$RESCUE_HELPER" rollback-candidate; then
         say "Предыдущий IPK автоматически восстановлен."
     else
@@ -1200,12 +1347,15 @@ if [ "$UPDATE_ONLY" = "1" ]; then
     say "Обновление keen-pbr-sb установлено. Веб-интерфейс перезапускается."
     exit 0
 fi
+prepare_first_install_retry
+choose_optional_setup
 choose_sing_box
 /opt/bin/opkg update
+prepare_first_install_dns
 install_package_transactionally
 set_sing_box_path
 configure_web_auth
-configure_dns
+if [ "$DNS_BOOTSTRAP" != 1 ]; then configure_dns; fi
 configure_nfqws2
 
 say ""
