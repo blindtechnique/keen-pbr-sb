@@ -4,6 +4,8 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -12,6 +14,20 @@ namespace keen_pbr3 {
 
 struct TestRoutingResult;
 struct RuleState;
+struct FibQuery;
+struct FibAnswer;
+namespace api { struct ConfigObject; }
+
+// One row of a user-started comparison, never a persistent health task.
+struct RoutingProbeOptions {
+    std::string url;
+    std::string family{"ipv4"};
+    std::string path{"policy"};
+    std::string outbound;
+};
+
+bool valid_routing_probe_options(const std::string& target,
+                                 const RoutingProbeOptions& options);
 
 enum class RoutingHttpProbeStatus { Answered, Failed, NotApplicable, Unavailable };
 enum class RoutingHttpProbeReason {
@@ -27,6 +43,7 @@ struct RoutingHttpProbe {
     std::string url;
     std::string interface;
     std::int64_t attempted_at{0};
+    std::int64_t timeout_ms{0};
     std::optional<std::uint32_t> fwmark;
     std::optional<std::uint32_t> table;
     std::optional<long> http_status;
@@ -44,6 +61,12 @@ struct RoutingHttpProbe {
 RoutingHttpProbe probe_routing_http(
     const TestRoutingResult& result, const std::vector<RuleState>& realized,
     const std::string& requested_ip, std::chrono::steady_clock::time_point deadline,
-    HttpTransport& transport);
+    HttpTransport& transport, const std::string& url = {});
+
+RoutingHttpProbe probe_routing_http_path(
+    const TestRoutingResult& result, const std::vector<RuleState>& realized,
+    const api::ConfigObject& config, const std::map<std::string, std::uint32_t>& marks,
+    const RoutingProbeOptions& options, std::chrono::steady_clock::time_point deadline,
+    HttpTransport& transport, const std::function<FibAnswer(const FibQuery&)>& fib_lookup);
 
 } // namespace keen_pbr3

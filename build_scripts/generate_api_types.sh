@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Native Node under Git Bash needs Windows paths inside its inline JS too;
+# MSYS argument conversion alone does not rewrite fs.readFileSync/require.
+if command -v cygpath >/dev/null 2>&1; then
+  REPO_ROOT="$(cygpath -m "$REPO_ROOT")"
+fi
 mkdir -p "$REPO_ROOT/src/api/generated"
 
 MODE="write"
@@ -27,6 +32,9 @@ fi
 # Stable filenames inside the temporary directory also keep QuickType's
 # synthetic root name deterministic (`ApiTypes`).
 TMP_DIR="$(mktemp -d /tmp/keen-pbr-api-types-XXXXXX)"
+if command -v cygpath >/dev/null 2>&1; then
+  TMP_DIR="$(cygpath -m "$TMP_DIR")"
+fi
 SCHEMA_TMP="$TMP_DIR/api-types.json"
 TYPES_TMP="$TMP_DIR/api-types.hpp"
 trap 'rm -rf "$TMP_DIR"' EXIT

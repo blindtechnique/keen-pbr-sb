@@ -139,6 +139,7 @@ add_executable(keen-pbr-tests
   test_srs_decoder.cpp
   test_http_client.cpp
   test_interface_probe.cpp
+  test_interface_probe_execution.cpp
   test_config_validation.cpp
   test_config_validation_complete_metadata.cpp
   test_config_passthrough.cpp
@@ -206,6 +207,7 @@ add_executable(keen-pbr-tests
   test_openapi_runtime_contracts.cpp
   test_update_version.cpp
   test_api_test_routing.cpp
+  test_api_rule_counters.cpp
   test_api_auth.cpp
   test_api_config.cpp
   test_backup_restore.cpp
@@ -1725,6 +1727,42 @@ add_test(
   COMMAND keen-pbr-urltest-manager-tests
 )
 
+# Probe queue saturation and real freshness/publication without a router.
+add_executable(keen-pbr-interface-probe-tests
+  test_main.cpp
+  test_interface_probe.cpp
+  test_interface_probe_execution.cpp
+  test_targeted_probe_admission.cpp
+  ../src/health/interface_probe.cpp
+  ../src/health/runtime_outbound_state.cpp
+  ../src/health/url_tester.cpp
+  ../src/http/http_transport.cpp
+  ../src/log/logger.cpp
+  ../src/log/trace.cpp
+  ../src/util/blocking_executor.cpp
+  ../src/util/traced_mutex.cpp
+)
+set_target_properties(keen-pbr-interface-probe-tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+target_include_directories(keen-pbr-interface-probe-tests PRIVATE
+  ${KEEN_PBR_GENERATED_INCLUDE_DIR}
+  ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/third_party/doctest)
+target_compile_definitions(keen-pbr-interface-probe-tests PRIVATE KEEN_PBR3_TESTING)
+if(WITH_API)
+  target_compile_definitions(keen-pbr-interface-probe-tests PRIVATE WITH_API)
+endif()
+target_link_libraries(keen-pbr-interface-probe-tests PRIVATE
+  nlohmann_json::nlohmann_json fmt::fmt-header-only
+  ${KEEN_PBR_CURL_TARGET} PkgConfig::LIBNL PkgConfig::LIBNL_ROUTE Threads::Threads)
+target_compile_options(keen-pbr-interface-probe-tests PRIVATE -ffunction-sections -fdata-sections)
+# Do not let the production -rdynamic retain unused full runtime/netlink
+# builders; this executable uses their pure probe-evidence classification.
+target_link_options(keen-pbr-interface-probe-tests PRIVATE
+  -Wl,--gc-sections -Wl,--no-export-dynamic)
+keen_pbr_apply_project_options(keen-pbr-interface-probe-tests)
+add_test(NAME keen-pbr-interface-probe-tests COMMAND keen-pbr-interface-probe-tests)
+
 # Keep the allocation-free runtime firewall core publication checkpoint
 # independently buildable. No Daemon, backend, Netlink or scheduler belongs
 # in this target.
@@ -2699,6 +2737,7 @@ if(WITH_API)
     ../src/api/transport_manager_endpoint.cpp
     ../src/api/handler_registry_check.cpp
     ../src/api/handler_test_routing.cpp
+    ../src/api/handler_rule_counters.cpp
     ../src/firewall/rule_counter_evidence.cpp
     ../src/routing/policy_rule_evidence.cpp
     ../src/api/handler_dns_test.cpp

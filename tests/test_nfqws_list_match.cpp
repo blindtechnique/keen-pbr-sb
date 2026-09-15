@@ -11,18 +11,18 @@ namespace keen_pbr3::nfqws {
 TEST_CASE("nfqws hostlist parsing drops what nfqws itself ignores") {
     const auto entries = parse_hostlist(
         "#vpn\n"
-        "techcorner.ignorelist.com\n"
+        "vpn-primary.example\n"
         "\n"
         "   \n"
-        "  sddvpn.mooo.com  \n"
+        "  vpn-backup.example  \n"
         "windows.crlf.example\r\n"
         "# trailing comment\n");
 
     CHECK(
         entries ==
         std::vector<std::string>{
-            "techcorner.ignorelist.com",
-            "sddvpn.mooo.com",
+            "vpn-primary.example",
+            "vpn-backup.example",
             "windows.crlf.example",
         });
 }

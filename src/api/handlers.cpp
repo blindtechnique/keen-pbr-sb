@@ -17,6 +17,7 @@
 #include "handler_diagnostic_tasks.hpp"
 #include "handler_registry_check.hpp"
 #include "handler_test_routing.hpp"
+#include "handler_rule_counters.hpp"
 #include "handler_transports.hpp"
 #include "handler_subscriptions.hpp"
 #include "../config/subscription_refresh.hpp"
@@ -62,6 +63,7 @@ void register_api_handlers(ApiServer& server, ApiContext& ctx) {
     register_runtime_inventory_handler(server, ctx);
     register_diagnostic_tasks_handler(server, ctx);
     register_test_routing_handler(server, ctx);
+    register_rule_counters_handler(server, ctx);
     register_registry_check_handler(server, ctx);
     register_transports_handler(server, ctx);
     register_subscriptions_handler(server, ctx);

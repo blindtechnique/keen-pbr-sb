@@ -43,6 +43,12 @@ ROTATOR_TCP_SUCCESS_INSEQ = 8192
 ROTATOR_TCP_REPLY_RANGE_SEQ = ROTATOR_TCP_SUCCESS_INSEQ + 1460
 # udp_in=1 proves success on the second incoming datagram.
 ROTATOR_UDP_REPLY_RANGE_PACKETS = 2
+# General TCP can stall after an apparently healthy first 16-20 KiB. Keep
+# the native autohostlist observation aligned with circular: for an unlisted
+# host the C detector runs before Lua is selected. Its stock 4 KiB success
+# cutoff otherwise hides these later failures from every strategy.
+GENERAL_TCP_SUCCESS_INSEQ = 26000
+GENERAL_TCP_REQUEST_MAXSEQ = 65536
 
 # alias -> файл в /opt/etc/nfqws2/blobs
 BLOB_FILES = {
@@ -451,9 +457,14 @@ def build(profile_name, spec):
     # Do not lower inseq to 8 KiB: a TCP 16-20 freeze can happen after that.
     args = [f"--filter-tcp={FILTER_TCP}",
             "--filter-l7=" + ("unknown," if with_syn else "") + "http,tls,mtproto",
+            *([f"--hostlist-auto-incoming-maxseq={GENERAL_TCP_SUCCESS_INSEQ}",
+               f"--hostlist-auto-retrans-maxseq={GENERAL_TCP_REQUEST_MAXSEQ}"]
+              if profile_name in ("02 balanced", "03 max") else []),
             "--payload=tls_client_hello,tls_server_hello,mtproto_initial,unknown,empty",
-            "--in-range=-s27460", "--out-range=-s66996",
-            circular("tcp_general", inseq=26000, maxseq=65536,
+            f"--in-range=-s{GENERAL_TCP_SUCCESS_INSEQ + 1460}",
+            f"--out-range=-s{GENERAL_TCP_REQUEST_MAXSEQ + 1460}",
+            circular("tcp_general", inseq=GENERAL_TCP_SUCCESS_INSEQ,
+                     maxseq=GENERAL_TCP_REQUEST_MAXSEQ,
                      tcp_window=profile_name in ("02 balanced", "03 max"),
                      hostkey="keen_pbr_tcp_endpoint" if with_syn else None,
                      failure_detector="keen_pbr_syn_failure_detector" if with_syn else None),

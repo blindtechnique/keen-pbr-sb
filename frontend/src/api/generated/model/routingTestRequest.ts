@@ -5,6 +5,7 @@
  * REST API for the keen-pbr policy-based routing daemon.
  * OpenAPI spec version: 3.0.0
  */
+import type { RoutingProbeOptions } from './routingProbeOptions';
 
 export interface RoutingTestRequest {
   /** IP address or domain name to test routing for. */
@@ -12,4 +13,5 @@ export interface RoutingTestRequest {
   /** Explicit opt-in to one HTTPS HEAD request for this IP after fresh routing evaluation. The server derives mark and interface; the IP must still occur in that evaluation. Absent means no HTTP request.
    */
   http_probe_ip?: string;
+  http_probe?: RoutingProbeOptions;
 }

@@ -30,6 +30,7 @@
 #include "internal_vpn_runtime_resolution.hpp"
 #include "keenetic_dns_refresh_coordinator.hpp"
 #include "../health/interface_probe.hpp"
+#include "../health/routing_http_probe.hpp"
 #include "../health/tunnel_probe_task.hpp"
 #include "../ipc/ipc_control_service.hpp"
 #include "pid_file.hpp"
@@ -501,6 +502,7 @@ private:
         bool unapplied_draft{false};
         RawPreroutingMode raw_prerouting{};
         std::uint32_t firewall_mark_mask{0xffffffffU};
+        OutboundMarkMap outbound_marks;
     };
     RoutingTestSnapshot capture_routing_test_snapshot();
     void wake_control_loop();
@@ -969,9 +971,11 @@ private:
     // API integration
     void setup_api();
     void retire_api_runtime_resources() noexcept;
+    api::RuleCountersResponse run_api_rule_counters();
     TestRoutingResult run_api_routing_test(
         const std::string& target,
-        std::optional<std::string> http_probe_ip = std::nullopt);
+        std::optional<std::string> http_probe_ip = std::nullopt,
+        std::optional<RoutingProbeOptions> probe_options = std::nullopt);
     RuntimeMutationAdmission::Lease acquire_runtime_mutation_or_throw(
         std::string label,
         bool require_runtime_running,
@@ -1378,6 +1382,11 @@ private:
     std::shared_ptr<RuntimeFirewallOperationOwner>
         runtime_firewall_owner_;
     BlockingExecutor blocking_executor_{2, 64};
+    // A slow manual probe, URLTEST batch or domain/list download must not
+    // starve regular interface health and age every neighbour to unknown.
+    // The existing single-flight gate admits one round plus one trailing
+    // request; reserve one coordinator worker, not an unbounded probe pool.
+    BlockingExecutor interface_probe_executor_{1, 1};
     // Resolver hooks can synchronously request a generated configuration.
     // Keep command execution, streaming and TXT probes on independent queues.
     BlockingExecutor resolver_hook_executor_{1, 16};

@@ -469,6 +469,45 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/routing/counters:
+    get:
+      summary: Read a partial snapshot of applied routing rule counters
+      description: >
+        On-demand, read-only PREROUTING classifier observations. Labels and
+        indices come from one captured applied configuration, never an editor
+        draft. Reads existing kernel counters through the bounded diagnostics
+        executor; no probes, polling, counter reset, health update or firewall
+        writes. IPv4 and IPv6 reads are not atomic with each other or rule
+        replacement. No rates or deltas are calculated: physical positions are
+        not persistent identities and the last reset time is unknown.
+        These are NOT complete per-site, per-rule or per-outbound traffic totals.
+      operationId: getRoutingCounters
+      responses:
+        "200":
+          description: Partial counter snapshot, including unavailable observations
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuleCountersResponse"
+        "401":
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Diagnostics busy or unavailable; routing is not changed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "504":
+          description: Snapshot deadline exceeded; routing is not changed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/routing/test:
     post:
       summary: Test routing for an IP or domain
@@ -7527,13 +7566,40 @@ components:
             Explicit opt-in to one HTTPS HEAD request for this IP after fresh
             routing evaluation. The server derives mark and interface; the IP
             must still occur in that evaluation. Absent means no HTTP request.
+        http_probe:
+          $ref: "#/components/schemas/RoutingProbeOptions"
+
+    RoutingProbeOptions:
+      type: object
+      additionalProperties: false
+      required: [url, family, path]
+      description: >
+        Explicit single comparison probe, mutually exclusive with http_probe_ip.
+        Resolve with the existing router resolver first, then HEAD the first
+        returned address of the selected family. Never changes config or health.
+      properties:
+        url:
+          type: string
+          maxLength: 2048
+          description: Same-target HTTPS URL on port 443, including resource path/query; no credentials or fragment.
+        family:
+          type: string
+          enum: [ipv4, ipv6]
+        path:
+          type: string
+          enum: [policy, direct, outbound]
+          description: policy follows captured rules; direct queries unmarked router routing (not a guarantee of WAN); outbound pins an applied interface outbound.
+        outbound:
+          type: string
+          maxLength: 24
+          description: Required only for path outbound. Applied interface outbound tag, not an arbitrary device or mark. Groups/table-only paths are not supported here.
 
     RoutingTestHttpProbe:
       type: object
       required: [status, reason, ip, url, method, scope, interface, attempted_at]
       description: >
         One explicitly requested router-originated HTTPS HEAD probe to port 443
-        and path /. Uses the freshly evaluated IP, full mark and interface,
+        and the explicitly selected resource (default /). Uses a fresh IP, full mark and interface,
         preserves hostname TLS verification, and does not follow redirects.
         Any HTTP response is evidence of a response, not site usability or
         client PREROUTING/nfqws coverage. No retries or configuration changes.
@@ -7549,7 +7615,11 @@ components:
           description: Requested destination; a changed DNS answer does not silently select a different address.
         url:
           type: string
-          description: HTTPS root URL used, or empty when the target was not usable.
+          description: HTTPS resource URL used, or empty when the target was not usable.
+        timeout_ms:
+          type: integer
+          format: int64
+          description: Actual transfer budget, at most 5000 ms; absent when no transfer started.
         method:
           type: string
           enum: [HEAD]
@@ -7747,8 +7817,10 @@ components:
       required: [family, table, chain, position, action, set_name, packets, bytes]
       description: >
         Absolute counters of one physical PREROUTING classifier associated with
-        the captured realized rule. These count all traffic matching that rule,
-        not this site or diagnostic request. Recreating rules resets counters.
+        the captured realized rule. Only packets reaching that physical row
+        are counted; conntrack fast paths and hardware acceleration may bypass
+        it. This is not complete traffic for a rule, site or diagnostic request.
+        Recreating rules resets counters; the last reset time is unknown.
         Adjacent CONNMARK, dispatcher and terminal helper rows are not summed.
       properties:
         family:
@@ -7820,6 +7892,55 @@ components:
           maxItems: 32
           items:
             $ref: "#/components/schemas/RoutingTestFirewallCounter"
+
+    RuleCounterEntry:
+      type: object
+      required: [rule_index, name, outbound, outbound_name, enabled, ipv4, ipv6]
+      properties:
+        rule_index:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Zero-based index in the captured applied config, not the current editor.
+        name:
+          type: string
+          description: Applied display name, empty for an unnamed rule.
+        outbound:
+          type: string
+          description: Configured outbound tag, not proof of a packet's chosen path.
+        outbound_name:
+          type: string
+          description: Applied outbound display name, falling back to its tag.
+        enabled:
+          type: boolean
+        ipv4:
+          $ref: "#/components/schemas/RoutingTestFirewallCounters"
+        ipv6:
+          $ref: "#/components/schemas/RoutingTestFirewallCounters"
+
+    RuleCountersResponse:
+      type: object
+      required: [captured_at, unapplied_draft, total, truncated, rules]
+      properties:
+        captured_at:
+          type: integer
+          format: int64
+          description: Report preparation time in Unix seconds, not the counters' reset time.
+        unapplied_draft:
+          type: boolean
+        total:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Number of logical rules in the captured applied config.
+        truncated:
+          type: boolean
+          description: Only the first 128 logical rules are included when true.
+        rules:
+          type: array
+          maxItems: 128
+          items:
+            $ref: "#/components/schemas/RuleCounterEntry"
 
     RoutingTestEntry:
       type: object

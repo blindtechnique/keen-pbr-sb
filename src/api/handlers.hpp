@@ -249,6 +249,10 @@ struct ApiContext {
 
     // Optional read-only report over the existing list cache, never a new owner.
     std::function<api::ListHintsResponse(const Config&)> get_list_hints_fn;
+    std::function<TestRoutingResult(const std::string&, const RoutingProbeOptions&)>
+        compute_test_routing_with_probe_fn;
+    // Optional on-demand read, sharing diagnostics admission; no runtime writer.
+    std::function<api::RuleCountersResponse()> get_rule_counters_fn;
 
     Config get_visible_config() const {
         return get_visible_config_fn();

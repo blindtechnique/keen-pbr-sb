@@ -683,6 +683,7 @@ if(WITH_API)
     src/api/transport_manager_endpoint.cpp
     src/api/handler_registry_check.cpp
     src/api/handler_test_routing.cpp
+    src/api/handler_rule_counters.cpp
     src/api/handler_dns_test.cpp
     src/api/handler_connections.cpp
     src/api/handler_nfqws.cpp

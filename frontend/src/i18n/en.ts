@@ -1,4 +1,44 @@
 export const enTranslation = {
+  ruleCounters: {
+    ipv4: "IPv4",
+    ipv6: "IPv6",
+    title: "Rule counters — partial accounting",
+    description:
+      "An on-demand snapshot of packets and bytes counted by firewall rules. Not complete site or VPN traffic, and not a connectivity test.",
+    read: "Read counters",
+    pending: "Reading counters. Routing and settings are unchanged…",
+    failed:
+      "Could not get a snapshot. Try again later. This does not mean routing has failed.",
+    done: "Snapshot received. Rules: {{count}}.",
+    limitsTitle: "What is counted",
+    units:
+      "Packets and IP-packet bytes at PREROUTING, before route selection, when a particular firewall row matches. Not connection counts or downloaded file sizes; server replies may not pass this row.",
+    fastPath:
+      "Conntrack and Keenetic hardware acceleration can bypass these rules for later packets. Even a zero counter does not prove there was no traffic or a failure.",
+    overlap:
+      "Several domains can share one IP. List overlap and rule order affect which row matches. Counters cannot be split by site or added as independent traffic totals.",
+    reset:
+      "Values accumulate since the last creation or reset of each physical firewall row. The reset time is unknown. Applying settings or restarting can recreate rows. IPv4 and IPv6 snapshots are not simultaneous.",
+    noTotals:
+      "Interface RX/TX is a separate measure of the entire interface. This report has no per-VPN totals, rates, differences between snapshots or disk history. The button reads counters; it does not reset them.",
+    snapshot:
+      "Applied-rule snapshot: {{time}}. Showing {{count}} of {{total}}. Values update only when requested.",
+    draft:
+      "There is an unapplied draft. Names, order and outbounds below come from the applied configuration.",
+    localChanges:
+      "The editor has unsaved changes. This snapshot does not include them: it describes applied rules.",
+    truncated:
+      "Only the first 128 rules are shown. This is not the full configuration snapshot.",
+    empty: "The applied configuration has no routing rules.",
+    unnamed: "Unnamed",
+    outbound: "Configured outbound: {{name}}",
+    disabled: "Disabled in settings",
+    physicalRows:
+      "Firewall rows: {{count}} of {{total}} — expand to see counters",
+    unavailable: "No readings",
+    ambiguous: "Ambiguous association",
+    notApplicable: "Not applicable",
+  },
   listHints: {
     title: "List hints",
     description:
@@ -2686,6 +2726,9 @@ export const enTranslation = {
         unknown: "Unknown route type",
       },
       technicalDetails: "Technical details",
+      advancedTitle: "Advanced diagnostics",
+      advancedDescription:
+        "Technical data for troubleshooting or requesting help. Not needed for everyday setup. Opening this section does not run checks or change settings.",
       details: {
         disabledByConfiguration: "Disabled by configuration",
         ruleNotFound:
@@ -2954,6 +2997,60 @@ export const enTranslation = {
       registryCdn: "Addresses belong to CDNs: {{providers}}",
       registrySource: "Source: {{service}}",
     },
+    batch: {
+      title: "Compare several addresses and paths",
+      description:
+        "Enter one domain or HTTPS URL per line. Test the page, CSS, scripts, images and video host as separate addresses. Up to 12 address, path and IP-family combinations, one at a time without retries.",
+      influence:
+        "Probes generate traffic and may affect nfqws2 auto-learning. Do not run them while capturing a failing connection. This check does not change settings, lists or tunnel health.",
+      targets: "Addresses to check",
+      placeholder: "example.com\nhttps://static.example.com/style.css",
+      paths: "Check through",
+      policy: "Current routing rules",
+      direct: "Without a keen-pbr mark",
+      pathHelp:
+        "Unmarked traffic follows the router's route, which is not necessarily outside a VPN. Only interface outbounds can be selected separately; groups follow current rules. Stopped VPNs are not started.",
+      family: "IP family",
+      method: "Method: HEAD",
+      invalidSize: "A series must contain between 1 and 12 probes.",
+      invalidResponse:
+        "The service returned an incomplete or incompatible check result.",
+      start: "Start comparison",
+      stop: "Stop series",
+      stopping:
+        "No more probes will start. Waiting for the current request, up to 60 seconds.",
+      progress: "Finished: {{count}} of {{total}}",
+      count: "Probes in series: {{count}} of 12",
+      invalidTargets:
+        "Enter a domain, IP or HTTPS URL on port 443. Remove credentials, the # fragment and spaces from the address.",
+      selectPaths: "Select at least one path and IP family.",
+      limit:
+        "A series can contain at most 12 probes. Select fewer addresses, paths or IP families.",
+      queued: "Waiting to start",
+      running: "Checking DNS, routing and the server response…",
+      cancelled: "Not started — series stopped",
+      apiFailed:
+        "The service did not return a check result. The series stopped; website availability is unknown. Check the panel connection and service version.",
+      dnsFailed: "DNS returned no address. HTTP was not checked.",
+      noAddress: "No address for this IP family. HTTP was not checked.",
+      answered: "Server responded: HTTP {{code}}",
+      httpError:
+        "Server responded: HTTP {{code}}. This is an HTTP error, not a missing connection.",
+      connectionFailed: "No HTTP response received",
+      unavailable: "Path was not checked",
+      details: "Check details",
+      dns: "DNS before HTTP: source, server and addresses",
+      actual: "Selected IP / connected IP / interface",
+      timing: "Time, ms",
+      timingValues:
+        "Total: {{elapsed}}; until TCP: {{connect}}; until TLS: {{tls}}; HTTP budget: {{timeout}}",
+      when: "Request start / finish",
+      interpretation:
+        "DNS uses the current router resolver before probing the selected path. HEAD checks only the response headers, without downloading content or following redirects. This is router-originated traffic, not a browser, video playback, Discord voice or client nfqws2-path test. TCP/TLS times are cumulative from request start; the result does not prove the presence or absence of DPI.",
+      export: "Download JSON report",
+      exportPrivacy:
+        "The report contains entered URLs, query parameters, IPs and selected outbound names. Review it before sharing. It is not automatically saved in settings or on the server.",
+    },
     routingTest: {
       retry: "Check again",
       guidance: {
@@ -3015,7 +3112,7 @@ export const enTranslation = {
         mark: "3. Firewall mark",
         counterTitle: "PREROUTING rule counters",
         counterScope:
-          "Cumulative totals for the whole rule, not this site or check. Recreating the rule may reset its counters. Zero does not mean a failure.",
+          "Counts packets reaching this physical firewall row, not all site or VPN traffic. Conntrack and hardware acceleration may bypass it. Values accumulate; recreating a row may reset them. Zero does not mean a failure.",
         counterMissing: "The service did not provide rule counters.",
         counterUnavailable: "The rule counters could not be read.",
         counterAmbiguous:

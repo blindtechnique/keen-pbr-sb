@@ -43,6 +43,38 @@ class TcpProfileTest(unittest.TestCase):
             self.assertFalse(any(':strategy=' in t for t in actions))
             self.assertEqual(len(actions), 2 if profile == '03 max' else 1)
 
+    def test_autohostlist_observes_late_tcp_stalls_before_strategy_selection(self):
+        for profile in ('02 balanced', '03 max'):
+            values = self.values(profile)[0]
+            tokens = values['NFQWS_ARGS'].split()
+            circular = next(t for t in tokens if t.startswith('--lua-desync=circular:'))
+            incoming = int(re.search(r':inseq=(\d+)', circular)[1])
+            outgoing = int(re.search(r':maxseq=(\d+)', circular)[1])
+            self.assertEqual(incoming, 26000)
+            self.assertEqual(outgoing, 65536)
+            self.assertIn(f'--hostlist-auto-incoming-maxseq={incoming}', tokens)
+            self.assertIn(f'--hostlist-auto-retrans-maxseq={outgoing}', tokens)
+            # These are C-engine profile options, not Lua arguments. The
+            # engine must see them even before a host qualifies for circular.
+            self.assertNotIn('hostlist-auto', circular)
+
+    def test_late_auto_detection_is_tcp_only_and_does_not_force_bypass(self):
+        for profile in self.gen['PROFILES']:
+            values = self.values(profile)[0]
+            for name, value in values.items():
+                if name != 'NFQWS_ARGS' or profile == '01 safe':
+                    self.assertNotIn('--hostlist-auto-incoming-maxseq', value, (profile, name))
+                    self.assertNotIn('--hostlist-auto-retrans-maxseq', value, (profile, name))
+                self.assertNotIn('--hostlist-auto-retrans-reset', value)
+                self.assertNotIn('--hostlist-auto-fail-threshold', value)
+                self.assertNotIn('--hostlist-auto-fail-time', value)
+                self.assertNotIn('pvvstream', value)
+            self.assertEqual(values['NFQWS_EXTRA_ARGS'], '$MODE_AUTO')
+            self.assertTrue(values['MODE_AUTO'].startswith('$MODE_LIST '))
+            self.assertIn('--hostlist-exclude=', values['MODE_LIST'])
+            self.assertNotIn('--hostlist-auto', values['MODE_LIST'])
+            self.assertNotIn('--hostlist-auto', values['MODE_ALL'])
+
     def test_ip_selected_mtproto_observes_both_directions_without_a_host_requirement(self):
         for profile in self.gen['PROFILES']:
             custom = self.values(profile)[0]['NFQWS_ARGS_CUSTOM']

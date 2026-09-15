@@ -1750,6 +1750,17 @@ namespace api {
         std::optional<TtlBypassState> ttl_bypass_state;
     };
 
+    enum class Family : int { IPV4, IPV6 };
+
+    enum class Path : int { DIRECT, OUTBOUND, POLICY };
+
+    struct RoutingProbeOptions {
+        Family family;
+        std::optional<std::string> outbound;
+        Path path;
+        std::string url;
+    };
+
     struct RoutingTestConnection {
         std::string destination;
         int64_t destination_port = 0;
@@ -1772,8 +1783,6 @@ namespace api {
     enum class Evaluation : int { INSUFFICIENT_CONTEXT, MATCHED, NOT_MATCHED };
 
     enum class RoutingTestFirewallCounterAction : int { DROP, MARK, PASS };
-
-    enum class Family : int { IPV4, IPV6 };
 
     struct RoutingTestFirewallCounterElement {
         RoutingTestFirewallCounterAction action;
@@ -1874,6 +1883,7 @@ namespace api {
         RoutingTestHttpProbeScope scope;
         RoutingTestHttpProbeStatus status;
         std::optional<int64_t> table;
+        std::optional<int64_t> timeout_ms;
         std::optional<int64_t> tls_ms;
         std::string url;
     };
@@ -1908,6 +1918,7 @@ namespace api {
     };
 
     struct RoutingTestRequest {
+        std::optional<RoutingProbeOptions> http_probe;
         std::optional<std::string> http_probe_ip;
         std::string target;
     };
@@ -1950,6 +1961,24 @@ namespace api {
         std::string target;
         bool unapplied_draft = false;
         std::vector<std::string> warnings;
+    };
+
+    struct RuleCounterEntry {
+        bool enabled = false;
+        FirewallCounters ipv4;
+        FirewallCounters ipv6;
+        std::string name;
+        std::string outbound;
+        std::string outbound_name;
+        int64_t rule_index = 0;
+    };
+
+    struct RuleCountersResponse {
+        int64_t captured_at = 0;
+        std::vector<RuleCounterEntry> rules;
+        int64_t total = 0;
+        bool truncated = false;
+        bool unapplied_draft = false;
     };
 
     enum class LinkUptimeSource : int { FIRMWARE, OBSERVED };
@@ -2686,6 +2715,7 @@ namespace api {
         std::optional<RouteTableCheck> route_table_check;
         std::optional<RoutingHealthErrorResponse> routing_health_error_response;
         std::optional<RoutingHealthResponse> routing_health_response;
+        std::optional<RoutingProbeOptions> routing_probe_options;
         std::optional<RoutingTestConnection> routing_test_connection;
         std::optional<RoutingTestConnections> routing_test_connections;
         std::optional<RoutingTestEntry> routing_test_entry;
@@ -2706,6 +2736,8 @@ namespace api {
         std::optional<RoutingTestRuleDiagnosticElement> routing_test_rule_diagnostic;
         std::optional<RoutingTestRuleIpDiagnosticElement> routing_test_rule_ip_diagnostic;
         std::optional<RoutingTestUnknownConditionElement> routing_test_unknown_condition;
+        std::optional<RuleCounterEntry> rule_counter_entry;
+        std::optional<RuleCountersResponse> rule_counters_response;
         std::optional<RuntimeInterfaceInventoryEntry> runtime_interface_inventory_entry;
         std::optional<RuntimeInterfaceInventoryResponse> runtime_interface_inventory_response;
         std::optional<RuntimeInterfaceInventoryStatusEnum> runtime_interface_inventory_status;
@@ -3244,6 +3276,9 @@ void to_json(json & j, const RoutingHealthErrorResponse & x);
 void from_json(const json & j, RoutingHealthResponse & x);
 void to_json(json & j, const RoutingHealthResponse & x);
 
+void from_json(const json & j, RoutingProbeOptions & x);
+void to_json(json & j, const RoutingProbeOptions & x);
+
 void from_json(const json & j, RoutingTestConnection & x);
 void to_json(json & j, const RoutingTestConnection & x);
 
@@ -3294,6 +3329,12 @@ void to_json(json & j, const RoutingTestRuleDiagnosticElement & x);
 
 void from_json(const json & j, RoutingTestResponse & x);
 void to_json(json & j, const RoutingTestResponse & x);
+
+void from_json(const json & j, RuleCounterEntry & x);
+void to_json(json & j, const RuleCounterEntry & x);
+
+void from_json(const json & j, RuleCountersResponse & x);
+void to_json(json & j, const RuleCountersResponse & x);
 
 void from_json(const json & j, RuntimeInterfaceTrafficPointElement & x);
 void to_json(json & j, const RuntimeInterfaceTrafficPointElement & x);
@@ -3751,14 +3792,17 @@ void to_json(json & j, const SystemAuthState & x);
 void from_json(const json & j, TtlBypassState & x);
 void to_json(json & j, const TtlBypassState & x);
 
+void from_json(const json & j, Family & x);
+void to_json(json & j, const Family & x);
+
+void from_json(const json & j, Path & x);
+void to_json(json & j, const Path & x);
+
 void from_json(const json & j, Evaluation & x);
 void to_json(json & j, const Evaluation & x);
 
 void from_json(const json & j, RoutingTestFirewallCounterAction & x);
 void to_json(json & j, const RoutingTestFirewallCounterAction & x);
-
-void from_json(const json & j, Family & x);
-void to_json(json & j, const Family & x);
 
 void from_json(const json & j, RoutingTestFirewallCountersScope & x);
 void to_json(json & j, const RoutingTestFirewallCountersScope & x);
@@ -7117,6 +7161,21 @@ namespace api {
         j["ttl_bypass_state"] = x.ttl_bypass_state;
     }
 
+    inline void from_json(const json & j, RoutingProbeOptions& x) {
+        x.family = j.at("family").get<Family>();
+        x.outbound = get_stack_optional<std::string>(j, "outbound");
+        x.path = j.at("path").get<Path>();
+        x.url = j.at("url").get<std::string>();
+    }
+
+    inline void to_json(json & j, const RoutingProbeOptions & x) {
+        j = json::object();
+        j["family"] = x.family;
+        j["outbound"] = x.outbound;
+        j["path"] = x.path;
+        j["url"] = x.url;
+    }
+
     inline void from_json(const json & j, RoutingTestConnection& x) {
         x.destination = j.at("destination").get<std::string>();
         x.destination_port = j.at("destination_port").get<int64_t>();
@@ -7312,6 +7371,7 @@ namespace api {
         x.scope = j.at("scope").get<RoutingTestHttpProbeScope>();
         x.status = j.at("status").get<RoutingTestHttpProbeStatus>();
         x.table = get_stack_optional<int64_t>(j, "table");
+        x.timeout_ms = get_stack_optional<int64_t>(j, "timeout_ms");
         x.tls_ms = get_stack_optional<int64_t>(j, "tls_ms");
         x.url = j.at("url").get<std::string>();
     }
@@ -7331,6 +7391,7 @@ namespace api {
         j["scope"] = x.scope;
         j["status"] = x.status;
         j["table"] = x.table;
+        j["timeout_ms"] = x.timeout_ms;
         j["tls_ms"] = x.tls_ms;
         j["url"] = x.url;
     }
@@ -7393,12 +7454,14 @@ namespace api {
     }
 
     inline void from_json(const json & j, RoutingTestRequest& x) {
+        x.http_probe = get_stack_optional<RoutingProbeOptions>(j, "http_probe");
         x.http_probe_ip = get_stack_optional<std::string>(j, "http_probe_ip");
         x.target = j.at("target").get<std::string>();
     }
 
     inline void to_json(json & j, const RoutingTestRequest & x) {
         j = json::object();
+        j["http_probe"] = x.http_probe;
         j["http_probe_ip"] = x.http_probe_ip;
         j["target"] = x.target;
     }
@@ -7480,6 +7543,44 @@ namespace api {
         j["target"] = x.target;
         j["unapplied_draft"] = x.unapplied_draft;
         j["warnings"] = x.warnings;
+    }
+
+    inline void from_json(const json & j, RuleCounterEntry& x) {
+        x.enabled = j.at("enabled").get<bool>();
+        x.ipv4 = j.at("ipv4").get<FirewallCounters>();
+        x.ipv6 = j.at("ipv6").get<FirewallCounters>();
+        x.name = j.at("name").get<std::string>();
+        x.outbound = j.at("outbound").get<std::string>();
+        x.outbound_name = j.at("outbound_name").get<std::string>();
+        x.rule_index = j.at("rule_index").get<int64_t>();
+    }
+
+    inline void to_json(json & j, const RuleCounterEntry & x) {
+        j = json::object();
+        j["enabled"] = x.enabled;
+        j["ipv4"] = x.ipv4;
+        j["ipv6"] = x.ipv6;
+        j["name"] = x.name;
+        j["outbound"] = x.outbound;
+        j["outbound_name"] = x.outbound_name;
+        j["rule_index"] = x.rule_index;
+    }
+
+    inline void from_json(const json & j, RuleCountersResponse& x) {
+        x.captured_at = j.at("captured_at").get<int64_t>();
+        x.rules = j.at("rules").get<std::vector<RuleCounterEntry>>();
+        x.total = j.at("total").get<int64_t>();
+        x.truncated = j.at("truncated").get<bool>();
+        x.unapplied_draft = j.at("unapplied_draft").get<bool>();
+    }
+
+    inline void to_json(json & j, const RuleCountersResponse & x) {
+        j = json::object();
+        j["captured_at"] = x.captured_at;
+        j["rules"] = x.rules;
+        j["total"] = x.total;
+        j["truncated"] = x.truncated;
+        j["unapplied_draft"] = x.unapplied_draft;
     }
 
     inline void from_json(const json & j, RuntimeInterfaceTrafficPointElement& x) {
@@ -8655,6 +8756,7 @@ namespace api {
         x.route_table_check = get_stack_optional<RouteTableCheck>(j, "RouteTableCheck");
         x.routing_health_error_response = get_stack_optional<RoutingHealthErrorResponse>(j, "RoutingHealthErrorResponse");
         x.routing_health_response = get_stack_optional<RoutingHealthResponse>(j, "RoutingHealthResponse");
+        x.routing_probe_options = get_stack_optional<RoutingProbeOptions>(j, "RoutingProbeOptions");
         x.routing_test_connection = get_stack_optional<RoutingTestConnection>(j, "RoutingTestConnection");
         x.routing_test_connections = get_stack_optional<RoutingTestConnections>(j, "RoutingTestConnections");
         x.routing_test_entry = get_stack_optional<RoutingTestEntry>(j, "RoutingTestEntry");
@@ -8675,6 +8777,8 @@ namespace api {
         x.routing_test_rule_diagnostic = get_stack_optional<RoutingTestRuleDiagnosticElement>(j, "RoutingTestRuleDiagnostic");
         x.routing_test_rule_ip_diagnostic = get_stack_optional<RoutingTestRuleIpDiagnosticElement>(j, "RoutingTestRuleIpDiagnostic");
         x.routing_test_unknown_condition = get_stack_optional<RoutingTestUnknownConditionElement>(j, "RoutingTestUnknownCondition");
+        x.rule_counter_entry = get_stack_optional<RuleCounterEntry>(j, "RuleCounterEntry");
+        x.rule_counters_response = get_stack_optional<RuleCountersResponse>(j, "RuleCountersResponse");
         x.runtime_interface_inventory_entry = get_stack_optional<RuntimeInterfaceInventoryEntry>(j, "RuntimeInterfaceInventoryEntry");
         x.runtime_interface_inventory_response = get_stack_optional<RuntimeInterfaceInventoryResponse>(j, "RuntimeInterfaceInventoryResponse");
         x.runtime_interface_inventory_status = get_stack_optional<RuntimeInterfaceInventoryStatusEnum>(j, "RuntimeInterfaceInventoryStatus");
@@ -8950,6 +9054,7 @@ namespace api {
         j["RouteTableCheck"] = x.route_table_check;
         j["RoutingHealthErrorResponse"] = x.routing_health_error_response;
         j["RoutingHealthResponse"] = x.routing_health_response;
+        j["RoutingProbeOptions"] = x.routing_probe_options;
         j["RoutingTestConnection"] = x.routing_test_connection;
         j["RoutingTestConnections"] = x.routing_test_connections;
         j["RoutingTestEntry"] = x.routing_test_entry;
@@ -8970,6 +9075,8 @@ namespace api {
         j["RoutingTestRuleDiagnostic"] = x.routing_test_rule_diagnostic;
         j["RoutingTestRuleIpDiagnostic"] = x.routing_test_rule_ip_diagnostic;
         j["RoutingTestUnknownCondition"] = x.routing_test_unknown_condition;
+        j["RuleCounterEntry"] = x.rule_counter_entry;
+        j["RuleCountersResponse"] = x.rule_counters_response;
         j["RuntimeInterfaceInventoryEntry"] = x.runtime_interface_inventory_entry;
         j["RuntimeInterfaceInventoryResponse"] = x.runtime_interface_inventory_response;
         j["RuntimeInterfaceInventoryStatus"] = x.runtime_interface_inventory_status;
@@ -11044,6 +11151,36 @@ namespace api {
         }
     }
 
+    inline void from_json(const json & j, Family & x) {
+        if (j == "ipv4") x = Family::IPV4;
+        else if (j == "ipv6") x = Family::IPV6;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"Family\""); }
+    }
+
+    inline void to_json(json & j, const Family & x) {
+        switch (x) {
+            case Family::IPV4: j = "ipv4"; break;
+            case Family::IPV6: j = "ipv6"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"Family\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, Path & x) {
+        if (j == "direct") x = Path::DIRECT;
+        else if (j == "outbound") x = Path::OUTBOUND;
+        else if (j == "policy") x = Path::POLICY;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"Path\""); }
+    }
+
+    inline void to_json(json & j, const Path & x) {
+        switch (x) {
+            case Path::DIRECT: j = "direct"; break;
+            case Path::OUTBOUND: j = "outbound"; break;
+            case Path::POLICY: j = "policy"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"Path\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
     inline void from_json(const json & j, Evaluation & x) {
         if (j == "insufficient_context") x = Evaluation::INSUFFICIENT_CONTEXT;
         else if (j == "matched") x = Evaluation::MATCHED;
@@ -11073,20 +11210,6 @@ namespace api {
             case RoutingTestFirewallCounterAction::MARK: j = "mark"; break;
             case RoutingTestFirewallCounterAction::PASS: j = "pass"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"RoutingTestFirewallCounterAction\": " + std::to_string(static_cast<int>(x)));
-        }
-    }
-
-    inline void from_json(const json & j, Family & x) {
-        if (j == "ipv4") x = Family::IPV4;
-        else if (j == "ipv6") x = Family::IPV6;
-        else { throw std::runtime_error("Cannot deserialize to enumeration \"Family\""); }
-    }
-
-    inline void to_json(json & j, const Family & x) {
-        switch (x) {
-            case Family::IPV4: j = "ipv4"; break;
-            case Family::IPV6: j = "ipv6"; break;
-            default: throw std::runtime_error("Unexpected value in enumeration \"Family\": " + std::to_string(static_cast<int>(x)));
         }
     }
 

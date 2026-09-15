@@ -6,6 +6,7 @@
 
 #include "../src/api/auth_runtime.hpp"
 #include "../src/api/handler_remote_access.hpp"
+#include "../src/api/handler_rule_counters.hpp"
 #include "../src/api/keenetic_auth.hpp"
 #include "../src/api/local_password_hash.hpp"
 #include "../src/api/server.hpp"
@@ -448,6 +449,47 @@ TEST_CASE("missing auth file keeps the bootstrap API open") {
     CHECK_FALSE(status.contains("keenetic_endpoint"));
     REQUIRE(protected_response != nullptr);
     CHECK(protected_response->status == 200);
+}
+
+TEST_CASE("rule counter reads use the existing session without additional credentials") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    write_text(auth_path,
+        R"({"enabled":true,"provider":"local","username":"admin","password":"secret"})");
+    EnvironmentVariableGuard auth_file("KEEN_PBR_AUTH_FILE", auth_path.string());
+    SseBroadcaster broadcaster;
+    ApiContext context{(directory.path / "unused-config.json").string(), broadcaster};
+    std::atomic<unsigned int> reads{0U};
+    context.get_rule_counters_fn = [&]() {
+        ++reads;
+        return build_rule_counters_response(Config{}, false, {});
+    };
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    register_rule_counters_handler(server, context);
+    server.start();
+    httplib::Client client("127.0.0.1", configured_port(config));
+
+    const auto anonymous = client.Get("/api/routing/counters");
+    REQUIRE(anonymous != nullptr);
+    CHECK(anonymous->status == 401);
+    CHECK(anonymous->get_header_value("Cache-Control") == "no-store");
+    CHECK(reads.load(std::memory_order_relaxed) == 0U);
+
+    const auto login = client.Post("/api/auth/login",
+        R"({"username":"admin","password":"secret"})", "application/json");
+    REQUIRE(login != nullptr);
+    REQUIRE(login->status == 200);
+    const httplib::Headers session{{"Cookie", session_cookie(*login)}};
+    // No step-up request and no grant: both reads use just the panel session.
+    for (unsigned int expected = 1U; expected <= 2U; ++expected) {
+        const auto response = client.Get("/api/routing/counters", session);
+        REQUIRE(response != nullptr);
+        CHECK(response->status == 200);
+        CHECK(response->get_header_value("Cache-Control") == "no-store");
+        CHECK(reads.load(std::memory_order_relaxed) == expected);
+        CHECK(nlohmann::json::parse(response->body).at("rules").empty());
+    }
 }
 
 TEST_CASE("present invalid auth file fails closed as auth_misconfigured") {

@@ -1077,6 +1077,7 @@ Daemon::~Daemon() {
     cleanup_step("discard queued blocking work", [this] {
         runtime_firewall_owner_->cancel_pending_work();
         runtime_firewall_owner_->pump_terminal_for_shutdown();
+        interface_probe_executor_.cancel_pending();
         blocking_executor_.cancel_pending();
     });
     cleanup_step("drain resolver stream recovery", [this] {
@@ -1124,6 +1125,9 @@ Daemon::~Daemon() {
     });
     cleanup_step("stop routing test executor", [this] {
         routing_test_executor_.cancel_pending_and_shutdown();
+    });
+    cleanup_step("stop interface probe executor", [this] {
+        interface_probe_executor_.cancel_pending_and_shutdown();
     });
     cleanup_step("stop blocking executor", [this] {
         blocking_executor_.cancel_pending_and_shutdown();
@@ -3308,6 +3312,7 @@ Daemon::RoutingTestSnapshot Daemon::capture_routing_test_snapshot() {
         config_store_.config_is_draft(),
         firewall_->raw_prerouting_mode(),
         firewall_state_.get_fwmark_mask(),
+        firewall_state_.get_outbound_marks(),
     };
 }
 
@@ -15245,6 +15250,7 @@ void Daemon::run() {
         // first would force this startup exception path back to unowned
         // direct kernel writes.
         runtime_firewall_owner_->prepare_for_process_cleanup();
+        interface_probe_executor_.cancel_pending();
         blocking_executor_.cancel_pending();
         quiesce_resolver_stream_recovery();
         quiesce_runtime_mutations();
@@ -15295,6 +15301,7 @@ void Daemon::run() {
             RemoteAccessRemovalMode::expected_teardown);
 #endif
         routing_test_executor_.cancel_pending_and_shutdown();
+        interface_probe_executor_.cancel_pending_and_shutdown();
         blocking_executor_.cancel_pending_and_shutdown();
         try {
             unregister_interface_monitor_fd();
@@ -15368,6 +15375,7 @@ void Daemon::run() {
     // unclaimed blocking work, then drain every admitted/background owner
     // while its executor, watchdog scheduler and resolver IPC remain alive.
     runtime_firewall_owner_->prepare_for_process_cleanup();
+    interface_probe_executor_.cancel_pending();
     blocking_executor_.cancel_pending();
     // Admission is closed before quiescence, so new HTTP/SIGHUP writers are
     // rejected. Existing owners keep their token and may finish through the
@@ -15426,6 +15434,7 @@ void Daemon::run() {
     resolver_stream_executor_.cancel_pending_and_shutdown();
     resolver_io_executor_.cancel_pending_and_shutdown();
     routing_test_executor_.cancel_pending_and_shutdown();
+    interface_probe_executor_.cancel_pending_and_shutdown();
     blocking_executor_.cancel_pending_and_shutdown();
 
     teardown_dns_probe();

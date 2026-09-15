@@ -101,6 +101,7 @@ import type {
   RoutingHealthResponse,
   RoutingTestRequest,
   RoutingTestResponse,
+  RuleCountersResponse,
   RuntimeInterfaceInventoryResponse,
   RuntimeInventoryResponse,
   RuntimeOutboundsResponse,
@@ -1758,6 +1759,136 @@ export const usePostConfigDiscard = <TError = ErrorResponse,
       > => {
       return useMutation(getPostConfigDiscardMutationOptions(options), queryClient);
     }
+
+/**
+ * On-demand, read-only PREROUTING classifier observations. Labels and indices come from one captured applied configuration, never an editor draft. Reads existing kernel counters through the bounded diagnostics executor; no probes, polling, counter reset, health update or firewall writes. IPv4 and IPv6 reads are not atomic with each other or rule replacement. No rates or deltas are calculated: physical positions are not persistent identities and the last reset time is unknown. These are NOT complete per-site, per-rule or per-outbound traffic totals.
+
+ * @summary Read a partial snapshot of applied routing rule counters
+ */
+export type getRoutingCountersResponse200 = {
+  data: RuleCountersResponse
+  status: 200
+}
+
+export type getRoutingCountersResponse401 = {
+  data: ErrorResponse
+  status: 401
+}
+
+export type getRoutingCountersResponse503 = {
+  data: ErrorResponse
+  status: 503
+}
+
+export type getRoutingCountersResponse504 = {
+  data: ErrorResponse
+  status: 504
+}
+
+export type getRoutingCountersResponseSuccess = (getRoutingCountersResponse200) & {
+  headers: Headers;
+};
+export type getRoutingCountersResponseError = (getRoutingCountersResponse401 | getRoutingCountersResponse503 | getRoutingCountersResponse504) & {
+  headers: Headers;
+};
+
+export type getRoutingCountersResponse = (getRoutingCountersResponseSuccess | getRoutingCountersResponseError)
+
+export const getGetRoutingCountersUrl = () => {
+
+
+
+
+  return `/api/routing/counters`
+}
+
+export const getRoutingCounters = async ( options?: RequestInit): Promise<getRoutingCountersResponse> => {
+
+  return apiFetch<getRoutingCountersResponse>(getGetRoutingCountersUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetRoutingCountersQueryKey = () => {
+    return [
+    `/api/routing/counters`
+    ] as const;
+    }
+
+
+export const getGetRoutingCountersQueryOptions = <TData = Awaited<ReturnType<typeof getRoutingCounters>>, TError = ErrorResponse>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getRoutingCounters>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetRoutingCountersQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getRoutingCounters>>> = ({ signal }) => getRoutingCounters({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getRoutingCounters>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetRoutingCountersQueryResult = NonNullable<Awaited<ReturnType<typeof getRoutingCounters>>>
+export type GetRoutingCountersQueryError = ErrorResponse
+
+
+export function useGetRoutingCounters<TData = Awaited<ReturnType<typeof getRoutingCounters>>, TError = ErrorResponse>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getRoutingCounters>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getRoutingCounters>>,
+          TError,
+          Awaited<ReturnType<typeof getRoutingCounters>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetRoutingCounters<TData = Awaited<ReturnType<typeof getRoutingCounters>>, TError = ErrorResponse>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getRoutingCounters>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getRoutingCounters>>,
+          TError,
+          Awaited<ReturnType<typeof getRoutingCounters>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetRoutingCounters<TData = Awaited<ReturnType<typeof getRoutingCounters>>, TError = ErrorResponse>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getRoutingCounters>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Read a partial snapshot of applied routing rule counters
+ */
+
+export function useGetRoutingCounters<TData = Awaited<ReturnType<typeof getRoutingCounters>>, TError = ErrorResponse>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getRoutingCounters>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetRoutingCountersQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
 
 /**
  * Resolves the target (if a domain name), scans configured route rules against cached list data to determine the expected outbound, and queries the live kernel firewall sets to determine the actual outbound. Useful for diagnosing routing mismatches without restarting the daemon.

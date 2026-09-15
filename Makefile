@@ -29,7 +29,7 @@ CLANG_FEATURE_CMAKE_FLAGS := -DWITH_API=ON -DUSE_KEENETIC_API=ON
 .PHONY: all build clean distclean setup \
         frontend-build \
         frontend-api-generate \
-        transport-manager-test transport-manager-build \
+        transport-manager-test transport-manager-fuzz transport-manager-build \
         test test-api-operation-errors test-package-dns \
         firewall-it-images firewall-it \
         clang-build clang-check-production clang-check clang-tidy clang-tidy-curated \
@@ -38,6 +38,7 @@ CLANG_FEATURE_CMAKE_FLAGS := -DWITH_API=ON -DUSE_KEENETIC_API=ON
         check-nfqws-assets \
         check-nfqws-rotator-lua \
         check-nfqws-tcp-reply-native \
+        check-nfqws-autohostlist-native \
         check-nfqws-tcp-fake-kernel \
         sanitize fuzz \
         cross-setup cross-build cross-deploy \
@@ -64,6 +65,9 @@ frontend-api-generate: ## Regenerate frontend API client using the Orval version
 transport-manager-test: ## Test the transport manager companion
 	cd $(TRANSPORT_MANAGER_DIR) && go test ./...
 	cd $(TRANSPORT_MANAGER_DIR) && go vet ./...
+
+transport-manager-fuzz: ## Run bounded Go parser fuzzing (separate from the C++ fuzz target)
+	bash build_scripts/fuzz-transport-manager.sh
 
 transport-manager-build: transport-manager-test ## Cross-compile transport manager for supported Keenetic architectures
 	mkdir -p $(TRANSPORT_MANAGER_DIST_DIR)
@@ -130,6 +134,11 @@ check-nfqws-tcp-reply-native: ## Test the TCP reply helper with a supplied offic
 	@test -n "$(NFQWS_UPSTREAM)" || (echo "Set NFQWS_UPSTREAM to an extracted zapret2 v1.0.5 tree"; exit 1)
 	python3 build_scripts/tests/nfqws_tcp_reply_native.py --upstream "$(NFQWS_UPSTREAM)" --output "$(NFQWS_NATIVE_OUTPUT)"
 
+NFQWS_AUTO_OUTPUT ?= build/nfqws-autohostlist-native
+check-nfqws-autohostlist-native: ## Test late TCP auto detection with the supplied official nfqws2 (network-none container)
+	@test -n "$(NFQWS_UPSTREAM)" || (echo "Set NFQWS_UPSTREAM to an extracted zapret2 v1.0.5 tree"; exit 1)
+	python3 build_scripts/tests/nfqws_autohostlist_native.py --upstream "$(NFQWS_UPSTREAM)" --output "$(NFQWS_AUTO_OUTPUT)"
+
 # Отдельный каталог сборки: санитайзеры не должны попасть в router/IPK binary.
 sanitize: ## Build and run the unit suite under AddressSanitizer + UndefinedBehaviorSanitizer
 	cmake -S . -B build/cmake-sanitize -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=ON \
@@ -176,6 +185,7 @@ NARROW_TEST_TARGETS := \
 	keen-pbr-runtime-resolver-generation-tests \
 	keen-pbr-ipc-control-service-tests \
 	keen-pbr-urltest-manager-tests \
+	keen-pbr-interface-probe-tests \
 	keen-pbr-runtime-routing-exact-tests \
 	keen-pbr-route-failure-policy-tests \
 	keen-pbr-runtime-cold-boot-terminal-policy-tests \
@@ -197,6 +207,7 @@ test: ## Build and run unit tests (doctest)
 	python3 -m unittest build_scripts.tests.test_ctest_discovery -v
 	python3 -m unittest build_scripts.tests.test_pinned_versions -v
 	python3 -m unittest build_scripts.tests.test_netlink_uapi_compat -v
+	python3 -m unittest build_scripts.tests.test_interface_probe_execution -v
 	$(MAKE) test-package-dns
 	cmake -S . -B $(GCC_BUILD_DIR) $(GCC_CMAKE_FLAGS) -DBUILD_TESTS=ON \
 		-DWITH_API=ON -DUSE_KEENETIC_API=ON $(TEST_CMAKE_FLAGS)

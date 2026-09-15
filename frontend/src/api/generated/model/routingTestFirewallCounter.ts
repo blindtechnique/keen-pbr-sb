@@ -9,7 +9,7 @@ import type { RoutingTestFirewallCounterAction } from './routingTestFirewallCoun
 import type { RoutingTestFirewallCounterFamily } from './routingTestFirewallCounterFamily';
 
 /**
- * Absolute counters of one physical PREROUTING classifier associated with the captured realized rule. These count all traffic matching that rule, not this site or diagnostic request. Recreating rules resets counters. Adjacent CONNMARK, dispatcher and terminal helper rows are not summed.
+ * Absolute counters of one physical PREROUTING classifier associated with the captured realized rule. Only packets reaching that physical row are counted; conntrack fast paths and hardware acceleration may bypass it. This is not complete traffic for a rule, site or diagnostic request. Recreating rules resets counters; the last reset time is unknown. Adjacent CONNMARK, dispatcher and terminal helper rows are not summed.
 
  */
 export interface RoutingTestFirewallCounter {

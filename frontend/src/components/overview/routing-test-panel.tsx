@@ -31,6 +31,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { getApiErrorMessage } from "@/lib/api-errors"
 
 import { RoutingDiagnosticsResult } from "./routing-diagnostics-result"
+import { RoutingBatchPanel } from "./routing-batch-panel"
 import {
   routingHttpProbeMutationOptions,
   routingHttpProbeState,
@@ -59,6 +60,7 @@ export function RoutingTestPanel({
     null
   )
   const [activeTarget, setActiveTarget] = useState<string | null>(null)
+  const [batchRunning, setBatchRunning] = useState(false)
 
   const routingTestMutation = usePostRoutingTestMutation()
   const httpProbeMutation = usePostRoutingTestMutation(
@@ -146,7 +148,7 @@ export function RoutingTestPanel({
         className="space-y-3"
         onSubmit={(event) => {
           event.preventDefault()
-          if (routingTestMutation.isPending) {
+          if (routingTestMutation.isPending || batchRunning) {
             return
           }
 
@@ -196,7 +198,7 @@ export function RoutingTestPanel({
           <InputGroupAddon align="inline-end">
             <InputGroupButton
               className="whitespace-nowrap"
-              disabled={routingTestMutation.isPending}
+              disabled={routingTestMutation.isPending || batchRunning}
               type="submit"
               variant="default"
             >
@@ -245,6 +247,16 @@ export function RoutingTestPanel({
           </p>
         ) : null}
       </form>
+      <RoutingBatchPanel
+        outbounds={outbounds}
+        onRunning={setBatchRunning}
+        busy={
+          routingTestMutation.isPending ||
+          httpProbeMutation.isPending ||
+          browserProbeMutation.isPending ||
+          routerProbeMutation.isPending
+        }
+      />
 
       {activeTarget ? (
         <TargetFacts
@@ -320,17 +332,24 @@ export function RoutingTestPanel({
           lists={lists}
           outbounds={outbounds}
           {...httpControls}
-          onHttpProbe={(ip) => {
-            if (
-              httpProbeMutation.isPending ||
-              !routingDiagnostics.results.some((entry) => entry.ip === ip)
-            )
-              return
-            setHttpProbeBase(routingDiagnostics)
-            httpProbeMutation.mutate({
-              data: { target: routingDiagnostics.target, http_probe_ip: ip },
-            })
-          }}
+          onHttpProbe={
+            batchRunning
+              ? undefined
+              : (ip) => {
+                  if (
+                    httpProbeMutation.isPending ||
+                    !routingDiagnostics.results.some((entry) => entry.ip === ip)
+                  )
+                    return
+                  setHttpProbeBase(routingDiagnostics)
+                  httpProbeMutation.mutate({
+                    data: {
+                      target: routingDiagnostics.target,
+                      http_probe_ip: ip,
+                    },
+                  })
+                }
+          }
         />
       ) : null}
     </SectionCard>
