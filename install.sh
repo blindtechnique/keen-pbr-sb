@@ -1136,7 +1136,8 @@ choose_optional_setup() {
 prepare_first_install_dns() {
     # A working/fully configured package keeps its existing DNS until the
     # optional setup at the end. --update never enters this first-run path.
-    if /opt/bin/opkg status keen-pbr 2>/dev/null | grep -q '^Status:.* installed'; then
+    if [ "${RESUME_FIRST_INSTALL:-0}" != 1 ] &&
+       /opt/bin/opkg status keen-pbr 2>/dev/null | grep -q '^Status:.* installed'; then
         return 0
     fi
     case "$DNS_SETUP_CHOICE" in
@@ -1250,6 +1251,31 @@ prepare_first_install_retry() {
     say "Завершаю прежнюю первую установку тем же подписанным IPK; настройки и резервная копия сохраняются."
 }
 
+verify_installed_runtime() {
+    local windows="$1"
+    local attempt=1
+    local result=1
+    say "Ожидаю готовности служб и веб-интерфейса..."
+    while [ "$attempt" -le "$windows" ]; do
+        if "$RESCUE_HELPER" verify; then
+            return 0
+        else
+            result=$?
+        fi
+        # Retry a completed readiness timeout, not a lock/metadata error.
+        # The helper already reports those errors itself.
+        case "$result" in 1) ;; *) return "$result" ;; esac
+        [ "$attempt" -lt "$windows" ] || break
+        attempt=$((attempt + 1))
+        say "Первый запуск ещё не подтверждён. Продолжаю ожидание ($attempt/$windows), службы не перезапускаю."
+    done
+    say "Готовность служб или веб-интерфейса не подтверждена за отведённое время."
+    /opt/etc/init.d/S80keen-pbr check 2>&1 || true
+    /opt/etc/init.d/S79transport-manager check 2>&1 || true
+    say "Причина запуска записана в /opt/var/log/keen-pbr.log."
+    return "$result"
+}
+
 install_package_transactionally() {
     [ ! -L "$RESCUE_DIR" ] &&
         { [ ! -e "$RESCUE_DIR" ] || [ -d "$RESCUE_DIR" ]; } ||
@@ -1264,8 +1290,20 @@ install_package_transactionally() {
     fi
 
     local recovery_capability=
+    local verification_windows=1
     if [ "${RESUME_FIRST_INSTALL:-0}" = 1 ]; then
         recovery_capability=recover-pending-v1
+    fi
+    # Published helpers use one ~30s readiness window (longer for HTTP
+    # timeouts). A clean Keenetic boot can legitimately publish its API only
+    # after the daemon's 30s route-observation retry. Give first installation
+    # up to three bounded windows, retaining the same three stable successful
+    # observations in each. Never restart a service between observations.
+    # Capture this BEFORE opkg marks a successful postinst as installed.
+    if [ "$UPDATE_ONLY" = 0 ] &&
+       { [ "${RESUME_FIRST_INSTALL:-0}" = 1 ] ||
+         ! /opt/bin/opkg status keen-pbr 2>/dev/null | grep -q '^Status:.* installed'; }; then
+        verification_windows=3
     fi
     FIRST_PACKAGE_STARTED=1
 
@@ -1275,7 +1313,7 @@ install_package_transactionally() {
            KEEN_PBR_REPLACE_DNSMASQ_DEFAULTS=N \
            /opt/bin/opkg --force-reinstall install "$PACKAGE_FILE" &&
        [ -x "$RESCUE_HELPER" ] &&
-       "$RESCUE_HELPER" verify; then
+       verify_installed_runtime "$verification_windows"; then
         # The no-baseline marker is cleared only after the same signed package
         # has actually started and passed the existing runtime verification.
         if [ "${RESUME_FIRST_INSTALL:-0}" = 1 ]; then
