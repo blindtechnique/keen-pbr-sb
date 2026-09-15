@@ -16,6 +16,7 @@ LOCK_HELPER="$RESCUE_DIR/update-lock.sh"
 METADATA_HELPER="$RESCUE_DIR/portable-stat.sh"
 LOCK_DIR="/opt/var/run/keen-pbr-update.lock"
 UPDATE_ONLY=0
+AUTH_SETUP_ONLY=0
 RELEASE_CHANNEL=stable
 REQUESTED_RELEASE_TAG=${KEEN_PBR_UPDATE_RELEASE_TAG:-}
 # This one-shot handoff must not leak through opkg/postinst into new services.
@@ -36,10 +37,16 @@ RESUME_FIRST_INSTALL=0
 for argument in "$@"; do
     case "$argument" in
         --update) UPDATE_ONLY=1 ;;
+        --configure-auth) AUTH_SETUP_ONLY=1 ;;
         --alpha) RELEASE_CHANNEL=alpha ;;
         *) printf '%s\n' "ОШИБКА: неизвестный параметр: $argument" >&2; exit 2 ;;
     esac
 done
+
+if [ "$AUTH_SETUP_ONLY" = 1 ] && [ "$UPDATE_ONLY" = 1 ]; then
+    printf '%s\n' 'ОШИБКА: --configure-auth настраивает только вход; не сочетайте его с --update.' >&2
+    exit 2
+fi
 
 # stable11 downloads this source through its release tag but passes only
 # --update. Keep that legacy handoff on this release even if Latest changes;
@@ -432,10 +439,12 @@ ask_secret() {
     printf '%s ' "$prompt" >/dev/tty
     stty -echo </dev/tty 2>/dev/null || true
     answer=""
-    IFS= read -r answer </dev/tty || true
+    read_status=0
+    IFS= read -r answer </dev/tty || read_status=$?
     stty echo </dev/tty 2>/dev/null || true
     printf '\n' >/dev/tty
     printf '%s' "$answer"
+    return "$read_status"
 }
 
 fetch() {
@@ -958,51 +967,81 @@ set_sing_box_path() {
 }
 
 configure_web_auth() {
-    auth_file=/opt/etc/keen-pbr/auth.json
-    if [ -f "$auth_file" ]; then
-        keep=$(ask "Сохранить существующие настройки авторизации веб-интерфейса? [Y/n]:" "Y")
-        case "$keep" in
-            n|N|no|NO) ;;
-            *) return 0 ;;
-        esac
+    local auth_file=/opt/etc/keen-pbr/auth.json
+    local choice username password confirmation escaped_username escaped_password
+    local candidate backup published
+    [ -d /opt/etc/keen-pbr ] && [ -x /opt/etc/init.d/S80keen-pbr ] ||
+        die "keen-pbr-sb ещё не установлен. Сначала запустите установщик без --configure-auth."
+
+    say "Для входа в веб-интерфейс нужен пароль. Выберите способ входа:"
+    say "  1) Логин и пароль администратора Keenetic/Netcraze (рекомендуется)"
+    say "  2) Отдельный логин и пароль только для keen-pbr-sb"
+    while :; do
+        choice=$(ask "Выберите [1-2] (по умолчанию 1):" "1")
+        case "$choice" in 1|2) break ;; esac
+        say "Введите 1 или 2. Варианта без пароля нет."
+    done
+
+    candidate="$TMP_DIR/auth.json"
+    if [ "$choice" = 1 ]; then
+        # The router validates its own credentials. Do not copy its password.
+        printf '%s\n' '{"enabled":true,"provider":"keenetic","keenetic_endpoint_mode":"auto","session_ttl_seconds":604800}' > "$candidate"
+    else
+        say "Этот пароль действует только в keen-pbr-sb и не меняет пароль роутера или SSH."
+        while :; do
+            username=$(ask "Логин веб-интерфейса (по умолчанию admin):" "admin")
+            if [ -n "$username" ] && ! printf '%s' "$username" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+                break
+            fi
+            say "Введите непустой логин без табуляции и управляющих символов."
+        done
+        while :; do
+            password=$(ask_secret "Пароль веб-интерфейса:") ||
+                die "ввод прерван; настройки входа не изменены."
+            if [ -z "$password" ]; then
+                say "Пароль не может быть пустым. Введите его ещё раз."
+                continue
+            fi
+            if printf '%s' "$password" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+                say "Пароль содержит табуляцию или управляющий символ. Введите его ещё раз."
+                continue
+            fi
+            confirmation=$(ask_secret "Повторите пароль:") ||
+                die "ввод прерван; настройки входа не изменены."
+            [ "$password" = "$confirmation" ] && break
+            say "Пароли не совпали. Введите пароль ещё раз."
+        done
+        escaped_username=$(printf '%s' "$username" | sed 's/[\\"]/\\&/g')
+        escaped_password=$(printf '%s' "$password" | sed 's/[\\"]/\\&/g')
+        printf '{"enabled":true,"provider":"local","username":"%s","password":"%s","session_ttl_seconds":604800}\n' \
+            "$escaped_username" "$escaped_password" > "$candidate"
+        unset password confirmation escaped_password
     fi
-
-    enable=$(ask "Включить защиту веб-интерфейса паролем? [Y/n]:" "Y")
-    case "$enable" in
-        n|N|no|NO)
-            printf '%s\n' '{"enabled":false}' > "$auth_file"
-            chmod 0600 "$auth_file"
-            /opt/etc/init.d/S80keen-pbr restart
-            return 0
-            ;;
-    esac
-
-    say "Вход можно проверять учётной записью самого роутера — тогда отдельный пароль не нужен и не хранится."
-    router_auth=$(ask "Использовать учётную запись роутера (Keenetic/Netcraze)? [Y/n]:" "Y")
-    case "$router_auth" in
-        n|N|no|NO) ;;
-        *)
-            umask 077
-            printf '%s\n' '{"enabled":true,"provider":"keenetic","keenetic_endpoint_mode":"auto","session_ttl_seconds":604800}' > "$auth_file"
-            chmod 0600 "$auth_file"
-            /opt/etc/init.d/S80keen-pbr restart
-            say "Адрес и порт веб-интерфейса будут безопасно определены через локальный NDMS RCI."
-            say "Вход в keen-pbr-sb теперь выполняется логином и паролем администратора роутера."
-            return 0
-            ;;
-    esac
-
-    say "По возможности используйте отдельный пароль. Можно ввести реквизиты root Entware или администратора Keenetic, но keen-pbr-sb хранит и проверяет собственную локальную копию."
-    username=$(ask "Логин веб-интерфейса (по умолчанию admin):" "admin")
-    password=$(ask_secret "Пароль веб-интерфейса:")
-    [ -n "$password" ] || die "пароль веб-интерфейса не может быть пустым"
-    escaped_username=$(printf '%s' "$username" | sed 's/[\\"]/\\&/g')
-    escaped_password=$(printf '%s' "$password" | sed 's/[\\"]/\\&/g')
-    umask 077
-    printf '{"enabled":true,"provider":"local","username":"%s","password":"%s","session_ttl_seconds":604800}\n' \
-        "$escaped_username" "$escaped_password" > "$auth_file"
-    chmod 0600 "$auth_file"
-    /opt/etc/init.d/S80keen-pbr restart
+    chmod 0600 "$candidate"
+    if [ -f "$auth_file" ]; then
+        backup=$(mktemp "$auth_file.before-installer.XXXXXX") || die "не удалось сохранить прежние настройки входа."
+        cp "$auth_file" "$backup" && chmod 0600 "$backup" || die "не удалось сохранить прежние настройки входа."
+        say "Прежние настройки входа сохранены в $backup"
+    fi
+    # Publish on the destination filesystem, only after all input is complete.
+    published=$(mktemp "$auth_file.new.XXXXXX") || die "не удалось сохранить настройки входа."
+    if ! { cp "$candidate" "$published" && chmod 0600 "$published" && mv -f "$published" "$auth_file"; }; then
+        rm -f "$published"
+        die "не удалось сохранить настройки входа; прежний файл не заменён."
+    fi
+    say "Настройки входа сохранены. Перезапускаю keen-pbr-sb, чтобы применить их; панель временно отключится."
+    /opt/etc/init.d/S80keen-pbr restart ||
+        die "настройки входа сохранены, но служба не запустилась. Проверьте /opt/var/log/keen-pbr.log."
+    if [ ! -x "$RESCUE_HELPER" ]; then
+        RESCUE_HELPER=/opt/usr/lib/keen-pbr/rescue-update.sh
+    fi
+    [ -x "$RESCUE_HELPER" ] && verify_installed_runtime 3 ||
+        die "настройки входа сохранены, но готовность панели пока не подтверждена. Проверьте /opt/var/log/keen-pbr.log; пакет переустанавливать не нужно."
+    if [ "$choice" = 1 ]; then
+        say "Вход настроен: используйте в панели логин и пароль администратора роутера, не пароль root Entware."
+    else
+        say "Вход настроен: используйте в панели указанный отдельный логин и пароль."
+    fi
 }
 
 read_dns_override_state() {
@@ -1371,6 +1410,12 @@ case "$TMP_DIR" in
 esac
 chmod 0700 "$TMP_DIR" || die "не удалось защитить временный каталог"
 acquire_update_lock || die "другое обновление или откат keen-pbr-sb уже выполняется"
+if [ "$AUTH_SETUP_ONLY" = 1 ]; then
+    configure_web_auth
+    say "Пакет, настройки DNS, VPN и nfqws2 не изменены."
+    say "Откройте прежний адрес панели и обновите страницу."
+    exit 0
+fi
 detect_target
 if [ "$UPDATE_ONLY" = "0" ]; then
     repair_interrupted_nfqws_bootstrap
