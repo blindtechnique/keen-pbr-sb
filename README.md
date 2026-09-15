@@ -355,7 +355,32 @@ sing-box и nfqws2 опциональны. Базовый сценарий со 
 
 Команды ниже скачивают установщик из ветки `alpha` и устанавливают **последний опубликованный Alpha IPK** для вашей архитектуры. Номер выпуска в ссылке менять не нужно; параметр `--alpha` выбирает именно тестовый канал, а не Stable/Latest.
 
-Первая установка через **wget**:
+### Подготовка HTTPS
+
+Перед первой установкой подготовьте загрузчик в Entware. Выберите **один** вариант — `wget` или `curl`; устанавливать оба не нужно.
+
+Для **wget** установите поддержку HTTPS и сертификаты, затем удалите вариант без HTTPS. Выполняйте команды по одной: если `opkg update` или `opkg install` завершились ошибкой, остановитесь. Удаляйте `wget-nossl` только после успешной установки `wget-ssl`.
+
+```sh
+opkg update
+opkg install ca-certificates wget-ssl
+opkg remove wget-nossl
+```
+
+Если `wget-nossl` уже отсутствует, удалять нечего; сообщение об отсутствии этого пакета не мешает установке.
+
+Для **curl** установите сам загрузчик и сертификаты; также выполняйте команды по очереди, продолжая только после успеха предыдущей:
+
+```sh
+opkg update
+opkg install curl ca-certificates
+```
+
+Ошибка `wget: not an http or ftp url: https://...` возникает ещё до запуска установщика, если используемый `wget` не поддерживает HTTPS. Подготовка выше устанавливает загрузчик с поддержкой HTTPS; отключать проверку сертификатов или заменять HTTPS на HTTP не нужно. [Подробнее о HTTPS в Entware](https://github.com/Entware/Entware/wiki/Using-HTTPS-with-opkg).
+
+### Первая установка
+
+Через **wget**:
 
 ```sh
 sh -c "$(wget -qO- https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/alpha/install.sh)" -- --alpha
@@ -367,7 +392,9 @@ sh -c "$(wget -qO- https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/
 sh -c "$(curl -fsSL https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/alpha/install.sh)" -- --alpha
 ```
 
-**Если keen-pbr-sb уже установлен**, включая переход со Stable, добавьте `--update`. Готовая команда через **wget**:
+### Обновление
+
+**Если keen-pbr-sb уже установлен**, включая переход со Stable, добавьте `--update`. Если загрузчик ещё не подготовлен, сначала выполните подготовку HTTPS выше. Готовая команда через **wget**:
 
 ```sh
 sh -c "$(wget -qO- https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/alpha/install.sh)" -- --alpha --update
