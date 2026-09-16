@@ -255,8 +255,9 @@ NdmsHttpServiceConfig parse_ndms_running_config_http_service(
     return result;
 }
 
-NdmsHttpServiceConfig cached_running_config_http_service() {
-    const auto snapshot = shared_ndms_running_config_resource().get();
+NdmsHttpServiceConfig cached_running_config_http_service(bool refresh) {
+    auto& resource = shared_ndms_running_config_resource();
+    const auto snapshot = refresh ? resource.force_refresh() : resource.get();
     if (!snapshot.document) {
         throw std::runtime_error(
             "NDMS running-config snapshot is unavailable");
@@ -287,10 +288,12 @@ std::optional<NdmsWebEndpoint> select_ndms_web_endpoint(
 
 std::optional<NdmsWebEndpoint> discover_ndms_web_endpoint(
     const NdmsWebEndpointProbe& probe,
-    std::string* error) {
+    std::string* error,
+    const bool refresh_failed_endpoint) {
     try {
-        const auto interface_snapshot =
-            shared_ndms_interface_resource().get();
+        auto& interface_resource = shared_ndms_interface_resource();
+        const auto interface_snapshot = refresh_failed_endpoint
+            ? interface_resource.force_refresh() : interface_resource.get();
         if (!interface_snapshot.document) {
             throw std::runtime_error(
                 "NDMS interface snapshot is unavailable");
@@ -309,8 +312,9 @@ std::optional<NdmsWebEndpoint> discover_ndms_web_endpoint(
             return std::nullopt;
         }
 
-        const auto structured =
-            shared_ndms_http_service_config_cache().get();
+        auto& http_config_cache = shared_ndms_http_service_config_cache();
+        const auto structured = refresh_failed_endpoint
+            ? http_config_cache.force_refresh() : http_config_cache.get();
         if (structured.config) {
             if (!structured.config->enabled) {
                 if (error) *error = "NDMS HTTP service is disabled";
@@ -337,7 +341,8 @@ std::optional<NdmsWebEndpoint> discover_ndms_web_endpoint(
         // Older NDMS releases do not expose a usable structured subtree.
         // This is a second shared resource lookup, not another reader of the
         // structured HTTP-config URL.
-        const auto service = cached_running_config_http_service();
+        const auto service =
+            cached_running_config_http_service(refresh_failed_endpoint);
         if (!service.enabled) {
             if (error) *error = "NDMS HTTP service is disabled";
             return std::nullopt;

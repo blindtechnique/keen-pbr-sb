@@ -8,7 +8,7 @@ trap 'rm -rf "$workdir"' EXIT HUP INT TERM
 
 # Execute the shipped function bodies; replace only fixed filesystem/command
 # boundaries. No installer entrypoint, router paths, services or network calls.
-for function_name in read_dns_override_state restore_dns_setup configure_dns; do
+for function_name in read_dns_override_state restore_dns_setup ask_dns_setup configure_dns; do
     definition=$(sed -n "/^${function_name}() {/,/^}/p" "$source_script" |
         sed -e "s@/opt/usr/lib/keen-pbr/dnsmasq.conf.template@$workdir/template@g" \
             -e "s@/opt/etc/dnsmasq.conf@$workdir/dnsmasq.conf@g" \

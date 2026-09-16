@@ -6,7 +6,10 @@ import { Router } from "wouter"
 
 import type { ConfigObject, Outbound } from "../src/api/generated/model"
 import { FirstRunCard } from "../src/components/overview/first-run-card"
-import { shouldOfferInitialSetup } from "../src/components/overview/first-run-state"
+import {
+  createInitialSetupSession,
+  shouldOfferInitialSetup,
+} from "../src/components/overview/first-run-state"
 import i18n from "../src/i18n"
 import { enTranslation } from "../src/i18n/en"
 import { ruTranslation } from "../src/i18n/ru"
@@ -26,6 +29,16 @@ const clean: ConfigObject = {
 }
 
 describe("first-install invitation", () => {
+  test("opens a confirmed fresh installation once, without stealing deep links", () => {
+    const session = createInitialSetupSession()
+    expect(session.claimAutomaticOpen(false, "")).toBe(false)
+    expect(session.claimAutomaticOpen(true, "section=dns")).toBe(false)
+    expect(session.claimAutomaticOpen(true, "")).toBe(true)
+    expect(session.claimAutomaticOpen(true, "")).toBe(false)
+    const manuallyOpened = createInitialSetupSession()
+    manuallyOpened.markVisited()
+    expect(manuallyOpened.claimAutomaticOpen(true, "")).toBe(false)
+  })
   test.each(["full", "headless"])(
     "recognizes the actual Keenetic %s seed",
     async (variant) => {

@@ -282,6 +282,8 @@ struct DaemonUrltestSelectionTransaction;
 struct DaemonKeeneticDnsRefreshTransaction;
 
 struct DaemonColdBootTransaction final {
+    std::future<PreparedRuntimeInputs> input_preparation;
+    bool inputs_prepared{false};
     PreparedNativeVpnCatalogPtr prepared_native_vpn_catalog;
     std::shared_ptr<const ListCacheGenerationSnapshot>
         list_cache_snapshot;
@@ -4306,6 +4308,63 @@ void Daemon::start_runtime_cold_boot_attempt(
         schedule_runtime_cold_boot_recovery(
             transaction, "cold-boot candidate budget is exhausted");
         return;
+    }
+
+    // Firmware DNS/RCI and netlink may not be ready when Entware starts.
+    // Prepare read-only inputs on the existing executor, inside the existing
+    // cold-boot retry window, not before the daemon event loop is available.
+    // A failed observation must not terminate the process or publish routes.
+    if (!transaction->inputs_prepared) {
+        try {
+            if (!transaction->input_preparation.valid()) {
+                const auto config = active_config_snapshot_->config;
+                auto work = std::make_shared<std::packaged_task<PreparedRuntimeInputs()>>(
+                    [this, config]() {
+                        return prepare_runtime_inputs(
+                            config, RemoteListPreparationMode::None);
+                    });
+                auto result = work->get_future();
+                if (!blocking_executor_.try_post(
+                        "cold-boot-inputs", [work]() { (*work)(); })) {
+                    throw DaemonError("cold-boot input preparation queue is busy");
+                }
+                transaction->input_preparation = std::move(result);
+            }
+            if (transaction->input_preparation.wait_for(
+                    std::chrono::milliseconds{0}) != std::future_status::ready) {
+                const int task_id = scheduler_->schedule_oneshot(
+                    std::chrono::milliseconds{100},
+                    [this, transaction]() noexcept {
+                        start_runtime_cold_boot_attempt(transaction);
+                    }, "cold-boot-input-completion");
+                if (!runtime_cold_boot_scheduler_task_accepted(task_id)) {
+                    throw DaemonError("cold-boot input completion timer was rejected");
+                }
+                return;
+            }
+            auto prepared = transaction->input_preparation.get();
+            auto catalog = std::make_shared<const PreparedNativeVpnCatalog>(
+                PreparedNativeVpnCatalog{
+                    transaction->runtime_generation,
+                    std::move(prepared.internal_vpn_resolution),
+                    std::move(prepared.internal_vpn_service_resolution),
+                    /*schedule_catalog_refresh=*/false});
+            active_keenetic_dns_ = std::move(prepared.keenetic_dns);
+            transaction->interface_resolution_state = catalog->interface_resolution.state;
+            transaction->service_resolution_state = catalog->service_resolution.state;
+            transaction->prepared_native_vpn_catalog = std::move(catalog);
+            transaction->inputs_prepared = true;
+            transaction->dispatch_rejections = 0U;
+        } catch (const std::exception& error) {
+            consume_dispatch_budget();
+            schedule_runtime_cold_boot_recovery(transaction, error.what());
+            return;
+        } catch (...) {
+            consume_dispatch_budget();
+            schedule_runtime_cold_boot_recovery(
+                transaction, "cold-boot input preparation failed with an unknown error");
+            return;
+        }
     }
 
     std::unique_ptr<RuntimeMutationAdmission::Lease> lease;
@@ -15017,24 +15076,8 @@ void Daemon::run() {
                 native_mutation_admission));
 #endif
 
-    // Startup happens before the event loop. It is the one lifecycle point
-    // where a bounded shared-cache refresh may safely query loopback NDMS.
-    // Prime Keenetic DNS explicitly before the first route/firewall mutation;
-    // all runtime consumers below are cache-only and share this exact view.
-    active_keenetic_dns_ = prepare_keenetic_dns_view(
-        active_config_snapshot_->config,
-        /*allow_refresh=*/true,
-        /*force_refresh=*/true);
-    auto internal_vpn_resolution =
-        resolve_internal_vpn_servers_for_runtime(
-            active_config_snapshot_->config, true);
-    const auto internal_vpn_resolution_state =
-        internal_vpn_resolution.state;
-    auto internal_vpn_service_resolution =
-        resolve_internal_vpn_services_for_runtime(
-            active_config_snapshot_->config, true);
-    const auto internal_vpn_service_resolution_state =
-        internal_vpn_service_resolution.state;
+    // DNS and native interface observations belong to the asynchronous
+    // cold-boot attempt below: early firmware readiness is not guaranteed.
     log.info("Startup lists: checking local cache; only missing remote lists will be downloaded.");
     const auto relevant_lists = collect_relevant_list_names(active_config_snapshot_->config);
     const auto dns_relevant_lists = collect_dns_relevant_list_names(active_config_snapshot_->config);
@@ -15074,17 +15117,6 @@ void Daemon::run() {
     cold_boot->runtime_generation =
         runtime_generation_.load(std::memory_order_acquire);
     cold_boot->list_cache_snapshot = startup_list_cache_snapshot;
-    cold_boot->interface_resolution_state =
-        internal_vpn_resolution_state;
-    cold_boot->service_resolution_state =
-        internal_vpn_service_resolution_state;
-    cold_boot->prepared_native_vpn_catalog =
-        std::make_shared<const PreparedNativeVpnCatalog>(
-            PreparedNativeVpnCatalog{
-                cold_boot->runtime_generation,
-                std::move(internal_vpn_resolution),
-                std::move(internal_vpn_service_resolution),
-                /*schedule_catalog_refresh=*/false});
 
     // The store default is true for compatibility with ordinary constructed
     // snapshots. Cold boot must revoke that optimistic default before any
@@ -15212,7 +15244,16 @@ void Daemon::run() {
         // consumed the matching resolver generation. Any failure before the
         // event loop starts must therefore unwind every owned subsystem; the
         // normal shutdown tail below is never reached in this path.
-        log.error("Daemon startup failed; rolling back partial runtime state.");
+        // Log before teardown: the top-level exception handler may run after
+        // destruction of the daemon's file-log sink.
+        try {
+            throw;
+        } catch (const std::exception& error) {
+            log.error("Daemon startup failed: {}; rolling back partial runtime state.",
+                      error.what());
+        } catch (...) {
+            log.error("Daemon startup failed with an unknown error; rolling back partial runtime state.");
+        }
 #ifdef WITH_API
         cancel_nfqws_boot_recovery();
         cancel_nfqws_retention_backfill();

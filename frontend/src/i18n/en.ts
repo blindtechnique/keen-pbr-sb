@@ -670,9 +670,10 @@ export const enTranslation = {
     defaultStrategyCreated:
       "The package's new configuration was saved as strategy “{{name}}”.",
     closeResult: "Close message",
-    customConfigTitle: "A custom configuration is running",
+    standardStrategyName: "Standard nfqws2 — {{name}}",
+    customConfigTitle: "The current configuration is not saved as a strategy",
     customConfigDescription:
-      "The active nfqws2.conf matches none of the strategies in the list - that happens after editing it on the Settings tab or over ssh. Save it as a strategy, or the first Apply will overwrite it for good.",
+      "The active nfqws2.conf matches none of the listed strategies. It may be a standard configuration from another nfqws2 version or one with your changes. Save it before applying another strategy so you can return to these settings.",
     snapshotActive: "Save the current one as a strategy",
     snapshotActiveAlreadySaved:
       "The current configuration is already saved as strategy “{{name}}”.",
@@ -682,7 +683,7 @@ export const enTranslation = {
     applyDescription:
       "The strategy \u201c{{name}}\u201d replaces nfqws2.conf entirely and the service restarts. Along with the bypass arguments this also changes what the Settings tab shows: interface, ports, policy.",
     applyOverCustomDescription:
-      "The strategy \u201c{{name}}\u201d replaces nfqws2.conf entirely. What is there now is a custom configuration saved in no strategy - once applied, it cannot be brought back. Save it first with \u201cSave the current one as a strategy\u201d.",
+      "The strategy \u201c{{name}}\u201d replaces nfqws2.conf entirely. The current configuration is not in the strategy list. Use \u201cSave the current one as a strategy\u201d first so you can return to these settings.",
     strategyHeaders: {
       name: "Strategy",
       origin: "Origin",
@@ -4188,6 +4189,7 @@ export const enTranslation = {
     },
     setupWizard: {
       title: "Setup wizard",
+      setUpLater: "Set up later",
       description:
         "Connect a VPN, choose services and check the result. Settings are saved when you press action buttons; opening the wizard changes nothing.",
       steps: {

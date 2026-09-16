@@ -3348,8 +3348,11 @@ void register_nfqws_handler_impl(
             for (const auto& strategy : strategies) {
                 const auto name = strategy.value("name", std::string{});
                 auto expected = strategy.value("content", std::string{});
+                const auto saved_identity = nfqws_config_without_version_metadata(
+                    nfqws_config_strategy_identity(expected));
                 if (automatic_wan_strategy(name)) expected = render_wan_interfaces(expected);
-                if (nfqws_config_without_version_metadata(
+                if (saved_identity == active_identity ||
+                    nfqws_config_without_version_metadata(
                         nfqws_config_strategy_identity(expected)) ==
                     active_identity) {
                     active_strategy = strategy.value("name", std::string{});

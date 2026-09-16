@@ -3,6 +3,7 @@
 from pathlib import Path
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import tarfile
@@ -11,7 +12,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SOURCE = (ROOT / "install.sh").read_text()
+SOURCE = Path(os.environ.get("KPBR_TEST_INSTALLER", ROOT / "install.sh")).read_text()
 
 
 def function(name, source=SOURCE):
@@ -164,7 +165,7 @@ fetch() {{
                                  "publish_sing_box_candidate", "install_sing_box"),
                                 "install_sing_box 1.13.14", overrides)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("ABI", result.stderr)
+        self.assertIn("sing-box", result.stderr)
         self.assert_old_pair()
         self.assertFalse((self.opt / "etc/keen-pbr/sing-box-managed.path").exists())
 
@@ -262,7 +263,7 @@ fetch() {{
 
     def configure_nfqws(self, overrides=""):
         return self.run_shell(("cleanup", "configure_nfqws2"),
-                              "trap cleanup EXIT\ntrap 'exit 129' HUP\nconfigure_nfqws2",
+                              "trap cleanup EXIT\ntrap 'exit 129' HUP\nNFQWS_SETUP_CHOICE=y\nconfigure_nfqws2",
                               'ask() { printf "y\\n"; }\n' + overrides)
 
     def test_configure_feed_restored_when_update_or_dependencies_fail(self):

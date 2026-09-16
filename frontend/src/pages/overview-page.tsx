@@ -33,7 +33,10 @@ import { AdvancedRoutingDiagnostics } from "@/components/overview/advanced-routi
 import { RoutingTestPanel } from "@/components/overview/routing-test-panel"
 import { FirstRunCard } from "@/components/overview/first-run-card"
 import { RuntimeEventsFeed } from "@/components/overview/runtime-events-feed"
-import { shouldOfferInitialSetup } from "@/components/overview/first-run-state"
+import {
+  initialSetupSession,
+  shouldOfferInitialSetup,
+} from "@/components/overview/first-run-state"
 import { SystemStatusSummary } from "@/components/overview/system-status-summary"
 import { ActiveInterfaceTraffic } from "@/components/overview/active-interface-traffic"
 import { selectDashboardRuntimeOutbounds } from "@/components/overview/dashboard-outbound-relevance"
@@ -143,6 +146,12 @@ export function OverviewPage() {
     loadFailed: configQuery.isError || transportsQuery.isError,
     transports: transportStatuses,
   })
+
+  useEffect(() => {
+    if (initialSetupSession.claimAutomaticOpen(showFirstRun, search)) {
+      navigate("/setup", { replace: true })
+    }
+  }, [showFirstRun, search, navigate])
 
   useEffect(() => {
     const params = new URLSearchParams(search)

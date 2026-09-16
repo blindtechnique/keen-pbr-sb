@@ -9,7 +9,9 @@
 namespace keen_pbr3 {
 
 // One recv() block may contain zero or more dump objects followed by
-// NLMSG_DONE.  Only `more` and `done` carry usable objects; every other state
+// NLMSG_DONE. Route results contain the IPv4/IPv6 unicast-routing inventory;
+// separately addressed families such as IPMR/IP6MR are not route-manager objects.
+// Only `more` and `done` carry usable objects; every other state
 // is a fail-closed classification and returns an empty object vector.
 enum class RawRtnetlinkDumpState {
     more,

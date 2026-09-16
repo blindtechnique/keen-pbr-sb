@@ -109,6 +109,12 @@ jobs:
   backend:
     needs: resolve-source
     runs-on: ubuntu-latest
+    env:
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_DIR: ${{ github.workspace }}/.ccache-gcc
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: 2G
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -118,6 +124,7 @@ jobs:
       - name: Install native build dependencies
         run: |
           sh build_scripts/ci-install-ubuntu-deps.sh \
+            ccache \
             libcurl4-openssl-dev \
             libnl-3-dev \
             libnl-route-3-dev \
@@ -127,6 +134,14 @@ jobs:
             libxtables-dev \
             pkg-config \
             zlib1g-dev
+
+      - name: Restore native compiler cache
+        uses: actions/cache@v4
+        with:
+          path: .ccache-gcc
+          key: ${{ runner.os }}-${{ runner.arch }}-gcc-v1-${{ needs.resolve-source.outputs.source_sha }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-gcc-v1-
 
       - name: Run deterministic source and package gates
         run: >-
@@ -143,6 +158,10 @@ jobs:
 
       - name: Run IPK validator unit tests
         run: python3 -m unittest build_scripts.tests.test_validate_keenetic_ipk -v
+
+      - name: Show native compiler cache results
+        if: always()
+        run: ccache --show-stats
 
       - name: Check Keenetic connndmmark ABI adapter
         run: python3 -m unittest build_scripts.tests.test_connndmmark_compat -v
@@ -254,6 +273,12 @@ jobs:
     needs: resolve-source
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    env:
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_DIR: ${{ github.workspace }}/.ccache-clang
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: 1G
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -264,12 +289,21 @@ jobs:
         run: |
           sh build_scripts/ci-install-ubuntu-deps.sh \
             clang \
+            ccache \
             libcurl4-openssl-dev \
             libnl-3-dev \
             libnl-route-3-dev \
             libunwind-dev \
             pkg-config \
             zlib1g-dev
+
+      - name: Restore Clang compiler cache
+        uses: actions/cache@v4
+        with:
+          path: .ccache-clang
+          key: ${{ runner.os }}-${{ runner.arch }}-clang-v1-${{ needs.resolve-source.outputs.source_sha }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-clang-v1-
 
       - name: Run production Clang thread-safety checks for alpha
         if: github.event_name == 'push' && needs.resolve-source.outputs.channel == 'alpha'
@@ -278,6 +312,10 @@ jobs:
       - name: Run full Clang thread-safety checks
         if: github.event_name != 'push' || needs.resolve-source.outputs.channel != 'alpha'
         run: make clang-check BUILD_JOBS=4
+
+      - name: Show Clang compiler cache results
+        if: always()
+        run: ccache --show-stats
 
   firewall-integration:
     needs: resolve-source

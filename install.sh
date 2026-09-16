@@ -33,18 +33,19 @@ DNS_BOOTSTRAP=0
 DNS_INSTALL_ROLLBACK=0
 FIRST_PACKAGE_STARTED=0
 RESUME_FIRST_INSTALL=0
+INSTALL_LANGUAGE=${KEEN_PBR_INSTALL_LANGUAGE:-ru}
 
 for argument in "$@"; do
     case "$argument" in
         --update) UPDATE_ONLY=1 ;;
         --configure-auth) AUTH_SETUP_ONLY=1 ;;
         --alpha) RELEASE_CHANNEL=alpha ;;
-        *) printf '%s\n' "ОШИБКА: неизвестный параметр: $argument" >&2; exit 2 ;;
+        *) printf '%s\n' "ОШИБКА / ERROR: неизвестный параметр / unknown argument: $argument" >&2; exit 2 ;;
     esac
 done
 
 if [ "$AUTH_SETUP_ONLY" = 1 ] && [ "$UPDATE_ONLY" = 1 ]; then
-    printf '%s\n' 'ОШИБКА: --configure-auth настраивает только вход; не сочетайте его с --update.' >&2
+    printf '%s\n' 'ОШИБКА / ERROR: --configure-auth и / and --update несовместимы / cannot be combined.' >&2
     exit 2
 fi
 
@@ -68,7 +69,7 @@ cleanup() {
         restore_dns_setup "$INSTALL_DNS_OVERRIDE" "$INSTALL_DNS_RUNNING" \
             "$INSTALL_DNS_CONFIG" "$INSTALL_DNS_BACKUP" \
             "$INSTALL_DNS_HAD_CONFIG" "$INSTALL_DNS_RESTARTED" || {
-                printf '%s\n' "Не удалось полностью вернуть прежний DNS. Резервная копия: $INSTALL_DNS_BACKUP" >&2
+                say "Не удалось полностью вернуть прежний DNS. Резервная копия: $INSTALL_DNS_BACKUP" "Could not fully restore previous DNS settings. Backup: $INSTALL_DNS_BACKUP" >&2
                 status=1
             }
     fi
@@ -79,7 +80,7 @@ cleanup() {
         if mv "$NFQWS_SAVED_FEED" /opt/etc/opkg/nfqws2-keenetic.conf; then
             NFQWS_SAVED_FEED=
         else
-            printf '%s\n' "Не удалось вернуть источник nfqws2. Копия сохранена: $NFQWS_SAVED_FEED" >&2
+            say "Не удалось вернуть источник nfqws2. Копия сохранена: $NFQWS_SAVED_FEED" "Could not restore the nfqws2 feed. A copy is retained at: $NFQWS_SAVED_FEED" >&2
             TMP_DIR=
             status=1
         fi
@@ -396,12 +397,29 @@ acquire_update_lock() {
 }
 
 say() {
-    printf '%s\n' "$*"
+    if [ "${INSTALL_LANGUAGE:-ru}" = en ]; then
+        printf '%s\n' "${2:-$1}"
+    else
+        printf '%s\n' "$1"
+    fi
 }
 
 die() {
-    say "ОШИБКА: $*" >&2
+    say "ОШИБКА: $1" "ERROR: ${2:-$1}" >&2
     exit 1
+}
+
+choose_install_language() {
+    # Web updates have no controlling terminal and never ask interactive questions.
+    [ "$UPDATE_ONLY" = 0 ] || return 0
+    while :; do
+        language_choice=$(ask 'Язык / Language: 1 — Русский, 2 — English [1/2]:' '1')
+        case "$language_choice" in
+            1|ru|RU) INSTALL_LANGUAGE=ru; return 0 ;;
+            2|en|EN) INSTALL_LANGUAGE=en; return 0 ;;
+        esac
+        printf '%s\n' 'Введите 1 или 2 / Enter 1 or 2.' >&2
+    done
 }
 
 # Единственный способ звать Keenetic CLI из этого скрипта.
@@ -419,7 +437,7 @@ die() {
 run_ndmc() {
     ndmc_output="$(LD_LIBRARY_PATH= ndmc -c "$1" 2>&1)" && return 0
     ndmc_status=$?
-    say "Keenetic CLI не выполнил '$1':" >&2
+    say "Keenetic CLI не выполнил '$1':" "Keenetic CLI failed to execute '$1':" >&2
     printf '%s\n' "$ndmc_output" >&2
     return "$ndmc_status"
 }
@@ -427,6 +445,7 @@ run_ndmc() {
 ask() {
     prompt="$1"
     default="$2"
+    [ "${INSTALL_LANGUAGE:-ru}" != en ] || prompt="${3:-$1}"
     printf '%s ' "$prompt" >/dev/tty
     answer=""
     IFS= read -r answer </dev/tty || true
@@ -436,6 +455,7 @@ ask() {
 
 ask_secret() {
     prompt="$1"
+    [ "${INSTALL_LANGUAGE:-ru}" != en ] || prompt="${2:-$1}"
     printf '%s ' "$prompt" >/dev/tty
     stty -echo </dev/tty 2>/dev/null || true
     answer=""
@@ -459,7 +479,7 @@ fetch() {
     elif command -v wget >/dev/null 2>&1; then
         wget -T 60 -O "$output" "$url"
     else
-        die "требуется curl или wget"
+        die "требуется curl или wget" "curl or wget is required"
     fi
 }
 
@@ -470,7 +490,7 @@ github_asset_urls() {
 }
 
 detect_target() {
-    [ -x /opt/bin/opkg ] || die "Entware не подключён в /opt"
+    [ -x /opt/bin/opkg ] || die "Entware не подключён в /opt" "Entware is not mounted at /opt"
     architecture=$(/opt/bin/opkg print-architecture | awk '
         $2 != "all" && $2 !~ /_kn$/ && $3 >= priority { arch=$2; priority=$3 }
         END { print arch }
@@ -481,7 +501,7 @@ detect_target() {
         mipsel-*) KEEN_ARCH="mipsel" ;;
         mips-*) KEEN_ARCH="mips" ;;
         x64-*) KEEN_ARCH="x64" ;;
-        *) die "неподдерживаемая архитектура Entware: ${architecture:-неизвестно}" ;;
+        *) die "неподдерживаемая архитектура Entware: ${architecture:-неизвестно}" "unsupported Entware architecture: ${architecture:-unknown}" ;;
     esac
     KEEN_ABI=${architecture#*-}
 }
@@ -627,15 +647,15 @@ KEEN_PBR_RELEASE_PUBLIC_KEY_EOF
 
 ensure_release_verifier() {
     [ "$PROJECT_REPOSITORY" = "$TRUSTED_RELEASE_REPOSITORY" ] ||
-        die "Этот установщик проверяет только выпуски blindtechnique/keen-pbr-sb. Для другого проекта нужен его доверенный установщик."
+        die "Этот установщик проверяет только выпуски blindtechnique/keen-pbr-sb. Для другого проекта нужен его доверенный установщик." "This installer verifies releases from blindtechnique/keen-pbr-sb only. Use the trusted installer for any other project."
     if ! command -v openssl >/dev/null 2>&1 && [ ! -x /opt/bin/openssl ]; then
         # The unsigned stable11 updater enters this installer with --update
         # before openssl-util was a package dependency. Establish that local
         # verifier dependency from Entware before downloading/checking the IPK;
         # the signed self-updater still requires its packaged dependency first.
-        say "Устанавливаю OpenSSL для проверки подписи пакета..."
+        say "Устанавливаю OpenSSL для проверки подписи пакета..." "Installing OpenSSL to verify the package signature..."
         /opt/bin/opkg update && /opt/bin/opkg install openssl-util ||
-            die "Не удалось установить OpenSSL для проверки подписи. Установка keen-pbr-sb не началась."
+            die "Не удалось установить OpenSSL для проверки подписи. Установка keen-pbr-sb не началась." "Could not install OpenSSL for signature verification. keen-pbr-sb installation has not started."
     fi
     prepare_release_verifier
 }
@@ -648,12 +668,12 @@ select_alpha_release() {
         | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\(alpha-[0-9][0-9]*-[0-9][0-9]*\)".*/\1/p' \
         | sort -t - -k2,2n -k3,3n | tail -n 1)
     [ -n "$REQUESTED_RELEASE_TAG" ] ||
-        die "Подписанный Alpha-выпуск не найден среди последних 100 выпусков. Stable вместо него установлен не будет."
+        die "Подписанный Alpha-выпуск не найден среди последних 100 выпусков. Stable вместо него установлен не будет." "No signed Alpha release was found among the latest 100 releases. Stable will not be installed instead."
 }
 
 download_package() {
     [ "$PROJECT_REPOSITORY" = "$TRUSTED_RELEASE_REPOSITORY" ] ||
-        die "Этот установщик проверяет только выпуски blindtechnique/keen-pbr-sb. Для другого проекта нужен его доверенный установщик."
+        die "Этот установщик проверяет только выпуски blindtechnique/keen-pbr-sb. Для другого проекта нужен его доверенный установщик." "This installer verifies releases from blindtechnique/keen-pbr-sb only. Use the trusted installer for any other project."
     release_json="$TMP_DIR/release.json"
     release_url="$GITHUB_API/$PROJECT_REPOSITORY/releases/latest"
     if [ "${RELEASE_CHANNEL:-stable}" = alpha ] && [ -z "$REQUESTED_RELEASE_TAG" ]; then
@@ -661,7 +681,7 @@ download_package() {
     fi
     if [ -n "$REQUESTED_RELEASE_TAG" ]; then
         case "$REQUESTED_RELEASE_TAG" in
-            *[!A-Za-z0-9._-]*) die "Получен некорректный тег обновления. Пакет не загружен; повторите проверку обновлений." ;;
+            *[!A-Za-z0-9._-]*) die "Получен некорректный тег обновления. Пакет не загружен; повторите проверку обновлений." "Invalid update tag. The package was not downloaded; check for updates again." ;;
         esac
         release_url="$GITHUB_API/$PROJECT_REPOSITORY/releases/tags/$REQUESTED_RELEASE_TAG"
     fi
@@ -670,14 +690,14 @@ download_package() {
         | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
         | head -n 1)
     case "$RELEASE_TAG" in
-        ""|*[!A-Za-z0-9._-]*) die "GitHub вернул некорректный тег выпуска" ;;
+        ""|*[!A-Za-z0-9._-]*) die "GitHub вернул некорректный тег выпуска" "GitHub returned an invalid release tag" ;;
     esac
     if [ -n "$REQUESTED_RELEASE_TAG" ] && [ "$RELEASE_TAG" != "$REQUESTED_RELEASE_TAG" ]; then
-        die "GitHub вернул другой выпуск. Пакет не загружен; повторите проверку обновлений."
+        die "GitHub вернул другой выпуск. Пакет не загружен; повторите проверку обновлений." "GitHub returned a different release. The package was not downloaded; check for updates again."
     fi
     pattern="/keen-pbr_[^/]*_keenetic_${KEEN_ARCH}-${KEEN_ABI}\\.ipk$"
     package_url=$(github_asset_urls "$release_json" | grep -E "$pattern" | head -n 1 || true)
-    [ -n "$package_url" ] || die "в Release нет полного пакета Keenetic для ${KEEN_ARCH}-${KEEN_ABI}"
+    [ -n "$package_url" ] || die "в Release нет полного пакета Keenetic для ${KEEN_ARCH}-${KEEN_ABI}" "the release has no full Keenetic package for ${KEEN_ARCH}-${KEEN_ABI}"
     PACKAGE_FILE="$TMP_DIR/$(basename "$package_url")"
     fetch "$package_url" "$PACKAGE_FILE"
 
@@ -685,11 +705,11 @@ download_package() {
     if [ -n "$sums_url" ]; then
         fetch "$sums_url" "$TMP_DIR/SHA256SUMS"
         expected=$(awk -v name="$(basename "$PACKAGE_FILE")" '$2 == name || $2 == "*" name { print $1; exit }' "$TMP_DIR/SHA256SUMS")
-        [ -n "$expected" ] || die "пакет отсутствует в SHA256SUMS"
+        [ -n "$expected" ] || die "пакет отсутствует в SHA256SUMS" "the package is missing from SHA256SUMS"
         actual=$(sha256sum "$PACKAGE_FILE" | awk '{print $1}')
-        [ "$actual" = "$expected" ] || die "контрольная сумма пакета не совпадает"
+        [ "$actual" = "$expected" ] || die "контрольная сумма пакета не совпадает" "the package checksum does not match"
     else
-        die "в Release нет SHA256SUMS; непроверенный пакет устанавливаться не будет"
+        die "в Release нет SHA256SUMS; непроверенный пакет устанавливаться не будет" "the release has no SHA256SUMS; the unverified package will not be installed"
     fi
 
     release_base="https://github.com/$TRUSTED_RELEASE_REPOSITORY/releases/download/$RELEASE_TAG"
@@ -699,24 +719,24 @@ download_package() {
         "$TMP_DIR/release-manifest.sig" "$RELEASE_PUBLIC_KEY" \
         "$TRUSTED_RELEASE_REPOSITORY" "${RELEASE_CHANNEL:-stable}" "$RELEASE_TAG" \
         package "$KEEN_ARCH" "$KEEN_ABI" "$(basename "$PACKAGE_FILE")" "$PACKAGE_FILE" ||
-        die "Подпись пакета не подтверждена. Установка не началась; попробуйте загрузить выпуск позднее."
+        die "Подпись пакета не подтверждена. Установка не началась; попробуйте загрузить выпуск позднее." "Package signature verification failed. Installation has not started; try downloading the release later."
 }
 
 bootstrap_rescue_helpers() {
     payload="$TMP_DIR/data.tar.gz"
     helper_tree="$TMP_DIR/package-helpers"
-    mkdir "$helper_tree" || die "не удалось подготовить каталог rescue helper"
-    chmod 0700 "$helper_tree" || die "не удалось защитить каталог rescue helper"
+    mkdir "$helper_tree" || die "не удалось подготовить каталог rescue helper" "could not prepare the recovery helper directory"
+    chmod 0700 "$helper_tree" || die "не удалось защитить каталог rescue helper" "could not set permissions on the recovery helper directory"
     # BusyBox tar needs explicit gzip mode for the Entware IPK outer archive.
     tar -xzOf "$PACKAGE_FILE" ./data.tar.gz > "$payload" ||
-        die "проверенный IPK не содержит data.tar.gz"
-    [ -s "$payload" ] || die "data.tar.gz в проверенном IPK пуст"
+        die "проверенный IPK не содержит data.tar.gz" "the verified IPK has no data.tar.gz"
+    [ -s "$payload" ] || die "data.tar.gz в проверенном IPK пуст" "data.tar.gz is empty in the verified IPK"
     tar -xzf "$payload" -C "$helper_tree" \
         ./opt/usr/lib/keen-pbr/portable-stat.sh \
         ./opt/usr/lib/keen-pbr/rescue-update.sh \
         ./opt/usr/lib/keen-pbr/rescue-startup-guard.sh \
         ./opt/usr/lib/keen-pbr/update-lock.sh ||
-        die "проверенный IPK не содержит rescue helper"
+        die "проверенный IPK не содержит rescue helper" "the verified IPK has no recovery helper"
     rescue_source="$helper_tree/opt/usr/lib/keen-pbr/rescue-update.sh"
     startup_guard_source="$helper_tree/opt/usr/lib/keen-pbr/rescue-startup-guard.sh"
     lock_source="$helper_tree/opt/usr/lib/keen-pbr/update-lock.sh"
@@ -726,7 +746,7 @@ bootstrap_rescue_helpers() {
         [ ! -L "$startup_guard_source" ] &&
         [ -f "$lock_source" ] && [ ! -L "$lock_source" ] &&
         [ -f "$metadata_source" ] && [ ! -L "$metadata_source" ] ||
-        die "rescue helper в IPK имеет небезопасный тип"
+        die "rescue helper в IPK имеет небезопасный тип" "the recovery helper in the IPK is not a regular file"
     # Some Keenetic firmware shells reject -n. Prefer Entware's POSIX shell,
     # and probe syntax-check support before attributing failure to a helper.
     rescue_syntax_shell=""
@@ -738,45 +758,45 @@ bootstrap_rescue_helpers() {
         fi
     done
     [ -n "$rescue_syntax_shell" ] ||
-        die "не найдена оболочка для проверки синтаксиса; файлы восстановления не изменены"
-    "$rescue_syntax_shell" -n "$rescue_source" || die "получен повреждённый rescue helper"
+        die "не найдена оболочка для проверки синтаксиса; файлы восстановления не изменены" "no shell is available to check syntax; recovery files were not changed"
+    "$rescue_syntax_shell" -n "$rescue_source" || die "получен повреждённый rescue helper" "the recovery helper has invalid shell syntax"
     "$rescue_syntax_shell" -n "$startup_guard_source" ||
-        die "получен повреждённый startup guard"
-    "$rescue_syntax_shell" -n "$lock_source" || die "получен повреждённый update lock helper"
+        die "получен повреждённый startup guard" "the startup guard has invalid shell syntax"
+    "$rescue_syntax_shell" -n "$lock_source" || die "получен повреждённый update lock helper" "the update lock helper has invalid shell syntax"
     "$rescue_syntax_shell" -n "$metadata_source" ||
-        die "получен повреждённый metadata helper"
+        die "получен повреждённый metadata helper" "the metadata helper has invalid shell syntax"
 
     [ ! -L "$RESCUE_DIR" ] &&
         { [ ! -e "$RESCUE_DIR" ] || [ -d "$RESCUE_DIR" ]; } ||
-        die "каталог rescue имеет небезопасный тип"
+        die "каталог rescue имеет небезопасный тип" "the recovery path is not a regular directory"
     mkdir -p "$RESCUE_DIR"
-    chmod 0700 "$RESCUE_DIR" || die "не удалось защитить каталог rescue"
+    chmod 0700 "$RESCUE_DIR" || die "не удалось защитить каталог rescue" "could not set permissions on the recovery directory"
     for helper in portable-stat.sh rescue-update.sh update-lock.sh; do
         source="$helper_tree/opt/usr/lib/keen-pbr/$helper"
         temporary="$RESCUE_DIR/$helper.tmp.$$"
-        cp "$source" "$temporary" || die "не удалось подготовить $helper"
-        chmod 0755 "$temporary" || die "не удалось выставить права $helper"
+        cp "$source" "$temporary" || die "не удалось подготовить $helper" "could not prepare $helper"
+        chmod 0755 "$temporary" || die "не удалось выставить права $helper" "could not set permissions for $helper"
         mv -f "$temporary" "$RESCUE_DIR/$helper" ||
-            die "не удалось установить $helper"
+            die "не удалось установить $helper" "could not install $helper"
     done
     mkdir -p /opt/etc/init.d
     startup_guard_tmp="/opt/etc/init.d/S00keen-pbr-rescue.tmp.$$"
     cp "$startup_guard_source" "$startup_guard_tmp" ||
-        die "не удалось подготовить ранний rescue guard"
+        die "не удалось подготовить ранний rescue guard" "could not prepare the early recovery guard"
     chmod 0755 "$startup_guard_tmp" ||
-        die "не удалось выставить права раннего rescue guard"
+        die "не удалось выставить права раннего rescue guard" "could not set permissions for the early recovery guard"
     mv -f "$startup_guard_tmp" /opt/etc/init.d/S00keen-pbr-rescue ||
-        die "не удалось установить ранний rescue guard"
+        die "не удалось установить ранний rescue guard" "could not install the early recovery guard"
     sync
     # Revalidate an inherited/fallback lock using the freshly installed common
     # implementation before any package or snapshot mutation. A no-op
     # ownership transfer also upgrades the bootstrap sidecars to the v2 atomic
     # owner record used for crash-safe hand-offs.
     "$LOCK_HELPER" held "$LOCK_OWNER_PID" "$LOCK_TOKEN" ||
-        die "потеряна блокировка обновления"
+        die "потеряна блокировка обновления" "the update lock was lost"
     "$LOCK_HELPER" transfer "$LOCK_OWNER_PID" "$LOCK_TOKEN" \
         "$LOCK_OWNER_PID" >/dev/null ||
-        die "не удалось перевести блокировку обновления в безопасный формат"
+        die "не удалось перевести блокировку обновления в безопасный формат" "could not migrate the update lock format"
 }
 
 find_existing_sing_box() {
@@ -847,7 +867,7 @@ publish_sing_box_candidate() {
             if [ "$sb_restore_failed" = 0 ]; then
                 rm -rf "$sb_stage"
             else
-                printf '%s\n' "Не удалось вернуть sing-box. Предыдущие файлы сохранены: $sb_stage" >&2
+                say "Не удалось вернуть sing-box. Предыдущие файлы сохранены: $sb_stage" "Could not restore sing-box. Previous files were retained at: $sb_stage" >&2
                 sb_status=1
             fi
             trap - EXIT INT TERM HUP
@@ -860,7 +880,7 @@ publish_sing_box_candidate() {
         chmod 0755 "$sb_stage/sing-box" || exit 1
         if ! "$sb_stage/sing-box" version >/dev/null 2>&1; then
             if ! make_entware_sing_box_wrapper "$sb_stage/sing-box"; then
-                printf '%s\n' "Новый sing-box не запускается с ABI установленного Entware. Прежние файлы не изменены." >&2
+                say "Новый sing-box не запускается с ABI установленного Entware. Прежние файлы не изменены." "The new sing-box cannot run with this Entware ABI. Previous files were not changed." >&2
                 exit 1
             fi
             sb_wrapped=1
@@ -889,20 +909,20 @@ publish_sing_box_candidate() {
 install_sing_box() {
     requested_version=$1
     [ "$requested_version" = "$SING_BOX_PINNED_VERSION" ] ||
-        die "разрешена только зафиксированная версия sing-box $SING_BOX_PINNED_VERSION"
+        die "разрешена только зафиксированная версия sing-box $SING_BOX_PINNED_VERSION" "only the pinned sing-box version $SING_BOX_PINNED_VERSION is supported"
     case "$KEEN_ARCH" in
         aarch64) sing_arch="arm64" ;;
         armv7) sing_arch="armv7" ;;
         mipsel) sing_arch="mipsle" ;;
         mips) sing_arch="mips" ;;
         x64) sing_arch="amd64" ;;
-        *) die "для архитектуры $KEEN_ARCH не задан официальный архив sing-box" ;;
+        *) die "для архитектуры $KEEN_ARCH не задан официальный архив sing-box" "there is no configured official sing-box archive for $KEEN_ARCH" ;;
     esac
 
     release_json="$TMP_DIR/sing-box-release-${requested_version}.json"
     fetch "$GITHUB_API/SagerNet/sing-box/releases/tags/v${requested_version}" "$release_json"
     archive_url=$(github_asset_urls "$release_json" | grep -E "/sing-box-${requested_version}-linux-${sing_arch}\\.tar\\.gz$" | head -n 1 || true)
-    [ -n "$archive_url" ] || die "в официальном выпуске sing-box ${requested_version} нет архива linux-$sing_arch"
+    [ -n "$archive_url" ] || die "в официальном выпуске sing-box ${requested_version} нет архива linux-$sing_arch" "the official sing-box ${requested_version} release has no linux-$sing_arch archive"
     archive="$TMP_DIR/$(basename "$archive_url")"
     fetch "$archive_url" "$archive"
 
@@ -910,17 +930,17 @@ install_sing_box() {
     if [ -n "$checksums_url" ]; then
         fetch "$checksums_url" "$TMP_DIR/sing-box-checksums.txt"
         expected=$(awk -v name="$(basename "$archive")" '$2 == name || $2 == "*" name { print $1; exit }' "$TMP_DIR/sing-box-checksums.txt")
-        [ -n "$expected" ] || die "архив sing-box отсутствует в файле контрольных сумм"
+        [ -n "$expected" ] || die "архив sing-box отсутствует в файле контрольных сумм" "the sing-box archive is missing from the checksums file"
         actual=$(sha256sum "$archive" | awk '{print $1}')
-        [ "$actual" = "$expected" ] || die "контрольная сумма sing-box не совпадает"
+        [ "$actual" = "$expected" ] || die "контрольная сумма sing-box не совпадает" "the sing-box checksum does not match"
     fi
 
     mkdir -p "$TMP_DIR/sing-box" /opt/bin /opt/etc/keen-pbr
     tar -xzf "$archive" -C "$TMP_DIR/sing-box"
     binary=$(find "$TMP_DIR/sing-box" -type f -name sing-box | head -n 1)
-    [ -n "$binary" ] || die "исполняемый файл sing-box не найден в архиве"
+    [ -n "$binary" ] || die "исполняемый файл sing-box не найден в архиве" "the sing-box executable was not found in the archive"
     publish_sing_box_candidate "$binary" ||
-        die "Не удалось установить новый sing-box. Проверьте сообщение об ошибке выше и повторите установку."
+        die "Не удалось установить новый sing-box. Проверьте сообщение об ошибке выше и повторите установку." "Could not install the new sing-box. Check the error above and retry."
     printf '%s\n' /opt/bin/sing-box > /opt/etc/keen-pbr/sing-box-managed.path
     SING_BOX_PATH=/opt/bin/sing-box
 }
@@ -929,37 +949,37 @@ choose_sing_box() {
     existing=$(find_existing_sing_box || true)
     if [ -n "$existing" ]; then
         current=$(sing_box_version "$existing")
-        say "Найден sing-box: $existing (версия ${current:-не определена})"
-        say "  1) Использовать найденный файл (рекомендуется, если он уже проверен)"
-        say "  2) Установить зафиксированную версию $SING_BOX_PINNED_VERSION в /opt/bin"
-        say "  3) Указать другой существующий путь"
-        say "  4) Продолжить без sing-box (только нативные интерфейсы)"
-        choice=$(ask "Выберите [1-4] (по умолчанию 1):" "1")
+        say "Найден sing-box: $existing (версия ${current:-не определена})" "Found sing-box: $existing (version ${current:-unknown})"
+        say "  1) Использовать найденный файл (рекомендуется, если он уже проверен)" "  1) Use the existing binary (recommended if already tested)"
+        say "  2) Установить зафиксированную версию $SING_BOX_PINNED_VERSION в /opt/bin" "  2) Install pinned version $SING_BOX_PINNED_VERSION into /opt/bin"
+        say "  3) Указать другой существующий путь" "  3) Choose another existing path"
+        say "  4) Продолжить без sing-box (только нативные интерфейсы)" "  4) Continue without sing-box (native interfaces only)"
+        choice=$(ask "Выберите [1-4] (по умолчанию 1):" "1" "Choose [1-4] (default 1):")
     else
-        say "sing-box не найден в стандартных каталогах."
-        say "  1) Установить зафиксированную версию $SING_BOX_PINNED_VERSION в /opt/bin (рекомендуется)"
-        say "  2) Указать другой существующий путь"
-        say "  3) Продолжить без sing-box (только нативные интерфейсы)"
-        choice=$(ask "Выберите [1-3] (по умолчанию 1):" "1")
-        case "$choice" in 1) choice=2 ;; 2) choice=3 ;; 3) choice=4 ;; *) die "неверный выбор" ;; esac
+        say "sing-box не найден в стандартных каталогах." "sing-box was not found in the standard directories."
+        say "  1) Установить зафиксированную версию $SING_BOX_PINNED_VERSION в /opt/bin (рекомендуется)" "  1) Install pinned version $SING_BOX_PINNED_VERSION into /opt/bin (recommended)"
+        say "  2) Указать другой существующий путь" "  2) Choose another existing path"
+        say "  3) Продолжить без sing-box (только нативные интерфейсы)" "  3) Continue without sing-box (native interfaces only)"
+        choice=$(ask "Выберите [1-3] (по умолчанию 1):" "1" "Choose [1-3] (default 1):")
+        case "$choice" in 1) choice=2 ;; 2) choice=3 ;; 3) choice=4 ;; *) die "неверный выбор" "invalid choice" ;; esac
     fi
 
     case "$choice" in
         1) SING_BOX_PATH="$existing" ;;
         2) install_sing_box "$SING_BOX_PINNED_VERSION" ;;
         3)
-            SING_BOX_PATH=$(ask "Абсолютный путь к sing-box:" "")
-            [ -x "$SING_BOX_PATH" ] || die "файл не является исполняемым: $SING_BOX_PATH"
-            "$SING_BOX_PATH" version >/dev/null || die "выбранный sing-box не запускается"
+            SING_BOX_PATH=$(ask "Абсолютный путь к sing-box:" "" "Absolute path to sing-box:")
+            [ -x "$SING_BOX_PATH" ] || die "файл не является исполняемым: $SING_BOX_PATH" "the file is not executable: $SING_BOX_PATH"
+            "$SING_BOX_PATH" version >/dev/null || die "выбранный sing-box не запускается" "the selected sing-box does not start"
             ;;
         4) SING_BOX_PATH="" ;;
-        *) die "неверный выбор" ;;
+        *) die "неверный выбор" "invalid choice" ;;
     esac
 }
 
 set_sing_box_path() {
     [ -n "$SING_BOX_PATH" ] || return 0
-    [ -f "$TRANSPORT_CONFIG" ] || die "конфигурация транспортов не установлена"
+    [ -f "$TRANSPORT_CONFIG" ] || die "конфигурация транспортов не установлена" "transport configuration is not installed"
     escaped=$(printf '%s' "$SING_BOX_PATH" | sed 's/[\\&|]/\\&/g')
     sed -i "s|\"sing_box_binary\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"sing_box_binary\": \"$escaped\"|" "$TRANSPORT_CONFIG"
     chmod 0600 "$TRANSPORT_CONFIG"
@@ -971,15 +991,15 @@ configure_web_auth() {
     local choice username password confirmation escaped_username escaped_password
     local candidate backup published
     [ -d /opt/etc/keen-pbr ] && [ -x /opt/etc/init.d/S80keen-pbr ] ||
-        die "keen-pbr-sb ещё не установлен. Сначала запустите установщик без --configure-auth."
+        die "keen-pbr-sb ещё не установлен. Сначала запустите установщик без --configure-auth." "keen-pbr-sb is not installed yet. Run the installer without --configure-auth first."
 
-    say "Для входа в веб-интерфейс нужен пароль. Выберите способ входа:"
-    say "  1) Логин и пароль администратора Keenetic/Netcraze (рекомендуется)"
-    say "  2) Отдельный логин и пароль только для keen-pbr-sb"
+    say "Для входа в веб-интерфейс нужен пароль. Выберите способ входа:" "The web interface requires a password. Choose a sign-in method:"
+    say "  1) Логин и пароль администратора Keenetic/Netcraze (рекомендуется)" "  1) Keenetic/Netcraze administrator username and password (recommended)"
+    say "  2) Отдельный логин и пароль только для keen-pbr-sb" "  2) A separate username and password for keen-pbr-sb only"
     while :; do
-        choice=$(ask "Выберите [1-2] (по умолчанию 1):" "1")
+        choice=$(ask "Выберите [1-2] (по умолчанию 1):" "1" "Choose [1-2] (default 1):")
         case "$choice" in 1|2) break ;; esac
-        say "Введите 1 или 2. Варианта без пароля нет."
+        say "Введите 1 или 2. Варианта без пароля нет." "Enter 1 or 2. Password-free access is not available."
     done
 
     candidate="$TMP_DIR/auth.json"
@@ -987,29 +1007,29 @@ configure_web_auth() {
         # The router validates its own credentials. Do not copy its password.
         printf '%s\n' '{"enabled":true,"provider":"keenetic","keenetic_endpoint_mode":"auto","session_ttl_seconds":604800}' > "$candidate"
     else
-        say "Этот пароль действует только в keen-pbr-sb и не меняет пароль роутера или SSH."
+        say "Этот пароль действует только в keen-pbr-sb и не меняет пароль роутера или SSH." "This password is for keen-pbr-sb only. It does not change your router or SSH password."
         while :; do
-            username=$(ask "Логин веб-интерфейса (по умолчанию admin):" "admin")
+            username=$(ask "Логин веб-интерфейса (по умолчанию admin):" "admin" "Web interface username (default admin):")
             if [ -n "$username" ] && ! printf '%s' "$username" | LC_ALL=C grep -q '[[:cntrl:]]'; then
                 break
             fi
-            say "Введите непустой логин без табуляции и управляющих символов."
+            say "Введите непустой логин без табуляции и управляющих символов." "Enter a non-empty username without tabs or control characters."
         done
         while :; do
-            password=$(ask_secret "Пароль веб-интерфейса:") ||
-                die "ввод прерван; настройки входа не изменены."
+            password=$(ask_secret "Пароль веб-интерфейса:" "Web interface password:") ||
+                die "ввод прерван; настройки входа не изменены." "input was interrupted; sign-in settings were not changed."
             if [ -z "$password" ]; then
-                say "Пароль не может быть пустым. Введите его ещё раз."
+                say "Пароль не может быть пустым. Введите его ещё раз." "The password cannot be empty. Enter it again."
                 continue
             fi
             if printf '%s' "$password" | LC_ALL=C grep -q '[[:cntrl:]]'; then
-                say "Пароль содержит табуляцию или управляющий символ. Введите его ещё раз."
+                say "Пароль содержит табуляцию или управляющий символ. Введите его ещё раз." "The password contains a tab or control character. Enter it again."
                 continue
             fi
-            confirmation=$(ask_secret "Повторите пароль:") ||
-                die "ввод прерван; настройки входа не изменены."
+            confirmation=$(ask_secret "Повторите пароль:" "Repeat password:") ||
+                die "ввод прерван; настройки входа не изменены." "input was interrupted; sign-in settings were not changed."
             [ "$password" = "$confirmation" ] && break
-            say "Пароли не совпали. Введите пароль ещё раз."
+            say "Пароли не совпали. Введите пароль ещё раз." "Passwords do not match. Enter the password again."
         done
         escaped_username=$(printf '%s' "$username" | sed 's/[\\"]/\\&/g')
         escaped_password=$(printf '%s' "$password" | sed 's/[\\"]/\\&/g')
@@ -1019,28 +1039,28 @@ configure_web_auth() {
     fi
     chmod 0600 "$candidate"
     if [ -f "$auth_file" ]; then
-        backup=$(mktemp "$auth_file.before-installer.XXXXXX") || die "не удалось сохранить прежние настройки входа."
-        cp "$auth_file" "$backup" && chmod 0600 "$backup" || die "не удалось сохранить прежние настройки входа."
-        say "Прежние настройки входа сохранены в $backup"
+        backup=$(mktemp "$auth_file.before-installer.XXXXXX") || die "не удалось сохранить прежние настройки входа." "could not back up the previous sign-in settings."
+        cp "$auth_file" "$backup" && chmod 0600 "$backup" || die "не удалось сохранить прежние настройки входа." "could not back up the previous sign-in settings."
+        say "Прежние настройки входа сохранены в $backup" "Previous sign-in settings were backed up to $backup"
     fi
     # Publish on the destination filesystem, only after all input is complete.
-    published=$(mktemp "$auth_file.new.XXXXXX") || die "не удалось сохранить настройки входа."
+    published=$(mktemp "$auth_file.new.XXXXXX") || die "не удалось сохранить настройки входа." "could not save sign-in settings."
     if ! { cp "$candidate" "$published" && chmod 0600 "$published" && mv -f "$published" "$auth_file"; }; then
         rm -f "$published"
-        die "не удалось сохранить настройки входа; прежний файл не заменён."
+        die "не удалось сохранить настройки входа; прежний файл не заменён." "could not save sign-in settings; the previous file was not replaced."
     fi
-    say "Настройки входа сохранены. Перезапускаю keen-pbr-sb, чтобы применить их; панель временно отключится."
+    say "Настройки входа сохранены. Перезапускаю keen-pbr-sb, чтобы применить их; панель временно отключится." "Sign-in settings saved. Restarting keen-pbr-sb to apply them; the panel will briefly disconnect."
     /opt/etc/init.d/S80keen-pbr restart ||
-        die "настройки входа сохранены, но служба не запустилась. Проверьте /opt/var/log/keen-pbr.log."
+        die "настройки входа сохранены, но служба не запустилась. Проверьте /opt/var/log/keen-pbr.log." "sign-in settings were saved, but the service did not start. Check /opt/var/log/keen-pbr.log."
     if [ ! -x "$RESCUE_HELPER" ]; then
         RESCUE_HELPER=/opt/usr/lib/keen-pbr/rescue-update.sh
     fi
     [ -x "$RESCUE_HELPER" ] && verify_installed_runtime 3 ||
-        die "настройки входа сохранены, но готовность панели пока не подтверждена. Проверьте /opt/var/log/keen-pbr.log; пакет переустанавливать не нужно."
+        die "настройки входа сохранены, но готовность панели пока не подтверждена. Проверьте /opt/var/log/keen-pbr.log; пакет переустанавливать не нужно." "sign-in settings were saved, but the panel is not confirmed ready. Check /opt/var/log/keen-pbr.log; you do not need to reinstall the package."
     if [ "$choice" = 1 ]; then
-        say "Вход настроен: используйте в панели логин и пароль администратора роутера, не пароль root Entware."
+        say "Вход настроен: используйте в панели логин и пароль администратора роутера, не пароль root Entware." "Sign-in is configured: use your router administrator username and password, not the Entware root password."
     else
-        say "Вход настроен: используйте в панели указанный отдельный логин и пароль."
+        say "Вход настроен: используйте в панели указанный отдельный логин и пароль." "Sign-in is configured: use the separate username and password you just entered."
     fi
 }
 
@@ -1076,7 +1096,7 @@ restore_dns_setup() {
         run_ndmc "no opkg dns-override" || restored=N
     fi
     if ! run_ndmc "system configuration save"; then
-        say "ПРЕДУПРЕЖДЕНИЕ: не удалось сохранить восстановленную настройку DNS в Keenetic." >&2
+        say "ПРЕДУПРЕЖДЕНИЕ: не удалось сохранить восстановленную настройку DNS в Keenetic." "WARNING: could not save the restored DNS setting in Keenetic." >&2
         restored=N
     fi
     if [ "$restart_attempted" = Y ] && [ "$was_running" = Y ]; then
@@ -1085,48 +1105,55 @@ restore_dns_setup() {
     [ "$restored" = Y ]
 }
 
+ask_dns_setup() {
+    say "Если выбрать N, сервис не будет работать полноценно без ручной настройки DNS: правила по доменам требуют запросов через dnsmasq. Выберите Y для автоматической настройки или N, если уже настроили DNS вручную." \
+        "If you choose N, the service will not work fully unless DNS is configured manually: domain-based rules need queries through dnsmasq. Choose Y for automatic setup, or N if you have already configured DNS manually." >&2
+    ask "Включить Keenetic DNS Override и настроить dnsmasq Entware? [Y/n]:" "Y" \
+        "Enable Keenetic DNS Override and configure Entware dnsmasq? [Y/n]:"
+}
+
 configure_dns() {
     answer=${DNS_SETUP_CHOICE:-}
     if [ -z "$answer" ]; then
-        answer=$(ask "Включить Keenetic DNS Override и настроить dnsmasq Entware? [Y/n]:" "Y")
+        answer=$(ask_dns_setup)
     fi
     case "$answer" in
         n|N|no|NO) return 0 ;;
     esac
 
     previous_override=$(read_dns_override_state) ||
-        die "не удалось прочитать текущее состояние DNS Override; настройки DNS не изменены"
+        die "не удалось прочитать текущее состояние DNS Override; настройки DNS не изменены" "could not read the current DNS Override state; DNS settings were not changed"
     dns_was_running=N
     if pidof dnsmasq >/dev/null 2>&1; then dns_was_running=Y; fi
     template=${1:-/opt/usr/lib/keen-pbr/dnsmasq.conf.template}
     config=/opt/etc/dnsmasq.conf
-    [ -f "$template" ] || die "шаблон dnsmasq отсутствует"
-    /opt/sbin/dnsmasq --test --conf-file="$template" >/dev/null 2>&1 || die "сгенерированная конфигурация dnsmasq некорректна"
+    [ -f "$template" ] || die "шаблон dnsmasq отсутствует" "the dnsmasq template is missing"
+    /opt/sbin/dnsmasq --test --conf-file="$template" >/dev/null 2>&1 || die "сгенерированная конфигурация dnsmasq некорректна" "the generated dnsmasq configuration is invalid"
     # Keep an operator's symlink itself unchanged. Publish beside its resolved
     # target so rename stays on the same filesystem even for a custom target.
     if [ -L "$config" ]; then
         config=$(readlink -f "$config") && [ -n "$config" ] ||
-            die "не удалось определить файл конфигурации dnsmasq; настройки DNS не изменены"
+            die "не удалось определить файл конфигурации dnsmasq; настройки DNS не изменены" "could not identify the dnsmasq configuration file; DNS settings were not changed"
     fi
     [ ! -e "$config" ] || [ -f "$config" ] ||
-        die "конфигурация dnsmasq не является обычным файлом; настройки DNS не изменены"
+        die "конфигурация dnsmasq не является обычным файлом; настройки DNS не изменены" "the dnsmasq configuration is not a regular file; DNS settings were not changed"
     backup="$config.backup-mykeenpbr-$(date +%Y%m%d%H%M%S)"
     had_config=N
     if [ -f "$config" ]; then
         cp -p "$config" "$backup" ||
-            die "не удалось сохранить прежнюю конфигурацию dnsmasq; настройки DNS не изменены"
+            die "не удалось сохранить прежнюю конфигурацию dnsmasq; настройки DNS не изменены" "could not back up the previous dnsmasq configuration; DNS settings were not changed"
         had_config=Y
     fi
 
     # Never truncate the working file before the new bytes and permissions are
     # ready. ENOSPC, chmod and rename failures leave the old DNS state intact.
     candidate=$(mktemp "$config.new-mykeenpbr.XXXXXX") ||
-        die "не удалось подготовить конфигурацию dnsmasq; настройки DNS не изменены"
+        die "не удалось подготовить конфигурацию dnsmasq; настройки DNS не изменены" "could not prepare dnsmasq configuration; DNS settings were not changed"
     if ! cp "$template" "$candidate" ||
        ! chmod 0600 "$candidate" ||
        ! mv -f "$candidate" "$config"; then
         rm -f "$candidate" || true
-        die "не удалось записать конфигурацию dnsmasq; настройки DNS не изменены"
+        die "не удалось записать конфигурацию dnsmasq; настройки DNS не изменены" "could not write dnsmasq configuration; DNS settings were not changed"
     fi
     if [ "${DNS_BOOTSTRAP:-0}" = 1 ]; then
         INSTALL_DNS_OVERRIDE=$previous_override
@@ -1143,9 +1170,9 @@ configure_dns() {
             "$config" "$backup" "$had_config" N; then
             DNS_INSTALL_ROLLBACK=0
         else
-            say "ПРЕДУПРЕЖДЕНИЕ: восстановление прежнего DNS завершено не полностью; проверьте DNS в Keenetic." >&2
+            say "ПРЕДУПРЕЖДЕНИЕ: восстановление прежнего DNS завершено не полностью; проверьте DNS в Keenetic." "WARNING: previous DNS settings were not fully restored; check DNS in Keenetic." >&2
         fi
-        die "не удалось включить opkg dns-override"
+        die "не удалось включить opkg dns-override" "could not enable opkg dns-override"
     fi
     INSTALL_DNS_RESTARTED=Y
     if ! /opt/etc/init.d/S56dnsmasq restart; then
@@ -1153,22 +1180,22 @@ configure_dns() {
             "$config" "$backup" "$had_config" Y; then
             DNS_INSTALL_ROLLBACK=0
         else
-            say "ПРЕДУПРЕЖДЕНИЕ: восстановление прежнего DNS завершено не полностью; проверьте DNS в Keenetic." >&2
+            say "ПРЕДУПРЕЖДЕНИЕ: восстановление прежнего DNS завершено не полностью; проверьте DNS в Keenetic." "WARNING: previous DNS settings were not fully restored; check DNS in Keenetic." >&2
         fi
-        die "dnsmasq не запустился; выполнен возврат к прежним настройкам DNS"
+        die "dnsmasq не запустился; выполнен возврат к прежним настройкам DNS" "dnsmasq did not start; previous DNS settings were restored"
     fi
     if ! nslookup google.com 127.0.0.1 >/dev/null 2>&1; then
-        say "ПРЕДУПРЕЖДЕНИЕ: dnsmasq запущен, но быстрая проверка внешнего DNS не прошла."
-        say "Установка продолжится; проверьте состояние DNS и диагностику в веб-интерфейсе."
+        say "ПРЕДУПРЕЖДЕНИЕ: dnsmasq запущен, но быстрая проверка внешнего DNS не прошла." "WARNING: dnsmasq is running, but the quick external DNS check did not pass."
+        say "Установка продолжится; проверьте состояние DNS и диагностику в веб-интерфейсе." "Installation will continue; check DNS status and diagnostics in the web interface."
     fi
 }
 
 choose_optional_setup() {
-    DNS_SETUP_CHOICE=$(ask "Включить Keenetic DNS Override и настроить dnsmasq Entware? [Y/n]:" "Y")
+    DNS_SETUP_CHOICE=$(ask_dns_setup)
     if /opt/bin/opkg status nfqws2-keenetic 2>/dev/null | grep -q '^Status:.* installed'; then
-        NFQWS_SETUP_CHOICE=$(ask "nfqws2 уже установлен. Обновить его из официального репозитория? [y/N]:" "N")
+        NFQWS_SETUP_CHOICE=$(ask "nfqws2 уже установлен. Обновить его из официального репозитория? [y/N]:" "N" "nfqws2 is already installed. Update it from the official repository? [y/N]:")
     else
-        NFQWS_SETUP_CHOICE=$(ask "Установить nfqws2 из официального репозитория nfqws/nfqws2-keenetic? [y/N]:" "N")
+        NFQWS_SETUP_CHOICE=$(ask "Установить nfqws2 из официального репозитория nfqws/nfqws2-keenetic? [y/N]:" "N" "Install nfqws2 from the official nfqws/nfqws2-keenetic repository? [y/N]:")
     fi
 }
 
@@ -1186,16 +1213,16 @@ prepare_first_install_dns() {
             if [ -x /opt/sbin/dnsmasq ] && pidof dnsmasq >/dev/null 2>&1; then
                 return 0
             fi
-            die "Для первого запуска нужен работающий dnsmasq. Повторите установку и разрешите настройку DNS Override либо сначала настройте dnsmasq вручную. Пакет keen-pbr ещё не устанавливался."
+            die "Для первого запуска нужен работающий dnsmasq. Повторите установку и разрешите настройку DNS Override либо сначала настройте dnsmasq вручную. Пакет keen-pbr ещё не устанавливался." "The first start requires a working dnsmasq. Rerun the installer and allow DNS Override setup, or configure dnsmasq manually first. The keen-pbr package has not been installed."
             ;;
     esac
 
-    say "Подготавливаю DNS перед первым запуском keen-pbr-sb..."
+    say "Подготавливаю DNS перед первым запуском keen-pbr-sb..." "Preparing DNS before the first start of keen-pbr-sb..."
     if [ ! -x /opt/sbin/dnsmasq ] || [ ! -x /opt/etc/init.d/S56dnsmasq ]; then
-        /opt/bin/opkg install dnsmasq || die "не удалось установить dnsmasq; DNS Keenetic не изменён"
+        /opt/bin/opkg install dnsmasq || die "не удалось установить dnsmasq; DNS Keenetic не изменён" "could not install dnsmasq; Keenetic DNS was not changed"
     fi
     [ -x /opt/sbin/dnsmasq ] && [ -x /opt/etc/init.d/S56dnsmasq ] ||
-        die "dnsmasq не установлен; DNS Keenetic не изменён"
+        die "dnsmasq не установлен; DNS Keenetic не изменён" "dnsmasq is not installed; Keenetic DNS was not changed"
 
     # Use the already authenticated IPK, not another download or an installed
     # helper which does not exist on a clean router yet. The package's existing
@@ -1205,12 +1232,12 @@ prepare_first_install_dns() {
     local first_config="$TMP_DIR/first-dnsmasq.conf"
     tar -xzOf "$TMP_DIR/data.tar.gz" ./opt/usr/lib/keen-pbr/dnsmasq.conf.template > "$first_template" &&
         tar -xzOf "$TMP_DIR/data.tar.gz" ./opt/etc/keen-pbr/dnsmasq-fallback.conf > "$first_fallback" ||
-        die "в проверенном IPK отсутствуют файлы начальной настройки DNS"
+        die "в проверенном IPK отсутствуют файлы начальной настройки DNS" "the verified IPK is missing initial DNS setup files"
     # An existing fallback may contain deliberate operator settings. Preserve
     # its directives instead of substituting the packaged bootstrap resolver.
     if [ -f /opt/etc/keen-pbr/dnsmasq-fallback.conf ]; then
         cp /opt/etc/keen-pbr/dnsmasq-fallback.conf "$first_fallback" ||
-            die "не удалось прочитать существующую резервную конфигурацию DNS"
+            die "не удалось прочитать существующую резервную конфигурацию DNS" "could not read the existing DNS fallback configuration"
     fi
     awk -v fallback="$first_fallback" '
         $0 == "conf-script=/opt/usr/lib/keen-pbr/dnsmasq.sh dnsmasq-config-entry" {
@@ -1224,16 +1251,41 @@ prepare_first_install_dns() {
         { print }
         END { if (found != 1) exit 1 }
     ' "$first_template" > "$first_config" ||
-        die "не удалось подготовить начальную конфигурацию DNS"
+        die "не удалось подготовить начальную конфигурацию DNS" "could not prepare the initial DNS configuration"
     DNS_BOOTSTRAP=1
     configure_dns "$first_config"
+}
+
+remember_initial_nfqws_config() {
+    # Only the installer knows that no operator configuration preceded opkg.
+    # Snapshot the actual postinst result (including detected WAN and IPv6),
+    # not our historical built-in "default", which may use other arguments.
+    local source=/opt/etc/nfqws2/nfqws2.conf
+    local directory=/opt/etc/keen-pbr/nfqws-strategies
+    local base="default ($(date +%Y.%m.%d))"
+    local index=1
+    local destination
+    [ -f "$source" ] || return 1
+    mkdir -p "$directory" || return 1
+    while [ "$index" -le 100 ]; do
+        destination="$directory/$base.conf"
+        [ "$index" = 1 ] || destination="$directory/$base $index.conf"
+        if [ -e "$destination" ] || [ -L "$destination" ]; then
+            cmp -s "$source" "$destination" && return 0
+        else
+            # noclobber also preserves a strategy saved concurrently in the UI.
+            (set -C; cat "$source" > "$destination") && return 0
+        fi
+        index=$((index + 1))
+    done
+    return 1
 }
 
 configure_nfqws2() {
     answer=${NFQWS_SETUP_CHOICE:-N}
     case "$answer" in y|Y|yes|YES|д|Д|да|ДА) ;; *) return 0 ;; esac
 
-    say "Подготавливаю HTTPS и официальный репозиторий nfqws2..."
+    say "Подготавливаю HTTPS и официальный репозиторий nfqws2..." "Preparing HTTPS and the official nfqws2 repository..."
     # Старый wget из Entware понимает только HTTP/FTP. Сначала обновляем
     # обычные feeds и заменяем его на SSL-вариант, и только после этого
     # добавляем HTTPS-feed nfqws2. Временное перемещение feed чинит повторный запуск
@@ -1246,19 +1298,28 @@ configure_nfqws2() {
     else
         rm -f /opt/etc/opkg/nfqws2-keenetic.conf
     fi
-    /opt/bin/opkg update || die "не удалось обновить список пакетов Entware"
-    /opt/bin/opkg install ca-certificates wget-ssl || die "не удалось установить HTTPS-зависимости nfqws2"
+    /opt/bin/opkg update || die "не удалось обновить список пакетов Entware" "could not update the Entware package lists"
+    /opt/bin/opkg install ca-certificates wget-ssl || die "не удалось установить HTTPS-зависимости nfqws2" "could not install HTTPS dependencies for nfqws2"
     /opt/bin/opkg remove wget-nossl >/dev/null 2>&1 || true
     printf '%s\n' 'src/gz nfqws2-keenetic https://nfqws.github.io/nfqws2-keenetic/all' > /opt/etc/opkg/nfqws2-keenetic.conf
     NFQWS_SAVED_FEED=
-    /opt/bin/opkg update || die "не удалось загрузить официальный репозиторий nfqws2"
-    say "Устанавливаю пакет nfqws2..."
-    if /opt/bin/opkg status nfqws2-keenetic 2>/dev/null | grep -q '^Status:.* installed'; then
-        /opt/bin/opkg upgrade nfqws2-keenetic || die "не удалось обновить nfqws2"
-    else
-        /opt/bin/opkg install nfqws2-keenetic || die "не удалось установить nfqws2"
+    /opt/bin/opkg update || die "не удалось загрузить официальный репозиторий nfqws2" "could not load the official nfqws2 repository"
+    say "Устанавливаю пакет nfqws2..." "Installing the nfqws2 package..."
+    local capture_default=0
+    if [ ! -e /opt/etc/nfqws2/nfqws2.conf ] &&
+       [ ! -L /opt/etc/nfqws2/nfqws2.conf ]; then
+        capture_default=1
     fi
-    say "nfqws2 установлен. Управление доступно в разделе «nfqws2» веб-интерфейса keen-pbr-sb."
+    if /opt/bin/opkg status nfqws2-keenetic 2>/dev/null | grep -q '^Status:.* installed'; then
+        /opt/bin/opkg upgrade nfqws2-keenetic || die "не удалось обновить nfqws2" "could not update nfqws2"
+    else
+        /opt/bin/opkg install nfqws2-keenetic || die "не удалось установить nfqws2" "could not install nfqws2"
+    fi
+    if [ "$capture_default" = 1 ]; then
+        remember_initial_nfqws_config ||
+            say "nfqws2 установлен, но стандартную конфигурацию не удалось сохранить в списке стратегий. Активный конфиг не изменён." "nfqws2 is installed, but its standard configuration could not be saved in the strategy list. The active configuration is unchanged." >&2
+    fi
+    say "nfqws2 установлен. Управление доступно в разделе «nfqws2» веб-интерфейса keen-pbr-sb." "nfqws2 is installed. Manage it in the nfqws2 section of the keen-pbr-sb web interface."
 }
 
 prepare_first_install_retry() {
@@ -1274,27 +1335,27 @@ prepare_first_install_retry() {
     for item in current.ipk current.ipk.sha256 previous.ipk previous.ipk.sha256 \
         pending-baseline.ipk pending-baseline.ipk.sha256; do
         [ ! -e "$RESCUE_DIR/$item" ] && [ ! -L "$RESCUE_DIR/$item" ] ||
-            die "Незавершённое обновление имеет предыдущий пакет; требуется его восстановление. Первая установка не начата."
+            die "Незавершённое обновление имеет предыдущий пакет; требуется его восстановление. Первая установка не начата." "The interrupted update has a previous package to restore. First installation has not started."
     done
     [ -f "$RESCUE_DIR/pending" ] && [ ! -L "$RESCUE_DIR/pending" ] &&
         [ "$(cat "$RESCUE_DIR/pending")" = candidate-staged ] &&
         [ -f "$RESCUE_DIR/candidate.ipk" ] && [ ! -L "$RESCUE_DIR/candidate.ipk" ] &&
         cmp -s "$PACKAGE_FILE" "$RESCUE_DIR/candidate.ipk" ||
-        die "Незавершённая установка относится к другому пакету или этапу. Сохранённые файлы не изменены."
+        die "Незавершённая установка относится к другому пакету или этапу. Сохранённые файлы не изменены." "The interrupted installation belongs to a different package or stage. Saved files were not changed."
     if [ -e "$RESCUE_DIR/UNKNOWN" ] || [ -L "$RESCUE_DIR/UNKNOWN" ]; then
         [ -f "$RESCUE_DIR/UNKNOWN" ] && [ ! -L "$RESCUE_DIR/UNKNOWN" ] &&
             [ "$(cat "$RESCUE_DIR/UNKNOWN")" = 'candidate rollback has no verified baseline' ] ||
-            die "Причина незавершённой установки отличается от сбоя первого запуска. Сохранённые файлы не изменены."
+            die "Причина незавершённой установки отличается от сбоя первого запуска. Сохранённые файлы не изменены." "The interrupted installation was not caused by first-start failure. Saved files were not changed."
     fi
     RESUME_FIRST_INSTALL=1
-    say "Завершаю прежнюю первую установку тем же подписанным IPK; настройки и резервная копия сохраняются."
+    say "Завершаю прежнюю первую установку тем же подписанным IPK; настройки и резервная копия сохраняются." "Completing the previous first installation with the same signed IPK; settings and backup will be retained."
 }
 
 verify_installed_runtime() {
     local windows="$1"
     local attempt=1
     local result=1
-    say "Ожидаю готовности служб и веб-интерфейса..."
+    say "Ожидаю готовности служб и веб-интерфейса..." "Waiting for the services and web interface to become ready..."
     while [ "$attempt" -le "$windows" ]; do
         if "$RESCUE_HELPER" verify; then
             return 0
@@ -1306,24 +1367,24 @@ verify_installed_runtime() {
         case "$result" in 1) ;; *) return "$result" ;; esac
         [ "$attempt" -lt "$windows" ] || break
         attempt=$((attempt + 1))
-        say "Первый запуск ещё не подтверждён. Продолжаю ожидание ($attempt/$windows), службы не перезапускаю."
+        say "Первый запуск ещё не подтверждён. Продолжаю ожидание ($attempt/$windows), службы не перезапускаю." "First start is not yet confirmed. Still waiting ($attempt/$windows), without restarting services."
     done
-    say "Готовность служб или веб-интерфейса не подтверждена за отведённое время."
+    say "Готовность служб или веб-интерфейса не подтверждена за отведённое время." "The services or web interface did not become ready within the allotted time."
     /opt/etc/init.d/S80keen-pbr check 2>&1 || true
     /opt/etc/init.d/S79transport-manager check 2>&1 || true
-    say "Причина запуска записана в /opt/var/log/keen-pbr.log."
+    say "Причина запуска записана в /opt/var/log/keen-pbr.log." "Check the startup diagnostics in /opt/var/log/keen-pbr.log."
     return "$result"
 }
 
 install_package_transactionally() {
     [ ! -L "$RESCUE_DIR" ] &&
         { [ ! -e "$RESCUE_DIR" ] || [ -d "$RESCUE_DIR" ]; } ||
-        die "каталог rescue имеет небезопасный тип"
+        die "каталог rescue имеет небезопасный тип" "the recovery path is not a regular directory"
     mkdir -p "$RESCUE_DIR"
     chmod 0700 "$RESCUE_DIR" ||
-        die "не удалось защитить каталог rescue"
+        die "не удалось защитить каталог rescue" "could not set permissions on the recovery directory"
     [ -x "$RESCUE_HELPER" ] ||
-        die "rescue helper не установлен"
+        die "rescue helper не установлен" "the recovery helper is not installed"
     if [ "${RESUME_FIRST_INSTALL:-0}" != 1 ]; then
         "$RESCUE_HELPER" stage "$PACKAGE_FILE"
     fi
@@ -1362,18 +1423,18 @@ install_package_transactionally() {
             DNS_INSTALL_ROLLBACK=0
             return 0
         fi
-        say "ОШИБКА: пакет работает, но rescue-снимок не удалось зафиксировать."
+        say "ОШИБКА: пакет работает, но rescue-снимок не удалось зафиксировать." "ERROR: the package is running, but its recovery snapshot could not be finalized."
     fi
 
-    say "ОШИБКА: новый пакет не прошёл проверку после установки."
+    say "ОШИБКА: новый пакет не прошёл проверку после установки." "ERROR: the new package did not pass the post-installation check."
     if [ ! -e "$RESCUE_DIR/pending-baseline.ipk" ] &&
        [ ! -L "$RESCUE_DIR/pending-baseline.ipk" ]; then
-        say "Первая установка не завершена. Предыдущего IPK ещё нет; сохранённую установку можно продолжить повторным запуском этой команды."
+        say "Первая установка не завершена. Предыдущего IPK ещё нет; сохранённую установку можно продолжить повторным запуском этой команды." "First installation is incomplete. No previous IPK exists yet; rerun this command to resume the saved installation."
     elif [ -x "$RESCUE_HELPER" ] &&
        "$RESCUE_HELPER" rollback-candidate; then
-        say "Предыдущий IPK автоматически восстановлен."
+        say "Предыдущий IPK автоматически восстановлен." "The previous IPK was restored automatically."
     else
-        say "Автоматический IPK-откат пока недоступен; сохранён бэкап конфигурации."
+        say "Автоматический IPK-откат пока недоступен; сохранён бэкап конфигурации." "Automatic IPK rollback is not available yet; a configuration backup was saved."
     fi
     return 1
 }
@@ -1384,36 +1445,37 @@ repair_interrupted_nfqws_bootstrap() {
     if /opt/bin/opkg status wget-ssl 2>/dev/null | grep -q '^Status:.* installed'; then
         return 0
     fi
-    say "Обнаружена незавершённая настройка nfqws2. Сначала восстанавливаю поддержку HTTPS..."
+    say "Обнаружена незавершённая настройка nfqws2. Сначала восстанавливаю поддержку HTTPS..." "An incomplete nfqws2 setup was found. Restoring HTTPS support first..."
     saved_feed="$TMP_DIR/nfqws2-keenetic.conf"
     NFQWS_SAVED_FEED=$saved_feed
     mv "$feed" "$saved_feed"
-    /opt/bin/opkg update || die "не удалось обновить пакеты Entware при восстановлении HTTPS"
-    /opt/bin/opkg install ca-certificates wget-ssl || die "не удалось установить wget с поддержкой HTTPS"
+    /opt/bin/opkg update || die "не удалось обновить пакеты Entware при восстановлении HTTPS" "could not update Entware package lists while restoring HTTPS"
+    /opt/bin/opkg install ca-certificates wget-ssl || die "не удалось установить wget с поддержкой HTTPS" "could not install wget with HTTPS support"
     /opt/bin/opkg remove wget-nossl >/dev/null 2>&1 || true
     mv "$saved_feed" "$feed"
     NFQWS_SAVED_FEED=
 }
 
-[ "$(id -u)" = "0" ] || die "запустите установщик от пользователя root"
+choose_install_language
+[ "$(id -u)" = "0" ] || die "запустите установщик от пользователя root" "run the installer as root"
 TMP_BASE=${TMPDIR:-/tmp}
 case "$TMP_BASE" in
     /*) ;;
-    *) die "TMPDIR должен быть абсолютным путём" ;;
+    *) die "TMPDIR должен быть абсолютным путём" "TMPDIR must be an absolute path" ;;
 esac
-[ "$TMP_BASE" != "/" ] || die "TMPDIR не должен указывать на корневой каталог"
+[ "$TMP_BASE" != "/" ] || die "TMPDIR не должен указывать на корневой каталог" "TMPDIR must not point to the root directory"
 TMP_DIR=$(mktemp -d "$TMP_BASE/mykeenpbr-install.XXXXXX") ||
-    die "не удалось создать защищённый временный каталог"
+    die "не удалось создать защищённый временный каталог" "could not create a private temporary directory"
 case "$TMP_DIR" in
     "$TMP_BASE"/mykeenpbr-install.*) ;;
-    *) die "mktemp вернул небезопасный путь" ;;
+    *) die "mktemp вернул небезопасный путь" "mktemp returned an unsafe path" ;;
 esac
-chmod 0700 "$TMP_DIR" || die "не удалось защитить временный каталог"
-acquire_update_lock || die "другое обновление или откат keen-pbr-sb уже выполняется"
+chmod 0700 "$TMP_DIR" || die "не удалось защитить временный каталог" "could not set permissions on the temporary directory"
+acquire_update_lock || die "другое обновление или откат keen-pbr-sb уже выполняется" "another keen-pbr-sb update or rollback is already running"
 if [ "$AUTH_SETUP_ONLY" = 1 ]; then
     configure_web_auth
-    say "Пакет, настройки DNS, VPN и nfqws2 не изменены."
-    say "Откройте прежний адрес панели и обновите страницу."
+    say "Пакет, настройки DNS, VPN и nfqws2 не изменены." "The package, DNS, VPN and nfqws2 settings were not changed."
+    say "Откройте прежний адрес панели и обновите страницу." "Open the same panel address and refresh the page."
     exit 0
 fi
 detect_target
@@ -1421,13 +1483,13 @@ if [ "$UPDATE_ONLY" = "0" ]; then
     repair_interrupted_nfqws_bootstrap
 fi
 ensure_release_verifier
-say "Установка keen-pbr-sb для ${KEEN_ARCH}-${KEEN_ABI} из $PROJECT_REPOSITORY"
+say "Установка keen-pbr-sb для ${KEEN_ARCH}-${KEEN_ABI} из $PROJECT_REPOSITORY" "Installing keen-pbr-sb for ${KEEN_ARCH}-${KEEN_ABI} from $PROJECT_REPOSITORY"
 download_package
 bootstrap_rescue_helpers
 if [ "$UPDATE_ONLY" = "1" ]; then
-    say "Устанавливаю обновление keen-pbr-sb без изменения пользовательских настроек..."
+    say "Устанавливаю обновление keen-pbr-sb без изменения пользовательских настроек..." "Installing the keen-pbr-sb update without changing user settings..."
     install_package_transactionally
-    say "Обновление keen-pbr-sb установлено. Веб-интерфейс перезапускается."
+    say "Обновление keen-pbr-sb установлено. Веб-интерфейс перезапускается." "keen-pbr-sb has been updated. The web interface is restarting."
     exit 0
 fi
 prepare_first_install_retry
@@ -1442,6 +1504,6 @@ if [ "$DNS_BOOTSTRAP" != 1 ]; then configure_dns; fi
 configure_nfqws2
 
 say ""
-say "Установка завершена."
-say "Веб-интерфейс: http://my.keenetic.net:12121/"
-say "Каталог конфигурации и резервных копий: /opt/etc/keen-pbr"
+say "Установка завершена." "Installation complete."
+say "Веб-интерфейс: http://my.keenetic.net:12121/" "Web interface: http://my.keenetic.net:12121/"
+say "Каталог конфигурации и резервных копий: /opt/etc/keen-pbr" "Configuration and backup directory: /opt/etc/keen-pbr"

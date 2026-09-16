@@ -45,8 +45,11 @@ std::optional<NdmsWebEndpoint> select_ndms_web_endpoint(
 
 // Performs one bounded read of each fixed loopback RCI URL. There is no timer
 // or polling loop: callers decide when a refresh is necessary.
+// A failed known endpoint can request a fresh shared observation instead of
+// waiting for the normal cache TTL after a firmware address/port change.
 std::optional<NdmsWebEndpoint> discover_ndms_web_endpoint(
     const NdmsWebEndpointProbe& probe,
-    std::string* error = nullptr);
+    std::string* error = nullptr,
+    bool refresh_failed_endpoint = false);
 
 } // namespace keen_pbr3

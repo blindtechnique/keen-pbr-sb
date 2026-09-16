@@ -567,6 +567,18 @@ RawRtnetlinkRouteDumpBlock parse_raw_rtnetlink_route_dump_block(
         [&](const std::uint8_t* payload,
             const std::size_t payload_size,
             RawRtnetlinkRouteDumpBlock&) {
+            if (payload_size < sizeof(rtmsg)) return false;
+            rtmsg header{};
+            std::memcpy(&header, payload, sizeof(header));
+            if (header.rtm_family != AF_INET && header.rtm_family != AF_INET6) {
+                // AF_UNSPEC dumps on Keenetic also include IPMR/IP6MR (128/129).
+                // They are separate multicast inventories, not malformed IPv4
+                // routes and not objects this unicast route manager may own.
+                // Still validate the message/attribute framing and dump terminal.
+                return visit_attributes(
+                    payload + sizeof(rtmsg), payload_size - sizeof(rtmsg),
+                    [](const AttributeView&) { return true; });
+            }
             DumpedRoute route;
             if (!decode_route(payload, payload_size, options, route)) {
                 return false;
@@ -575,7 +587,7 @@ RawRtnetlinkRouteDumpBlock parse_raw_rtnetlink_route_dump_block(
             return true;
         },
         [&](RawRtnetlinkRouteDumpBlock& result) {
-            result.routes.push_back(std::move(*decoded));
+            if (decoded) result.routes.push_back(std::move(*decoded));
             decoded.reset();
         },
         [](RawRtnetlinkRouteDumpBlock& result) { result.routes.clear(); });
