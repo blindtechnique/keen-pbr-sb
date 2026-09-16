@@ -169,6 +169,21 @@ class ReleaseWorkflowTest(unittest.TestCase):
             self.assertNotIn('cache-hit', text)  # A hit never bypasses tests.
         self.assertIn('make test BUILD_JOBS=4', self.jobs['backend'])
 
+    def test_compiler_caches_preserve_fixture_paths_before_expensive_builds(self):
+        for job, compiler, build in [
+            ('backend', 'g++', 'Build and run backend test matrix'),
+            ('clang-thread-safety', 'clang++', 'Run production Clang thread-safety checks for alpha'),
+        ]:
+            with self.subTest(job=job):
+                _, environment = field(self.jobs[job], 'env', 4)
+                base, _ = field(environment, 'CCACHE_BASEDIR', 6)
+                self.assertEqual(base, '""', '__FILE__ readers need absolute compiler input paths')
+                job_steps = steps(self.jobs[job])
+                probe = 'Verify cached compiler fixture paths'
+                self.assertEqual(shlex.split(shell(job_steps[probe])),
+                                 ['python3', 'build_scripts/check-compiler-cache.py', '--compiler', compiler])
+                self.assertLess(list(job_steps).index(probe), list(job_steps).index(build))
+
     def test_job_environment_uses_only_contexts_available_before_runner_assignment(self):
         allowed = {'github', 'needs', 'strategy', 'matrix', 'vars', 'secrets', 'inputs'}
         for name, job in self.jobs.items():
