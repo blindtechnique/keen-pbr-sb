@@ -651,7 +651,8 @@ run_ndmc() {{
             old = subprocess.run([dnsmasq, "--keep-in-foreground", "--user=root", "--conf-file=" + str(self.config)],
                                  capture_output=True, text=True, timeout=3)
             self.assertNotEqual(old.returncode, 0, "old ordering must fail while native DNS owns 53")
-            self.assertIn("Address in use", old.stderr)
+            # musl and glibc use different wording for the same EADDRINUSE.
+            self.assertRegex(old.stderr, r"Address (?:already )?in use")
             result = self.run_shell("prepare_first_install_dns", overrides)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertNotIn("conf-script=", self.config.read_text())

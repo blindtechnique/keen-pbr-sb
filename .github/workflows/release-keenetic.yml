@@ -112,7 +112,8 @@ jobs:
     env:
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
       CCACHE_DIR: ${{ github.workspace }}/.cache/ccache/gcc
-      CCACHE_BASEDIR: ${{ github.workspace }}
+      # Fixture readers use __FILE__; keep it absolute across build/run dirs.
+      CCACHE_BASEDIR: ""
       CCACHE_COMPILERCHECK: content
       CCACHE_MAXSIZE: 2G
     steps:
@@ -146,6 +147,10 @@ jobs:
         run: >-
           make check-shell check-openapi-parity check-nfqws-assets
           check-nfqws-rotator-lua
+
+      - name: Verify cached compiler fixture paths
+        run: |
+          python3 build_scripts/check-compiler-cache.py --compiler g++
 
       - name: Build and run backend test matrix
         # Includes the monolithic suite, crash smoke test and all eight narrow
@@ -272,7 +277,8 @@ jobs:
     env:
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
       CCACHE_DIR: ${{ github.workspace }}/.cache/ccache/clang
-      CCACHE_BASEDIR: ${{ github.workspace }}
+      # Fixture readers use __FILE__; keep it absolute across build/run dirs.
+      CCACHE_BASEDIR: ""
       CCACHE_COMPILERCHECK: content
       CCACHE_MAXSIZE: 1G
     steps:
@@ -300,6 +306,10 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-clang-v1-${{ needs.resolve-source.outputs.source_sha }}-${{ github.run_id }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-clang-v1-
+
+      - name: Verify cached compiler fixture paths
+        run: |
+          python3 build_scripts/check-compiler-cache.py --compiler clang++
 
       - name: Run production Clang thread-safety checks for alpha
         if: github.event_name == 'push' && needs.resolve-source.outputs.channel == 'alpha'
