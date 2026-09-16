@@ -178,6 +178,38 @@ TEST_CASE("raw rtnetlink codec: IPv4 and IPv6 routes preserve exact visible iden
     CHECK(v6.exact_identity_representable);
 }
 
+TEST_CASE("raw rtnetlink codec: Keenetic multicast families do not invalidate IP inventory") {
+    for (const auto family : {128, 129}) { // RTNL_FAMILY_IPMR / IP6MR
+        CAPTURE(family);
+        std::vector<std::uint8_t> block;
+        auto ordinary = payload_with(route_header(AF_INET, 0U, 101U));
+        append_scalar(ordinary, RTA_OIF, std::uint32_t{7U});
+        append_message(block, RTM_NEWROUTE, ordinary);
+        auto multicast = payload_with(route_header(
+            family, family == 128 ? 32U : 128U, RT_TABLE_DEFAULT, RTN_MULTICAST));
+        append_ip(multicast, RTA_DST, family == 128 ? AF_INET : AF_INET6,
+                  family == 128 ? "239.1.2.3" : "ff3e::1234");
+        append_scalar(multicast, RTA_IIF, std::uint32_t{9U});
+        SUBCASE("complete foreign message") {}
+        SUBCASE("truncated foreign attribute") { multicast.pop_back(); }
+        const bool truncated = multicast.size() % 4 != 0;
+        append_message(block, RTM_NEWROUTE, multicast);
+        append_done(block);
+        const auto parsed = parse_raw_rtnetlink_route_dump_block(
+            block.data(), block.size(), options());
+        if (truncated) {
+            CHECK(parsed.state == RawRtnetlinkDumpState::malformed);
+            CHECK(parsed.routes.empty());
+        } else {
+            REQUIRE(parsed.state == RawRtnetlinkDumpState::done);
+            REQUIRE(parsed.routes.size() == 1U);
+            CHECK(parsed.routes[0].family == AF_INET);
+            CHECK(parsed.routes[0].table == 101U);
+            CHECK(parsed.routes[0].exact_identity_representable);
+        }
+    }
+}
+
 TEST_CASE("raw rtnetlink codec: default blackhole and unreachable routes are represented") {
     std::vector<std::uint8_t> block;
     auto unicast = payload_with(route_header(AF_INET, 0U, 101U));

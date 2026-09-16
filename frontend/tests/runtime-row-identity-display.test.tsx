@@ -124,34 +124,39 @@ describe("runtime row identity display", () => {
     expect(visibleText(html)).toContain("23")
   })
 
-  test("orphan name cell hides raw interface subline but preserves technical title and edit identity", () => {
-    const page = readFileSync(
-      new URL("../src/pages/transports-page.tsx", import.meta.url),
-      "utf8"
-    )
-    const orphanRows = page.slice(
-      page.indexOf("const orphanRows ="),
-      page.indexOf("const transportRows =")
-    )
-    const nameCell = orphanRows.slice(
-      orphanRows.indexOf('<span\n        className="min-w-0'),
-      orphanRows.indexOf("<KeeneticStatus")
-    )
-    expect(nameCell).toContain("getOutboundReferenceLabel(outbound)")
-    expect(nameCell).toContain("outbound.interface")
-    expect(nameCell).toContain("{getOutboundDisplayName(outbound)}")
-    expect(nameCell).not.toContain("{outbound.interface}")
-    expect(nameCell).not.toContain("font-mono")
-    expect(orphanRows).toContain("encodeURIComponent(outbound.tag)")
+  test.each(["\n", "\r\n"])(
+    "orphan name cell hides raw interface subline but preserves technical title and edit identity (newline=%j)",
+    (newline) => {
+      const page = readFileSync(
+        new URL("../src/pages/transports-page.tsx", import.meta.url),
+        "utf8"
+      ).replace(/\r?\n/g, newline)
+      const orphanRows = page.slice(
+        page.indexOf("const orphanRows ="),
+        page.indexOf("const transportRows =")
+      )
+      // Git checkouts may use LF or CRLF; neither changes the JSX contract.
+      const nameStart = orphanRows.search(/<span\r?\n {8}className="min-w-0/)
+      const nameEnd = orphanRows.indexOf("<KeeneticStatus")
+      expect(nameStart).toBeGreaterThanOrEqual(0)
+      expect(nameEnd).toBeGreaterThan(nameStart)
+      const nameCell = orphanRows.slice(nameStart, nameEnd)
+      expect(nameCell).toContain("getOutboundReferenceLabel(outbound)")
+      expect(nameCell).toContain("outbound.interface")
+      expect(nameCell).toContain("{getOutboundDisplayName(outbound)}")
+      expect(nameCell).not.toContain("{outbound.interface}")
+      expect(nameCell).not.toContain("font-mono")
+      expect(orphanRows).toContain("encodeURIComponent(outbound.tag)")
 
-    const cells = readFileSync(
-      new URL(
-        "../src/components/outbounds/outbound-cells.tsx",
-        import.meta.url
-      ),
-      "utf8"
-    )
-    expect(cells).toContain("key={member.outbound_tag}")
-    expect(cells).toContain("title={member.outbound_tag}")
-  })
+      const cells = readFileSync(
+        new URL(
+          "../src/components/outbounds/outbound-cells.tsx",
+          import.meta.url
+        ),
+        "utf8"
+      )
+      expect(cells).toContain("key={member.outbound_tag}")
+      expect(cells).toContain("title={member.outbound_tag}")
+    }
+  )
 })

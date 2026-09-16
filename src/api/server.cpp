@@ -596,12 +596,14 @@ struct WebAuthConfig {
 };
 
 std::optional<KeeneticAuthEndpoint> discover_keenetic_auth_endpoint(
-    std::string* error = nullptr) {
+    std::string* error = nullptr,
+    const bool refresh_failed_endpoint = false) {
     const auto endpoint = discover_ndms_web_endpoint(
         [](const NdmsWebEndpoint& candidate) {
             return probe_keenetic_auth_challenge(candidate.canonical);
         },
-        error);
+        error,
+        refresh_failed_endpoint);
     if (!endpoint) return std::nullopt;
     return parse_keenetic_auth_endpoint(endpoint->canonical, error);
 }
@@ -714,7 +716,8 @@ WebAuthConfig load_web_auth_config() {
             } else if (config.enabled) {
                 // Do not block daemon startup on NDMS HTTP probes. A verified
                 // last-known-good endpoint is usable immediately; when it is
-                // absent or stale, the first rate-limited login refreshes it.
+                // absent, auth status must resolve it before the UI can
+                // collect credentials. Login also refreshes a stale endpoint.
                 if (fallback) {
                     config.keenetic_endpoint = fallback->canonical;
                 } else {
@@ -1409,7 +1412,12 @@ struct ApiServer::Impl {
             permit->record_forwarded_failure();
         }
         if (!outcome.keenetic.authenticated) {
-            outcome.status = outcome.keenetic.reachable ? 401 : 503;
+            // A retired port or a restarting web service can answer HTTP
+            // without issuing any challenge. No password was checked there;
+            // do not charge that infrastructure failure as a bad login.
+            outcome.status = outcome.keenetic.reachable &&
+                                     outcome.keenetic.endpoint_verified
+                                 ? 401 : 503;
             outcome.body = nlohmann::json{
                 {"error", outcome.keenetic.error.empty()
                               ? "invalid credentials"
@@ -1764,32 +1772,41 @@ struct ApiServer::Impl {
         // successful refresh reuse that result; failed discovery has a short
         // backoff so an unauthenticated client cannot occupy all HTTP workers.
         std::lock_guard discovery_lock(auth_endpoint_discovery_mutex);
-        {
-            const auto current = auth_snapshot_with_generation();
-            if (!current.first.endpoint_unavailable &&
-                current.first.keenetic_endpoint != failed_endpoint) {
-                return current;
-            }
+        const auto before = auth_snapshot_with_generation();
+        if (!before.first.enabled || !before.first.uses_router_account() ||
+            before.first.keenetic_endpoint_mode != "auto") {
+            return std::nullopt;
+        }
+        if (!before.first.endpoint_unavailable &&
+            before.first.keenetic_endpoint != failed_endpoint) {
+            return before;
         }
         const auto now = std::chrono::steady_clock::now();
         if (now < auth_endpoint_retry_after) return std::nullopt;
 
-        const auto endpoint = discover_keenetic_auth_endpoint();
+        // A failed known endpoint is evidence that a still-fresh RCI cache
+        // may describe the previous LAN address/HTTP port. Use the shared
+        // resource's bounded refresh, not another copy of its old document.
+        const auto endpoint = discover_keenetic_auth_endpoint(
+            nullptr, !failed_endpoint.empty());
         if (!endpoint) {
             auth_endpoint_retry_after = now + std::chrono::seconds(10);
             return std::nullopt;
         }
 
         std::lock_guard auth_lock(auth_mutex);
-        if (!auth.uses_router_account() ||
+        if (auth_generation != before.second || !auth.enabled ||
+            !auth.uses_router_account() ||
             auth.keenetic_endpoint_mode != "auto") {
             return std::nullopt;
         }
+        const bool changed = auth.endpoint_unavailable ||
+            auth.keenetic_endpoint != endpoint->canonical;
         auth.keenetic_endpoint = endpoint->canonical;
         auth.keenetic_endpoint_from_ndms = true;
         auth.endpoint_unavailable = false;
         auth_endpoint_retry_after = {};
-        advance_auth_generation_locked();
+        if (changed) advance_auth_generation_locked();
         return std::pair{auth, auth_generation};
     }
 };
@@ -1858,7 +1875,18 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
             });
     impl_->server.Get("/api/auth/status", [state = impl_.get()](const httplib::Request& req,
                                                                   httplib::Response& res) {
-        const auto auth = state->auth_snapshot();
+        auto auth = state->auth_snapshot();
+        if (auth.enabled && auth.uses_router_account() &&
+            auth.keenetic_endpoint_mode == "auto" &&
+            auth.endpoint_unavailable) {
+            // Fresh installs deliberately contain no router address/port.
+            // AuthGate will not display or submit credentials while status
+            // reports an unavailable endpoint, so discovery cannot depend on
+            // a first login. This bounded, shared lookup sends no credentials.
+            (void)state->refresh_keenetic_endpoint_from_ndms(
+                auth.keenetic_endpoint);
+            auth = state->auth_snapshot();
+        }
         const bool loopback_request =
             is_loopback_address(req.remote_addr);
         bool authenticated = !auth.enabled && loopback_request;
@@ -3597,11 +3625,11 @@ void ApiServer::publish_auth_provider_for_testing(
     auto replacement = impl_->auth_snapshot();
     replacement.enabled = true;
     replacement.misconfigured = false;
+    replacement.endpoint_unavailable = false;
     replacement.provider = provider;
     if (provider == "keenetic") {
         replacement.keenetic_endpoint = keenetic_endpoint;
         replacement.keenetic_endpoint_mode = "manual";
-        replacement.endpoint_unavailable = false;
     }
     impl_->replace_auth(std::move(replacement));
 }

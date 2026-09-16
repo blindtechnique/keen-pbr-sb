@@ -1,6 +1,24 @@
 import type { ConfigObject } from "@/api/generated/model"
 import { isSystemDefaultOutbound } from "@/lib/outbound-display"
 
+// Per loaded panel, not a server configuration flag. Opening or postponing
+// the wizard never creates a draft; returning to the dashboard must not loop.
+export function createInitialSetupSession() {
+  let visited = false
+  return {
+    markVisited() {
+      visited = true
+    },
+    claimAutomaticOpen(emptyInstallation: boolean, search: string) {
+      if (!emptyInstallation || search || visited) return false
+      visited = true
+      return true
+    },
+  }
+}
+
+export const initialSetupSession = createInitialSetupSession()
+
 export function shouldOfferInitialSetup({
   config,
   isDraft = false,

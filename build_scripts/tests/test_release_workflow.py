@@ -144,9 +144,9 @@ class ReleaseWorkflowTest(unittest.TestCase):
         common = ['libcurl4-openssl-dev', 'libnl-3-dev', 'libnl-route-3-dev', 'libunwind-dev']
         tail = ['pkg-config', 'zlib1g-dev']
         expected = {
-            'backend': common + ['busybox-static', 'lua5.3'] + tail,
+            'backend': ['ccache'] + common + ['busybox-static', 'lua5.3'] + tail,
             'crash-diagnostics-smoke': common + tail,
-            'clang-thread-safety': ['clang'] + common + tail,
+            'clang-thread-safety': ['clang', 'ccache'] + common + tail,
         }
         for name, packages in expected.items():
             with self.subTest(job=name):
@@ -156,6 +156,18 @@ class ReleaseWorkflowTest(unittest.TestCase):
         helper = CI_DEPENDENCIES.read_text(encoding='utf-8')
         for forbidden in ('--allow-unauthenticated', 'AllowInsecure', 'Verify-Peer', '|| true', 'rm ', 'mv '):
             self.assertNotIn(forbidden, helper)
+
+    def test_compiler_caches_are_separate_and_do_not_replace_test_execution(self):
+        for job, compiler in [('backend', 'gcc'), ('clang-thread-safety', 'clang')]:
+            text = self.jobs[job]
+            self.assertIn('CMAKE_CXX_COMPILER_LAUNCHER: ccache', text)
+            self.assertIn('CCACHE_COMPILERCHECK: content', text)
+            self.assertIn('path: ${{ runner.temp }}/keen-pbr-ccache/' + compiler, text)
+            self.assertIn('CCACHE_DIR: ${{ runner.temp }}/keen-pbr-ccache/' + compiler, text)
+            self.assertIn(f'-{compiler}-v1-', text)
+            self.assertIn('ccache --show-stats', text)
+            self.assertNotIn('cache-hit', text)  # A hit never bypasses tests.
+        self.assertIn('make test BUILD_JOBS=4', self.jobs['backend'])
 
     def run_fake_ci_dependencies(self, packages: list[str], *, update_status: int = 0, install_status: int = 0) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
         with tempfile.TemporaryDirectory() as temporary:

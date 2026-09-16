@@ -13,6 +13,7 @@ import { queryKeys } from "@/api/query-keys"
 import { useGetConfig, useGetTransportConfig } from "@/api/queries"
 import { selectConfig } from "@/api/selectors"
 import { PageHeader } from "@/components/shared/page-header"
+import { initialSetupSession } from "@/components/overview/first-run-state"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -59,6 +60,10 @@ export default function SetupWizardPage() {
   const transportConfigQuery = useGetTransportConfig()
   const loadedConfig = selectConfig(configQuery.data)
   const { labelFor: interfaceLabelFor } = useInterfaceDisplayNames()
+
+  useEffect(() => {
+    initialSetupSession.markVisited()
+  }, [])
 
   const [step, setStep] = useState<WizardStep>(1)
   const [link, setLink] = useState("")
@@ -256,6 +261,15 @@ export default function SetupWizardPage() {
       <PageHeader
         description={t("pages.setupWizard.description")}
         title={t("pages.setupWizard.title")}
+        actions={
+          <Button
+            variant="outline"
+            disabled={createTunnelMutation.isPending || setupMutation.isPending}
+            onClick={() => navigate("/")}
+          >
+            {t("pages.setupWizard.setUpLater")}
+          </Button>
+        }
       />
 
       <ol className="flex flex-wrap items-center gap-2 text-sm">

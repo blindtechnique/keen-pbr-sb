@@ -1922,11 +1922,8 @@ function StrategiesEditor({
   const deletingIsOverride = Boolean(
     status.strategies.find((item) => item.name === deleting)?.overridden
   )
-  // Пустой active_strategy означает, что nfqws2.conf не совпадает побайтово ни
-  // с одной стратегией. Так бывает ровно в одном случае: конфигурацию правили
-  // руками — на вкладке «Настройки» или по ssh. Раньше об этом сообщала плашка
-  // над списком; со списком стратегий она пропала, и таблица показывала четыре
-  // «не применена», ничего не объясняя.
+  // An unmatched config may also be a vendor default installed outside our UI.
+  // Absence from the catalog is not evidence of manual editing.
   const customConfig = !status.active_strategy
   // Текущий nfqws2.conf держим под рукой, чтобы его можно было сохранить
   // стратегией до того, как «Применить» его перезапишет.
@@ -2078,6 +2075,9 @@ function StrategiesEditor({
   const legacyExpanded = activeIsLegacy || showLegacy
   const displayStrategyName = (name: string | null): string => {
     if (!name) return ""
+    if (/^default \(\d{4}\.\d{2}\.\d{2}\)(?: \d+)?$/.test(name)) {
+      return t("nfqws.standardStrategyName", { name })
+    }
     const item = status.strategies.find((candidate) => candidate.name === name)
     const key = item ? nfqwsBuiltinStrategyDisplayKey(item) : undefined
     return key ? t(`nfqws.strategyDisplayNames.${key}`) : name

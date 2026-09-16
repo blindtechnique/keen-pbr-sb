@@ -9,6 +9,8 @@
 #include "../src/api/keenetic_auth.hpp"
 #include "../src/api/local_password_hash.hpp"
 #include "../src/api/server.hpp"
+#include "../src/keenetic/ndms_http_config_resource.hpp"
+#include "../src/keenetic/ndms_interface_resource.hpp"
 #include "../src/log/logger.hpp"
 
 #include <atomic>
@@ -19,6 +21,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -200,6 +204,70 @@ private:
 };
 
 std::atomic<int> next_api_port{18320};
+
+// Only RCI's transport URL and the LAN verdict are substituted. Discovery,
+// port parsing, /auth challenge validation, status and login are production
+// code: a mocked HTTP 200 alone must not count as a usable first login.
+class NdmsWebDiscoveryFixture {
+public:
+    explicit NdmsWebDiscoveryFixture(int port) : management_port(port) {
+        ndms_.Get("/rci/show/interface", [this](const auto&, auto& response) {
+            ++interface_reads;
+            if (before_interface_read) before_interface_read();
+            response.set_content(
+                nlohmann::json{{"Bridge0", {
+                    {"id", "Bridge0"}, {"address", "127.0.0.1"},
+                    {"connected", interfaces_available.load() ? "yes" : "no"},
+                    {"global", false}, {"admin-only", false},
+                    {"security-level", "private"}
+                }}}.dump(),
+                "application/json");
+        });
+        ndms_.Get("/rci/show/rc/ip/http", [this](const auto&, auto& response) {
+            ++http_config_reads;
+            response.set_content(
+                nlohmann::json{{"port", management_port.load()}}.dump(),
+                "application/json");
+        });
+        ndms_.Get("/rci/show/rc/user", [](const auto&, auto& response) {
+            response.set_content(
+                R"({"admin":{"password":{"nt":{"hash":"fixture"}},"tag":["http"]}})",
+                "application/json");
+        });
+        running_ = std::make_unique<BoundHttpServer>(ndms_);
+        const auto base =
+            "http://127.0.0.1:" + std::to_string(running_->port());
+        interface_endpoint_ = std::make_unique<EnvironmentVariableGuard>(
+            "KEEN_PBR_TEST_NDMS_INTERFACE_ENDPOINT",
+            base + "/rci/show/interface");
+        http_endpoint_ = std::make_unique<EnvironmentVariableGuard>(
+            "KEEN_PBR_TEST_NDMS_HTTP_CONFIG_ENDPOINT",
+            base + "/rci/show/rc/ip/http");
+        user_endpoint_ = std::make_unique<EnvironmentVariableGuard>(
+            "KEEN_PBR_TEST_NDMS_USER_ENDPOINT", base + "/rci/show/rc/user");
+        invalidate();
+    }
+
+    ~NdmsWebDiscoveryFixture() { invalidate(); }
+
+    void invalidate() {
+        shared_ndms_interface_resource().invalidate();
+        shared_ndms_http_config_resource().invalidate();
+    }
+
+    std::atomic<int> management_port;
+    std::atomic<bool> interfaces_available{true};
+    std::atomic<unsigned> interface_reads{0};
+    std::atomic<unsigned> http_config_reads{0};
+    std::function<void()> before_interface_read;
+
+private:
+    httplib::Server ndms_;
+    std::unique_ptr<BoundHttpServer> running_;
+    std::unique_ptr<EnvironmentVariableGuard> interface_endpoint_;
+    std::unique_ptr<EnvironmentVariableGuard> http_endpoint_;
+    std::unique_ptr<EnvironmentVariableGuard> user_endpoint_;
+};
 
 ApiConfig auth_api_config() {
     ApiConfig config;
@@ -1255,6 +1323,313 @@ TEST_CASE("public auth status hides the configured Keenetic endpoint") {
     CHECK(status.at("provider") == "keenetic");
     CHECK_FALSE(status.at("authenticated").get<bool>());
     CHECK_FALSE(status.contains("keenetic_endpoint"));
+}
+
+TEST_CASE("fresh auto Keenetic auth discovers the port before collecting credentials") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    const std::string installed_auth =
+        R"({"enabled":true,"provider":"keenetic","keenetic_endpoint_mode":"auto","session_ttl_seconds":604800})";
+    write_text(auth_path, installed_auth);
+    EnvironmentVariableGuard auth_file("KEEN_PBR_AUTH_FILE", auth_path.string());
+    std::atomic<unsigned> credentials{0};
+    httplib::Server router;
+    router.Get("/auth", [](const auto&, auto& response) {
+        response.status = 401;
+        response.set_header("X-NDM-Realm", "Netcraze Giga");
+        response.set_header("X-NDM-Challenge", "fixture-challenge");
+    });
+    router.Post("/auth", [&](const auto&, auto& response) {
+        ++credentials;
+        response.status = 200;
+    });
+    BoundHttpServer running_router(router);
+    REQUIRE(running_router.port() != 80);
+    NdmsWebDiscoveryFixture ndms(running_router.port());
+    TrustedLocalConnectionEvaluatorGuard local_transport(
+        [](auto, auto, bool) { return true; });
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    server.start();
+    httplib::Client client("127.0.0.1", configured_port(config));
+
+    // This is AuthGate's first request. Login is never attempted while this
+    // response contains an error, regardless of its HTTP status.
+    const auto status = get_auth_status(client);
+    CHECK(status.at("enabled") == true);
+    CHECK(status.at("provider") == "keenetic");
+    CHECK(status.at("trusted_local_connection") == true);
+    CHECK(status.at("authenticated") == false);
+    REQUIRE_FALSE(status.contains("error"));
+    CHECK_FALSE(status.contains("keenetic_endpoint"));
+    CHECK(credentials == 0U);
+    const auto preflight = client.Get("/api/auth/status?credential_transport=1");
+    REQUIRE(preflight != nullptr);
+    CHECK_FALSE(nlohmann::json::parse(preflight->body).contains("error"));
+    CHECK(ndms.interface_reads == 1U);
+    CHECK(ndms.http_config_reads == 1U);
+
+    const auto login = client.Post(
+        "/api/auth/login", R"({"username":"admin","password":"fixture-secret"})",
+        "application/json");
+    REQUIRE(login != nullptr);
+    REQUIRE(login->status == 200);
+    CHECK(credentials == 1U);
+    const auto signed_in = client.Get(
+        "/api/auth/status", httplib::Headers{{"Cookie", session_cookie(*login)}});
+    REQUIRE(signed_in != nullptr);
+    const auto signed_in_status = nlohmann::json::parse(signed_in->body);
+    CHECK(signed_in_status.at("authenticated") == true);
+    CHECK(signed_in_status.at("keenetic_endpoint") ==
+          "127.0.0.1:" + std::to_string(running_router.port()));
+    CHECK(signed_in_status.at("keenetic_endpoint_source") == "ndms");
+    std::ifstream stored(auth_path);
+    CHECK(nlohmann::json::parse(stored) == nlohmann::json::parse(installed_auth));
+}
+
+TEST_CASE("auto Keenetic login follows a changed port without waiting for the RCI cache") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    std::atomic<bool> old_port_open{true};
+    std::atomic<unsigned> old_credentials{0}, new_credentials{0};
+    httplib::Server old_router, new_router;
+    old_router.Get("/auth", [&](const auto&, auto& response) {
+        response.status = old_port_open ? 401 : 503;
+        if (old_port_open) {
+            response.set_header("X-NDM-Realm", "Keenetic");
+            response.set_header("X-NDM-Challenge", "old-challenge");
+        }
+    });
+    new_router.Get("/auth", [](const auto&, auto& response) {
+        response.status = 401;
+        response.set_header("X-NDM-Realm", "Keenetic");
+        response.set_header("X-NDM-Challenge", "new-challenge");
+    });
+    old_router.Post("/auth", [&](const auto&, auto& response) {
+        ++old_credentials;
+        response.status = 200;
+    });
+    new_router.Post("/auth", [&](const auto&, auto& response) {
+        ++new_credentials;
+        response.status = 200;
+    });
+    BoundHttpServer first(old_router), second(new_router);
+    NdmsWebDiscoveryFixture ndms(first.port());
+    write_text(auth_path, nlohmann::json{
+        {"enabled", true}, {"provider", "keenetic"},
+        {"keenetic_endpoint_mode", "auto"},
+        {"keenetic_endpoint", "127.0.0.1:" + std::to_string(first.port())}
+    }.dump());
+    EnvironmentVariableGuard auth_file("KEEN_PBR_AUTH_FILE", auth_path.string());
+    TrustedLocalConnectionEvaluatorGuard local_transport(
+        [](auto, auto, bool) { return true; });
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    server.start();
+    httplib::Client client("127.0.0.1", configured_port(config));
+    const auto login = client.Post(
+        "/api/auth/login", R"({"username":"admin","password":"fixture-secret"})",
+        "application/json");
+    REQUIRE(login != nullptr);
+    REQUIRE(login->status == 200);
+    const httplib::Headers session{{"Cookie", session_cookie(*login)}};
+    REQUIRE(shared_ndms_interface_resource().get().document != nullptr);
+    REQUIRE(shared_ndms_http_config_resource().get().document != nullptr);
+    const auto previous_reads = ndms.http_config_reads.load();
+
+    // Simulate a firmware port change with the process and both caches alive.
+    // Do not invalidate the caches from the test or restart keen-pbr.
+    old_port_open = false;
+    ndms.management_port = second.port();
+    const auto new_login = client.Post(
+        "/api/auth/login", R"({"username":"admin","password":"fixture-secret"})",
+        "application/json");
+    REQUIRE(new_login != nullptr);
+    REQUIRE(new_login->status == 200);
+    CHECK(new_credentials == 1U);
+    CHECK(old_credentials == 1U);
+    CHECK(ndms.http_config_reads == previous_reads + 1U);
+    const auto existing_session = client.Get("/api/auth/status", session);
+    REQUIRE(existing_session != nullptr);
+    const auto status = nlohmann::json::parse(existing_session->body);
+    CHECK(status.at("authenticated") == true);
+    CHECK(status.at("keenetic_endpoint") ==
+          "127.0.0.1:" + std::to_string(second.port()));
+}
+
+TEST_CASE("auto Keenetic status recovers when startup discovery becomes available") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    write_text(auth_path,
+        R"({"enabled":true,"provider":"keenetic","keenetic_endpoint_mode":"auto"})");
+    EnvironmentVariableGuard auth_file("KEEN_PBR_AUTH_FILE", auth_path.string());
+    httplib::Server router;
+    std::atomic<unsigned> credentials{0};
+    router.Get("/auth", [](const auto&, auto& response) {
+        response.status = 401;
+        response.set_header("X-NDM-Realm", "Keenetic");
+        response.set_header("X-NDM-Challenge", "fixture-challenge");
+    });
+    router.Post("/auth", [&](const auto&, auto&) { ++credentials; });
+    BoundHttpServer running_router(router);
+    NdmsWebDiscoveryFixture ndms(running_router.port());
+    ndms.interfaces_available = false;
+    TrustedLocalConnectionEvaluatorGuard local_transport(
+        [](auto, auto, bool) { return true; });
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    server.start();
+    httplib::Client client("127.0.0.1", configured_port(config));
+    for (int i = 0; i != 3; ++i) {
+        CHECK(get_auth_status(client).at("error") == "auth_endpoint_unavailable");
+    }
+    CHECK(ndms.interface_reads == 1U);
+    CHECK(ndms.http_config_reads == 0U);
+
+    ndms.interfaces_available = true;
+    ndms.invalidate();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{12};
+    auto status = get_auth_status(client);
+    while (status.contains("error") && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{100});
+        status = get_auth_status(client);
+    }
+    CHECK_FALSE(status.contains("error"));
+    CHECK(status.at("authenticated") == false);
+    CHECK(ndms.interface_reads == 2U);
+    CHECK(credentials == 0U);
+}
+
+TEST_CASE("pending auto discovery does not replace a newly selected auth provider") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    write_text(auth_path,
+        R"({"enabled":true,"provider":"keenetic","keenetic_endpoint_mode":"auto"})");
+    EnvironmentVariableGuard auth_file("KEEN_PBR_AUTH_FILE", auth_path.string());
+    httplib::Server router;
+    router.Get("/auth", [](const auto&, auto& response) {
+        response.status = 401;
+        response.set_header("X-NDM-Realm", "Keenetic");
+        response.set_header("X-NDM-Challenge", "fixture-challenge");
+    });
+    BoundHttpServer running_router(router);
+    NdmsWebDiscoveryFixture ndms(running_router.port());
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool entered = false, release = false;
+    ndms.before_interface_read = [&]() {
+        std::unique_lock lock(mutex);
+        entered = true;
+        cv.notify_all();
+        cv.wait(lock, [&]() { return release; });
+    };
+    TrustedLocalConnectionEvaluatorGuard local_transport(
+        [](auto, auto, bool) { return true; });
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    server.start();
+    std::string response_body;
+    std::thread request([&]() {
+        httplib::Client client("127.0.0.1", configured_port(config));
+        const auto response = client.Get("/api/auth/status");
+        if (response) response_body = response->body;
+    });
+    bool discovery_started;
+    {
+        std::unique_lock lock(mutex);
+        discovery_started = cv.wait_for(
+            lock, std::chrono::milliseconds{750}, [&]() { return entered; });
+    }
+    server.publish_auth_provider_for_testing("local");
+    {
+        std::lock_guard lock(mutex);
+        release = true;
+    }
+    cv.notify_all();
+    request.join();
+    REQUIRE(discovery_started);
+    REQUIRE_FALSE(response_body.empty());
+    const auto status = nlohmann::json::parse(response_body);
+    CHECK(status.at("provider") == "local");
+    CHECK_FALSE(status.contains("keenetic_endpoint"));
+    CHECK_FALSE(status.contains("error"));
+}
+
+TEST_CASE("auth status does not autodiscover for local or manual authentication") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    std::string provider;
+    SUBCASE("local password") { provider = "local"; }
+    SUBCASE("manual router endpoint") { provider = "keenetic"; }
+    write_text(auth_path, nlohmann::json{
+        {"enabled", true}, {"provider", provider},
+        {"username", "admin"}, {"password", "fixture-secret"},
+        {"keenetic_endpoint_mode", "manual"},
+        {"keenetic_endpoint", "127.0.0.1:8090"}
+    }.dump());
+    EnvironmentVariableGuard auth_file("KEEN_PBR_AUTH_FILE", auth_path.string());
+    NdmsWebDiscoveryFixture ndms(8090);
+    TrustedLocalConnectionEvaluatorGuard local_transport(
+        [](auto, auto, bool) { return true; });
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    server.start();
+    httplib::Client client("127.0.0.1", configured_port(config));
+    const auto status = get_auth_status(client);
+    CHECK(status.at("provider") == provider);
+    CHECK_FALSE(status.contains("error"));
+    CHECK(ndms.interface_reads == 0U);
+    CHECK(ndms.http_config_reads == 0U);
+}
+
+TEST_CASE("a temporarily unavailable Keenetic endpoint does not consume password attempts") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    std::atomic<bool> ready{false};
+    std::atomic<unsigned> credentials{0};
+    httplib::Server router;
+    router.Get("/auth", [&](const auto&, auto& response) {
+        response.status = ready ? 401 : 503;
+        if (ready) {
+            response.set_header("X-NDM-Realm", "Keenetic");
+            response.set_header("X-NDM-Challenge", "fixture-challenge");
+        }
+    });
+    router.Post("/auth", [&](const auto&, auto& response) {
+        ++credentials;
+        response.status = 200;
+    });
+    BoundHttpServer running_router(router);
+    NdmsWebDiscoveryFixture ndms(running_router.port());
+    ndms.interfaces_available = false;
+    write_text(auth_path, nlohmann::json{
+        {"enabled", true}, {"provider", "keenetic"},
+        {"keenetic_endpoint_mode", "auto"},
+        {"keenetic_endpoint",
+         "127.0.0.1:" + std::to_string(running_router.port())}
+    }.dump());
+    EnvironmentVariableGuard auth_file("KEEN_PBR_AUTH_FILE", auth_path.string());
+    TrustedLocalConnectionEvaluatorGuard local_transport(
+        [](auto, auto, bool) { return true; });
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    server.start();
+    httplib::Client client("127.0.0.1", configured_port(config));
+    for (int i = 0; i != 6; ++i) {
+        const auto attempt = client.Post(
+            "/api/auth/login", R"({"username":"admin","password":"fixture-secret"})",
+            "application/json");
+        REQUIRE(attempt != nullptr);
+        CHECK(attempt->status == 503);
+    }
+    CHECK(credentials == 0U);
+    ready = true;
+    const auto login = client.Post(
+        "/api/auth/login", R"({"username":"admin","password":"fixture-secret"})",
+        "application/json");
+    REQUIRE(login != nullptr);
+    CHECK(login->status == 200);
+    CHECK(credentials == 1U);
 }
 
 TEST_CASE("Keenetic endpoint parser accepts canonical local targets") {
