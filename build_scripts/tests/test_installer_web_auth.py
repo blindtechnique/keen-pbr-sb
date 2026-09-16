@@ -67,6 +67,10 @@ echo "$count" > '{self.count}'
 
     def overrides(self):
         return f'''
+id() {{
+    if [ "$1" = -u ]; then printf '%s\\n' "${{TEST_UID:-0}}";
+    else command id "$@"; fi
+}}
 ask() {{
     echo "ask $1" >> '{self.effects}'
     IFS= read -r answer < '{self.answers}' || return 1
@@ -222,6 +226,14 @@ ensure_release_verifier() {{ echo forbidden-download >> '{self.effects}'; exit 9
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.auth.read_bytes(), self.original)
         self.assertEqual(self.effect_lines(), ["lock"])
+
+    def test_auth_only_rejects_non_root_before_any_mutation(self):
+        result = self.run_setup(args=("--configure-auth",), env={"TEST_UID": "1000"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("root", result.stdout + result.stderr)
+        self.assertEqual(self.auth.read_bytes(), self.original)
+        self.assertEqual(self.effect_lines(), [])
+        self.assertEqual(list(self.work.iterdir()), [])
 
     def test_auth_only_cannot_be_combined_with_update(self):
         result = self.run_setup(args=("--configure-auth", "--update"))

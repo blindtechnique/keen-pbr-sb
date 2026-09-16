@@ -162,7 +162,8 @@ class ReleaseWorkflowTest(unittest.TestCase):
             text = self.jobs[job]
             self.assertIn('CMAKE_CXX_COMPILER_LAUNCHER: ccache', text)
             self.assertIn('CCACHE_COMPILERCHECK: content', text)
-            self.assertIn(f'path: .ccache-{compiler}', text)
+            self.assertIn('path: ${{ runner.temp }}/keen-pbr-ccache/' + compiler, text)
+            self.assertIn('CCACHE_DIR: ${{ runner.temp }}/keen-pbr-ccache/' + compiler, text)
             self.assertIn(f'-{compiler}-v1-', text)
             self.assertIn('ccache --show-stats', text)
             self.assertNotIn('cache-hit', text)  # A hit never bypasses tests.
