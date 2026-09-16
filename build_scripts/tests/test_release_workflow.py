@@ -162,12 +162,21 @@ class ReleaseWorkflowTest(unittest.TestCase):
             text = self.jobs[job]
             self.assertIn('CMAKE_CXX_COMPILER_LAUNCHER: ccache', text)
             self.assertIn('CCACHE_COMPILERCHECK: content', text)
-            self.assertIn('path: ${{ runner.temp }}/keen-pbr-ccache/' + compiler, text)
-            self.assertIn('CCACHE_DIR: ${{ runner.temp }}/keen-pbr-ccache/' + compiler, text)
+            self.assertIn('path: .cache/ccache/' + compiler, text)
+            self.assertIn('CCACHE_DIR: ${{ github.workspace }}/.cache/ccache/' + compiler, text)
             self.assertIn(f'-{compiler}-v1-', text)
             self.assertIn('ccache --show-stats', text)
             self.assertNotIn('cache-hit', text)  # A hit never bypasses tests.
         self.assertIn('make test BUILD_JOBS=4', self.jobs['backend'])
+
+    def test_job_environment_uses_only_contexts_available_before_runner_assignment(self):
+        allowed = {'github', 'needs', 'strategy', 'matrix', 'vars', 'secrets', 'inputs'}
+        for name, job in self.jobs.items():
+            if not re.search(r'^    env:', job, re.MULTILINE):
+                continue
+            _, environment = field(job, 'env', 4)
+            contexts = set(re.findall(r'\$\{\{\s*(\w+)\.', environment))
+            self.assertLessEqual(contexts, allowed, name)
 
     def run_fake_ci_dependencies(self, packages: list[str], *, update_status: int = 0, install_status: int = 0) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
         with tempfile.TemporaryDirectory() as temporary:

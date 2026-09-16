@@ -111,7 +111,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
-      CCACHE_DIR: ${{ runner.temp }}/keen-pbr-ccache/gcc
+      CCACHE_DIR: ${{ github.workspace }}/.cache/ccache/gcc
       CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_COMPILERCHECK: content
       CCACHE_MAXSIZE: 2G
@@ -137,7 +137,7 @@ jobs:
       - name: Restore native compiler cache
         uses: actions/cache@v4
         with:
-          path: ${{ runner.temp }}/keen-pbr-ccache/gcc
+          path: .cache/ccache/gcc
           key: ${{ runner.os }}-${{ runner.arch }}-gcc-v1-${{ needs.resolve-source.outputs.source_sha }}-${{ github.run_id }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-gcc-v1-
@@ -271,7 +271,7 @@ jobs:
     timeout-minutes: 120
     env:
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
-      CCACHE_DIR: ${{ runner.temp }}/keen-pbr-ccache/clang
+      CCACHE_DIR: ${{ github.workspace }}/.cache/ccache/clang
       CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_COMPILERCHECK: content
       CCACHE_MAXSIZE: 1G
@@ -296,7 +296,7 @@ jobs:
       - name: Restore Clang compiler cache
         uses: actions/cache@v4
         with:
-          path: ${{ runner.temp }}/keen-pbr-ccache/clang
+          path: .cache/ccache/clang
           key: ${{ runner.os }}-${{ runner.arch }}-clang-v1-${{ needs.resolve-source.outputs.source_sha }}-${{ github.run_id }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-clang-v1-
