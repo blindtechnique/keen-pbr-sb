@@ -8028,7 +8028,7 @@ components:
       properties:
         list:
           type: string
-          description: Path of the list file, as nfqws2.conf names it.
+          description: Path of the list file, or the inline flag such as --hostlist-domains.
         role:
           type: string
           enum: [hostlist, hostlist_auto, hostlist_exclude, ipset, ipset_exclude]
@@ -8039,9 +8039,8 @@ components:
         includes:
           type: boolean
           description: >
-            false for the two exclude roles. An exclude match is not coverage -
-            it is the reason coverage does not apply - so it is reported as
-            itself rather than folded into the same answer.
+            false for the two exclude roles. An exclusion belongs only to its
+            profile; it must never override a match in another profile.
         entry:
           type: string
           description: >
@@ -8059,12 +8058,52 @@ components:
             true when the entry is the domain or address itself rather than a
             parent domain or a wider prefix.
 
+    RoutingTestNfqwsProfile:
+      type: object
+      required: [index, name, filters, has_actions, hostname_required, auto_hostlist, list_result, matches]
+      description: >
+        One saved startup profile, in --new order. Only list predicates are
+        evaluated, separately for each resolved IP. This is not a claim that
+        the profile wins for a live packet: protocol, port, visible hostname,
+        earlier profiles, queue admission and running state also matter.
+      properties:
+        index:
+          type: integer
+          minimum: 1
+        name:
+          type: string
+        filters:
+          type: array
+          items:
+            type: string
+          description: Saved --filter-* selectors, shown as conditions rather than observed traffic.
+        has_actions:
+          type: boolean
+          description: Whether the profile contains a strategy action; false for a pass-through profile.
+        hostname_required:
+          type: boolean
+          description: Nonempty domain filters or an auto hostlist require a hostname visible to nfqws.
+        auto_hostlist:
+          type: boolean
+        list_result:
+          type: string
+          pattern: "^(matched|excluded|unmatched|unrestricted|mixed|unknown|hostname_required|ip_required|auto_pending)$"
+          description: >
+            Result of the list predicates only. Host and IP includes intersect;
+            exclusions are local to this profile. mixed means different IPs
+            have different results. Empty static includes are unrestricted,
+            while an empty auto hostlist still waits for learning.
+        matches:
+          type: array
+          items:
+            $ref: "#/components/schemas/RoutingTestNfqwsMatch"
+
     RoutingTestNfqws:
       type: object
       required: [available, matches]
       description: >
-        Which nfqws lists cover this target. Read from the files on disk, so it
-        says what nfqws is configured to act on - not whether nfqws is running
+        Which nfqws list predicates match this target in each saved startup
+        profile. Read from the files on disk, not whether nfqws is running
         or whether its strategy works, which are separate questions with
         separate answers. At most one request scans the bounded cached lists;
         concurrent requests keep the routing result but report this sub-result
@@ -8083,8 +8122,14 @@ components:
             or parsed safely.
         matches:
           type: array
+          description: Legacy flat evidence only; do not derive global exclusion precedence from it.
           items:
             $ref: "#/components/schemas/RoutingTestNfqwsMatch"
+        profiles:
+          type: array
+          description: Profile-scoped evidence; absent on older service versions.
+          items:
+            $ref: "#/components/schemas/RoutingTestNfqwsProfile"
 
     RegistryCheckRequest:
       type: object

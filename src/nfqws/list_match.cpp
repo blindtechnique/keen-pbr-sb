@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstring>
 #include <limits>
+#include <set>
 #include <string_view>
 
 namespace keen_pbr3::nfqws {
@@ -168,6 +169,166 @@ std::vector<std::string> parse_hostlist(const std::string& contents) {
     return parsed ? std::move(parsed->entries) : std::vector<std::string>{};
 }
 
+std::vector<ProfileReference> parse_profile_references(
+    const std::vector<std::string>& arguments) {
+    std::vector<ProfileReference> profiles(1);
+    std::vector<std::string> tokens;
+    const auto finish = [&]() {
+        auto& profile = profiles.back();
+        profile.lists = parse_list_references(tokens);
+        static const std::vector<std::pair<std::string, ListRole>> inline_flags{
+            {"--hostlist-domains=", ListRole::hostlist},
+            {"--hostlist-exclude-domains=", ListRole::hostlist_exclude},
+            {"--ipset-ip=", ListRole::ipset},
+            {"--ipset-exclude-ip=", ListRole::ipset_exclude},
+        };
+        for (const auto& token : tokens) {
+            // This reader understands token=value. A separate argument or
+            // missing value must not silently remove a list predicate.
+            for (const auto* flag : {
+                     "--hostlist", "--hostlist-auto", "--hostlist-exclude",
+                     "--ipset", "--ipset-exclude", "--hostlist-domains",
+                     "--hostlist-exclude-domains", "--ipset-ip",
+                     "--ipset-exclude-ip", "--lua-desync", "--dpi-desync"}) {
+                if (token == flag || token == std::string(flag) + "=") {
+                    profile.supported = false;
+                }
+            }
+            if (token.rfind("--name=", 0) == 0) profile.name = token.substr(7);
+            if (token.rfind("--filter-", 0) == 0 || token == "--skip") {
+                profile.filters.push_back(token);
+            }
+            if (token.rfind("--lua-desync=", 0) == 0 ||
+                token.rfind("--dpi-desync=", 0) == 0) {
+                profile.has_actions = true;
+            }
+            // Templates and server mode change where filters come from or
+            // which endpoint they inspect. Never flatten them into certainty.
+            if (token.rfind("--template", 0) == 0 ||
+                token.rfind("--import", 0) == 0 ||
+                token.rfind("--server", 0) == 0 ||
+                token.rfind("--filter-host", 0) == 0 || token == "--skip") {
+                profile.supported = false;
+            }
+            for (const auto& [flag, role] : inline_flags) {
+                if (token.rfind(flag, 0) != 0) continue;
+                auto text = token.substr(flag.size());
+                std::replace(text.begin(), text.end(), ',', '\n');
+                profile.lists.push_back(ListReference{
+                    flag.substr(0, flag.size() - 1), role, true,
+                    parse_hostlist(text)});
+            }
+        }
+        tokens.clear();
+    };
+    bool global_unsupported = false;
+    for (const auto& argument : arguments) {
+        global_unsupported = global_unsupported ||
+                             argument.rfind("--server", 0) == 0 ||
+                             argument.rfind("--template", 0) == 0 ||
+                             argument.rfind("--import", 0) == 0;
+        if (argument == "--new" || argument.rfind("--new=", 0) == 0) {
+            finish();
+            ProfileReference next;
+            next.index = profiles.size() + 1;
+            if (argument.size() > 6) next.name = argument.substr(6);
+            profiles.push_back(std::move(next));
+        } else {
+            tokens.push_back(argument);
+        }
+    }
+    finish();
+    if (global_unsupported) {
+        for (auto& profile : profiles) profile.supported = false;
+    }
+    return profiles;
+}
+
+ProfileListEvaluation evaluate_profile_lists(
+    const ProfileReference& profile,
+    const std::string& domain,
+    const std::vector<std::string>& addresses,
+    const ListLoader& load) {
+    ProfileListEvaluation evaluation;
+    if (!profile.supported) return evaluation;
+    std::vector<std::string> ips = addresses;
+    std::sort(ips.begin(), ips.end());
+    ips.erase(std::unique(ips.begin(), ips.end()), ips.end());
+    if (ips.empty()) ips.emplace_back();
+    struct Hits {
+        bool host{false}, ip{false}, host_excluded{false}, ip_excluded{false};
+    };
+    std::vector<Hits> hits(ips.size());
+    bool host_include = false, ip_include = false, any_ip_entries = false;
+    for (const auto& reference : profile.lists) {
+        const auto entries = reference.inline_values
+            ? std::make_shared<const std::vector<std::string>>(reference.entries)
+            : (load ? load(reference.path) : nullptr);
+        if (!entries) {
+            evaluation.matches.clear();
+            return evaluation;
+        }
+        const bool automatic = reference.role == ListRole::hostlist_auto;
+        evaluation.auto_hostlist = evaluation.auto_hostlist || automatic;
+        if (role_is_hostlist(reference.role)) {
+            evaluation.hostname_required = evaluation.hostname_required ||
+                                           automatic || !entries->empty();
+            host_include = host_include ||
+                           (role_includes(reference.role) &&
+                            (automatic || !entries->empty()));
+        } else {
+            any_ip_entries = any_ip_entries || !entries->empty();
+            ip_include = ip_include ||
+                         (role_includes(reference.role) && !entries->empty());
+        }
+        const bool host = role_is_hostlist(reference.role);
+        const auto domain_hit = host ? match_hostlist(*entries, domain) : std::nullopt;
+        for (std::size_t i = 0; i < ips.size(); ++i) {
+            const auto& target = host ? domain : ips[i];
+            if (target.empty()) continue;
+            const auto hit = host ? domain_hit : match_ipset(*entries, target);
+            if (!hit) continue;
+            if (host) {
+                (role_includes(reference.role) ? hits[i].host : hits[i].host_excluded) = true;
+            } else {
+                (role_includes(reference.role) ? hits[i].ip : hits[i].ip_excluded) = true;
+            }
+            const bool duplicate = std::any_of(
+                evaluation.matches.begin(), evaluation.matches.end(),
+                [&](const ProfileListMatch& previous) {
+                    return previous.reference.path == reference.path &&
+                           previous.reference.role == reference.role &&
+                           previous.hit.entry == hit->entry &&
+                           previous.matched == target;
+                });
+            if (!duplicate) {
+                evaluation.matches.push_back({reference, *hit, target});
+            }
+        }
+        // Release each parsed list before loading the next: a request must
+        // not pin every evicted list and exceed the cache's memory budget.
+    }
+    // nfqws treats all-empty static includes as unrestricted; an auto hostlist
+    // stays a real condition even while empty. See upstream HostlistCheck_.
+    std::set<std::string> outcomes;
+    for (std::size_t i = 0; i < ips.size(); ++i) {
+        // IP predicates are checked before hostname. An unrelated IP profile
+        // must not claim an applicable domain exclusion for this address.
+        if (ips[i].empty() && any_ip_entries) outcomes.insert("ip_required");
+        else if (hits[i].ip_excluded) outcomes.insert("excluded");
+        else if (ip_include && !hits[i].ip) outcomes.insert("unmatched");
+        else if (domain.empty() && evaluation.hostname_required)
+            outcomes.insert("hostname_required");
+        else if (hits[i].host_excluded) outcomes.insert("excluded");
+        else if (host_include && !hits[i].host)
+            outcomes.insert(evaluation.auto_hostlist ? "auto_pending" : "unmatched");
+        else if (hits[i].host || hits[i].ip) outcomes.insert("matched");
+        else outcomes.insert("unrestricted");
+    }
+    evaluation.result = outcomes.size() == 1 ? *outcomes.begin() : "mixed";
+    return evaluation;
+}
+
 std::optional<BoundedHostlist> parse_hostlist_bounded(
     const std::string& contents,
     std::size_t max_entries,
@@ -235,7 +396,10 @@ std::optional<HostlistMatch> match_hostlist(
 
     std::optional<HostlistMatch> best;
     for (const auto& raw : entries) {
-        const auto entry = lower(raw);
+        auto entry = lower(raw);
+        if (entry.empty()) continue;
+        const bool exact_only = entry.front() == '^';
+        if (exact_only) entry.erase(0, 1);
         if (entry.empty()) continue;
 
         bool covers = false;
@@ -243,7 +407,7 @@ std::optional<HostlistMatch> match_hostlist(
         if (entry == needle) {
             covers = true;
             exact = true;
-        } else if (needle.size() > entry.size() &&
+        } else if (!exact_only && needle.size() > entry.size() &&
                    needle.compare(needle.size() - entry.size(),
                                   entry.size(),
                                   entry) == 0 &&

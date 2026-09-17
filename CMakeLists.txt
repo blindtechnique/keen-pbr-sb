@@ -768,6 +768,21 @@ endif()
 
 install(TARGETS keen-pbr RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
+# Entware 1.4.21 serializes Keenetic's revision-1 connndmmark using the old
+# three-byte ABI. This private match adapter is loaded only by our NFQ helper.
+# The old SDK's kernel/xtables headers are C-only; the daemon stays C++17.
+if(KEEN_PBR_TARGET_OS STREQUAL "keenetic" AND WITH_API)
+  enable_language(C)
+  pkg_check_modules(XTABLES REQUIRED IMPORTED_TARGET xtables)
+  add_library(keen-pbr-connndmmark SHARED src/keenetic/connndmmark_compat.c)
+  set_target_properties(keen-pbr-connndmmark PROPERTIES
+    C_STANDARD 11 C_STANDARD_REQUIRED YES C_EXTENSIONS YES
+    C_VISIBILITY_PRESET hidden)
+  target_compile_options(keen-pbr-connndmmark PRIVATE -Wall -Wextra -Werror)
+  target_link_libraries(keen-pbr-connndmmark PRIVATE PkgConfig::XTABLES ${CMAKE_DL_LIBS})
+  install(TARGETS keen-pbr-connndmmark LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/keen-pbr)
+endif()
+
 if(WITH_API)
   set(KEEN_PBR_PACKAGED_CONFIG "${CMAKE_SOURCE_DIR}/packages/common/config.full.example.json")
 else()

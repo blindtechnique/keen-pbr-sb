@@ -68,6 +68,7 @@ CMAKE_OPTIONS += \
 	-DKEEN_PBR_TARGET_OS:STRING=keenetic \
 	-DKEEN_PBR_USE_LIBUNWIND=OFF \
 	-DCMAKE_INSTALL_BINDIR:PATH=$(KEEN_PBR_CMAKE_INSTALL_BINDIR) \
+	-DCMAKE_INSTALL_LIBDIR:PATH=usr/lib \
 	-DUSE_KEENETIC_API=ON \
 	-DCMAKE_BUILD_TYPE=MinSizeRel
 
@@ -123,6 +124,12 @@ define Package/keen-pbr/install
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/etc/init.d/S80keen-pbr $(1)/opt/etc/init.d/S80keen-pbr
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/etc/init.d/S79transport-manager $(1)/opt/etc/init.d/S79transport-manager
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/etc/init.d/S52keen-pbr-ssh-guard $(1)/opt/etc/init.d/S52keen-pbr-ssh-guard
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/etc/init.d/S53keen-pbr-nfqws-tcp $(1)/opt/etc/init.d/S53keen-pbr-nfqws-tcp
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/nfqws-tcp-window.sh $(1)/opt/usr/lib/keen-pbr/nfqws-tcp-window.sh
+	$(INSTALL_DATA) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/nfqws-tcp-window.awk $(1)/opt/usr/lib/keen-pbr/nfqws-tcp-window.awk
+	$(INSTALL_DATA) $(PKG_INSTALL_DIR)/opt/usr/lib/keen-pbr/libkeen-pbr-connndmmark.so $(1)/opt/usr/lib/keen-pbr/libkeen-pbr-connndmmark.so
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/etc/ndm/netfilter.d/099-keen-pbr-nfqws-tcp.sh $(1)/opt/etc/ndm/netfilter.d/099-keen-pbr-nfqws-tcp.sh
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/etc/ndm/netfilter.d/110-keen-pbr-nfqws-tcp.sh $(1)/opt/etc/ndm/netfilter.d/110-keen-pbr-nfqws-tcp.sh
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/etc/keen-pbr/defaults $(1)/opt/etc/keen-pbr/defaults
 	$(INSTALL_CONF) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/etc/keen-pbr/dnsmasq-fallback.conf $(1)/opt/etc/keen-pbr/dnsmasq-fallback.conf
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/dnsmasq.sh $(1)/opt/usr/lib/keen-pbr/dnsmasq.sh

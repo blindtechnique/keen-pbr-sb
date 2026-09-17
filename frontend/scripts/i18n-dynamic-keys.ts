@@ -559,4 +559,19 @@ export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
     reason:
       "registryVerdict returns the RegistryVerdict union, and the branch only renders once a response exists.",
   },
+  {
+    file: "src/components/overview/target-facts.tsx",
+    argument:
+      '"overview.targetFacts.nfqwsProfileResults." + nfqwsProfileResult(profile)',
+    keys: ["overview.targetFacts.nfqwsProfileResults.*"],
+    reason:
+      "nfqwsProfileResult narrows API values to nine known outcomes and maps future values to unknown; the model tests cover the fallback.",
+  },
+  {
+    file: "src/components/overview/target-facts.tsx",
+    argument: '"overview.targetFacts.role." + match.role',
+    keys: ["overview.targetFacts.role.*"],
+    reason:
+      "Nested profile matches use the same generated five-role union as legacy flat matches.",
+  },
 ] as const

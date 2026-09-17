@@ -295,6 +295,7 @@ export * from './routingTestListMatch';
 export * from './routingTestNfqws';
 export * from './routingTestNfqwsMatch';
 export * from './routingTestNfqwsMatchRole';
+export * from './routingTestNfqwsProfile';
 export * from './routingTestPolicyRule';
 export * from './routingTestPolicyRuleFamily';
 export * from './routingTestPolicyRules';

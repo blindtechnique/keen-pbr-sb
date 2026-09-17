@@ -4,13 +4,10 @@ import {
   nfqwsVerdict,
   registryVerdict,
   summariseNfqwsCoverage,
+  nfqwsProfileResult,
 } from "../src/components/overview/target-facts-model"
 
-const match = (
-  role: string,
-  includes: boolean,
-  entry = "youtube.com"
-): never =>
+const match = (role: string, includes: boolean, entry = "youtube.com"): never =>
   ({
     list: `/opt/etc/nfqws2/lists/${role}.list`,
     role,
@@ -21,6 +18,22 @@ const match = (
   }) as never
 
 describe("nfqws coverage", () => {
+  test("an exclusion in another profile cannot prove a global bypass", () => {
+    const coverage = summariseNfqwsCoverage({
+      available: true,
+      matches: [match("hostlist_exclude", false), match("ipset", true)],
+      profiles: [
+        { index: 1, list_result: "matched", matches: [match("ipset", true)] },
+        {
+          index: 2,
+          list_result: "excluded",
+          matches: [match("hostlist_exclude", false)],
+        },
+      ],
+    } as never)
+    expect(nfqwsVerdict(coverage)).toBe("mixed")
+  })
+
   test("an unreadable nfqws config is unknown, not uncovered", () => {
     // "nfqws is not handling this" and "we could not tell" send someone to
     // different places, so they must not render the same.
@@ -58,15 +71,37 @@ describe("nfqws coverage", () => {
     expect(coverage.excluding).toHaveLength(2)
   })
 
-  test("an exclude match wins the summary over a covering one", () => {
-    // This is what nfqws actually does: the exclude list is consulted and the
-    // traffic is left alone. Saying "covered" would send someone debugging a
-    // strategy that never runs on this domain.
+  test("old flat evidence cannot establish global exclusion precedence", () => {
     const coverage = summariseNfqwsCoverage({
       available: true,
       matches: [match("hostlist", true), match("hostlist_exclude", false)],
     } as never)
-    expect(nfqwsVerdict(coverage)).toBe("excluded")
+    expect(nfqwsVerdict(coverage)).toBe("mixed")
+  })
+
+  test("unknown and IP-dependent profile results stay distinct", () => {
+    for (const [result, verdict] of [
+      ["unknown", "unknown"],
+      ["future_result", "unknown"],
+      ["mixed", "mixed"],
+      ["matched", "covered"],
+      ["excluded", "excluded"],
+      ["hostname_required", "unknown"],
+      ["ip_required", "unknown"],
+      ["auto_pending", "uncovered"],
+      ["unmatched", "uncovered"],
+    ]) {
+      const profile = { list_result: result, has_actions: true } as never
+      const coverage = summariseNfqwsCoverage({
+        available: true,
+        matches: [],
+        profiles: [profile],
+      } as never)
+      expect(nfqwsVerdict(coverage)).toBe(verdict)
+    }
+    expect(nfqwsProfileResult({ list_result: "future_result" } as never)).toBe(
+      "unknown"
+    )
   })
 
   test("no match at all is uncovered", () => {

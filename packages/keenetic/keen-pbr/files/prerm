@@ -24,6 +24,11 @@ if [ "${PKG_UPGRADE:-0}" = 1 ] &&
 fi
 
 echo "Stopping keen-pbr service..."
+# Detach only our optional TCP observation before its helper is removed.
+# nfqws2 itself is independent and remains running.
+if [ -x /opt/usr/lib/keen-pbr/nfqws-tcp-window.sh ]; then
+    /opt/usr/lib/keen-pbr/nfqws-tcp-window.sh remove >/dev/null 2>&1 || true
+fi
 stop_action=stop
 if [ "${PKG_UPGRADE:-0}" = 1 ]; then
     stop_action=stop-for-upgrade

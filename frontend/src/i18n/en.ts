@@ -681,7 +681,7 @@ export const enTranslation = {
       details: "Details",
       poolSummary: "Traffic pools: {{count}}",
       domainPools: "dedicated pools for YouTube, Discord and others",
-      sharedPools: "one shared pool per protocol",
+      sharedPools: "shared pools without per-service splits",
       tier: {
         safe: "Safe",
         balanced: "Balanced",
@@ -691,7 +691,7 @@ export const enTranslation = {
         safe: "The familiar conservative behaviour without the defects and risky techniques of the old presets. Use it as a fallback if a stronger profile causes trouble.",
         balanced:
           "Dedicated pools for YouTube, googlevideo and Discord let each traffic group choose its bypass independently. Recommended for most setups.",
-        max: "Everything in Balanced plus extra techniques such as syndata, IP fragmentation and QUIC replacement. Experimental: some providers may drop the connection.",
+        max: "Everything in Balanced plus extra bypass techniques and separate choices for Discord: opening the app and starting a voice connection. Experimental: calls are not guaranteed to work, and some providers may drop the connection. If things get worse, apply your previous strategy.",
       },
     },
     strategyDisplayNames: {
@@ -2849,16 +2849,39 @@ export const enTranslation = {
         },
       },
       nfqwsTitle: "nfqws",
-      nfqwsChecking: "Checking whether DPI circumvention applies…",
+      nfqwsChecking: "Checking nfqws lists…",
       nfqws: {
         busy: "Another nfqws coverage check is already running. This routing result is still valid; try the check again.",
         unknown:
-          "The nfqws configuration or an active list could not be read safely, so coverage is unknown.",
+          "Not all nfqws conditions could be checked: some data is unavailable or needs connection details.",
         covered:
-          "This target is in an nfqws list, so DPI circumvention applies to it.",
+          "List conditions match in at least one nfqws processing profile.",
         excluded:
-          "This target is on an nfqws exclude list, so circumvention does not apply - even though another list also matches it.",
-        uncovered: "This target is in no active nfqws list.",
+          "An exclusion matches. It applies only within its own profile, not across all nfqws settings.",
+        uncovered:
+          "No list-condition matches were found in nfqws processing profiles.",
+        mixed:
+          "Results differ between profiles or IP addresses. This does not mean the target is excluded from all nfqws processing.",
+      },
+      nfqwsScope:
+        "Lists were checked against the saved settings. Actual processing also depends on the protocol, port, visible hostname and profile order. This check does not confirm successful circumvention.",
+      nfqwsProfiles: "Profile details: {{count}}",
+      nfqwsProfile: "Profile {{index}}",
+      nfqwsProfileNamed: "Profile {{index}} — {{name}}",
+      nfqwsPassThrough: "This profile has no DPI circumvention actions.",
+      nfqwsVisibleHost:
+        "Domain conditions apply only when nfqws can see the hostname in the connection.",
+      nfqwsProfileResults: {
+        matched: "List conditions match",
+        excluded: "Excluded within this profile",
+        unmatched: "List conditions do not match",
+        unrestricted: "Include lists do not restrict this profile",
+        mixed: "Results differ between IP addresses",
+        unknown: "List conditions could not be checked",
+        hostname_required:
+          "A visible hostname is needed to determine the result",
+        ip_required: "An IP address is needed",
+        auto_pending: "No match yet; this profile uses an automatic hostlist",
       },
       nfqwsMatch: "{{role}}: {{entry}} matched {{matched}} ({{list}})",
       role: {

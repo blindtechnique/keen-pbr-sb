@@ -6,9 +6,10 @@
  * OpenAPI spec version: 3.0.0
  */
 import type { RoutingTestNfqwsMatch } from './routingTestNfqwsMatch';
+import type { RoutingTestNfqwsProfile } from './routingTestNfqwsProfile';
 
 /**
- * Which nfqws lists cover this target. Read from the files on disk, so it says what nfqws is configured to act on - not whether nfqws is running or whether its strategy works, which are separate questions with separate answers. At most one request scans the bounded cached lists; concurrent requests keep the routing result but report this sub-result as busy instead of queueing API workers behind the scan.
+ * Which nfqws list predicates match this target in each saved startup profile. Read from the files on disk, not whether nfqws is running or whether its strategy works, which are separate questions with separate answers. At most one request scans the bounded cached lists; concurrent requests keep the routing result but report this sub-result as busy instead of queueing API workers behind the scan.
 
  */
 export interface RoutingTestNfqws {
@@ -20,5 +21,8 @@ export interface RoutingTestNfqws {
      * @pattern ^(busy|unavailable)$
      */
   reason?: string;
+  /** Legacy flat evidence only; do not derive global exclusion precedence from it. */
   matches: RoutingTestNfqwsMatch[];
+  /** Profile-scoped evidence; absent on older service versions. */
+  profiles?: RoutingTestNfqwsProfile[];
 }

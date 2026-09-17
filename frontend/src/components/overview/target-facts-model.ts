@@ -1,6 +1,7 @@
 import type {
   RoutingTestNfqws,
   RoutingTestNfqwsMatch,
+  RoutingTestNfqwsProfile,
 } from "@/api/generated/model"
 
 /**
@@ -16,10 +17,11 @@ export type NfqwsCoverage = {
   readonly known: boolean
   /** Why coverage is unknown, when the API can distinguish it. */
   readonly reason?: RoutingTestNfqws["reason"]
-  /** Lists that make nfqws act on this target. */
+  /** Matching include entries, not proof that nfqws processes a packet. */
   readonly covering: readonly RoutingTestNfqwsMatch[]
-  /** Lists that keep it away from it - the reason coverage does not apply. */
+  /** Matching exclude entries, whose effect is local to their profile. */
   readonly excluding: readonly RoutingTestNfqwsMatch[]
+  readonly profiles: readonly RoutingTestNfqwsProfile[]
 }
 
 export function summariseNfqwsCoverage(
@@ -31,6 +33,7 @@ export function summariseNfqwsCoverage(
       reason: nfqws?.reason,
       covering: [],
       excluding: [],
+      profiles: nfqws?.profiles ?? [],
     }
   }
   const matches = nfqws.matches ?? []
@@ -38,16 +41,16 @@ export function summariseNfqwsCoverage(
     known: true,
     covering: matches.filter((match) => match.includes),
     excluding: matches.filter((match) => !match.includes),
+    profiles: nfqws.profiles ?? [],
   }
 }
 
 /**
  * What to say about nfqws in one line.
  *
- * An exclude match wins the summary even when a covering list also matched,
- * because that is what nfqws does: the exclude list is consulted and the
- * traffic is left alone. Reporting "covered" while nfqws steps aside would be
- * the one reading that sends someone debugging the wrong thing.
+ * Exclusions are local to a profile. A target-only request cannot determine
+ * the winning profile for a packet without its port/protocol/visible host.
+ * Even legacy flat evidence must never claim global exclusion precedence.
  */
 export type NfqwsVerdict =
   | "busy"
@@ -55,10 +58,52 @@ export type NfqwsVerdict =
   | "excluded"
   | "covered"
   | "uncovered"
+  | "mixed"
+
+export const nfqwsProfileResults = [
+  "matched",
+  "excluded",
+  "unmatched",
+  "unrestricted",
+  "mixed",
+  "unknown",
+  "hostname_required",
+  "ip_required",
+  "auto_pending",
+] as const
+export type NfqwsProfileResult = (typeof nfqwsProfileResults)[number]
+
+export function nfqwsProfileResult(
+  profile: RoutingTestNfqwsProfile
+): NfqwsProfileResult {
+  return nfqwsProfileResults.includes(profile.list_result as NfqwsProfileResult)
+    ? (profile.list_result as NfqwsProfileResult)
+    : "unknown"
+}
 
 export function nfqwsVerdict(coverage: NfqwsCoverage): NfqwsVerdict {
   if (!coverage.known && coverage.reason === "busy") return "busy"
   if (!coverage.known) return "unknown"
+  if (coverage.profiles.length) {
+    const results = coverage.profiles.map(nfqwsProfileResult)
+    if (
+      results.some((result) =>
+        ["unknown", "hostname_required", "ip_required"].includes(result)
+      )
+    )
+      return "unknown"
+    const matched = coverage.profiles.some(
+      (profile) =>
+        profile.has_actions !== false &&
+        ["matched", "unrestricted"].includes(nfqwsProfileResult(profile))
+    )
+    const excluded = results.includes("excluded")
+    if (results.includes("mixed") || (matched && excluded)) return "mixed"
+    if (excluded) return "excluded"
+    return matched ? "covered" : "uncovered"
+  }
+  if (coverage.excluding.length > 0 && coverage.covering.length > 0)
+    return "mixed"
   if (coverage.excluding.length > 0) return "excluded"
   return coverage.covering.length > 0 ? "covered" : "uncovered"
 }

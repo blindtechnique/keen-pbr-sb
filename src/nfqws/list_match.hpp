@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstddef>
+#include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -32,10 +34,49 @@ enum class ListRole {
 struct ListReference {
     std::string path;
     ListRole role{ListRole::hostlist};
+    bool inline_values{false};
+    std::vector<std::string> entries;
 };
 
-// True for the roles that make nfqws act on traffic, false for the two that
-// keep it away from it.
+// These describe the saved startup argv, not an observed packet. Keeping the
+// --new boundaries is essential: exclusions never override another profile.
+struct ProfileReference {
+    std::size_t index{1};
+    std::string name;
+    std::vector<std::string> filters;
+    std::vector<ListReference> lists;
+    bool has_actions{false};
+    bool supported{true};
+};
+
+struct ProfileListMatch {
+    ListReference reference;
+    HostlistMatch hit;
+    std::string matched;
+};
+
+struct ProfileListEvaluation {
+    // Only the list predicates are evaluated. Protocol/port, profile order,
+    // queue admission and live processing are NOT proven by this result.
+    std::string result{"unknown"};
+    bool hostname_required{false};
+    bool auto_hostlist{false};
+    std::vector<ProfileListMatch> matches;
+};
+
+using ListEntries = std::shared_ptr<const std::vector<std::string>>;
+using ListLoader = std::function<ListEntries(const std::string&)>;
+
+std::vector<ProfileReference> parse_profile_references(
+    const std::vector<std::string>& arguments);
+ProfileListEvaluation evaluate_profile_lists(
+    const ProfileReference& profile,
+    const std::string& domain,
+    const std::vector<std::string>& addresses,
+    const ListLoader& load);
+
+// True for include roles, false for exclude roles. A matching entry is only
+// one predicate within a profile, not proof of live packet processing.
 bool role_includes(ListRole role) noexcept;
 // True for the roles whose entries are domains rather than addresses.
 bool role_is_hostlist(ListRole role) noexcept;
@@ -77,7 +118,8 @@ std::optional<BoundedHostlist> parse_hostlist_bounded(
 //
 // nfqws matches a hostlist entry against a domain and all of its subdomains,
 // so "youtube.com" covers "www.youtube.com" but never "notyoutube.com" - the
-// boundary is a dot, not a substring. When several entries cover the domain the
+// boundary is a dot, not a substring. A leading ^ makes an entry exact-only.
+// When several entries cover the domain the
 // most specific one is returned, because that is the one an operator would edit.
 std::optional<HostlistMatch> match_hostlist(
     const std::vector<std::string>& entries,

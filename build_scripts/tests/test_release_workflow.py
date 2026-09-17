@@ -144,7 +144,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
         common = ['libcurl4-openssl-dev', 'libnl-3-dev', 'libnl-route-3-dev', 'libunwind-dev']
         tail = ['pkg-config', 'zlib1g-dev']
         expected = {
-            'backend': ['ccache'] + common + ['busybox-static', 'lua5.3'] + tail,
+            'backend': ['ccache'] + common + ['busybox-static', 'lua5.3', 'libxtables-dev'] + tail,
             'crash-diagnostics-smoke': common + tail,
             'clang-thread-safety': ['clang', 'ccache'] + common + tail,
         }
@@ -156,6 +156,19 @@ class ReleaseWorkflowTest(unittest.TestCase):
         helper = CI_DEPENDENCIES.read_text(encoding='utf-8')
         for forbidden in ('--allow-unauthenticated', 'AllowInsecure', 'Verify-Peer', '|| true', 'rm ', 'mv '):
             self.assertNotIn(forbidden, helper)
+
+    def test_nfqws_keenetic_abi_check_is_not_optional(self):
+        backend_steps = steps(self.jobs['backend'])
+        name = 'Check Keenetic connndmmark ABI adapter'
+        self.assertIn(name, backend_steps)
+        command, _ = field(backend_steps[name], 'run', 8)
+        self.assertEqual(shlex.split(command), [
+            'python3', '-m', 'unittest',
+            'build_scripts.tests.test_connndmmark_compat', '-v',
+        ])
+        self.assertNotIn('continue-on-error:', backend_steps[name])
+        names = list(backend_steps)
+        self.assertLess(names.index('Install native build dependencies'), names.index(name))
 
     def test_compiler_caches_are_separate_and_do_not_replace_test_execution(self):
         for job, compiler in [('backend', 'gcc'), ('clang-thread-safety', 'clang')]:

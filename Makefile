@@ -37,6 +37,9 @@ CLANG_FEATURE_CMAKE_FLAGS := -DWITH_API=ON -DUSE_KEENETIC_API=ON
         check-warnings check-shell check-ndmc-env check-openapi-parity \
         check-nfqws-assets \
         check-nfqws-rotator-lua \
+        check-nfqws-tcp-reply-native \
+        check-nfqws-autohostlist-native \
+        check-nfqws-tcp-fake-kernel \
         sanitize fuzz \
         cross-setup cross-build cross-deploy \
         help
@@ -111,9 +114,27 @@ check-openapi-parity: ## Fail when a registered API route is missing from docs/o
 check-nfqws-assets: ## Verify nfqws2 preset/blob invariants and their exact-waiver contract
 	python3 build_scripts/check-nfqws-assets.py
 	python3 -m unittest build_scripts.tests.test_check_nfqws_assets -v
+	python3 -m unittest build_scripts.tests.test_nfqws_discord_profile -v
+	python3 -m unittest build_scripts.tests.test_nfqws_tcp_profile -v
+	python3 -m unittest build_scripts.tests.test_nfqws_tcp_window -v
 
 check-nfqws-rotator-lua: ## Check telemetry and pinned zapret2 circular semantics
 	bash build_scripts/check-nfqws-rotator-lua.sh
+
+# Explicit disposable-container acceptance; never downloads upstream or runs
+# against the host/router network. See docs/NFQWS_ROTATOR_DIAGNOSTICS.ru.md.
+NFQWS_NATIVE_OUTPUT ?= build/nfqws-tcp-reply-native
+check-nfqws-tcp-fake-kernel: ## Check fake isolation in a disposable network-none container (NET_RAW)
+	python3 build_scripts/tests/nfqws_tcp_fake_kernel.py
+
+check-nfqws-tcp-reply-native: ## Test the TCP reply helper with a supplied official nfqws2 binary
+	@test -n "$(NFQWS_UPSTREAM)" || (echo "Set NFQWS_UPSTREAM to an extracted zapret2 v1.0.5 tree"; exit 1)
+	python3 build_scripts/tests/nfqws_tcp_reply_native.py --upstream "$(NFQWS_UPSTREAM)" --output "$(NFQWS_NATIVE_OUTPUT)"
+
+NFQWS_AUTO_OUTPUT ?= build/nfqws-autohostlist-native
+check-nfqws-autohostlist-native: ## Test late TCP auto detection with the supplied official nfqws2 (network-none container)
+	@test -n "$(NFQWS_UPSTREAM)" || (echo "Set NFQWS_UPSTREAM to an extracted zapret2 v1.0.5 tree"; exit 1)
+	python3 build_scripts/tests/nfqws_autohostlist_native.py --upstream "$(NFQWS_UPSTREAM)" --output "$(NFQWS_AUTO_OUTPUT)"
 
 # Отдельный каталог сборки: санитайзеры не должны попасть в router/IPK binary.
 sanitize: ## Build and run the unit suite under AddressSanitizer + UndefinedBehaviorSanitizer

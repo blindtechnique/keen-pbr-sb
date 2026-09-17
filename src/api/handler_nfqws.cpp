@@ -1917,6 +1917,30 @@ std::string run_nfqws_init_script(const std::string& action, int& status) {
 }
 
 std::string run_nfqws_service_command(const std::string& command, int& status) {
+    // Optional extension of the vendor's TCP observation window. Remove our
+    // late reply hooks before vendor stop/start can recreate its early hook;
+    // rebuild after every service action, including update/rollback, without making
+    // extension availability part of the service's success/rollback verdict.
+    // The helper uses live argv and touches only its own tagged NFQUEUE rules.
+    struct TcpWindowRefresh {
+        TcpWindowRefresh() noexcept { refresh("remove"); }
+        ~TcpWindowRefresh() noexcept { refresh("apply"); }
+        static void refresh(const char* action) noexcept {
+            constexpr const char* helper =
+                "/opt/usr/lib/keen-pbr/nfqws-tcp-window.sh";
+            try {
+                if (::access(helper, X_OK) != 0) return;
+                (void)safe_exec_capture(
+                    {helper, action}, true, 4096, true, true,
+                    SafeExecFailureLog::Suppressed,
+                    SafeExecTimeouts{std::chrono::seconds{5},
+                                     std::chrono::seconds{1}});
+            } catch (...) {
+                // No throw, service stop or global routing refresh here.
+            }
+        }
+    } tcp_window_refresh;
+
     if (command == "reload") {
         repair_nfqws_pidfile();
         return run_nfqws_init_script("reload", status);

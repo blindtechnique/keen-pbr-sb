@@ -126,6 +126,24 @@ TEST_CASE("nfqws config migration adds resolved missing defaults without replaci
     CHECK(position_of(args, "--hostlist=/opt/operator.list") == std::string::npos);
 }
 
+TEST_CASE("nfqws config migration retains TCP observation capability and confirmed success detector") {
+    const std::string detector =
+        "--lua-desync=circular:fails=2:inseq=26000:maxseq=65536:"
+        "success_detector=keen_pbr_tcp_success_detector:kpbr_tcp_window=96:key=tcp_general";
+    const std::string previous =
+        "CONFIG_VERSION=1\nNFQUEUE_NUM=411\n"
+        "NFQWS_ARGS='--filter-tcp=443 " + detector + "'\n";
+    const auto migrated = migrate_nfqws_config_preserving_settings(
+        previous, "CONFIG_VERSION=2\nNFQUEUE_NUM=300\nNFQWS_ARGS=''\n");
+    REQUIRE(migrated.has_value());
+    CHECK(migrated->find(detector) != std::string::npos);
+    const auto before = build_nfqws_dry_run_args(previous);
+    const auto after = build_nfqws_dry_run_args(*migrated);
+    CHECK(after == before);
+    CHECK(position_of(after, "--qnum=411") != std::string::npos);
+    CHECK(position_of(after, detector) != std::string::npos);
+}
+
 TEST_CASE("nfqws config migration quotes literal dollars backticks and apostrophes without expansion") {
     const std::string previous = "CONFIG_VERSION=1\nNFQUEUE_NUM=300\n";
     const std::string backtick(1, '\x60');

@@ -3,7 +3,7 @@
 -- zapret-auto.lua keeps the authoritative state in
 -- autostate[pool_key][host_key].  For explicitly revisioned YouTube pools this
 -- companion can lazily seed only hrec.nstrategy from a previously confirmed
--- stock success.  It never changes hostkey selection, ctstrategy, or failure
+-- detector success.  It never changes hostkey selection, ctstrategy, or failure
 -- counters.  It also periodically publishes bounded aggregate histograms to
 -- WRITABLE so keen-pbr can expose them through its API.
 --
@@ -17,6 +17,117 @@
 -- encoded host keys plus only their confirmed slot, slot count, and revision.
 
 local SNAPSHOT_PERIOD_MS = 10000
+-- Sending a large request is not proof that it reached the server. In
+-- particular, a 16-20 KiB stall must not become success just because the
+-- client attempted to send past maxseq. Use server data or a server ACK of
+-- bytes actually observed in the client stream. No synthetic ACKs or resets.
+function keen_pbr_tcp_success_detector(desync, connection)
+    local tcp = desync.dis and desync.dis.tcp
+    if not tcp then return standard_success_detector(desync, connection) end
+    if desync.outgoing then return false end
+    if bitand(tcp.th_flags or 0, 2 + 4 + 1) ~= 0 then return false end -- SYN/RST/FIN
+    local inseq = tonumber(desync.arg.inseq) or 4096
+    if inseq > 0 and #(desync.dis.payload or "") > 0
+        and pos_get(desync, "s") > inseq then return true end
+    local maxseq = tonumber(desync.arg.maxseq) or 32768
+    local client = desync.track and desync.track.pos and desync.track.pos.client
+    client = client and client.tcp
+    if maxseq <= 0 or not client or client.rseq_over_2G
+        or type(client.seq0) ~= "number" or type(client.uppos) ~= "number"
+        or type(tcp.th_ack) ~= "number" or bitand(tcp.th_flags or 0, 16) == 0 then
+        return false
+    end
+    local acknowledged = (tcp.th_ack - client.seq0) % 4294967296
+    return acknowledged > maxseq and acknowledged < 2147483648
+        and acknowledged <= client.uppos
+end
+
+-- Max's last TCP slot has an optional zero-phase SYN action. This adapter is
+-- packet-local, not a timer, firewall hook or service watchdog. Stock circular
+-- owns all strategy selection and failure counters. No other pool calls it.
+local function plain_client_syn(desync)
+    local tcp = desync.dis and desync.dis.tcp
+    return desync.track and desync.outgoing and tcp
+        and tcp.th_dport == 443
+        and bitand(tcp.th_flags, TH_SYN) ~= 0
+        and bitand(tcp.th_flags, TH_ACK) == 0
+        and #(desync.dis.payload or "") == 0
+end
+
+function keen_pbr_syndata(ctx, desync)
+    if not plain_client_syn(desync) then return VERDICT_PASS end
+    local connection = automate_conn_record(desync)
+    if not connection or connection.keen_pbr_syn_sent then return VERDICT_PASS end
+    local verdict = syndata(ctx, desync)
+    if verdict == VERDICT_DROP then connection.keen_pbr_syn_sent = true end
+    return verdict
+end
+
+-- Recognize only the first server record rejecting an observed ClientHello.
+-- Do not scan encrypted data or treat ordinary close_notify/certificate alerts
+-- as a reason to change strategies. At most seven byte positions are retained
+-- in the existing conntrack; there is no host cache, timer or packet mutation.
+local TLS_DECODE_ERROR_RECORD = {21, 3, 0, 0, 2, 2, 50}
+local function early_tls_decode_error(desync, connection)
+    local tcp = desync.dis and desync.dis.tcp
+    if not connection or not desync.track or not tcp
+        or not desync.arg or desync.arg.key ~= "tcp_general" then return false end
+    local positions = desync.track.pos
+    local client = positions and positions.client and positions.client.tcp
+    local server = positions and positions.server and positions.server.tcp
+    if client and client.rseq_over_2G or server and server.rseq_over_2G then return false end
+    local seq = pos_get(desync, "s")
+    if desync.outgoing then
+        if desync.l7payload == "tls_client_hello" and seq == 1
+            and connection.keen_pbr_tls_alert == nil then
+            connection.keen_pbr_tls_alert = {}
+        end
+        return false
+    end
+    local bytes = connection.keen_pbr_tls_alert
+    local payload = desync.dis.payload or ""
+    if type(bytes) ~= "table" or #payload == 0
+        or bitand(tcp.th_flags or 0, 2 + 4) ~= 0 -- SYN/RST stay stock-owned
+        or type(seq) ~= "number" or seq < 1 or seq > 7 or seq % 1 ~= 0 then
+        return false
+    end
+    -- TLS Alert, record version 3.1..3.3, length=2, fatal(2), decode_error(50).
+    -- TCP may split, repeat or reorder these seven bytes. Conflicting overlap
+    -- or any other first record permanently disarms this classifier.
+    for index = seq, math.min(7, seq + #payload - 1) do
+        local byte = payload:byte(index - seq + 1)
+        local valid = index == 3 and byte >= 1 and byte <= 3
+            or index ~= 3 and byte == TLS_DECODE_ERROR_RECORD[index]
+        if not valid or bytes[index] and bytes[index] ~= byte then
+            connection.keen_pbr_tls_alert = false
+            return false
+        end
+        bytes[index] = byte
+    end
+    for index = 1, 7 do if bytes[index] == nil then return false end end
+    connection.keen_pbr_tls_alert = false
+    DLOG("keen_pbr_syn_failure_detector: early TLS fatal decode_error")
+    return true
+end
+
+function keen_pbr_syn_failure_detector(desync, connection)
+    if early_tls_decode_error(desync, connection) then return true end
+    if connection and connection.keen_pbr_syn_sent and plain_client_syn(desync) then
+        connection.keen_pbr_syn_retries = (connection.keen_pbr_syn_retries or 0) + 1
+        return connection.keen_pbr_syn_retries >= (tonumber(desync.arg.retrans) or 3)
+    end
+    return standard_failure_detector(desync, connection)
+end
+
+function keen_pbr_tcp_endpoint(desync)
+    local address = host_ip(desync)
+    local tcp = desync.dis and desync.dis.tcp
+    if not address or not tcp then return nil end
+    -- The service port, unlike SNI, is already known on SYN. Do not let an
+    -- alternate TLS port at the same address select SYN handling for HTTPS.
+    return address .. "|" .. tostring(desync.outgoing and tcp.th_dport or tcp.th_sport)
+end
+
 local MAX_POOLS = 64
 -- This also caps the worst-case serialized histogram below the backend's
 -- 128 KiB read limit, even if every target occupies a distinct bucket in all
@@ -71,7 +182,7 @@ local state = {
 -- learned[pool_key][revision][host_key] = {
 --     slot = N, slot_count = N, confirmed_at = unix_time
 -- }
--- Only a success reported by stock standard_success_detector() enters this
+-- Only a success reported by the selected success detector enters this
 -- table.  In particular, failure counters and an unproven rotated slot are
 -- never durable.
 local learned = {}
@@ -638,6 +749,12 @@ local function install_persistence_hooks()
         if succeeded then
             pcall(mark_learned_success, desync)
         end
+        return succeeded
+    end
+    local confirmed_tcp_success = keen_pbr_tcp_success_detector
+    keen_pbr_tcp_success_detector = function(desync, connection_record)
+        local succeeded = confirmed_tcp_success(desync, connection_record)
+        if succeeded then pcall(mark_learned_success, desync) end
         return succeeded
     end
 end
