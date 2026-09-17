@@ -2075,10 +2075,13 @@ function StrategiesEditor({
   const legacyExpanded = activeIsLegacy || showLegacy
   const displayStrategyName = (name: string | null): string => {
     if (!name) return ""
+    const item = status.strategies.find((candidate) => candidate.name === name)
+    const stockVersion = /^default \(nfqws2 ([0-9.]+)\)$/.exec(name)?.[1]
+    if (stockVersion && item?.builtin && item.canonical !== false)
+      return t("nfqws.standardStrategyName", { name: stockVersion })
     if (/^default \(\d{4}\.\d{2}\.\d{2}\)(?: \d+)?$/.test(name)) {
       return t("nfqws.standardStrategyName", { name })
     }
-    const item = status.strategies.find((candidate) => candidate.name === name)
     const key = item ? nfqwsBuiltinStrategyDisplayKey(item) : undefined
     return key ? t(`nfqws.strategyDisplayNames.${key}`) : name
   }
@@ -2219,6 +2222,12 @@ function StrategiesEditor({
       {/* Своя конфигурация — не ошибка, но и не то, что человек предполагает,
           глядя на четыре «не применена». Заодно это единственный случай, когда
           «Применить» уничтожает то, чего больше нигде нет. */}
+      {!customConfig ? (
+        <p className="text-sm text-green-700">
+          {t("nfqws.activeStrategyLabel")}{" "}
+          <strong>{displayStrategyName(status.active_strategy)}</strong>
+        </p>
+      ) : null}
       {customConfig ? (
         <Alert>
           <AlertTitle>{t("nfqws.customConfigTitle")}</AlertTitle>

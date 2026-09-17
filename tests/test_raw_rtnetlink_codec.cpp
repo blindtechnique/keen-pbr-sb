@@ -117,6 +117,7 @@ fib_rule_hdr rule_header(const int family,
 
 RawRtnetlinkDumpOptions options() {
     static const RawRtnetlinkInterfaceName names[] = {
+        {1U, "lo"},
         {7U, "awg0"},
         {9U, "wan0"},
     };
@@ -348,6 +349,55 @@ TEST_CASE("raw rtnetlink codec: selectors actions flags and duplicates make rule
         CHECK_FALSE(rule.exact_identity_representable);
     }
     CHECK(parsed.rules[3].priority == 154U);
+}
+
+TEST_CASE("raw rtnetlink codec: IPv6 reject routes normalize kernel loopback metadata") {
+    for (const auto type : {RTN_BLACKHOLE, RTN_UNREACHABLE}) {
+        CAPTURE(type);
+        std::vector<std::uint8_t> block;
+        auto payload = payload_with(route_header(AF_INET6, 0U, 160U, type));
+        append_scalar(payload, RTA_OIF, std::uint32_t{1U});
+        append_scalar(payload, RTA_PRIORITY, std::uint32_t{65535U});
+        append_message(block, RTM_NEWROUTE, payload);
+        append_done(block);
+        const auto parsed = parse_raw_rtnetlink_route_dump_block(
+            block.data(), block.size(), options());
+        REQUIRE(parsed.state == RawRtnetlinkDumpState::done);
+        REQUIRE(parsed.routes.size() == 1U);
+        const auto& route = parsed.routes.front();
+        CHECK(route.exact_identity_representable);
+        CHECK_FALSE(route.interface.has_value());
+        CHECK_FALSE(route.gateway.has_value());
+        CHECK(route.blackhole == (type == RTN_BLACKHOLE));
+        CHECK(route.unreachable == (type == RTN_UNREACHABLE));
+        CHECK(route.metric == 65535U);
+    }
+}
+
+TEST_CASE("raw rtnetlink codec: reject-route normalization retains unsupported nexthops") {
+    auto header = route_header(AF_INET6, 0U, 160U, RTN_UNREACHABLE);
+    std::uint32_t interface = 1U;
+    bool gateway = false;
+    bool duplicate = false;
+    bool multipath = false;
+    SUBCASE("non-loopback device") { interface = 7U; }
+    SUBCASE("IPv4 device is not implicit metadata") { header.rtm_family = AF_INET; }
+    SUBCASE("gateway") { gateway = true; }
+    SUBCASE("duplicate output device") { duplicate = true; }
+    SUBCASE("multipath") { multipath = true; }
+    std::vector<std::uint8_t> block;
+    auto payload = payload_with(header);
+    append_scalar(payload, RTA_OIF, interface);
+    if (duplicate) append_scalar(payload, RTA_OIF, interface);
+    if (gateway) append_ip(payload, RTA_GATEWAY, AF_INET6, "2001:db8::1");
+    if (multipath) append_attribute(payload, RTA_MULTIPATH, nullptr, 0U);
+    append_message(block, RTM_NEWROUTE, payload);
+    append_done(block);
+    const auto parsed = parse_raw_rtnetlink_route_dump_block(
+        block.data(), block.size(), options());
+    REQUIRE(parsed.state == RawRtnetlinkDumpState::done);
+    REQUIRE(parsed.routes.size() == 1U);
+    CHECK_FALSE(parsed.routes.front().exact_identity_representable);
 }
 
 TEST_CASE("raw rtnetlink codec: terminal and ownership classifications fail closed") {

@@ -81,6 +81,11 @@ std::optional<std::string> migrate_nfqws_config_preserving_settings(
 // a parse issue or a setting that depends on VERSION leaves it unchanged.
 std::string nfqws_config_without_version_metadata(const std::string& content);
 
+// The upstream installer adapts this toggle to the router. Ignore a parsed
+// 0/1 assignment for strategy comparison only when no other setting depends
+// on it; quoted text and unrelated edits remain part of the identity.
+std::string nfqws_config_without_runtime_ipv6(const std::string& content);
+
 // Parses and validates once, then derives a bounded, canonical PPE selector
 // from the same parsed candidate.  TCP filters from action-bearing active
 // profiles must exactly match TCP_PORTS.  Empty, malformed, ambiguous or

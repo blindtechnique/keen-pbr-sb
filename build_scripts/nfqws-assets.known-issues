@@ -25,3 +25,12 @@ typo|ver8 max aggresive|aggresive|aggressive
 # Сейчас только default имеет IPV6_ENABLED=1, остальные двенадцать — 0. Ключ
 # фиксирует обе стороны, поэтому изменение majority не будет принято молча.
 ipv6-exception|default|value=1|baseline=0
+
+# Original upstream 1.2.8 reference, not one of our improved presets. It must
+# remain byte-for-byte stock to recognize existing installations and offer
+# that named configuration. The upstream QUIC action is intentionally not
+# replaced by our circular pool; upstream postinst detects IPv6 separately.
+# tests/test_nfqws_config.cpp pins the full reference and Giga postinst hash.
+# Source: tests/fixtures/nfqws2-keenetic-1.2.8/SOURCE.md.
+shallow-pool|default (nfqws2 1.2.8)|quic|present=1|sha256=bbfd8a3e63516763132900afab2f226997bc50b8364339ef5399334aec7353ca|circular=0|ids=0|bodies=0
+ipv6-exception|default (nfqws2 1.2.8)|value=1|baseline=0

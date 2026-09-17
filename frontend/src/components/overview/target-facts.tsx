@@ -95,34 +95,58 @@ export function TargetFacts({
         <div className="text-xs font-medium">
           {t("overview.targetFacts.nfqwsTitle")}
         </div>
-        <p className="text-sm text-muted-foreground">
-          {nfqwsPending
-            ? t("overview.targetFacts.nfqwsChecking")
-            : verdict === "covered" &&
-                coverage.covering.length === 0 &&
-                coverage.profiles.some(
-                  (profile) =>
-                    profile.has_actions !== false &&
-                    nfqwsProfileResult(profile) === "unrestricted"
-                )
-              ? t("overview.targetFacts.nfqwsUnrestricted")
-              : t(`overview.targetFacts.nfqws.${verdict}`)}
-        </p>
+        {nfqwsPending ? (
+          <p className="text-sm text-muted-foreground">
+            {t("overview.targetFacts.nfqwsChecking")}
+          </p>
+        ) : (
+          <>
+            {coverage.excluding.length > 0 ? (
+              <p className="text-sm text-primary">
+                <strong>{target}</strong>
+                {" — "}
+                {t("overview.targetFacts.nfqwsExcludedList")}
+              </p>
+            ) : null}
+            {coverage.covering.length > 0 ? (
+              <p className="text-sm text-green-700">
+                <strong>{target}</strong>
+                {" — "}
+                {t("overview.targetFacts.nfqwsIncludedList")}
+              </p>
+            ) : null}
+            {coverage.excluding.length === 0 &&
+            coverage.covering.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                <strong>{target}</strong>
+                {" — "}
+                {verdict === "busy"
+                  ? t("overview.targetFacts.nfqws.busy")
+                  : verdict === "unknown"
+                    ? t("overview.targetFacts.nfqws.unknown")
+                    : t("overview.targetFacts.nfqwsNotInLists")}
+              </p>
+            ) : null}
+          </>
+        )}
         {/* Keep the matching entry and list visible, as in the original view.
             Per-profile interpretation belongs in the optional details. */}
-        {[...coverage.excluding, ...coverage.covering].map((match) => (
-          <p
-            className="text-xs [overflow-wrap:anywhere] break-words text-muted-foreground"
-            key={[match.role, match.list, match.entry, match.matched].join(":")}
-          >
-            {t("overview.targetFacts.nfqwsMatch", {
-              entry: match.entry,
-              list: match.list,
-              matched: match.matched,
-              role: t(`overview.targetFacts.role.${match.role}`),
-            })}
-          </p>
-        ))}
+        {!nfqwsPending &&
+          [...coverage.excluding, ...coverage.covering].map((match) => (
+            <p
+              className="text-xs [overflow-wrap:anywhere] break-words text-muted-foreground"
+              key={[match.role, match.list, match.entry, match.matched].join(
+                ":"
+              )}
+            >
+              {t("overview.targetFacts.nfqwsMatch", {
+                entry: match.entry,
+                list: match.list,
+                matched: match.matched,
+                role: t(`overview.targetFacts.role.${match.role}`),
+              })}
+            </p>
+          ))}
         {coverage.profiles.length > 0 ? (
           <details className="text-xs text-muted-foreground">
             <summary className="cursor-pointer">
@@ -131,7 +155,15 @@ export function TargetFacts({
               })}
             </summary>
             <div className="mt-2 space-y-3">
+              {verdict === "unknown" || verdict === "mixed" ? (
+                <p>{t(`overview.targetFacts.nfqws.${verdict}`)}</p>
+              ) : null}
               <p>{t("overview.targetFacts.nfqwsScope")}</p>
+              {coverage.profiles.some(
+                (profile) => nfqwsProfileResult(profile) === "unrestricted"
+              ) ? (
+                <p>{t("overview.targetFacts.nfqwsUnrestricted")}</p>
+              ) : null}
               {coverage.profiles.map((profile) => (
                 <div
                   className="space-y-1 [overflow-wrap:anywhere]"
@@ -202,7 +234,9 @@ export function TargetFacts({
             </p>
           ) : registry ? (
             <>
-              <p className="text-sm text-muted-foreground">
+              <p
+                className={`text-sm ${registryState === "listed" || registryState === "subnet-only" ? "text-red-600" : registryState === "whitelisted" ? "text-green-700" : registryState === "not-listed" ? "text-primary" : "text-muted-foreground"}`}
+              >
                 {t(`overview.targetFacts.registry.${registryState}`)}
               </p>
               {registry.blocked_subnets?.length ? (

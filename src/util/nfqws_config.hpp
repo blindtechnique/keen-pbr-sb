@@ -13,7 +13,8 @@ std::string nfqws_config_strategy_identity(const std::string& content);
 bool nfqws_config_has_owned_rotator_telemetry(const std::string& content);
 // A built-in remains canonical when its selected content is either the raw
 // packaged file or the same file after package-owned WAN/telemetry rendering.
-// No other config delta is ignored.
+// Parsed package version metadata and the independent runtime IPv6 toggle
+// are ignored too. No other config delta is ignored.
 bool nfqws_config_matches_packaged_strategy(
     const std::string& content,
     const std::string& packaged_content,

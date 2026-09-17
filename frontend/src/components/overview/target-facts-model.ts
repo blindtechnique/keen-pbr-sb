@@ -36,7 +36,23 @@ export function summariseNfqwsCoverage(
       profiles: nfqws?.profiles ?? [],
     }
   }
-  const matches = nfqws.matches ?? []
+  const matches = [
+    ...new Map(
+      [
+        ...(nfqws.matches ?? []),
+        ...(nfqws.profiles ?? []).flatMap((profile) => profile.matches ?? []),
+      ].map((match) => [
+        JSON.stringify([
+          match.role,
+          match.list,
+          match.entry,
+          match.matched,
+          match.includes,
+        ]),
+        match,
+      ])
+    ).values(),
+  ]
   return {
     known: true,
     covering: matches.filter((match) => match.includes),
@@ -115,6 +131,7 @@ export type RegistryVerdict =
   | "listed"
   | "not-listed"
   | "subnet-only"
+  | "whitelisted"
 
 /**
  * `checked: false` is never "not listed". A lookup that did not run and a
@@ -124,10 +141,12 @@ export type RegistryVerdict =
 export function registryVerdict(response: {
   checked?: boolean
   blocked?: boolean
+  whitelisted?: boolean
   blocked_subnets?: readonly string[] | null
 }): RegistryVerdict {
   if (!response.checked) return "not-checked"
   if (response.blocked) return "listed"
+  if (response.whitelisted) return "whitelisted"
   return (response.blocked_subnets?.length ?? 0) > 0
     ? "subnet-only"
     : "not-listed"

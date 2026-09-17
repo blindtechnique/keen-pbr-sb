@@ -81,6 +81,8 @@ struct ListMatchInfo {
 struct TestRoutingEntry {
     std::string ip;
     std::optional<ListMatchInfo> list_match;
+    // Membership is independent of a routing rule using the list.
+    std::vector<ListMatchInfo> list_matches;
     std::string expected_outbound; // rule outbound tag, or "(default)"
     std::string actual_outbound;   // tag, "(default)", or "(unknown)" if kernel check unavailable
     bool ok;

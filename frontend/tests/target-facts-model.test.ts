@@ -18,6 +18,32 @@ const match = (role: string, includes: boolean, entry = "youtube.com"): never =>
   }) as never
 
 describe("nfqws coverage", () => {
+  test("profile-only membership is retained and duplicate evidence is collapsed", () => {
+    const include = match("hostlist", true)
+    const exclude = match("hostlist_exclude", false)
+    const coverage = summariseNfqwsCoverage({
+      available: true,
+      matches: [include],
+      profiles: [{ index: 1, matches: [include, exclude] }],
+    } as never)
+    expect(coverage.covering).toHaveLength(1)
+    expect(coverage.excluding).toHaveLength(1)
+  })
+
+  test("whitelist membership requires its own positive evidence", () => {
+    expect(registryVerdict({ checked: true, blocked: false })).toBe(
+      "not-listed"
+    )
+    expect(
+      registryVerdict({ checked: true, blocked: false, whitelisted: true })
+    ).toBe("whitelisted")
+    expect(registryVerdict({ checked: false, whitelisted: true })).toBe(
+      "not-checked"
+    )
+    expect(
+      registryVerdict({ checked: true, blocked: true, whitelisted: true })
+    ).toBe("listed")
+  })
   test("an exclusion in another profile cannot prove a global bypass", () => {
     const coverage = summariseNfqwsCoverage({
       available: true,

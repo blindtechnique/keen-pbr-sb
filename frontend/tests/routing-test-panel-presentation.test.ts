@@ -11,7 +11,9 @@ test("site diagnostics keeps useful results without the technical path card", ()
   )
   expect(result).not.toContain("overview.routingDiagnostics.pathTitle")
   expect(result).not.toContain("<RoutingPathStep")
-  expect(result).toContain("overview.routingDiagnostics.resultTitle")
+  expect(result).not.toContain("overview.routingDiagnostics.resultTitle")
+  expect(result).toContain("overview.routingDiagnostics.resultListMatch")
+  expect(result).toContain("overview.routingDiagnostics.appliedRoute")
   expect(result).toContain("overview.routingDiagnostics.ruleDetailsTitle")
 
   const panel = readFileSync(

@@ -296,9 +296,18 @@ bool decode_route(const std::uint8_t* payload,
         // visible nexthop, or an RTA_MULTIPATH graph, is a different shape.
         output.exact_identity_representable = false;
     }
-    if ((output.blackhole || output.unreachable) &&
-        (saw_interface || saw_gateway || saw_multipath)) {
-        output.exact_identity_representable = false;
+    if (output.blackhole || output.unreachable) {
+        // Linux attaches its loopback device to IPv6 reject routes even when
+        // the writer supplied no nexthop. This is kernel-generated metadata,
+        // not forwarding through lo. Preserve the no-nexthop RouteSpec image
+        // so verification and exact cleanup also work for these routes.
+        const bool kernel_loopback = message.rtm_family == AF_INET6 &&
+            output.interface == std::optional<std::string>{"lo"} &&
+            !saw_gateway && !saw_multipath;
+        if (kernel_loopback) output.interface.reset();
+        if ((saw_interface && !kernel_loopback) || saw_gateway || saw_multipath) {
+            output.exact_identity_representable = false;
+        }
     }
     return true;
 }
