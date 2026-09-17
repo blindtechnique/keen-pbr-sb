@@ -1,4 +1,5 @@
 #include "ndms_native_observation_store.hpp"
+#include "ndms_native_storage_path.hpp"
 
 #include "../crypto/sha256.hpp"
 
@@ -198,7 +199,7 @@ FileDescriptor open_directory(const std::filesystem::path& path,
                     "native observation directory is not exact owner-only 0700");
             }
         } else if (policy.require_root_process &&
-                   (opened.st_uid != 0 || (opened.st_mode & 0022) != 0)) {
+                   !ndms_native_parent_metadata_allowed(components, index, opened)) {
             throw NdmsNativeObservationStoreError(
                 "native observation parent directory is not root protected");
         }

@@ -1,4 +1,5 @@
 #include "ndms_native_writer_lease.hpp"
+#include "ndms_native_storage_path.hpp"
 
 #include <cerrno>
 #include <cstring>
@@ -220,7 +221,7 @@ FileDescriptor open_state_directory(const std::filesystem::path& path,
                     "native writer directory is not exact owner-only 0700");
             }
         } else if (policy.require_root_process &&
-                   (opened.st_uid != 0 || (opened.st_mode & 0022) != 0)) {
+                   !ndms_native_parent_metadata_allowed(components, index, opened)) {
             throw PathError(
                 PathErrorKind::unsafe,
                 "native writer parent directory is not root protected");

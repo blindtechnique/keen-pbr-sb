@@ -1,4 +1,5 @@
 #include "ndms_native_import_wal_store.hpp"
+#include "ndms_native_storage_path.hpp"
 
 #include <algorithm>
 #include <array>
@@ -351,8 +352,7 @@ FileDescriptor open_store_directory(
                     "0700 state");
             }
         } else if (policy.require_root_process &&
-                   (before.st_uid != 0 ||
-                    (before.st_mode & 0022) != 0)) {
+                   !ndms_native_parent_metadata_allowed(components, index, before)) {
             throw DirectoryError(
                 DirectoryErrorKind::unsafe,
                 "Native import WAL parent directory is not root-owned and "

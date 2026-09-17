@@ -160,6 +160,13 @@ jobs:
           make test BUILD_JOBS=4
           TEST_CMAKE_FLAGS="-DKEEN_PBR_USE_LIBUNWIND=ON -DCMAKE_BUILD_TYPE=Release"
 
+      - name: Verify native VPN storage on Entware-owned prefixes
+        # Exercises production ownership rules inside a disposable child chroot.
+        # The runner's /opt and the checkout are never changed.
+        run: >-
+          sudo ./cmake-build-gcc/tests/keen-pbr-native-tunnel-import-tests
+          --test-case="native stores use production policy*"
+
       - name: Run IPK validator unit tests
         run: python3 -m unittest build_scripts.tests.test_validate_keenetic_ipk -v
 

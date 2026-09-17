@@ -184,6 +184,16 @@ class ReleaseWorkflowTest(unittest.TestCase):
                                  ['python3', 'build_scripts/check-compiler-cache.py', '--compiler', compiler])
                 self.assertLess(list(job_steps).index(probe), list(job_steps).index(build))
 
+    def test_native_storage_runs_with_production_ownership_policy(self):
+        job_steps = steps(self.jobs['backend'])
+        probe = 'Verify native VPN storage on Entware-owned prefixes'
+        self.assertEqual(shlex.split(shell(job_steps[probe])), [
+            'sudo', './cmake-build-gcc/tests/keen-pbr-native-tunnel-import-tests',
+            '--test-case=native stores use production policy*',
+        ])
+        self.assertLess(list(job_steps).index('Build and run backend test matrix'),
+                        list(job_steps).index(probe))
+
     def test_job_environment_uses_only_contexts_available_before_runner_assignment(self):
         allowed = {'github', 'needs', 'strategy', 'matrix', 'vars', 'secrets', 'inputs'}
         for name, job in self.jobs.items():
