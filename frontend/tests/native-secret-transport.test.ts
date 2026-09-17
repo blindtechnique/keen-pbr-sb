@@ -7,6 +7,7 @@ import {
   NDMS_NATIVE_IMPORT_OWNER_RISK_HEADER,
   NDMS_NATIVE_IMPORT_SECRET_ENDPOINT,
   NativeSecretTransportError,
+  NATIVE_IMPORT_PREFLIGHT_REASONS,
   nativeSecretEndpointIsAllowed,
   preflightNdmsNativeImport,
   postNdmsNativeImportSecretOnce,
@@ -172,6 +173,57 @@ describe("one-shot native secret transport", () => {
       )
     ).toBe("preflight_failed")
     expect(failed.vault.takeOnce(failed.ticket)).not.toBeNull()
+  })
+
+  test("preserves bounded refusal reasons without consuming or posting the configuration", async () => {
+    for (const reason of NATIVE_IMPORT_PREFLIGHT_REASONS) {
+      const secret = selectedSecret()
+      const fetchImpl = mock(() =>
+        Promise.resolve(
+          Response.json(
+            { error: `native_import_preflight:${reason}` },
+            { status: 409 }
+          )
+        )
+      ) as unknown as typeof fetch
+      const secretFetch = mock(() => Promise.resolve(new Response()))
+      const request = postNdmsNativeImportSecretOnce({
+        ...secret,
+        preflight: (binding) =>
+          preflightNdmsNativeImport({ binding, fetchImpl }),
+        fetchImpl: secretFetch,
+      })
+      await expect(request).rejects.toMatchObject({
+        code: "preflight_denied",
+        preflightReason: reason,
+      })
+      expect(fetchImpl).toHaveBeenCalledTimes(1)
+      expect(secretFetch).toHaveBeenCalledTimes(0)
+      expect(secret.vault.takeOnce(secret.ticket)).not.toBeNull()
+    }
+  })
+
+  test("never exposes arbitrary text disguised as a preflight reason", async () => {
+    for (const error of [
+      "native_import_preflight:PrivateKey=secret",
+      "native_import_preflight:first_free_target_not_managed extra-data",
+      "upstream echoed a secret",
+      12,
+      null,
+    ]) {
+      const fetchImpl = mock(() =>
+        Promise.resolve(Response.json({ error }, { status: 503 }))
+      ) as unknown as typeof fetch
+      expect(
+        await preflightNdmsNativeImport({
+          binding: {
+            preflightEndpoint: NDMS_NATIVE_IMPORT_PREFLIGHT_ENDPOINT,
+            secretEndpoint: NDMS_NATIVE_IMPORT_SECRET_ENDPOINT,
+          },
+          fetchImpl,
+        })
+      ).toBe("denied")
+    }
   })
 
   test("binds bodyless preflight to its exact route and secret destination", async () => {

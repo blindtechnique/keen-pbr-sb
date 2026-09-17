@@ -407,19 +407,20 @@ TEST_CASE("native import baseline requires an exact authoritative refresh") {
 }
 
 TEST_CASE("native import baseline enforces the complete stock allocator scan") {
-    SUBCASE("first free system slot blocks") {
+    SUBCASE("empty router must target its actual first free slot") {
         check_error(
             build_valid(authoritative_snapshot(nlohmann::json::object())),
             NdmsNativeImportBaselineBuildError::
-                first_free_target_protected);
+                expected_target_not_first_free);
+        CHECK(build_valid(authoritative_snapshot(nlohmann::json::object()), "Wireguard0").success());
     }
-    SUBCASE("protected expected target is invalid") {
+    SUBCASE("existing low-numbered slots are still occupied") {
         check_error(
             build_valid(baseline_snapshot(), "Wireguard4"),
-            NdmsNativeImportBaselineBuildError::expected_target_invalid);
+            NdmsNativeImportBaselineBuildError::expected_target_occupied);
         check_error(
             build_valid(baseline_snapshot(), "Wireguard99"),
-            NdmsNativeImportBaselineBuildError::expected_target_invalid);
+            NdmsNativeImportBaselineBuildError::expected_target_not_first_free);
     }
     SUBCASE("expected target must be the exact canonical identity") {
         for (const auto target : {
@@ -448,13 +449,14 @@ TEST_CASE("native import baseline enforces the complete stock allocator scan") {
             NdmsNativeImportBaselineBuildError::
                 expected_target_not_first_free);
     }
-    SUBCASE("first free sentinel slot blocks") {
+    SUBCASE("high free slot is allowed but an occupied slot still blocks") {
         const auto snapshot = authoritative_snapshot(
             occupied_slots(slot_range(0U, 98U)));
         check_error(
             build_valid(snapshot, "Wireguard98"),
             NdmsNativeImportBaselineBuildError::
-                first_free_target_protected);
+                expected_target_occupied);
+        CHECK(build_valid(snapshot, "Wireguard99").success());
     }
     SUBCASE("full allocator namespace blocks") {
         const auto snapshot = authoritative_snapshot(

@@ -793,11 +793,11 @@ TEST_CASE("cross-process cold start installs exactly one durable master key") {
     CHECK(metadata.st_nlink == 1);
 }
 
-TEST_CASE("protected slots and malformed identities cannot hold secrets") {
+TEST_CASE("unsupported slots and malformed identities cannot hold secrets") {
     TempDirectory directory;
     auto store = store_for(directory);
     for (const char* name :
-         {"Wireguard0", "Wireguard99", "wireguard5", "Wireguard05"}) {
+         {"Bridge0", "Wireguard127", "wireguard5", "Wireguard05"}) {
         CHECK_THROWS(store.publish(name, kTransaction, kMarker, kSecret));
         CHECK(store.read(name, kTransaction, kMarker).state ==
               NdmsNativeSecretReadState::unreadable);

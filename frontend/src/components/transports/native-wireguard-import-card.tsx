@@ -20,6 +20,7 @@ import { useTranslation } from "react-i18next"
 
 import {
   NativeSecretTransportError,
+  type NativeImportPreflightReason,
   postNdmsNativeImportSecretOnce,
   preflightNdmsNativeImport,
 } from "@/api/native-secret-transport"
@@ -107,7 +108,10 @@ type ImportOperationState =
   | { readonly status: "idle" }
   | { readonly status: "preflighting" }
   | { readonly status: "sending" }
-  | { readonly status: "preflight-error" }
+  | {
+      readonly status: "preflight-error"
+      readonly reason?: NativeImportPreflightReason
+    }
   | { readonly status: "not-imported" }
   | { readonly status: "selection-expired" }
   | { readonly status: "unknown" }
@@ -753,6 +757,7 @@ function NativeWireGuardImportFieldsContent({
                   disposition: { state: "not_started" } as const,
                   value: {
                     status: "preflight-error",
+                    reason: error.preflightReason,
                   } as ImportOperationState,
                 }
               }
@@ -1186,7 +1191,23 @@ function NativeWireGuardImportFieldsContent({
               {t("transports.nativeImport.preflightFailedTitle")}
             </AlertTitle>
             <AlertDescription>
-              {t("transports.nativeImport.preflightFailedDescription")}
+              {operation.reason === "first_free_target_not_managed"
+                ? t("transports.nativeImport.preflightUnsupportedSlot")
+                : operation.reason === "no_first_free_slot"
+                  ? t("transports.nativeImport.preflightNoFreeSlot")
+                  : operation.reason === "import_recovery_required" ||
+                      operation.reason === "delete_wal_unfinished" ||
+                      operation.reason ===
+                        "first_free_target_retains_ownership" ||
+                      operation.reason ===
+                        "first_free_snapshot_absence_unproven"
+                    ? t("transports.nativeImport.preflightPendingOperation")
+                    : t("transports.nativeImport.preflightFailedDescription")}
+              {operation.reason ? (
+                <code className="mt-2 block text-xs break-all">
+                  {operation.reason}
+                </code>
+              ) : null}
             </AlertDescription>
           </Alert>
         </div>

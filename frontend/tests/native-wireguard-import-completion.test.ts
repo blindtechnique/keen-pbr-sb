@@ -95,6 +95,59 @@ describe("active native import completion hand-off", () => {
     expect(readStagedNativeWireGuardImportCompletion()).toBeUndefined()
   })
 
+  test("recovers newly allowed slots only with exact panel ownership", () => {
+    const plan = {
+      tag: "imported_awg",
+      displayName: "Imported AWG",
+      createOutbound: true,
+      autoStart: true,
+    }
+    for (const slot of [0, 4, 99, 126]) {
+      const row = {
+        firmware_interface_name: `Wireguard${slot}`,
+        kernel_name: `nwg${slot}`,
+        label: plan.displayName,
+        kind: "amnezia_wireguard",
+        native_mutation: { ownership_state: "panel_owned_active" },
+      }
+      expect(
+        findStagedNativeWireGuardImportIdentity(plan, [row as never], [])
+      ).toEqual({
+        firmwareInterface: row.firmware_interface_name,
+        kernelInterface: row.kernel_name,
+        kind: row.kind,
+      })
+      for (const ownership of ["foreign", "unknown", "panel_owned_deleted"]) {
+        expect(
+          findStagedNativeWireGuardImportIdentity(
+            plan,
+            [
+              {
+                ...row,
+                native_mutation: { ownership_state: ownership },
+              } as never,
+            ],
+            []
+          )
+        ).toBeUndefined()
+      }
+      expect(
+        findStagedNativeWireGuardImportIdentity(
+          plan,
+          [row as never],
+          [row.kernel_name]
+        )
+      ).toBeUndefined()
+      expect(
+        findStagedNativeWireGuardImportIdentity(
+          plan,
+          [{ ...row, label: "Existing VPN" } as never],
+          []
+        )
+      ).toBeUndefined()
+    }
+  })
+
   test("recovers one exact untracked panel-owned interface after no-work", () => {
     const plan = {
       tag: "fraystor_awg",

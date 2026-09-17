@@ -1685,8 +1685,7 @@ NdmsNativeCooperativeImportCoordinator::import_once(
         }
 
         const auto first_free = first_free_slot(runtime_occupancy);
-        if (!first_free.has_value() || *first_free < 5U ||
-            *first_free > 98U) {
+        if (!first_free.has_value()) {
             result.stop = NdmsNativeCooperativeImportStop::
                 first_free_target_not_managed;
             return result;

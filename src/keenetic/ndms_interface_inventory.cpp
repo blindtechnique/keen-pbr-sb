@@ -24,9 +24,9 @@ bool ndms_catalog_proves_wireguard_absent(
         kernel_interface.substr(0, 3) != "nwg") return false;
     const auto identity = parse_ndms_wireguard_identity(
         "Wireguard" + std::string(kernel_interface.substr(3)));
-    // Allocator-reserved low slots may still have panel metadata. This only
-    // retires that metadata after external deletion; it never deletes a slot.
-    return identity && identity->slot != 0U &&
+    // The same authoritative absence rule applies to every supported index,
+    // including zero. This retires panel metadata, never a router interface.
+    return identity &&
         catalog.wireguard_slots[identity->slot].state == NdmsWireguardCatalogSlotState::absent;
 }
 

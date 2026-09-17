@@ -8,6 +8,7 @@
 #include "api/handler_ndms_native_import.hpp"
 #include "api/server.hpp"
 #include "api/sse_broadcaster.hpp"
+#include "keenetic/ndms_native_fresh_import_preflight.hpp"
 #include "util/base64.hpp"
 
 #include <atomic>
@@ -94,7 +95,8 @@ class NativeImportApiFixture final {
 public:
     explicit NativeImportApiFixture(
         ImportCallback callback = {},
-        ImportRecoveryCallback recovery_callback = {})
+        ImportRecoveryCallback recovery_callback = {},
+        std::optional<NdmsNativeFreshImportPreflightRefusal> refusal = std::nullopt)
         : auth_file_("KEEN_PBR_AUTH_FILE",
                      auth_directory_.auth_path().string()),
           trusted_transport_([this](std::string_view,
@@ -106,7 +108,8 @@ public:
           context_(test_support::make_minimal_api_context(
               broadcaster_,
               "/tmp/keen-pbr-native-import-api-config.json")),
-          server_(config()) {
+          server_(config()),
+          refusal_(std::move(refusal)) {
         if (callback) {
             context_.run_ndms_native_import_fn =
                 [this, callback = std::move(callback)](
@@ -205,6 +208,7 @@ private:
     std::string last_display_name_;
     std::shared_ptr<SensitiveRequestReservation> reserve_for_request() {
         reservation_attempts_.fetch_add(1U, std::memory_order_relaxed);
+        if (refusal_) throw *refusal_;
         if (!reservation_available_.load(std::memory_order_acquire)) {
             return {};
         }
@@ -245,6 +249,7 @@ private:
     ApiContext context_;
     ApiServer server_;
     std::unique_ptr<httplib::Client> client_;
+    std::optional<NdmsNativeFreshImportPreflightRefusal> refusal_;
 };
 
 NdmsNativeCooperativeImportResult completed_result() {
@@ -912,6 +917,39 @@ TEST_CASE("native import preflight is bodyless and reports residual risk") {
         "application/octet-stream");
     check_no_store(too_large);
     CHECK(too_large->status == 413);
+}
+
+TEST_CASE("native import preflight reports a typed reason without streaming secrets") {
+    for (const auto status : {NdmsNativeFreshImportPreflightStatus::blocked,
+                              NdmsNativeFreshImportPreflightStatus::unavailable}) {
+        const auto stop = status == NdmsNativeFreshImportPreflightStatus::blocked
+            ? NdmsNativeFreshImportPreflightStop::first_free_target_not_managed
+            : NdmsNativeFreshImportPreflightStop::runtime_observation_failed;
+        std::size_t callback_count = 0U;
+        NativeImportApiFixture fixture(
+            [&](std::string&&, NdmsNativeExternalWriterRaceAcceptance) {
+                ++callback_count;
+                return completed_result();
+            }, {}, NdmsNativeFreshImportPreflightRefusal{status, stop});
+        const auto session = fixture.login();
+        for (const auto path : {kNdmsNativeImportPreflightApiPath,
+                                kNdmsNativeImportApiPath}) {
+            reset_sensitive_request_body_stream_count_for_testing();
+            const auto response = fixture.client().Post(
+                std::string{path}, fixture.accepted_headers(session),
+                "PrivateKey=must-not-stream-or-disclose", "text/plain");
+            check_no_store(response);
+            CHECK(response->status ==
+                  (status == NdmsNativeFreshImportPreflightStatus::blocked ? 409 : 503));
+            CHECK(response->get_header_value("Connection") == "close");
+            const auto body = nlohmann::json::parse(response->body);
+            CHECK(body["error"] == std::string{"native_import_preflight:"} +
+                  ndms_native_fresh_import_preflight_stop_name(stop));
+            CHECK(response->body.find("PrivateKey") == std::string::npos);
+            CHECK(sensitive_request_body_stream_count_for_testing() == 0U);
+            CHECK(callback_count == 0U);
+        }
+    }
 }
 
 TEST_CASE("native import availability content type and consent reject pre-body") {

@@ -9,6 +9,7 @@
 #include "ndms_native_writer_lease.hpp"
 
 #include <cstdint>
+#include <exception>
 #include <memory>
 #include <optional>
 #include <string>
@@ -45,6 +46,24 @@ enum class NdmsNativeFreshImportPreflightStop : std::uint8_t {
     keen_pbr_dependencies_present,
     first_free_snapshot_absence_unproven,
     unexpected_failure,
+};
+
+// A bodyless refusal contains only public enums, never a target, path or
+// configuration. Sensitive HTTP routes may report this typed reason while
+// continuing to redact arbitrary exceptions from secret-bearing handlers.
+class NdmsNativeFreshImportPreflightRefusal final : public std::exception {
+public:
+    NdmsNativeFreshImportPreflightRefusal(
+        NdmsNativeFreshImportPreflightStatus status,
+        NdmsNativeFreshImportPreflightStop stop) noexcept
+        : status(status), stop(stop) {}
+
+    const char* what() const noexcept override {
+        return "native import preflight refused";
+    }
+
+    const NdmsNativeFreshImportPreflightStatus status;
+    const NdmsNativeFreshImportPreflightStop stop;
 };
 
 // This is intentionally bodyless. A caller may take a secret request body

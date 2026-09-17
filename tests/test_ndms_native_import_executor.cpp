@@ -1148,8 +1148,8 @@ TEST_CASE("unexpected returned targets stay recovery-only and never become owner
               NdmsNativeImportRecoveryAction::
                   rollback_delete_exact_owned);
     }
-    SUBCASE("a protected slot blocks even recovery deletion") {
-        CHECK(run("Wireguard4") ==
+    SUBCASE("an unsupported slot blocks even recovery deletion") {
+        CHECK(run("Wireguard127") ==
               NdmsNativeImportRecoveryAction::block_unknown);
     }
 }
@@ -1180,15 +1180,15 @@ TEST_CASE("native import executor rejects a stale authoritative baseline") {
     CHECK(fixture.backend.calls == 0U);
 }
 
-TEST_CASE("native import executor blocks incompatible or protected targets") {
-    SUBCASE("protected expected target") {
+TEST_CASE("native import executor blocks incompatible or unsupported targets") {
+    SUBCASE("unsupported expected target") {
         Fixture fixture;
         auto plan = execution_plan();
         auto prepared = prepare_ndms_native_import(
             plain_wireguard_config());
         const auto& request = prepared.request_identity();
         auto receipt = fence_receipt(plan, request);
-        plan.expected_created_interface = "Wireguard4";
+        plan.expected_created_interface = "Wireguard127";
 
         const auto result = execute_ndms_native_import_transaction(
             std::move(prepared),

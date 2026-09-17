@@ -41,11 +41,8 @@ struct NdmsNativeRemovePolicy {
     std::string operation{"no interface"};
     // Only interfaces in the managed candidate range can ever be claimed, so
     // only they can ever be removed by keen-pbr.
-    NdmsNativeWireguardTargetRange removable_targets{5U, 98U};
-    std::vector<NdmsNativeWireguardTargetRange> protected_targets{
-        {0U, 4U},
-        {99U, 126U},
-    };
+    NdmsNativeWireguardTargetRange removable_targets{0U, 126U};
+    std::vector<NdmsNativeWireguardTargetRange> protected_targets;
     // Deliberately absent from the blockers: removal needs no allocator
     // fence, and listing one would be false.
     std::vector<NdmsNativeRemovePolicyBlocker> blockers{

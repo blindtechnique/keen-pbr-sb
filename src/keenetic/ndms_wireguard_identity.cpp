@@ -9,10 +9,11 @@ namespace {
 constexpr std::string_view kPrefix{"Wireguard"};
 
 NdmsWireguardSlotClass classify_slot(const unsigned int slot) noexcept {
-    if (slot <= 4U) {
-        return NdmsWireguardSlotClass::protected_system;
-    }
-    if (slot <= 98U) {
+    // The number is an allocator index, not evidence of ownership. On a
+    // clean Keenetic the first import normally receives Wireguard0. Every
+    // supported index is eligible only as a candidate: create still proves
+    // absence, and changes/deletion still require our exact ownership record.
+    if (slot <= 126U) {
         return NdmsWireguardSlotClass::managed_candidate;
     }
     return NdmsWireguardSlotClass::protected_sentinel;
@@ -54,7 +55,8 @@ parse_ndms_wireguard_identity(const std::string_view value) noexcept {
 bool ndms_wireguard_identity_is_managed_candidate(
     const NdmsWireguardIdentity& identity) noexcept {
     return identity.slot_class ==
-           NdmsWireguardSlotClass::managed_candidate;
+               NdmsWireguardSlotClass::managed_candidate &&
+           identity.slot <= 126U;
 }
 
 bool ndms_wireguard_identity_is_protected(

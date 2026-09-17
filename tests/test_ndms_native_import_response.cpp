@@ -397,13 +397,13 @@ TEST_CASE("invalid expected target is rejected independently of response") {
         CHECK_FALSE(unsupported_result.success());
     }
 
-    for (const auto* protected_target : {
+    for (const auto* other_target : {
              "Wireguard0", "Wireguard4", "Wireguard99",
              "Wireguard100", "Wireguard126"}) {
-        const auto protected_result =
-            inspect_ndms_native_import_response_v3(response, protected_target);
-        CHECK(protected_result.outcome == NdmsNativeImportResponseOutcome::
-                                              expected_target_ineligible);
-        CHECK_FALSE(protected_result.success());
+        const auto mismatched_result =
+            inspect_ndms_native_import_response_v3(response, other_target);
+        CHECK(mismatched_result.outcome ==
+              NdmsNativeImportResponseOutcome::created_mismatch);
+        CHECK_FALSE(mismatched_result.success());
     }
 }

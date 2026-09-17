@@ -13,7 +13,7 @@ TEST_CASE("WireGuard identities share one strict canonical parser") {
     REQUIRE(zero.has_value());
     CHECK(zero->slot == 0U);
     CHECK(zero->slot_class ==
-          NdmsWireguardSlotClass::protected_system);
+          NdmsWireguardSlotClass::managed_candidate);
     CHECK(zero->canonical_name() == "Wireguard0");
 
     const auto five = parse_ndms_wireguard_identity("Wireguard5");
@@ -31,14 +31,14 @@ TEST_CASE("WireGuard identities share one strict canonical parser") {
         parse_ndms_wireguard_identity("Wireguard99");
     REQUIRE(ninety_nine.has_value());
     CHECK(ninety_nine->slot_class ==
-          NdmsWireguardSlotClass::protected_sentinel);
+          NdmsWireguardSlotClass::managed_candidate);
 
     const auto one_twenty_six =
         parse_ndms_wireguard_identity("Wireguard126");
     REQUIRE(one_twenty_six.has_value());
     CHECK(one_twenty_six->slot_class ==
-          NdmsWireguardSlotClass::protected_sentinel);
-    CHECK(ndms_wireguard_identity_is_protected(*one_twenty_six));
+          NdmsWireguardSlotClass::managed_candidate);
+    CHECK_FALSE(ndms_wireguard_identity_is_protected(*one_twenty_six));
 
     for (const std::string invalid : {
              "Wireguard", "Wireguard00", "Wireguard05",
@@ -58,9 +58,8 @@ TEST_CASE("native create policy describes only the dormant stock primitive") {
     CHECK(policy.request_name.empty());
     CHECK(policy.batch_item_count == 1U);
     const NdmsNativeWireguardTargetRange allocator{0U, 126U};
-    const NdmsNativeWireguardTargetRange eligible{5U, 98U};
-    const std::vector<NdmsNativeWireguardTargetRange> protected_ranges{
-        {0U, 4U}, {99U, 126U}};
+    const NdmsNativeWireguardTargetRange eligible{0U, 126U};
+    const std::vector<NdmsNativeWireguardTargetRange> protected_ranges;
     const std::vector<NdmsNativeCreatePolicyBlocker> blockers{
         NdmsNativeCreatePolicyBlocker::writer_disabled,
         NdmsNativeCreatePolicyBlocker::allocator_range_unfenced,
@@ -76,18 +75,11 @@ TEST_CASE("native create policy describes only the dormant stock primitive") {
               policy.journal_state)} == "dormant");
 }
 
-TEST_CASE("native create result policy separates eligible and protected targets") {
-    for (const std::string eligible :
-         {"Wireguard5", "Wireguard47", "Wireguard98"}) {
+TEST_CASE("native create candidates cover the full stock allocator namespace") {
+    for (unsigned slot = 0U; slot <= 126U; ++slot) {
+        const auto eligible = "Wireguard" + std::to_string(slot);
         CHECK(ndms_native_created_target_is_eligible(eligible));
         CHECK_FALSE(ndms_native_created_target_is_protected(eligible));
-    }
-    for (const std::string protected_target :
-         {"Wireguard0", "Wireguard4", "Wireguard99",
-          "Wireguard100", "Wireguard126"}) {
-        CHECK_FALSE(
-            ndms_native_created_target_is_eligible(protected_target));
-        CHECK(ndms_native_created_target_is_protected(protected_target));
     }
     for (const std::string unsupported :
          {"Wireguard127", "Wireguard999", "Wireguard05"}) {
@@ -108,7 +100,7 @@ TEST_CASE("native create policy consistency rejects every capability escalation"
     CHECK_FALSE(ndms_native_create_policy_is_consistent(named));
 
     auto widened = original;
-    widened.eligible_returned_targets.last_index = 99U;
+    widened.eligible_returned_targets.last_index = 127U;
     CHECK_FALSE(ndms_native_create_policy_is_consistent(widened));
 
     auto missing_blocker = original;

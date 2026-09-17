@@ -229,11 +229,10 @@ TEST_CASE("read-only ownership inspection fails closed and leaves a temporary un
     CHECK(fs::exists(temporary));
 }
 
-TEST_CASE("a protected slot cannot even be claimed") {
+TEST_CASE("an unsupported or noncanonical slot cannot be claimed") {
     TempDirectory directory;
     NdmsNativeOwnershipStore store(directory.path / "ownership");
-    for (const char* name : {"Wireguard0", "Wireguard99", "Wireguard126",
-                             "Wireguard05", "wireguard5", "Wireguard127"}) {
+    for (const char* name : {"Bridge0", "Wireguard05", "wireguard5", "Wireguard127"}) {
         auto record = record_fixture();
         record.interface_name = name;
         CHECK_THROWS(store.publish(record));

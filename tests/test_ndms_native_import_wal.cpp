@@ -550,7 +550,7 @@ TEST_CASE("native import recovery never retries an ambiguous import POST") {
               o.target_down = false;
           },
           +[](NdmsNativeImportRecoveryObservation& o) {
-              o.marker_target = "Wireguard0";
+              o.marker_target = "Wireguard127";
           }}) {
         auto weakened = unverifiable;
         weaken(weakened);
@@ -624,19 +624,24 @@ TEST_CASE("prepared native import WAL can recover without generation advance") {
           NdmsNativeImportRecoveryAction::block_unknown);
 }
 
-TEST_CASE("native import recovery blocks protected ambiguous and mismatched targets") {
+TEST_CASE("native import recovery needs exact ownership at every slot") {
     auto record = prepared_record();
     record.phase = NdmsNativeImportWalPhase::import_may_be_inflight;
     reserve(record);
 
-    auto protected_target = exact_owned_target();
-    protected_target.marker_target = "Wireguard4";
-    CHECK(classify_ndms_native_import_recovery(
-              record, protected_target) ==
-          NdmsNativeImportRecoveryAction::block_unknown);
+    for (const auto* target : {"Wireguard0", "Wireguard4", "Wireguard99",
+                               "Wireguard126"}) {
+        auto owned_target = exact_owned_target();
+        owned_target.marker_target = target;
+        CHECK(classify_ndms_native_import_recovery(record, owned_target) ==
+              NdmsNativeImportRecoveryAction::rollback_delete_exact_owned);
+        owned_target.target_absent_in_baseline = false;
+        CHECK(classify_ndms_native_import_recovery(record, owned_target) ==
+              NdmsNativeImportRecoveryAction::block_unknown);
+    }
 
     auto unsupported_target = exact_owned_target();
-    unsupported_target.marker_target = "Wireguard126";
+    unsupported_target.marker_target = "Wireguard127";
     CHECK(classify_ndms_native_import_recovery(
               record, unsupported_target) ==
           NdmsNativeImportRecoveryAction::block_unknown);

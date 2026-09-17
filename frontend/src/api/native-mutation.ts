@@ -389,7 +389,7 @@ const inList = <T extends string>(
 
 const validFirmwareInterface = (value: unknown): value is string =>
   typeof value === "string" &&
-  /^Wireguard(?:[5-9]|[1-8][0-9]|9[0-8])$/.test(value)
+  /^Wireguard(?:[0-9]|[1-9][0-9]|1[01][0-9]|12[0-6])$/.test(value)
 
 const validKernelInterface = (value: unknown): value is string =>
   typeof value === "string" &&

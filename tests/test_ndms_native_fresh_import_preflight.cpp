@@ -448,6 +448,22 @@ TEST_CASE("first-free retained ownership blocks before secret take") {
             first_free_target_retains_ownership);
 }
 
+TEST_CASE("fresh preflight admits unused Keenetic slots including a clean router") {
+    for (const std::uint8_t slot : {0U, 1U, 4U, 5U, 98U, 99U, 126U}) {
+        CAPTURE(slot);
+        FreshFixture fixture;
+        fixture.gateway.runtime_first_free = slot;
+        fixture.gateway.running_first_free = slot;
+        const auto outcome = fixture.preflight.check_before_secret_take(
+            fixture.writer.lease);
+        CHECK(outcome.status == NdmsNativeFreshImportPreflightStatus::admitted);
+        CHECK(outcome.stop == NdmsNativeFreshImportPreflightStop::none);
+        CHECK(outcome.expected_first_free_target ==
+              std::optional<std::string>{"Wireguard" + std::to_string(slot)});
+        CHECK(outcome.secret_body_may_be_taken());
+    }
+}
+
 TEST_CASE("first-free snapshot artifacts block before body or dispatch") {
     FreshFixture fixture;
 
@@ -510,13 +526,12 @@ TEST_CASE("fresh preflight requires coherent fresh dual-scope allocation") {
             NdmsNativeFreshImportPreflightStop::
                 first_free_scope_mismatch);
     }
-    SUBCASE("stock first-free is protected") {
+    SUBCASE("a clean router has an eligible first-free slot") {
         fixture.gateway.runtime_first_free = 0U;
         fixture.gateway.running_first_free = 0U;
-        require_no_sensitive_continuation(
-            fixture,
-            NdmsNativeFreshImportPreflightStop::
-                first_free_target_not_managed);
+        const auto outcome = fixture.preflight.check_before_secret_take(fixture.writer.lease);
+        CHECK(outcome.secret_body_may_be_taken());
+        CHECK(outcome.expected_first_free_target == std::optional<std::string>{"Wireguard0"});
     }
     SUBCASE("an unsafe slot refuses the complete catalog") {
         fixture.gateway.unsafe_call = 1U;

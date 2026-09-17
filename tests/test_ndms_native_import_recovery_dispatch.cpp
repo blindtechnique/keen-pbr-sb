@@ -331,10 +331,10 @@ TEST_CASE("the dispatcher refuses before the first step, loudly") {
     CHECK(no_target.state ==
           NdmsNativeImportRecoveryDispatchState::target_missing);
 
-    // A protected name reaching this far is refused by the last line of
+    // An unsupported name reaching this far is refused by the last line of
     // defence, however it got past the earlier ones.
     const auto protected_slot = dispatch_ndms_native_import_recovery(
-        store, admission.lease, record, plan, "Wireguard0",
+        store, admission.lease, record, plan, "Wireguard127",
         [](const std::string&, const std::string&) {
             return NdmsNativeImportRecoveryDeleteOutcome::
                 deleted_confirmed;

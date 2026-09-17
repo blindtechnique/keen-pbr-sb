@@ -44,14 +44,11 @@ struct NdmsNativeCreatePolicy {
     std::string operation{"interface.wireguard.import"};
     std::string request_name;
     std::size_t batch_item_count{1U};
-    // Stock firmware scans 0..126. Only canonical post-results 5..98 enter
-    // the managed candidate range; 99..126 remain protected/unsupported.
+    // Stock firmware scans 0..126. No numeric prefix is reserved by keen-pbr:
+    // existing interfaces are protected by absence/ownership checks instead.
     NdmsNativeWireguardTargetRange allocator_range{0U, 126U};
-    NdmsNativeWireguardTargetRange eligible_returned_targets{5U, 98U};
-    std::vector<NdmsNativeWireguardTargetRange> protected_targets{
-        {0U, 4U},
-        {99U, 126U},
-    };
+    NdmsNativeWireguardTargetRange eligible_returned_targets{0U, 126U};
+    std::vector<NdmsNativeWireguardTargetRange> protected_targets;
     NdmsNativeDormantFacilityState journal_state{
         NdmsNativeDormantFacilityState::dormant};
     NdmsNativeDormantFacilityState reconcile_barrier_state{

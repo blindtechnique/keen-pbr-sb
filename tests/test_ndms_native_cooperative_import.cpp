@@ -275,8 +275,9 @@ public:
                 NdmsNativeDirectObservationFailure::transport_failed;
             return result;
         }
-        std::vector<std::uint8_t> default_recovery_occupied{
-            0U, 1U, 2U, 3U, 4U, 6U};
+        std::vector<std::uint8_t> default_recovery_occupied =
+            recovery_baseline_occupied.value_or(
+                std::vector<std::uint8_t>{0U, 1U, 2U, 3U, 4U, 6U});
         if (recovery_target_present) {
             default_recovery_occupied.push_back(marker_identity->slot);
             if (second_marker_identity.has_value()) {
@@ -413,6 +414,7 @@ public:
     std::optional<std::string> running_kernel_interface{"nwg5"};
     std::optional<std::vector<std::uint8_t>>
         running_recovery_occupied;
+    std::optional<std::vector<std::uint8_t>> recovery_baseline_occupied;
     std::optional<NdmsNativeDirectCatalogScope> fail_catalog_scope;
     std::size_t recovery_calls{0U};
     std::vector<NdmsNativeDirectCatalogScope> catalog_scopes;
@@ -475,8 +477,8 @@ private:
             const auto body = nlohmann::json::parse(bodies.back());
             const auto identity = body.contains("interface") &&
                     body["interface"].is_object() &&
-                    body["interface"].contains("Wireguard5")
-                ? &body["interface"]["Wireguard5"]
+                    body["interface"].contains(gateway->recovery_marker_target)
+                ? &body["interface"][gateway->recovery_marker_target]
                 : nullptr;
             if (identity != nullptr &&
                 identity->is_object() &&
@@ -1217,28 +1219,10 @@ TEST_CASE("cooperative import compares both direct prewrite scopes") {
               NdmsNativeDirectCatalogScope::running_config);
     }
 
-    SUBCASE("stock first-free in a protected slot is refused") {
-        Fixture fixture;
-        fixture.gateway.runtime_occupied = {1U, 2U, 3U, 4U, 6U};
-        fixture.gateway.running_occupied =
-            fixture.gateway.runtime_occupied;
-
-        const auto result = fixture.run();
-
-        CHECK(result.stop == NdmsNativeCooperativeImportStop::
-              first_free_target_not_managed);
-        CHECK_FALSE(result.expected_interface.has_value());
-        CHECK_FALSE(result.created_interface.has_value());
-        CHECK(fixture.backend.calls == 0U);
-        REQUIRE(result.transaction_id.has_value());
-        CHECK(fixture.wal.load(*result.transaction_id).state ==
-              NdmsNativeImportWalLoadState::absent);
-    }
-
-    SUBCASE("stock first-free above the managed range is refused") {
+    SUBCASE("a completely occupied namespace is refused without a router write") {
         Fixture fixture;
         fixture.gateway.runtime_occupied.clear();
-        for (std::uint8_t slot = 0U; slot <= 98U; ++slot) {
+        for (std::uint8_t slot = 0U; slot <= 126U; ++slot) {
             fixture.gateway.runtime_occupied.push_back(slot);
         }
         fixture.gateway.running_occupied =
@@ -1479,6 +1463,80 @@ TEST_CASE("cooperative import enables the tunnel and saves KeeneticOS") {
     REQUIRE(ownership.record.has_value());
     CHECK(ownership.record->target_full_revision ==
           "ndms-rci-full-v1-" + std::string(64U, 'a'));
+}
+
+TEST_CASE("cooperative import creates enables and saves every supported free slot") {
+    for (const std::uint8_t slot : {0U, 1U, 4U, 5U, 98U, 99U, 126U}) {
+        for (const bool amnezia : {false, true}) {
+            CAPTURE(slot);
+            CAPTURE(amnezia);
+            Fixture fixture(true);
+            const auto target = "Wireguard" + std::to_string(slot);
+            const auto kernel = "nwg" + std::to_string(slot);
+            fixture.gateway.runtime_occupied.clear();
+            for (unsigned index = 0U; index < slot; ++index) {
+                fixture.gateway.runtime_occupied.push_back(
+                    static_cast<std::uint8_t>(index));
+            }
+            fixture.gateway.running_occupied = fixture.gateway.runtime_occupied;
+            fixture.gateway.recovery_baseline_occupied =
+                fixture.gateway.runtime_occupied;
+            fixture.gateway.recovery_marker_target = target;
+            fixture.gateway.runtime_kernel_interface = kernel;
+            fixture.gateway.running_kernel_interface = kernel;
+            fixture.gateway.protocol = amnezia
+                ? NdmsNativeAscClass::amnezia_wg
+                : NdmsNativeAscClass::plain_wireguard;
+            fixture.backend.response_body =
+                "[{\"interface\":{\"wireguard\":{\"import\":{\"created\":\"" +
+                target + "\",\"intersects\":\"\"}}}}]";
+
+            const auto result = fixture.run(
+                amnezia ? amnezia_config() : plain_config());
+            CAPTURE(std::string{ndms_native_cooperative_import_stop_name(result.stop)});
+            REQUIRE(result.status == NdmsNativeCooperativeImportStatus::completed);
+            CHECK(result.created_interface == std::optional<std::string>{target});
+            CHECK(result.created_kernel_interface == std::optional<std::string>{kernel});
+            CHECK(result.system_configuration_save_performed);
+            CHECK(result.ownership_published);
+            CHECK_FALSE(result.wal_may_require_recovery);
+            CHECK(fixture.backend.perform_calls == 1U);
+            CHECK(fixture.delete_backend.perform_calls == 0U);
+            REQUIRE(fixture.activation_backend.bodies.size() == 2U);
+            const nlohmann::json activation{{"interface", {{target, {{"up", true}}}}}};
+            CHECK(nlohmann::json::parse(fixture.activation_backend.bodies[0]) == activation);
+            CHECK(fixture.activation_backend.bodies[1] ==
+                  R"({"system":{"configuration":{"save":{}}}})");
+            REQUIRE(result.transaction_id.has_value());
+            CHECK(fixture.wal.load(*result.transaction_id).state ==
+                  NdmsNativeImportWalLoadState::absent);
+            const auto claim = fixture.ownership.read(target);
+            REQUIRE(claim.state == NdmsNativeOwnershipReadState::valid);
+            REQUIRE(claim.record.has_value());
+            CHECK(claim.record->transaction_id == *result.transaction_id);
+            const auto snapshot = fixture.snapshots.read_panel_delete_snapshot(
+                target, *result.transaction_id, "kpbr-ni-v1-" + *result.transaction_id);
+            CHECK(snapshot.state == NdmsNativeSecretReadState::valid);
+
+            // Reopen persistent stores, as a new daemon process would. A
+            // successful import must not become foreign after restarting.
+            NdmsNativeOwnershipStore reopened_ownership(
+                fixture.directory.root / "ownership",
+                ownership_hooks(fixture.faults));
+            const auto persisted = reopened_ownership.read(target);
+            REQUIRE(persisted.state == NdmsNativeOwnershipReadState::valid);
+            REQUIRE(persisted.record.has_value());
+            CHECK(persisted.record->transaction_id == *result.transaction_id);
+            NdmsNativeSecretSnapshotStore reopened_snapshots(
+                fixture.directory.root / "keys" / "native-import-snapshot.key",
+                fixture.directory.root / "native-import-snapshots",
+                snapshot_hooks(fixture.faults));
+            CHECK(reopened_snapshots.read_panel_delete_snapshot(
+                      target, *result.transaction_id,
+                      "kpbr-ni-v1-" + *result.transaction_id).state ==
+                  NdmsNativeSecretReadState::valid);
+        }
+    }
 }
 
 TEST_CASE("cooperative import moves its marker out of the KeeneticOS name") {

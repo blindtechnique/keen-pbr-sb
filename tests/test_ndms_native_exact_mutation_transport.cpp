@@ -238,7 +238,7 @@ TEST_CASE("exact native identity request keeps the marker out of the description
     CHECK(request.content_length() == 0U);
 
     for (const auto& invalid : std::vector<std::string>{
-             "Wireguard4", "Wireguard99"}) {
+             "Wireguard127", "Wireguard05"}) {
         CHECK_THROWS_AS(
             NdmsNativeExactMutationRequest::
                 set_managed_interface_identity(
@@ -296,10 +296,10 @@ TEST_CASE("exact mutation request move invalidates the source") {
           R"({"interface":{"name":"Wireguard98","no":true}})");
 }
 
-TEST_CASE("exact delete rejects protected and noncanonical targets") {
+TEST_CASE("exact delete rejects unsupported and noncanonical targets") {
     for (const char* target : {
-             "Wireguard0", "Wireguard4", "Wireguard99",
-             "Wireguard126", "Wireguard05", "AmneziaWireguard5",
+             "Wireguard127", "Wireguard999", "Bridge0",
+             "Wireguard05", "AmneziaWireguard5",
              "Wireguard5/../Wireguard6"}) {
         CHECK_THROWS_AS(
             NdmsNativeExactMutationRequest::delete_managed_interface(
