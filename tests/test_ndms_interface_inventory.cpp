@@ -14,21 +14,26 @@
 using namespace keen_pbr3;
 
 TEST_CASE("deleted WG metadata requires an absent firmware slot not a down Linux link") {
-    auto catalog = parse_ndms_interface_catalog(nlohmann::json::object());
-    CHECK(ndms_catalog_proves_wireguard_absent(catalog, "nwg4"));
-    CHECK_FALSE(ndms_catalog_proves_wireguard_absent(catalog, "nwg04"));
-    CHECK_FALSE(ndms_catalog_proves_wireguard_absent(catalog, "nwg0"));
-    CHECK_FALSE(ndms_catalog_proves_wireguard_absent(catalog, "tun4"));
-    catalog.wireguard_slots[4].state = NdmsWireguardCatalogSlotState::occupied;
-    CHECK_FALSE(ndms_catalog_proves_wireguard_absent(catalog, "nwg4"));
-    catalog.wireguard_slots[4].state = NdmsWireguardCatalogSlotState::unsafe;
-    CHECK_FALSE(ndms_catalog_proves_wireguard_absent(catalog, "nwg4"));
-    catalog.wireguard_slots[4].state = NdmsWireguardCatalogSlotState::absent;
-    catalog.wireguard_slot_evidence_complete = false;
-    CHECK_FALSE(ndms_catalog_proves_wireguard_absent(catalog, "nwg4"));
-    catalog.wireguard_slot_evidence_complete = true;
-    catalog.firmware_available = false;
-    CHECK_FALSE(ndms_catalog_proves_wireguard_absent(catalog, "nwg4"));
+    for (unsigned slot = 0U; slot <= 126U; ++slot) {
+        CAPTURE(slot);
+        const auto name = "nwg" + std::to_string(slot);
+        auto catalog = parse_ndms_interface_catalog(nlohmann::json::object());
+        CHECK(ndms_catalog_proves_wireguard_absent(catalog, name));
+        catalog.wireguard_slots[slot].state = NdmsWireguardCatalogSlotState::occupied;
+        CHECK_FALSE(ndms_catalog_proves_wireguard_absent(catalog, name));
+        catalog.wireguard_slots[slot].state = NdmsWireguardCatalogSlotState::unsafe;
+        CHECK_FALSE(ndms_catalog_proves_wireguard_absent(catalog, name));
+        catalog.wireguard_slots[slot].state = NdmsWireguardCatalogSlotState::absent;
+        catalog.wireguard_slot_evidence_complete = false;
+        CHECK_FALSE(ndms_catalog_proves_wireguard_absent(catalog, name));
+        catalog.wireguard_slot_evidence_complete = true;
+        catalog.firmware_available = false;
+        CHECK_FALSE(ndms_catalog_proves_wireguard_absent(catalog, name));
+    }
+    const auto catalog = parse_ndms_interface_catalog(nlohmann::json::object());
+    for (const auto* name : {"nwg", "nwg00", "nwg04", "nwg127", "tun4"}) {
+        CHECK_FALSE(ndms_catalog_proves_wireguard_absent(catalog, name));
+    }
 }
 
 namespace {

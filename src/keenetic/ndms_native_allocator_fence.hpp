@@ -56,8 +56,8 @@ using NdmsNativeAllocatorMonotonicTime =
 using NdmsNativeAllocatorMonotonicDuration =
     NdmsNativeAllocatorMonotonicClock::duration;
 
-constexpr std::uint8_t kNdmsNativeAllocatorFirstManagedSlot = 5U;
-constexpr std::uint8_t kNdmsNativeAllocatorLastManagedSlot = 98U;
+constexpr std::uint8_t kNdmsNativeAllocatorFirstManagedSlot = 0U;
+constexpr std::uint8_t kNdmsNativeAllocatorLastManagedSlot = 126U;
 constexpr auto kNdmsNativeAllocatorMaximumReceiptLifetime =
     std::chrono::seconds{30};
 

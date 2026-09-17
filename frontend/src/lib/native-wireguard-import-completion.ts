@@ -203,7 +203,7 @@ export function findStagedNativeWireGuardImportIdentity(
     const kernelInterface = item.kernel_name?.trim()
     return (
       item.label.trim() === plan.displayName &&
-      /^Wireguard(?:[5-9]|[1-8][0-9]|9[0-8])$/.test(
+      /^Wireguard(?:[0-9]|[1-9][0-9]|1[01][0-9]|12[0-6])$/.test(
         item.firmware_interface_name
       ) &&
       Boolean(kernelInterface) &&

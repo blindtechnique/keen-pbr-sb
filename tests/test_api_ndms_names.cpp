@@ -774,16 +774,9 @@ TEST_CASE("NDMS read-only endpoints share the cache and safety contract") {
                 {"last_index", 126}}},
               {"eligible_returned_targets",
                {{"prefix", "Wireguard"},
-                {"first_index", 5},
-                {"last_index", 98}}},
-              {"protected_targets",
-                nlohmann::json::array(
-                    {nlohmann::json{{"prefix", "Wireguard"},
-                                    {"first_index", 0},
-                                    {"last_index", 4}},
-                     nlohmann::json{{"prefix", "Wireguard"},
-                                    {"first_index", 99},
-                                    {"last_index", 126}}})},
+                {"first_index", 0},
+                {"last_index", 126}}},
+              {"protected_targets", nlohmann::json::array()},
               {"journal_state", "dormant"},
               {"reconcile_barrier_state", "dormant"},
               {"blockers",
@@ -1131,7 +1124,7 @@ TEST_CASE(
             case 12:
                 REQUIRE_FALSE(projection.retained_deletions.empty());
                 projection.retained_deletions[0].interface_name =
-                    "Wireguard4";
+                    "Wireguard127";
                 break;
             case 13:
                 REQUIRE_FALSE(projection.retained_deletions.empty());

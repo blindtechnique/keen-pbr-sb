@@ -683,18 +683,6 @@ NdmsNativeImportBaselineBuildResult build_ndms_native_import_baseline(
             NdmsNativeImportBaselineBuildError::
                 allocator_namespace_full);
     }
-    const auto first_free_identity = NdmsWireguardIdentity{
-        *first_free,
-        *first_free <= 4U
-            ? NdmsWireguardSlotClass::protected_system
-            : (*first_free <= 98U
-                   ? NdmsWireguardSlotClass::managed_candidate
-                   : NdmsWireguardSlotClass::protected_sentinel)};
-    if (ndms_wireguard_identity_is_protected(first_free_identity)) {
-        return failure(
-            NdmsNativeImportBaselineBuildError::
-                first_free_target_protected);
-    }
     if (snapshot.catalog.wireguard_slots[expected_identity->slot].state !=
         NdmsWireguardCatalogSlotState::absent) {
         return failure(
@@ -818,18 +806,6 @@ build_ndms_native_cooperative_import_baseline(
         return failure(
             NdmsNativeImportBaselineBuildError::
                 allocator_namespace_full);
-    }
-    const auto first_free_identity = NdmsWireguardIdentity{
-        *first_free,
-        *first_free <= 4U
-            ? NdmsWireguardSlotClass::protected_system
-            : (*first_free <= 98U
-                   ? NdmsWireguardSlotClass::managed_candidate
-                   : NdmsWireguardSlotClass::protected_sentinel)};
-    if (ndms_wireguard_identity_is_protected(first_free_identity)) {
-        return failure(
-            NdmsNativeImportBaselineBuildError::
-                first_free_target_protected);
     }
     if (snapshot.catalog.wireguard_slots[expected_identity->slot].state !=
         NdmsWireguardCatalogSlotState::absent) {

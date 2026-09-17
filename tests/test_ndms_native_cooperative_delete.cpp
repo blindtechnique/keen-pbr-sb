@@ -1081,11 +1081,11 @@ TEST_CASE("ordinary runtime revision drift does not revoke panel ownership") {
 }
 
 TEST_CASE("every preflight mismatch remains read-only for the router") {
-    SUBCASE("protected and noncanonical targets stop before stores") {
+    SUBCASE("unsupported targets stop before stores") {
         DeleteFixture fixture;
         auto request = fixture.request(
             digest("ndms-native-owner-v3-", '1'));
-        request.interface_name = "Wireguard4";
+        request.interface_name = "Wireguard127";
         const auto result = fixture.coordinator.delete_once(
             fixture.writer.lease, request);
         CHECK(result.stop == NdmsNativeCooperativeDeleteStop::
@@ -1101,6 +1101,17 @@ TEST_CASE("every preflight mismatch remains read-only for the router") {
         CHECK(result.stop ==
               NdmsNativeCooperativeDeleteStop::ownership_absent);
         check_no_router_write(fixture);
+    }
+
+    SUBCASE("a slot number never authorizes deleting a foreign VPN") {
+        for (const auto name : {"Wireguard0", "Wireguard4", "Wireguard99", "Wireguard126"}) {
+            DeleteFixture fixture;
+            auto request = fixture.request(digest("ndms-native-owner-v3-", '1'));
+            request.interface_name = name;
+            const auto result = fixture.coordinator.delete_once(fixture.writer.lease, request);
+            CHECK(result.stop == NdmsNativeCooperativeDeleteStop::ownership_absent);
+            check_no_router_write(fixture);
+        }
     }
 
     SUBCASE("missing snapshot") {

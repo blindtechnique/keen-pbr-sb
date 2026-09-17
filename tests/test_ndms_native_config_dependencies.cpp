@@ -311,7 +311,7 @@ TEST_CASE("native config dependency scan fails closed on unsafe identity") {
     NdmsNativeConfigDependencySnapshot snapshot;
 
     CHECK_FALSE(observe_ndms_native_config_dependencies(
-                    snapshot, "Wireguard4", std::string{"nwg4"})
+                    snapshot, "Wireguard127", std::string{"nwg127"})
                     .complete);
     CHECK_FALSE(observe_ndms_native_config_dependencies(
                     snapshot, "Wireguard5", std::nullopt)

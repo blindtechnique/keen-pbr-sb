@@ -147,9 +147,9 @@ struct NdmsNativeOwnershipStoreTestHooks {
 #endif
 
 // One file per interface under a root-only directory, written atomically and
-// durably. Only managed-candidate identities are accepted anywhere: a claim
-// over Wireguard0-4 or 99-126 is refused at publish, at read and at remove,
-// so a corrupted store cannot even assert ownership of a protected slot.
+// durably. Only canonical Wireguard0..126 identities are accepted. A valid
+// number is not proof of ownership: record validation and exact ownership
+// checks remain necessary when publishing, reading or removing a claim.
 class NdmsNativeOwnershipStore {
 public:
     explicit NdmsNativeOwnershipStore(

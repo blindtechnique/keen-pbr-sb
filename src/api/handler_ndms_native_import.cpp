@@ -6,6 +6,7 @@
 #include "server.hpp"
 
 #include "../keenetic/ndms_native_import_identity.hpp"
+#include "../keenetic/ndms_native_fresh_import_preflight.hpp"
 #include "../keenetic/ndms_native_import_request.hpp"
 #include "../keenetic/ndms_wireguard_identity.hpp"
 #include "../util/base64.hpp"
@@ -1638,6 +1639,8 @@ ApiServer::SensitiveRequestReservationPtr reserve_import(
     }
     try {
         return context.reserve_ndms_native_import_fn();
+    } catch (const NdmsNativeFreshImportPreflightRefusal&) {
+        throw;
     } catch (const ApiError&) {
         throw;
     } catch (...) {

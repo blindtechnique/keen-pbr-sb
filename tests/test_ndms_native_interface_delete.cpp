@@ -93,17 +93,41 @@ TEST_CASE("an interface that stopped being ours is never removed") {
     CHECK(router.commands.empty());
 }
 
-TEST_CASE("a protected slot is refused even when it carries our marker") {
+TEST_CASE("an unsupported identity is refused even when it carries our marker") {
     ScriptedRouter router;
-    router.queue("show/rc/interface/Wireguard0",
+    router.queue("show/rc/interface/Wireguard127",
                  interface_document("tunnel " + kMarker));
-    for (const char* name : {"Wireguard0", "Wireguard4", "Wireguard99",
-                             "Wireguard126", "wireguard5", "Wireguard05"}) {
+    for (const char* name : {"Wireguard127", "Wireguard999", "Bridge0",
+                             "wireguard5", "Wireguard05"}) {
         CHECK(delete_exact_owned_ndms_interface(name, kMarker,
                                                 router.dependencies()) ==
               Outcome::refused);
     }
     CHECK(router.commands.empty());
+}
+
+TEST_CASE("exact owned deletion uses markers rather than numeric exclusions") {
+    for (const auto* target : {"Wireguard0", "Wireguard4", "Wireguard99",
+                               "Wireguard126"}) {
+        const auto config_path = std::string{"show/rc/interface/"} + target;
+        const auto runtime_path = std::string{"show/interface/"} + target;
+        ScriptedRouter owned;
+        owned.queue(config_path, interface_document("tunnel " + kMarker));
+        owned.queue(config_path, nlohmann::json());
+        owned.queue(runtime_path, nlohmann::json());
+        CHECK(delete_exact_owned_ndms_interface(target, kMarker,
+                                                owned.dependencies()) ==
+              Outcome::deleted_confirmed);
+        REQUIRE(owned.commands.size() == 1U);
+        CHECK(owned.commands.front() == std::string{"no interface "} + target);
+
+        ScriptedRouter foreign;
+        foreign.queue(config_path, interface_document("existing user VPN"));
+        CHECK(delete_exact_owned_ndms_interface(target, kMarker,
+                                                foreign.dependencies()) ==
+              Outcome::refused);
+        CHECK(foreign.commands.empty());
+    }
 }
 
 TEST_CASE("an unreadable world never authorizes a delete") {

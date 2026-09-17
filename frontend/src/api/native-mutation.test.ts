@@ -71,20 +71,23 @@ const tombstoneForgetRequest = () => ({
 })
 
 describe("native mutation identity boundaries", () => {
-  test("accepts the exact managed Wireguard5..98 range", () => {
-    expect(
-      parseNdmsNativeDeleteResult(terminalDelete("Wireguard5"))
-    ).not.toBeNull()
-    expect(
-      parseNdmsNativeDeleteResult(terminalDelete("Wireguard98"))
-    ).not.toBeNull()
+  test("accepts canonical Wireguard0..126 identities in proved outcomes", () => {
+    for (let slot = 0; slot <= 126; slot += 1) {
+      expect(
+        parseNdmsNativeDeleteResult(terminalDelete(`Wireguard${slot}`))
+      ).not.toBeNull()
+    }
   })
 
-  test("rejects adjacent Wireguard4 and Wireguard99 identities", () => {
-    expect(parseNdmsNativeDeleteResult(terminalDelete("Wireguard4"))).toBeNull()
-    expect(
-      parseNdmsNativeDeleteResult(terminalDelete("Wireguard99"))
-    ).toBeNull()
+  test("rejects unsupported and noncanonical identities", () => {
+    for (const name of [
+      "Bridge0",
+      "Wireguard127",
+      "Wireguard00",
+      "wireguard4",
+    ]) {
+      expect(parseNdmsNativeDeleteResult(terminalDelete(name))).toBeNull()
+    }
   })
 
   test("rejects a forged terminal transport failure", () => {
@@ -105,9 +108,9 @@ describe("native mutation identity boundaries", () => {
     await expect(
       postNdmsNativeDeleteOnce(
         {
-          interface_name: "Wireguard4",
+          interface_name: "Wireguard127",
           expected_ownership_revision: revision,
-          confirm_label: "Wireguard4",
+          confirm_label: "Wireguard127",
         },
         fetchImpl
       )

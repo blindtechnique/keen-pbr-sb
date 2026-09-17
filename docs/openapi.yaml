@@ -846,7 +846,9 @@ paths:
         neither reserves nor authorizes the later secret-bearing request, whose
         admission is checked again. It does not claim that other NDMS writers
         are excluded. Both successful and error responses are served with
-        `Cache-Control: no-store`.
+        `Cache-Control: no-store`. Typed admission refusals expose only the
+        public `native_import_preflight:<reason>` code, never configuration
+        contents or arbitrary exception messages.
       operationId: postNdmsNativeImportPreflight
       responses:
         "200":
@@ -873,8 +875,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Import admission is blocked by current native operation state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "503":
-          description: Native mutation is unavailable or recovery must run first
+          description: Native mutation admission is temporarily unavailable
           content:
             application/json:
               schema:
@@ -894,6 +902,8 @@ paths:
         A completed result proves that the new interface was enabled and that
         KeeneticOS acknowledged `system configuration save`. The response is
         redacted and all responses are served with `Cache-Control: no-store`.
+        Typed admission refusals occur before the secret body is read and
+        expose only the public `native_import_preflight:<reason>` code.
       operationId: postNdmsNativeImportSecret
       parameters:
         - name: X-Keen-Pbr-External-Ndms-Writer-Race-Acceptance
@@ -954,6 +964,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Import admission is blocked before reading the secret body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "415":
           description: Exactly one `text/plain` content type is required
           content:
@@ -973,7 +989,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
         "503":
-          description: Native mutation is unavailable or recovery must run first
+          description: Native mutation admission is temporarily unavailable
           content:
             application/json:
               schema:
@@ -1068,7 +1084,7 @@ paths:
       summary: Delete one exact panel-owned native interface
       description: >
         Submits one exact compare-and-swap delete for a managed
-        `Wireguard5..98` interface. The ownership revision is an opaque token
+        `Wireguard0..126` interface. The ownership revision is an opaque token
         rendered by the current inventory card, and `confirm_label` must equal
         `interface_name`. Both owner acknowledgement headers are required and
         fresh for this invocation: the cooperative lease does not exclude
@@ -9234,7 +9250,7 @@ components:
     NdmsNativeManagedInterfaceName:
       title: NdmsNativeManagedInterfaceName
       type: string
-      pattern: "^Wireguard(?:[5-9]|[1-8][0-9]|9[0-8])$"
+      pattern: "^Wireguard(?:[0-9]|[1-9][0-9]|1[01][0-9]|12[0-6])$"
       description: Exact production-managed native mutation identity.
 
     NdmsNativeTombstoneForgetRequest:

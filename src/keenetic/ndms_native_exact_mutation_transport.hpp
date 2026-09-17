@@ -54,7 +54,7 @@ public:
 // Closed, move-only command vocabulary for the exact RCI writes used by
 // native import activation and panel deletion. Callers cannot supply a URL,
 // a JSON tree or an arbitrary command. A target must be a canonical managed
-// candidate (Wireguard5..98).
+// candidate (Wireguard0..126); the slot number never proves ownership.
 class NdmsNativeExactMutationRequest final {
 public:
     static NdmsNativeExactMutationRequest delete_managed_interface(

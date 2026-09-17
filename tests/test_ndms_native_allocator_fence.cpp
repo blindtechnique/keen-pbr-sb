@@ -263,7 +263,7 @@ TEST_CASE("allocator fence receipt move assignment poisons every source") {
                     .authorizes());
 }
 
-TEST_CASE("allocator fence range is exactly Wireguard5 through Wireguard98") {
+TEST_CASE("allocator fence range is exactly Wireguard0 through Wireguard126") {
     auto expectation = valid_expectation();
     expectation.range.first_index = 4U;
     CHECK(validate_fields(valid_fields(), expectation).error ==
@@ -285,10 +285,9 @@ TEST_CASE("allocator fence range is exactly Wireguard5 through Wireguard98") {
           NdmsNativeAllocatorFenceValidationError::receipt_range_invalid);
 }
 
-TEST_CASE("exact-create allocator fence rejects protected targets") {
+TEST_CASE("exact-create allocator fence rejects invalid targets") {
     for (const std::string target : {
-             "Wireguard0", "Wireguard4", "Wireguard99", "Wireguard126",
-             "Wireguard05", "Wireguard127"}) {
+             "Wireguard00", "Wireguard05", "Wireguard127", "Bridge0"}) {
         CAPTURE(target);
         auto fields = valid_fields(
             NdmsNativeAllocatorFenceMode::exact_create_if_absent);
@@ -300,7 +299,7 @@ TEST_CASE("exact-create allocator fence rejects protected targets") {
               NdmsNativeAllocatorFenceValidationError::exact_target_invalid);
     }
 
-    for (const std::string target : {"Wireguard5", "Wireguard98"}) {
+    for (const std::string target : {"Wireguard0", "Wireguard4", "Wireguard5", "Wireguard98", "Wireguard99", "Wireguard126"}) {
         CAPTURE(target);
         auto fields = valid_fields(
             NdmsNativeAllocatorFenceMode::exact_create_if_absent);

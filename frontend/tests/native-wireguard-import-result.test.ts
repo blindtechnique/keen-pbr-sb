@@ -55,12 +55,12 @@ describe("native WireGuard import public result", () => {
       { stop: "executor_blocked" },
       { expected_interface: "Wireguard6" },
       {
-        expected_interface: "Wireguard4",
-        created_interface: "Wireguard4",
+        expected_interface: "Wireguard127",
+        created_interface: "Wireguard127",
       },
       {
-        expected_interface: "Wireguard99",
-        created_interface: "Wireguard99",
+        expected_interface: "Wireguard00",
+        created_interface: "Wireguard00",
       },
       { created_interface: undefined },
       { created_kernel_interface: undefined },
@@ -85,6 +85,23 @@ describe("native WireGuard import public result", () => {
       expect(
         parseNdmsNativeImportResult({ ...completed(), ...patch })
       ).toBeNull()
+    }
+  })
+
+  test("accepts proved imports across the supported allocator namespace", () => {
+    for (let slot = 0; slot <= 126; slot += 1) {
+      const result = parseNdmsNativeImportResult({
+        ...completed(),
+        expected_interface: `Wireguard${slot}`,
+        created_interface: `Wireguard${slot}`,
+        created_kernel_interface: `nwg${slot}`,
+      })
+      expect(result).not.toBeNull()
+      expect(result && provedCompletedNativeImportIdentity(result)).toEqual({
+        firmwareInterface: `Wireguard${slot}`,
+        kernelInterface: `nwg${slot}`,
+        kind: "wireguard",
+      })
     }
   })
 

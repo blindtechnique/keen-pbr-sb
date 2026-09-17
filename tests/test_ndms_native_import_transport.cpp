@@ -303,7 +303,7 @@ TEST_CASE("ineligible target is rejected before request dispatch") {
 
     CHECK_THROWS_AS(
         post_for_test(
-            std::move(request), "Wireguard4", guard, backend),
+            std::move(request), "Wireguard127", guard, backend),
         NdmsNativeImportTransportError);
     CHECK(backend.calls == 0U);
 }

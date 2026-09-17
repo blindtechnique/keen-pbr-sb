@@ -1865,9 +1865,15 @@ export const enTranslation = {
       preflightStatus: "Checking access without sending the configuration…",
       sendingStatus:
         "The configuration was sent once. Waiting for the redacted result; do not repeat the request.",
-      preflightFailedTitle: "Import was not admitted",
+      preflightFailedTitle: "Could not start import",
       preflightFailedDescription:
-        "The configuration was not sent and remains in this page's one-shot vault. Check authentication or pending recovery, then you may run the bodyless check again.",
+        "The service could not prepare the import. The configuration was not sent and existing VPNs were not changed. See the service log for details.",
+      preflightUnsupportedSlot:
+        "This service build rejected the number of a free Keenetic interface. A corrected service version is needed; refreshing the page will not help. The configuration was not sent.",
+      preflightNoFreeSlot:
+        "No free WireGuard interface was found. Check the connections in Keenetic. The configuration was not sent and existing VPNs were not changed.",
+      preflightPendingOperation:
+        "Data from a previous import or deletion remains. Check that operation's result in the VPN section first. The new configuration was not sent.",
       selectionExpiredTitle: "Select the configuration again",
       selectionExpiredDescription:
         "Authentication, locality, or the selection revision changed before the one-shot request. No secret request was sent; the old in-memory copy was wiped.",
@@ -1901,7 +1907,7 @@ export const enTranslation = {
       applyBlockedDescription:
         "The panel checks the file or URI safely in this browser only. The server now describes the future create-only flow, but no keys are sent and the Keenetic write API remains disabled.",
       createOnlyRange:
-        "This import may create only a new interface in the {{first}}–{{last}} range; existing and protected interfaces must remain unchanged.",
+        "A new interface will use the first free number ({{first}}–{{last}}). Existing VPNs will not be changed.",
       readinessBlockers: "Why apply is not available yet",
       blockers: {
         writer_disabled: "the apply API and Keenetic writes are disabled",

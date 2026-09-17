@@ -5,6 +5,35 @@ import type {
 
 export type NativeSecretPreflightVerdict = "admitted" | "denied"
 
+// Only these public reason codes may be shown. Never display an arbitrary
+// server error, which could contain a filename or configuration material.
+export const NATIVE_IMPORT_PREFLIGHT_REASONS = [
+  "writer_missing",
+  "writer_lost",
+  "import_recovery_required",
+  "import_wal_unsafe",
+  "delete_wal_unfinished",
+  "delete_wal_unsafe",
+  "runtime_observation_failed",
+  "running_config_observation_failed",
+  "observation_scope_mismatch",
+  "observed_catalog_unsafe",
+  "first_free_scope_mismatch",
+  "no_first_free_slot",
+  "first_free_target_not_managed",
+  "ownership_inventory_unreadable",
+  "first_free_target_retains_ownership",
+  "kernel_inventory_unavailable",
+  "first_free_kernel_identity_present",
+  "keen_pbr_dependency_scan_incomplete",
+  "keen_pbr_dependencies_present",
+  "first_free_snapshot_absence_unproven",
+  "unexpected_failure",
+] as const
+
+export type NativeImportPreflightReason =
+  (typeof NATIVE_IMPORT_PREFLIGHT_REASONS)[number]
+
 export const NDMS_NATIVE_IMPORT_SECRET_ENDPOINT =
   "/api/system/ndms/interfaces/import" as const
 export const NDMS_NATIVE_IMPORT_PREFLIGHT_ENDPOINT =
@@ -38,11 +67,16 @@ export type NativeSecretTransportErrorCode =
 
 export class NativeSecretTransportError extends Error {
   readonly code: NativeSecretTransportErrorCode
+  readonly preflightReason?: NativeImportPreflightReason
 
-  constructor(code: NativeSecretTransportErrorCode) {
+  constructor(
+    code: NativeSecretTransportErrorCode,
+    preflightReason?: NativeImportPreflightReason
+  ) {
     super(code)
     this.name = "NativeSecretTransportError"
     this.code = code
+    this.preflightReason = preflightReason
   }
 }
 
@@ -85,13 +119,18 @@ export async function preflightNdmsNativeImport({
     headers: { Accept: "application/json" },
     signal,
   })
-  if (!response.ok) return "denied"
-
   const payload = await response.json().catch(() => null)
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return "denied"
   }
   const value = payload as Record<string, unknown>
+  if (!response.ok) {
+    const reason = NATIVE_IMPORT_PREFLIGHT_REASONS.find(
+      (candidate) => value.error === `native_import_preflight:${candidate}`
+    )
+    if (reason) throw new NativeSecretTransportError("preflight_denied", reason)
+    return "denied"
+  }
   return value.admitted === true &&
     value.owner_risk_acceptance_required === true &&
     value.external_ndms_writer_race_excluded === false
@@ -143,7 +182,13 @@ export async function postNdmsNativeImportSecretOnce({
       preflightEndpoint: NDMS_NATIVE_IMPORT_PREFLIGHT_ENDPOINT,
       secretEndpoint: NDMS_NATIVE_IMPORT_SECRET_ENDPOINT,
     })
-  } catch {
+  } catch (error) {
+    if (
+      error instanceof NativeSecretTransportError &&
+      error.code === "preflight_denied"
+    ) {
+      throw error
+    }
     throw new NativeSecretTransportError("preflight_failed")
   }
 

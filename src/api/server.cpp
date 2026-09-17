@@ -14,6 +14,7 @@
 #include "../http/http_client.hpp"
 #include "../keenetic/ndms_credential_generation.hpp"
 #include "../keenetic/ndms_lockout_policy.hpp"
+#include "../keenetic/ndms_native_fresh_import_preflight.hpp"
 #include "../keenetic/ndms_web_endpoint.hpp"
 #include "../log/logger.hpp"
 #include "../log/trace.hpp"
@@ -3236,6 +3237,14 @@ void ApiServer::post_sensitive(
                 log_request_end(
                     req, "api-sensitive",
                     res.status == 0 ? 200 : res.status, started_at);
+            } catch (const NdmsNativeFreshImportPreflightRefusal& error) {
+                res.status = error.status == NdmsNativeFreshImportPreflightStatus::blocked
+                    ? 409 : 503;
+                const std::string reason = std::string{"native_import_preflight:"} +
+                    ndms_native_fresh_import_preflight_stop_name(error.stop);
+                res.set_content(nlohmann::json{{"error", reason}}.dump(),
+                                "application/json");
+                log_request_end(req, "api-sensitive", res.status, started_at);
             } catch (const ApiError& error) {
                 res.status = error.status();
                 res.set_content(

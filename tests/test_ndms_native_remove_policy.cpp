@@ -51,11 +51,11 @@ TEST_CASE("a preview that promised more would be inconsistent") {
     CHECK_FALSE(ndms_native_remove_policy_is_consistent(policy));
 
     policy = preview_ndms_native_remove_policy();
-    policy.removable_targets = {0U, 126U};
+    policy.removable_targets = {0U, 127U};
     CHECK_FALSE(ndms_native_remove_policy_is_consistent(policy));
 
     policy = preview_ndms_native_remove_policy();
-    policy.protected_targets.clear();
+    policy.protected_targets.push_back({0U, 4U});
     CHECK_FALSE(ndms_native_remove_policy_is_consistent(policy));
 }
 
@@ -70,11 +70,10 @@ TEST_CASE("the published operation is the command actually issued") {
 }
 
 TEST_CASE("only managed candidates are removable, and by one rule") {
-    for (const char* name : {"Wireguard5", "Wireguard50", "Wireguard98"}) {
+    for (const char* name : {"Wireguard0", "Wireguard4", "Wireguard5", "Wireguard50", "Wireguard98", "Wireguard99", "Wireguard126"}) {
         CHECK(ndms_native_removable_target(name));
     }
-    for (const char* name : {"Wireguard0", "Wireguard4", "Wireguard99",
-                             "Wireguard126", "wireguard5", "Wireguard05",
+    for (const char* name : {"Bridge0", "Wireguard127", "wireguard5", "Wireguard05",
                              "Wireguard", ""}) {
         CHECK_FALSE(ndms_native_removable_target(name));
     }

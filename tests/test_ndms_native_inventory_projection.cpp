@@ -366,7 +366,7 @@ TEST_CASE("never-activated import state is not authoritative for delete") {
             import_journal_not_authoritatively_clean));
 }
 
-TEST_CASE("protected native slots and non-native interfaces stay inapplicable") {
+TEST_CASE("foreign native slots and non-native interfaces cannot be deleted") {
     NdmsNativeOwnershipInspection empty;
     empty.readable = true;
     const auto projected = project_ndms_native_inventory(
@@ -383,7 +383,7 @@ TEST_CASE("protected native slots and non-native interfaces stay inapplicable") 
     CHECK(has_blocker(
         projected.interfaces[0],
         NdmsNativeInventoryDeleteBlocker::
-            invalid_or_protected_target));
+            ownership_absent));
     CHECK(projected.interfaces[1].ownership_state ==
           NdmsNativeInventoryOwnershipState::not_applicable);
     CHECK(has_blocker(

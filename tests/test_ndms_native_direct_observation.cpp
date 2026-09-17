@@ -458,10 +458,10 @@ TEST_CASE("untrusted marker and target never become an RCI path") {
         CHECK(transport->requests.empty());
     }
 
-    SUBCASE("protected target") {
+    SUBCASE("unsupported target") {
         auto transport = std::make_shared<QueueTransport>();
         const auto measured = gateway_for(transport).observe_recovery(
-            kMarker, std::optional<std::string>{"Wireguard0"});
+            kMarker, std::optional<std::string>{"Wireguard127"});
         CHECK(measured.failure ==
               NdmsNativeDirectObservationFailure::invalid_target);
         CHECK(transport->requests.empty());

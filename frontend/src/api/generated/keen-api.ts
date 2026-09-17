@@ -3193,7 +3193,7 @@ export function useGetNdmsInterfaceInventory<TData = Awaited<ReturnType<typeof g
 
 
 /**
- * Performs the bodyless authentication and native mutation admission phase. The request body must be empty. A successful response reports only that the one-shot import may be attempted; it neither reserves nor authorizes the later secret-bearing request, whose admission is checked again. It does not claim that other NDMS writers are excluded. Both successful and error responses are served with `Cache-Control: no-store`.
+ * Performs the bodyless authentication and native mutation admission phase. The request body must be empty. A successful response reports only that the one-shot import may be attempted; it neither reserves nor authorizes the later secret-bearing request, whose admission is checked again. It does not claim that other NDMS writers are excluded. Both successful and error responses are served with `Cache-Control: no-store`. Typed admission refusals expose only the public `native_import_preflight:<reason>` code, never configuration contents or arbitrary exception messages.
 
  * @summary Admit a native WireGuard import without sending its secret
  */
@@ -3217,6 +3217,11 @@ export type postNdmsNativeImportPreflightResponse403 = {
   status: 403
 }
 
+export type postNdmsNativeImportPreflightResponse409 = {
+  data: ErrorResponse
+  status: 409
+}
+
 export type postNdmsNativeImportPreflightResponse503 = {
   data: ErrorResponse
   status: 503
@@ -3225,7 +3230,7 @@ export type postNdmsNativeImportPreflightResponse503 = {
 export type postNdmsNativeImportPreflightResponseSuccess = (postNdmsNativeImportPreflightResponse200) & {
   headers: Headers;
 };
-export type postNdmsNativeImportPreflightResponseError = (postNdmsNativeImportPreflightResponse400 | postNdmsNativeImportPreflightResponse401 | postNdmsNativeImportPreflightResponse403 | postNdmsNativeImportPreflightResponse503) & {
+export type postNdmsNativeImportPreflightResponseError = (postNdmsNativeImportPreflightResponse400 | postNdmsNativeImportPreflightResponse401 | postNdmsNativeImportPreflightResponse403 | postNdmsNativeImportPreflightResponse409 | postNdmsNativeImportPreflightResponse503) & {
   headers: Headers;
 };
 

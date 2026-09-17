@@ -8,6 +8,6 @@
 
 /**
  * Exact production-managed native mutation identity.
- * @pattern ^Wireguard(?:[5-9]|[1-8][0-9]|9[0-8])$
+ * @pattern ^Wireguard(?:[0-9]|[1-9][0-9]|1[01][0-9]|12[0-6])$
  */
 export type NdmsNativeManagedInterfaceName = string;

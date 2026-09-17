@@ -2321,9 +2321,15 @@ void Daemon::setup_api() {
                             result.status),
                         ndms_native_fresh_import_preflight_stop_name(
                             result.stop));
-                    return std::shared_ptr<SensitiveRequestReservation>{};
+                    // Only the bounded reason enum reaches the browser. Do
+                    // not hide a deterministic refusal behind a null token
+                    // and the generic "reservation unavailable" response.
+                    throw NdmsNativeFreshImportPreflightRefusal{
+                        result.status, result.stop};
                 }
                 return opaque_reservation;
+            } catch (const NdmsNativeFreshImportPreflightRefusal&) {
+                throw;
             } catch (...) {
                 return std::shared_ptr<SensitiveRequestReservation>{};
             }
