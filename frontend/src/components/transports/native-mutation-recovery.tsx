@@ -1,6 +1,14 @@
 import { AlertTriangleIcon, RotateCcwIcon } from "lucide-react"
-import { useCallback, useEffect, useRef, useState } from "react"
+import {
+  useCallback,
+  useEffect,
+  useEffectEvent,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react"
 import { useTranslation } from "react-i18next"
+import { toast } from "sonner"
 
 import type { NdmsNativeMutationInventoryStatus } from "@/api/generated/model"
 import {
@@ -22,7 +30,10 @@ import {
 } from "@/lib/native-mutation-lock"
 import {
   cancelActiveNativeWireGuardImportCompletion,
-  clearStagedNativeWireGuardImportCompletion,
+  readBackgroundNativeWireGuardImportCompletionTag,
+  readStagedNativeWireGuardImportCompletion,
+  subscribeNativeWireGuardImportCompletion,
+  NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID,
 } from "@/lib/native-wireguard-import-completion"
 
 import {
@@ -85,7 +96,7 @@ export function NativeMutationRecovery({
   readonly onDeleteTerminal: (result: NdmsNativeDeleteResult) => void
   readonly onImportCompleted?: (
     result: NdmsNativeImportRecoveryResult
-  ) => void | Promise<void>
+  ) => boolean | void | Promise<boolean | void>
   readonly onImportNoWork?: () =>
     | boolean
     | undefined
@@ -98,8 +109,16 @@ export function NativeMutationRecovery({
   )
   const [busy, setBusy] = useState<NativeMutationRecoveryKind | null>(null)
   const [outcome, setOutcome] = useState<RecoveryOutcome | null>(null)
+  const [finishedPass, setFinishedPass] = useState(0)
   const automaticImportRecoveryAttempts = useRef(0)
   const automaticDeleteRecoveryAttempts = useRef(0)
+  const completionTag = useSyncExternalStore(
+    subscribeNativeWireGuardImportCompletion,
+    readBackgroundNativeWireGuardImportCompletionTag,
+    () => undefined
+  )
+  const [settledCompletionTag, setSettledCompletionTag] = useState<string>()
+  const completionAttempts = useRef({ tag: completionTag, count: 0 })
 
   useEffect(
     () => subscribeNativeMutationLock((nextLock) => setLock(nextLock)),
@@ -196,8 +215,10 @@ export function NativeMutationRecovery({
         const reconnected = await Promise.resolve(onImportNoWork?.()).catch(
           () => undefined
         )
-        if (reconnected === false) {
-          clearStagedNativeWireGuardImportCompletion()
+        if (
+          reconnected === false &&
+          !readStagedNativeWireGuardImportCompletion()
+        ) {
           cancelActiveNativeWireGuardImportCompletion()
         }
       }
@@ -213,9 +234,15 @@ export function NativeMutationRecovery({
       )
     } finally {
       setBusy(null)
+      setFinishedPass((pass) => pass + 1)
       await refresh().catch(() => undefined)
     }
   }, [busy, importNeedsRecovery, onImportCompleted, onImportNoWork, refresh])
+
+  // Inventory/runtime polling replaces the parent's callbacks every few
+  // seconds. Read the latest callbacks when the timer fires, but do not restart
+  // a five-second recovery delay on every three-second status refresh.
+  const onImportRecoveryTimer = useEffectEvent(() => void recoverImport())
 
   useEffect(() => {
     if (!importNeedsRecovery) {
@@ -234,10 +261,73 @@ export function NativeMutationRecovery({
     const delay = attempt < 8 ? 400 : 5_000
     const timeout = window.setTimeout(() => {
       automaticImportRecoveryAttempts.current += 1
-      void recoverImport()
+      onImportRecoveryTimer()
     }, delay)
     return () => window.clearTimeout(timeout)
-  }, [busy, importNeedsRecovery, recoverImport])
+  }, [busy, importNeedsRecovery, finishedPass])
+
+  // Retiring the router WAL only finishes interface creation. The tab's
+  // non-secret plan survives until its tracker/route are actually saved.
+  // Reconcile that separate step without replaying the native import.
+  const onImportCompletionTimer = useEffectEvent(async () => {
+    if (busy || !completionTag) return
+    const tag = completionTag
+    if (completionAttempts.current.tag !== tag) {
+      completionAttempts.current = { tag, count: 0 }
+    }
+    setBusy("import")
+    try {
+      const result = await Promise.resolve(onImportNoWork?.()).catch(
+        () => undefined
+      )
+      if (readStagedNativeWireGuardImportCompletion()?.tag !== tag) return
+      if (result === true) {
+        setSettledCompletionTag(tag)
+      } else if (result === false || ++completionAttempts.current.count >= 8) {
+        // Keep the plan: retry continues linking, never recreates the VPN.
+        setSettledCompletionTag(tag)
+        toast.error(t("transports.nativeImport.completionPending"), {
+          id: NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID,
+          action: {
+            label: t("common.retry"),
+            onClick: () => {
+              completionAttempts.current = { tag, count: 0 }
+              setSettledCompletionTag(undefined)
+            },
+          },
+        })
+      }
+    } finally {
+      setBusy(null)
+      // React can batch busy -> idle for an immediately available answer.
+      // A settled pass must still schedule the next inventory observation.
+      setFinishedPass((pass) => pass + 1)
+    }
+  })
+
+  useEffect(() => {
+    if (
+      !completionTag ||
+      completionTag === settledCompletionTag ||
+      busy ||
+      lock ||
+      importNeedsRecovery ||
+      deleteNeedsRecovery
+    )
+      return
+    const timeout = window.setTimeout(() => {
+      void onImportCompletionTimer()
+    }, 5_000)
+    return () => window.clearTimeout(timeout)
+  }, [
+    busy,
+    completionTag,
+    settledCompletionTag,
+    lock,
+    importNeedsRecovery,
+    deleteNeedsRecovery,
+    finishedPass,
+  ])
 
   const recoverDelete = useCallback(async () => {
     if (busy) return
@@ -312,9 +402,12 @@ export function NativeMutationRecovery({
       }
     } finally {
       setBusy(null)
+      setFinishedPass((pass) => pass + 1)
       await refresh().catch(() => undefined)
     }
   }, [busy, deleteNeedsRecovery, onDeleteTerminal, refresh])
+
+  const onDeleteRecoveryTimer = useEffectEvent(() => void recoverDelete())
 
   useEffect(() => {
     if (!deleteNeedsRecovery) {
@@ -329,10 +422,10 @@ export function NativeMutationRecovery({
         : Math.min(1_000 * 2 ** Math.min(attempt - 1, 4), 15_000)
     const timeout = window.setTimeout(() => {
       automaticDeleteRecoveryAttempts.current += 1
-      void recoverDelete()
+      onDeleteRecoveryTimer()
     }, delay)
     return () => window.clearTimeout(timeout)
-  }, [busy, deleteNeedsRecovery, recoverDelete])
+  }, [busy, deleteNeedsRecovery, finishedPass])
 
   if (!show) return null
 

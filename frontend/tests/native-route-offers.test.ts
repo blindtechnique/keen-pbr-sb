@@ -64,6 +64,12 @@ describe("native route offer candidates", () => {
       boundInterfaceNames: new Set(["nwg0"]),
       hiddenIds: new Set(["Wireguard3"]),
       dismissedIds: new Set(["Wireguard4"]),
+      pendingImport: {
+        tag: "panel_import",
+        displayName: "Panel import",
+        createOutbound: true,
+        autoStart: false,
+      },
     })
 
     expect(candidates).toEqual([
@@ -74,6 +80,65 @@ describe("native route offer candidates", () => {
         interfaceName: "nwg2",
       },
     ])
+  })
+
+  test("offers route repair for an imported VPN whose browser completion plan was lost", () => {
+    const imported = native({
+      id: "Wireguard0",
+      label: "Imported AWG",
+      kernelName: "nwg0",
+      ownershipState: "panel_owned_active",
+    })
+    const options = {
+      nativeInterfaces: [imported],
+      boundInterfaceNames: new Set<string>(),
+      hiddenIds: new Set<string>(),
+      dismissedIds: new Set<string>(),
+    }
+    expect(pickNativeRouteOfferCandidates(options)).toEqual([
+      { id: "Wireguard0", label: "Imported AWG", interfaceName: "nwg0" },
+    ])
+    expect(
+      pickNativeRouteOfferCandidates({
+        ...options,
+        boundInterfaceNames: new Set(["nwg0"]),
+      })
+    ).toEqual([])
+    expect(
+      pickNativeRouteOfferCandidates({
+        ...options,
+        dismissedIds: new Set(["Wireguard0"]),
+      })
+    ).toEqual([])
+  })
+
+  test("does not offer a competing action while the confirmed imported identity is being linked", () => {
+    expect(
+      pickNativeRouteOfferCandidates({
+        nativeInterfaces: [
+          native({
+            id: "Wireguard0",
+            label: "Renamed AWG",
+            kernelName: "nwg0",
+            ownershipState: "panel_owned_active",
+          }),
+        ],
+        boundInterfaceNames: new Set(),
+        hiddenIds: new Set(),
+        dismissedIds: new Set(),
+        pendingImport: {
+          tag: "panel_import",
+          displayName: "Old name",
+          createOutbound: true,
+          autoStart: false,
+          identity: {
+            firmwareInterface: "Wireguard0",
+            kernelInterface: "nwg0",
+            kind: "amnezia_wireguard",
+          },
+        },
+      })
+    ).toEqual([])
   })
 })
 

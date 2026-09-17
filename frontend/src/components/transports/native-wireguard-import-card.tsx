@@ -80,6 +80,7 @@ import { looksLikeWireGuardConfig } from "@/components/transports/subscription-i
 import { cn } from "@/lib/utils"
 import {
   registerActiveNativeWireGuardImportCompletion,
+  rememberNativeWireGuardImportedIdentity,
   type NativeWireGuardImportedIdentity,
 } from "@/lib/native-wireguard-import-completion"
 
@@ -326,6 +327,7 @@ function NativeWireGuardImportFieldsContent({
       const key = `${identity.firmwareInterface}\n${identity.kernelInterface}\n${identity.kind}`
       if (completedIdentityReportedRef.current === key) return true
       completedIdentityReportedRef.current = key
+      rememberNativeWireGuardImportedIdentity(identity)
       onImportedIdentityChange?.(identity)
       return true
     },

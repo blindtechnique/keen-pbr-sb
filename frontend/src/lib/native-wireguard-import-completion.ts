@@ -1,6 +1,7 @@
 import {
   TransportSpecType,
   type NdmsTunnelInterface,
+  type Outbound,
   type TransportSpec,
 } from "@/api/generated/model"
 
@@ -20,6 +21,7 @@ export type NativeWireGuardImportCompletionPlan = Readonly<{
   countryCode?: string
   country?: string
   endpointHost?: string
+  identity?: NativeWireGuardImportedIdentity
 }>
 
 type ActiveImportCompletionHandler = (
@@ -35,6 +37,30 @@ let activeHandler:
 
 let stagedPlan: NativeWireGuardImportCompletionPlan | undefined
 const COMPLETION_PLAN_KEY = "keen-pbr.native-wireguard-import-completion.v1"
+const completionListeners = new Set<() => void>()
+const notifyCompletion = () => completionListeners.forEach((notify) => notify())
+
+const parseIdentity = (
+  value: unknown
+): NativeWireGuardImportedIdentity | undefined => {
+  if (!value || typeof value !== "object") return undefined
+  const identity = value as Record<string, unknown>
+  if (
+    typeof identity.firmwareInterface !== "string" ||
+    !/^Wireguard(?:[0-9]|[1-9][0-9]|1[01][0-9]|12[0-6])$/.test(
+      identity.firmwareInterface
+    ) ||
+    typeof identity.kernelInterface !== "string" ||
+    !identity.kernelInterface.trim() ||
+    (identity.kind !== "wireguard" && identity.kind !== "amnezia_wireguard")
+  )
+    return undefined
+  return {
+    firmwareInterface: identity.firmwareInterface,
+    kernelInterface: identity.kernelInterface.trim(),
+    kind: identity.kind,
+  }
+}
 
 /**
  * One Sonner entry follows the import across the modal, page recovery and the
@@ -88,6 +114,7 @@ const parseStoredPlan = (
       country: typeof value.country === "string" ? value.country : undefined,
       endpointHost:
         typeof value.endpointHost === "string" ? value.endpointHost : undefined,
+      identity: parseIdentity(value.identity),
     }
   } catch {
     return undefined
@@ -107,8 +134,12 @@ export function registerActiveNativeWireGuardImportCompletion(
 ): () => void {
   const token = Symbol("native-wireguard-import-completion")
   activeHandler = { token, handle }
+  notifyCompletion()
   return () => {
-    if (activeHandler?.token === token) activeHandler = undefined
+    if (activeHandler?.token === token) {
+      activeHandler = undefined
+      notifyCompletion()
+    }
   }
 }
 
@@ -138,6 +169,32 @@ export function stageNativeWireGuardImportCompletion(
   } catch {
     // Same-document completion remains available when storage is disabled.
   }
+  notifyCompletion()
+}
+
+export function rememberNativeWireGuardImportedIdentity(
+  identity: NativeWireGuardImportedIdentity
+): void {
+  const plan = readStagedNativeWireGuardImportCompletion()
+  if (plan) stageNativeWireGuardImportCompletion({ ...plan, identity })
+}
+
+/** Resume the non-secret panel step even after the native WAL has retired. */
+export function readBackgroundNativeWireGuardImportCompletionTag():
+  | string
+  | undefined {
+  return activeHandler
+    ? undefined
+    : readStagedNativeWireGuardImportCompletion()?.tag
+}
+
+export function subscribeNativeWireGuardImportCompletion(
+  listener: () => void
+): () => void {
+  completionListeners.add(listener)
+  return () => {
+    completionListeners.delete(listener)
+  }
 }
 
 export function readStagedNativeWireGuardImportCompletion():
@@ -166,6 +223,7 @@ export function clearStagedNativeWireGuardImportCompletion(
   } catch {
     // The in-memory plan is already cleared.
   }
+  notifyCompletion()
 }
 
 export function buildStagedNativeWireGuardTransport(
@@ -202,7 +260,11 @@ export function findStagedNativeWireGuardImportIdentity(
   const matches = interfaces.filter((item) => {
     const kernelInterface = item.kernel_name?.trim()
     return (
-      item.label.trim() === plan.displayName &&
+      (plan.identity
+        ? item.firmware_interface_name === plan.identity.firmwareInterface &&
+          kernelInterface === plan.identity.kernelInterface &&
+          item.kind === plan.identity.kind
+        : item.label.trim() === plan.displayName) &&
       /^Wireguard(?:[0-9]|[1-9][0-9]|1[01][0-9]|12[0-6])$/.test(
         item.firmware_interface_name
       ) &&
@@ -219,4 +281,36 @@ export function findStagedNativeWireGuardImportIdentity(
     kernelInterface: match.kernel_name!.trim(),
     kind: match.kind === "wireguard" ? "wireguard" : "amnezia_wireguard",
   }
+}
+
+/** A lost apply response must not cause a second create or a false failure. */
+export function stagedNativeWireGuardLinkState(
+  plan: NativeWireGuardImportCompletionPlan,
+  identity: NativeWireGuardImportedIdentity,
+  transports: readonly TransportSpec[],
+  outbounds: readonly Outbound[]
+): "create" | "complete" | "conflict" {
+  const transport = transports.find((item) => item.tag === plan.tag)
+  const outbound = outbounds.find((item) => item.tag === plan.tag)
+  const trackerMatches =
+    transport?.type === TransportSpecType.native &&
+    transport.interface === identity.kernelInterface
+  const routeMatches =
+    outbound?.type === "interface" &&
+    outbound.interface === identity.kernelInterface
+  if (trackerMatches && (!plan.createOutbound || routeMatches))
+    return "complete"
+  if (
+    transport ||
+    (plan.createOutbound && outbound) ||
+    transports.some((item) => item.interface === identity.kernelInterface) ||
+    (plan.createOutbound &&
+      outbounds.some(
+        (item) =>
+          item.type === "interface" &&
+          item.interface === identity.kernelInterface
+      ))
+  )
+    return "conflict"
+  return "create"
 }

@@ -2,6 +2,7 @@ import {
   getNativeBindBlockReason,
   type NativeInterfaceModel,
 } from "@/lib/native-interfaces"
+import type { NativeWireGuardImportCompletionPlan } from "@/lib/native-wireguard-import-completion"
 
 /**
  * Предложение «использовать новый туннель как VPN».
@@ -73,23 +74,33 @@ export function pickNativeRouteOfferCandidates({
   boundInterfaceNames,
   hiddenIds,
   dismissedIds,
+  pendingImport,
 }: {
   readonly nativeInterfaces: readonly NativeInterfaceModel[]
   readonly boundInterfaceNames: ReadonlySet<string>
   readonly hiddenIds: ReadonlySet<string>
   readonly dismissedIds: ReadonlySet<string>
+  readonly pendingImport?: NativeWireGuardImportCompletionPlan
 }): NativeRouteOfferCandidate[] {
   return nativeInterfaces.flatMap((nativeInterface) => {
-    // Imports owned by this panel are completed by the import pipeline itself.
-    // This offer is only for a WG/AWG tunnel the operator created directly in
-    // KeeneticOS and whose absent panel claim was observed authoritatively.
+    // A lost browser completion plan must not hide an unbound imported VPN.
+    // Offer an explicit route action, but do not compete with an active import.
+    const ownership = nativeInterface.source.native_mutation.ownership_state
     if (
-      nativeInterface.source.native_mutation.ownership_state !== "foreign" ||
+      (ownership !== "foreign" && ownership !== "panel_owned_active") ||
       (nativeInterface.source.kind !== "wireguard" &&
         nativeInterface.source.kind !== "amnezia_wireguard")
     ) {
       return []
     }
+    if (
+      pendingImport &&
+      (pendingImport.identity
+        ? pendingImport.identity.firmwareInterface ===
+          nativeInterface.logicalName
+        : pendingImport.displayName === nativeInterface.label.trim())
+    )
+      return []
     if (getNativeBindBlockReason(nativeInterface) !== undefined) {
       return []
     }
