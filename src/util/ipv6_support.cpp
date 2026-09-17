@@ -121,7 +121,7 @@ void log_ipv6_support_decision_once(const Ipv6SupportDecision& decision) {
 
     if (decision.reason == Ipv6SupportDecision::Reason::UnsupportedBySystem) {
         if (!logged_system_unsupported) {
-            Logger::instance().error(
+            Logger::instance().info(
                 "IPv6 is not supported by this system; continuing in IPv4-only mode");
             logged_system_unsupported = true;
         }

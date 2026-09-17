@@ -1383,7 +1383,7 @@ export const enTranslation = {
     singBoxMissing: {
       title: "sing-box is not installed",
       description:
-        "VLESS, VMess, Trojan, Shadowsocks and other managed proxy connections require sing-box. Run the keen-pbr-sb installer over SSH and select the tested version.",
+        "For VLESS, VMess, Trojan, Shadowsocks and other proxy connections, click “Install sing-box” at the top of the page. WireGuard, AmneziaWG and native Keenetic/Netcraze VPNs work without it.",
     },
     title: "VPN and proxies",
     description:
@@ -1858,10 +1858,8 @@ export const enTranslation = {
       aliasConflictDescription:
         "KeeneticOS already has an interface with this display or technical name. A different name must be explicitly chosen before a future save; the existing interface was not changed.",
       apply: "Create interface in Keenetic",
-      ownerRiskConsent:
-        "Keenetic can be changed by another tool during this operation; by continuing, I accept this risk.",
-      ownerRiskExplanation:
-        "The operation excludes other keen-pbr changes only. It cannot lock every Keenetic tool. Access is checked without sending the configuration before the one-shot request.",
+      routerCreationNotice:
+        "The tunnel will be created on the router and appear in the Keenetic/Netcraze panel. Existing VPNs will not be changed.",
       preflighting: "Checking…",
       sending: "Creating…",
       preflightStatus: "Checking access without sending the configuration…",
@@ -2002,7 +2000,7 @@ export const enTranslation = {
       consentConfirm: "Update and restart",
       setupTitle: "sing-box is not installed",
       setupBody:
-        "VPN and proxy connections need it. Installing takes about a minute.",
+        "WireGuard and AmneziaWG work without sing-box. Install it for VLESS, VMess, Trojan, other proxies and JSON configurations.",
       leftDown:
         "These connections did not start again and need to be started by hand: {{tags}}.",
       notDurable:
@@ -2038,6 +2036,8 @@ export const enTranslation = {
         transport_state_unknown:
           "The transport manager did not answer, so it is not known whether anything is running.",
       },
+      versionUnavailable:
+        "Could not run the downloaded sing-box or read its version. Nothing was replaced. Check the service log for the cause.",
       outcome: {
         installed: "sing-box installed.",
         cancelled: "Install stopped. Nothing on the router changed.",
@@ -2046,7 +2046,7 @@ export const enTranslation = {
         checksum_mismatch: "The archive did not match its published checksum.",
         archive_unusable: "The archive contained no usable binary.",
         staged_version_mismatch:
-          "The archive is not the pinned release, so nothing was replaced.",
+          "The downloaded sing-box reports a different version. Nothing was replaced.",
         install_failed: "The binary could not be put in place.",
         marker_not_written:
           "sing-box was installed, but the record that it belongs to keen-pbr was not written. Until it is, this page will treat the binary as yours and refuse to touch it.",
@@ -2843,7 +2843,7 @@ export const enTranslation = {
           browser:
             "The browser did not complete the request: a network error or browser restriction may be responsible.",
           timeout: "No response was received within the time limit.",
-          dns: "The router could not resolve the website's IP address through DNS.",
+          dns: "The router's availability check could not resolve the website's IP address through DNS.",
           tls: "A secure connection to the website (TLS) could not be established.",
           connection:
             "The router could not connect, or the connection was interrupted.",
@@ -2862,8 +2862,7 @@ export const enTranslation = {
         busy: "Another nfqws coverage check is already running. This routing result is still valid; try the check again.",
         unknown:
           "Not all nfqws conditions could be checked: some data is unavailable or needs connection details.",
-        covered:
-          "List conditions match in at least one nfqws processing profile.",
+        covered: "The target is in the nfqws lists.",
         excluded:
           "An exclusion matches. It applies only within its own profile, not across all nfqws settings.",
         uncovered:
@@ -2873,6 +2872,8 @@ export const enTranslation = {
       },
       nfqwsScope:
         "Lists were checked against the saved settings. Actual processing also depends on the protocol, port, visible hostname and profile order. This check does not confirm successful circumvention.",
+      nfqwsUnrestricted:
+        "An nfqws profile is configured to process traffic without an address list restriction.",
       nfqwsProfiles: "Profile details: {{count}}",
       nfqwsProfile: "Profile {{index}}",
       nfqwsProfileNamed: "Profile {{index}} — {{name}}",
@@ -2926,7 +2927,7 @@ export const enTranslation = {
       guidance: {
         deviceOnly:
           "The router received a site response, but this device's browser did not. The connection path or browser-check restrictions may explain the difference; it does not prove a DNS problem.",
-        dns: "The router could not resolve the site's address. Review the DNS check and the servers in use.",
+        dns: "The DNS request in the availability check failed. The routing check runs separately and may obtain an IP address. Check DNS if the error repeats.",
         service:
           "The service did not provide a result. Check its status first; the site's availability is still unknown.",
         openDns: "View DNS diagnostics",
@@ -2941,7 +2942,8 @@ export const enTranslation = {
       emptyDescription: "Try another domain or IP address.",
     },
     routingDiagnostics: {
-      noMatchingRule: "No matching routing rule for the target lists.",
+      noMatchingRule:
+        "This address has no specific keen-pbr routing rule. nfqws does not need one — its lists are checked separately.",
       pathTitle: "Routing path check",
       pathDescription:
         "Shows rule, firewall, and router-local route lookup decisions. This is not a website availability test.",
@@ -4058,7 +4060,26 @@ export const enTranslation = {
       connection: {
         title: "Step 1. Connect a VPN",
         description:
-          "Paste the connection link from your VPN provider. The panel creates a VPN through sing-box and its linked route.",
+          "Choose a file or paste your connection details. The panel creates the VPN and its route, then lets you choose which services to send through it.",
+        defaultName: "My VPN",
+        previewDetails: "Connection details",
+        fileHint:
+          "Choose a .conf or .vpn file from your VPN provider. You can also paste its contents in the Connection link tab.",
+        nameHint:
+          "This name will appear in the panel. Keep it or enter your own.",
+        geoAuto: "Detect from the server",
+        nativeOnlyPlaceholder: "vpn://…  [Interface]…",
+        nativeOnlyHint:
+          "Paste an Amnezia vpn:// link or a WireGuard / AmneziaWG configuration. Install sing-box first to use other links.",
+        singBoxRequired:
+          "This format needs sing-box. Install it above or choose a WireGuard / AmneziaWG configuration.",
+        finishingImport:
+          "Finishing the VPN route connection. The wizard will continue automatically; do not import the VPN again.",
+        completionPaused:
+          "The VPN route connection could not be completed. Retry to continue from the saved step without importing the VPN again.",
+        saveHint:
+          "You can change the name and leave the country hidden. The route is created automatically with the VPN.",
+        countryRequired: "Choose a country or select the option to hide it.",
         otherImport: "Import another VPN or a subscription",
         otherImportHint:
           "For WireGuard, AmneziaWG, a file or a subscription, open the regular import. Then return to the wizard and select the created route below.",

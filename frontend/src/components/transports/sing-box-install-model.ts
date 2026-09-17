@@ -195,6 +195,17 @@ export function singBoxInstallOutcomeKey(
   return `transports.singBoxInstall.outcome.${outcome}`
 }
 
+export function singBoxInstallMessageKey(result: SingBoxInstallResult): string {
+  // Older daemons use the same outcome for a different version and for a
+  // binary that never ran (for example, a missing ELF interpreter).
+  if (
+    result.install_outcome === "staged_version_mismatch" &&
+    !result.staged_version?.trim()
+  )
+    return "transports.singBoxInstall.versionUnavailable"
+  return singBoxInstallOutcomeKey(result.install_outcome)
+}
+
 // Why the release was refused, when the outcome alone does not say. Shown for
 // both outcomes that carry a real judgement and for no others: a verdict
 // printed beside a download failure would name a judgement that never
@@ -263,10 +274,13 @@ export function singBoxInstallLeftDown(result: SingBoxInstallResult): string[] {
 export function singBoxDownloadLabel(
   received: number | undefined,
   total: number | undefined
-): { readonly kind: "percent"; readonly percent: number } | {
-  readonly kind: "received"
-  readonly megabytes: string
-} | null {
+):
+  | { readonly kind: "percent"; readonly percent: number }
+  | {
+      readonly kind: "received"
+      readonly megabytes: string
+    }
+  | null {
   if (typeof received !== "number" || received <= 0) return null
   if (typeof total === "number" && total > 0) {
     // Clamped: a server that under-reports its own length must not produce

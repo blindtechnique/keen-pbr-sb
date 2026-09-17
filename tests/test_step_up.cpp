@@ -138,7 +138,7 @@ TEST_CASE("the package and access operations require a step-up") {
     CHECK(requires_step_up("POST", "/api/system/update"));
     CHECK(requires_step_up("POST", "/api/system/update/rollback"));
     CHECK(requires_step_up("POST", "/api/system/naive-component"));
-    CHECK(requires_step_up("POST", "/api/transports/sing-box/install"));
+    CHECK_FALSE(requires_step_up("POST", "/api/transports/sing-box/install"));
     CHECK(requires_step_up("POST", "/api/nfqws", "install"));
     CHECK(requires_step_up("POST", "/api/nfqws", "restore_component"));
     CHECK(requires_step_up("POST", "/api/backup/restore"));
@@ -172,6 +172,14 @@ TEST_CASE("the package and access operations require a step-up") {
     // Exporting the archive: it carries credentials and the whole routing
     // state, so handing it out is closer to exfiltration than to a status
     // query. A POST because the body selects which groups to export.
+    CHECK(requires_step_up("POST", "/api/backup"));
+}
+
+TEST_CASE("pinned sing-box install uses the existing authenticated session") {
+    CHECK_FALSE(requires_step_up("POST", "/api/transports/sing-box/install"));
+    CHECK_FALSE(requires_step_up("POST", "/api/transports/sing-box/install/"));
+    CHECK_FALSE(requires_step_up("POST", "/api/transports/sing-box/install?source=pinned"));
+    CHECK(requires_step_up("POST", "/api/auth/settings"));
     CHECK(requires_step_up("POST", "/api/backup"));
 }
 

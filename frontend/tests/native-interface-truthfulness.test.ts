@@ -119,12 +119,12 @@ describe("native Keenetic interface wording", () => {
       ).toBeTruthy()
     }
 
-    expect(ruTranslation.transports.nativeImport.ownerRiskConsent).toContain(
-      "другим инструментом"
-    )
-    expect(enTranslation.transports.nativeImport.ownerRiskConsent).toContain(
-      "another tool"
-    )
+    expect(
+      ruTranslation.transports.nativeImport.routerCreationNotice
+    ).toContain("панели Keenetic/Netcraze")
+    expect(
+      enTranslation.transports.nativeImport.routerCreationNotice
+    ).toContain("Keenetic/Netcraze panel")
     expect(ruTranslation.transports.nativeImport.results.runningOnly).toContain(
       "конфигурация KeeneticOS сохранена"
     )

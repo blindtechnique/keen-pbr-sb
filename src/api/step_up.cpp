@@ -30,7 +30,6 @@ const std::vector<StepUpProtectedRoute>& step_up_protected_routes() {
     //   POST /api/system/update           - applies a component update
     //   POST /api/system/update/rollback  - replaces the running component set
     //   POST /api/system/naive-component  - installs a component
-    //   POST /api/transports/sing-box/install - installs or replaces sing-box
     //   POST /api/nfqws action=install   - action-scoped below because this
     //                                        route also serves routine UI work
     //   POST /api/backup/restore          - replaces configuration wholesale
@@ -49,6 +48,10 @@ const std::vector<StepUpProtectedRoute>& step_up_protected_routes() {
     //   selects which groups to export; guarding the GET it looks like it
     //   ought to be would have protected a route that does not exist.
     //
+    // Installing the pinned sing-box release uses the authenticated session:
+    // the client cannot select an arbitrary download URL, and the installer
+    // verifies the archive and staged binary before replacement.
+    //
     // Deliberately absent: /api/system/update/check and
     // /api/system/update/status report what is available and what happened.
     // Asking for a password to read them would train the operator to type it
@@ -58,7 +61,6 @@ const std::vector<StepUpProtectedRoute>& step_up_protected_routes() {
         {"POST", "/api/system/update"},
         {"POST", "/api/system/update/rollback"},
         {"POST", "/api/system/naive-component"},
-        {"POST", "/api/transports/sing-box/install"},
         {"POST", "/api/backup/restore"},
         {"POST", "/api/backup/rollback"},
         {"POST", "/api/auth/settings"},

@@ -98,11 +98,31 @@ export function TargetFacts({
         <p className="text-sm text-muted-foreground">
           {nfqwsPending
             ? t("overview.targetFacts.nfqwsChecking")
-            : t(`overview.targetFacts.nfqws.${verdict}`)}
+            : verdict === "covered" &&
+                coverage.covering.length === 0 &&
+                coverage.profiles.some(
+                  (profile) =>
+                    profile.has_actions !== false &&
+                    nfqwsProfileResult(profile) === "unrestricted"
+                )
+              ? t("overview.targetFacts.nfqwsUnrestricted")
+              : t(`overview.targetFacts.nfqws.${verdict}`)}
         </p>
-        <p className="text-xs text-muted-foreground">
-          {t("overview.targetFacts.nfqwsScope")}
-        </p>
+        {/* Keep the matching entry and list visible, as in the original view.
+            Per-profile interpretation belongs in the optional details. */}
+        {[...coverage.excluding, ...coverage.covering].map((match) => (
+          <p
+            className="text-xs [overflow-wrap:anywhere] break-words text-muted-foreground"
+            key={[match.role, match.list, match.entry, match.matched].join(":")}
+          >
+            {t("overview.targetFacts.nfqwsMatch", {
+              entry: match.entry,
+              list: match.list,
+              matched: match.matched,
+              role: t(`overview.targetFacts.role.${match.role}`),
+            })}
+          </p>
+        ))}
         {coverage.profiles.length > 0 ? (
           <details className="text-xs text-muted-foreground">
             <summary className="cursor-pointer">
@@ -111,6 +131,7 @@ export function TargetFacts({
               })}
             </summary>
             <div className="mt-2 space-y-3">
+              <p>{t("overview.targetFacts.nfqwsScope")}</p>
               {coverage.profiles.map((profile) => (
                 <div
                   className="space-y-1 [overflow-wrap:anywhere]"
@@ -159,23 +180,7 @@ export function TargetFacts({
               ))}
             </div>
           </details>
-        ) : (
-          [...coverage.excluding, ...coverage.covering].map((match) => (
-            <p
-              className="text-xs [overflow-wrap:anywhere] break-words text-muted-foreground"
-              key={[match.role, match.list, match.entry, match.matched].join(
-                ":"
-              )}
-            >
-              {t("overview.targetFacts.nfqwsMatch", {
-                entry: match.entry,
-                list: match.list,
-                matched: match.matched,
-                role: t(`overview.targetFacts.role.${match.role}`),
-              })}
-            </p>
-          ))
-        )}
+        ) : null}
       </div>
 
       <div className="space-y-1">

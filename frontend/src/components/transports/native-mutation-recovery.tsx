@@ -90,6 +90,7 @@ export function NativeMutationRecovery({
   onDeleteTerminal,
   onImportCompleted,
   onImportNoWork,
+  onImportCompletionStalled,
   onInventoryRefresh,
 }: {
   readonly inventoryStatus?: NdmsNativeMutationInventoryStatus
@@ -101,6 +102,7 @@ export function NativeMutationRecovery({
     | boolean
     | undefined
     | Promise<boolean | undefined>
+  readonly onImportCompletionStalled?: () => void
   readonly onInventoryRefresh: () => Promise<void>
 }) {
   const { t } = useTranslation()
@@ -286,6 +288,7 @@ export function NativeMutationRecovery({
       } else if (result === false || ++completionAttempts.current.count >= 8) {
         // Keep the plan: retry continues linking, never recreates the VPN.
         setSettledCompletionTag(tag)
+        onImportCompletionStalled?.()
         toast.error(t("transports.nativeImport.completionPending"), {
           id: NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID,
           action: {

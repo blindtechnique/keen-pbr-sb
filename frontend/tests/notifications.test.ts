@@ -6,6 +6,28 @@ const t = (key: string, options?: Record<string, unknown>) =>
   `${key}:${String(options?.version ?? "")}`
 
 describe("notification collector", () => {
+  test("IPv4-only mode is not an incident, including old error-level records", () => {
+    const routine = [
+      "IPv6 disabled in the configuration; running IPv4-only",
+      "IPv6 is not supported by this system; continuing in IPv4-only mode",
+      "IPv6 iptables backend is unavailable; skipping IPv6 firewall state and continuing IPv4-only",
+    ]
+    const failure = "IPv6 firewall publication failed: permission denied"
+    const notices = collectNotices(
+      [...routine, failure].map(
+        (text, index) => `2026-09-17 19:07:0${index}.000 [E] ${text}`
+      ),
+      undefined,
+      undefined,
+      undefined,
+      [],
+      new Set(),
+      t
+    )
+    expect(notices).toHaveLength(1)
+    expect(notices[0]).toMatchObject({ level: "error", details: failure })
+  })
+
   test("keeps the routing failure but not the subsequent routine recovery notice", () => {
     const failure =
       "Runtime state running -> broken: configuration generation terminal is unknown"

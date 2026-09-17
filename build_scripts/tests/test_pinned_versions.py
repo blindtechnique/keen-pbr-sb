@@ -66,7 +66,7 @@ def installer_asset_architectures():
     )
     keen_to_asset = dict(
         re.findall(
-            r'^\s*([a-z0-9_]+)\)\s*sing_arch="([a-z0-9_]+)"', text, re.M
+            r'^\s*([a-z0-9_]+)\)\s*sing_arch="([a-z0-9_-]+)"', text, re.M
         )
     )
     if not family_to_keen or not keen_to_asset:
@@ -86,7 +86,7 @@ def daemon_asset_architectures():
     text = POLICY.read_text(encoding="utf-8")
     mapping = dict(
         re.findall(
-            r'if \(family == "([a-z0-9_]+)"\) return "([a-z0-9_]+)";', text
+            r'if \(family == "([a-z0-9_]+)"\) return "([a-z0-9_-]+)";', text
         )
     )
     if not mapping:
@@ -127,6 +127,15 @@ class TestPinnedVersions(unittest.TestCase):
 
 
 class TestArchitectureTables(unittest.TestCase):
+    def test_official_assets_are_self_contained_for_entware(self):
+        expected = {
+            "aarch64": "arm64-musl", "armv7": "armv7",
+            "mipsel": "mipsle-softfloat", "mips": "mips-softfloat",
+            "x64": "amd64-musl",
+        }
+        self.assertEqual(daemon_asset_architectures(), expected)
+        self.assertEqual(installer_asset_architectures(), expected)
+
     def test_daemon_and_installer_map_the_same_architectures(self):
         # Divergence here does not fail loudly. It fetches the wrong asset:
         # an ARM archive onto a MIPS router, which installs, does not run, and

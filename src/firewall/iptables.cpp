@@ -6489,7 +6489,7 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
 
     bool effective_ipv6 = ipv6_enabled();
     if (effective_ipv6 && !ipv6_backend_available()) {
-        Logger::instance().error(
+        Logger::instance().info(
             "IPv6 iptables backend is unavailable; skipping IPv6 firewall state and continuing IPv4-only");
         effective_ipv6 = false;
     }

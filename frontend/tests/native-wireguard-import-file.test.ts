@@ -11,6 +11,22 @@ import {
 } from "@/lib/native-wireguard-import-file"
 
 describe("native WireGuard .conf intake", () => {
+  test("connection documents need an explicit subscription receiver and keep size limits", () => {
+    for (const name of ["profile.json", "subscription.txt"]) {
+      expect(
+        validateNativeWireGuardImportFile({ name, size: 512, type: "" })
+      ).toBe("supported-extension-required")
+      expect(
+        validateNativeWireGuardImportFile({ name, size: 512, type: "" }, true)
+      ).toBeUndefined()
+      expect(
+        validateNativeWireGuardImportFile(
+          { name, size: NATIVE_WIREGUARD_CONF_MAX_BYTES + 1, type: "" },
+          true
+        )
+      ).toBe("file-too-large")
+    }
+  })
   test("accepts a bounded .conf without trusting browser MIME detection", () => {
     expect(
       validateNativeWireGuardImportFile({

@@ -1,6 +1,6 @@
-import { SingBoxSetupOffer } from "@/components/transports/sing-box-setup-offer"
+import { SetupVpnConnection } from "@/components/transports/setup-vpn-connection"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { CheckIcon, Link2Icon, WorkflowIcon } from "lucide-react"
+import { CheckIcon, WorkflowIcon } from "lucide-react"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
@@ -8,7 +8,6 @@ import { useLocation } from "wouter"
 
 import type { ApiError } from "@/api/client"
 import type { Outbound } from "@/api/generated/model/outbound"
-import { usePostTransportConfigApplyMutation } from "@/api/mutations"
 import { queryKeys } from "@/api/query-keys"
 import { useGetConfig, useGetTransportConfig } from "@/api/queries"
 import { selectConfig } from "@/api/selectors"
@@ -17,12 +16,8 @@ import { initialSetupSession } from "@/components/overview/first-run-state"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
-import { Textarea } from "@/components/ui/textarea"
 import { useInterfaceDisplayNames } from "@/hooks/use-interface-display-names"
 import { OperationErrorMessage } from "@/components/shared/operation-error-message"
-import { validateDisplayName } from "@/lib/display-name-validation"
 import { getOutboundSelectDisplayName } from "@/lib/outbound-display"
 import { cn } from "@/lib/utils"
 import {
@@ -43,7 +38,6 @@ import {
   type CatalogSetupIntent,
 } from "@/pages/catalog-setup-intent"
 import {
-  createSetupWizardTransport,
   previewSetupWizardCatalog,
   SetupWizardVisibleDraftError,
 } from "@/pages/setup-wizard-flow"
@@ -66,10 +60,7 @@ export default function SetupWizardPage() {
   }, [])
 
   const [step, setStep] = useState<WizardStep>(1)
-  const [link, setLink] = useState("")
-  const [tunnelName, setTunnelName] = useState("")
-  const [nameTouched, setNameTouched] = useState(false)
-  const nameInputRef = useRef<HTMLInputElement>(null)
+  const [connectionBusy, setConnectionBusy] = useState(false)
   const stepHeadingRef = useRef<HTMLHeadingElement>(null)
   const [existingOutboundTag, setExistingOutboundTag] = useState("")
   const [outboundTag, setOutboundTag] = useState("")
@@ -127,50 +118,6 @@ export default function SetupWizardPage() {
       }),
     [catalogQuery.data?.presets]
   )
-
-  const nameError = validateDisplayName(tunnelName)
-  const showNameError = nameTouched && Boolean(nameError)
-  const createTunnelMutation = usePostTransportConfigApplyMutation()
-
-  const createTunnel = async () => {
-    if (nameError) {
-      setNameTouched(true)
-      nameInputRef.current?.focus()
-      return
-    }
-    try {
-      if (!setupInventoryReady || !loadedConfig) {
-        throw new Error(t("pages.setupWizard.connection.inventoryUnavailable"))
-      }
-      const result = await createSetupWizardTransport(
-        {
-          displayName: tunnelName,
-          existingInterfaces: [
-            ...configured.map((item) => item.interface),
-            ...existingOutbounds.flatMap((outbound) =>
-              outbound.type === "interface" && outbound.interface
-                ? [outbound.interface]
-                : []
-            ),
-          ],
-          existingTags: [
-            ...configured.map((item) => item.tag),
-            ...existingOutbounds.map((outbound) => outbound.tag),
-          ],
-          link,
-        },
-        {
-          applyTransport: (request) =>
-            createTunnelMutation.mutateAsync({ data: request }),
-        }
-      )
-      setOutboundTag(result.outboundTag)
-      setOutboundName(result.displayName)
-      setStep(2)
-    } catch (error) {
-      toast.error(<OperationErrorMessage error={error} />, { richColors: true })
-    }
-  }
 
   const setupMutation = useMutation({
     mutationFn: async ({ acceptWarnings }: { acceptWarnings: boolean }) => {
@@ -264,7 +211,7 @@ export default function SetupWizardPage() {
         actions={
           <Button
             variant="outline"
-            disabled={createTunnelMutation.isPending || setupMutation.isPending}
+            disabled={connectionBusy || setupMutation.isPending}
             onClick={() => navigate("/")}
           >
             {t("pages.setupWizard.setUpLater")}
@@ -307,7 +254,7 @@ export default function SetupWizardPage() {
       </ol>
 
       {step === 1 ? (
-        <section className="max-w-[640px] space-y-4">
+        <section className="max-w-[800px] space-y-4">
           <div className="space-y-1">
             <h2
               className="text-base font-semibold"
@@ -320,13 +267,6 @@ export default function SetupWizardPage() {
               {t("pages.setupWizard.connection.description")}
             </p>
           </div>
-
-          {/* An operator who installed the service from the terminal may have
-              declined sing-box there. The wizard is where they find out, and
-              it is the wrong place to send them back to a shell - so the same
-              button is here, and it renders nothing to do when sing-box is
-              already current. */}
-          <SingBoxSetupOffer />
 
           {setupInventoryLoading ? (
             <p className="text-sm text-muted-foreground">
@@ -360,74 +300,18 @@ export default function SetupWizardPage() {
             </Alert>
           ) : null}
 
-          <div className="grid gap-1.5">
-            <Label htmlFor="setup-link">
-              {t("pages.setupWizard.connection.linkLabel")}
-            </Label>
-            <Textarea
-              className="min-h-24 font-mono text-xs"
-              disabled={!setupInventoryReady || createTunnelMutation.isPending}
-              id="setup-link"
-              onChange={(event) => setLink(event.target.value)}
-              placeholder="vless://…, trojan://…, hy2://…"
-              value={link}
+          {setupInventoryReady ? (
+            <SetupVpnConnection
+              configured={configured}
+              outbounds={existingOutbounds}
+              onBusyChange={setConnectionBusy}
+              onCreated={(tag, name) => {
+                setOutboundTag(tag)
+                setOutboundName(name)
+                setStep(2)
+              }}
             />
-            <p className="text-xs text-muted-foreground">
-              {t("pages.setupWizard.connection.linkHint")}
-            </p>
-          </div>
-
-          <div className="grid max-w-[480px] gap-1.5">
-            <Label htmlFor="setup-name">
-              {t("pages.setupWizard.connection.nameLabel")}
-            </Label>
-            <Input
-              aria-describedby={showNameError ? "setup-name-error" : undefined}
-              aria-invalid={showNameError}
-              id="setup-name"
-              disabled={!setupInventoryReady || createTunnelMutation.isPending}
-              onBlur={() => setNameTouched(true)}
-              onChange={(event) => setTunnelName(event.target.value)}
-              placeholder={t("pages.setupWizard.connection.namePlaceholder")}
-              ref={nameInputRef}
-              value={tunnelName}
-            />
-            {showNameError ? (
-              <p className="text-xs text-destructive" id="setup-name-error">
-                {t("transports.form.displayNameInvalid")}
-              </p>
-            ) : null}
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              disabled={
-                !link.trim() ||
-                !setupInventoryReady ||
-                createTunnelMutation.isPending
-              }
-              onClick={() => void createTunnel()}
-            >
-              <Link2Icon />
-              {createTunnelMutation.isPending
-                ? t("pages.setupWizard.connection.creating")
-                : t("pages.setupWizard.connection.create")}
-            </Button>
-          </div>
-
-          <div className="space-y-2">
-            <Button
-              className="h-auto min-h-8 max-w-full whitespace-normal"
-              disabled={createTunnelMutation.isPending}
-              onClick={() => navigate("/transports")}
-              variant="outline"
-            >
-              {t("pages.setupWizard.connection.otherImport")}
-            </Button>
-            <p className="text-xs text-muted-foreground">
-              {t("pages.setupWizard.connection.otherImportHint")}
-            </p>
-          </div>
+          ) : null}
 
           {routableOutbounds.length > 0 ? (
             <div className="space-y-2 border-t pt-4">
@@ -438,9 +322,7 @@ export default function SetupWizardPage() {
                 <select
                   aria-label={t("pages.setupWizard.connection.existingLabel")}
                   className="h-8 max-w-[320px] min-w-0 rounded-lg border border-input bg-transparent px-2 text-sm"
-                  disabled={
-                    !setupInventoryReady || createTunnelMutation.isPending
-                  }
+                  disabled={!setupInventoryReady || connectionBusy}
                   onChange={(event) =>
                     setExistingOutboundTag(event.target.value)
                   }
@@ -462,7 +344,7 @@ export default function SetupWizardPage() {
                   disabled={
                     !setupInventoryReady ||
                     !existingOutboundTag ||
-                    createTunnelMutation.isPending
+                    connectionBusy
                   }
                   onClick={() => {
                     const outbound = routableOutbounds.find(

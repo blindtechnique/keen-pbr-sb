@@ -4575,7 +4575,8 @@ export function useGetSingBoxInstallCapability<TData = Awaited<ReturnType<typeof
 
 
 /**
- * Installs the one release this build pins, and only when the capability endpoint says it may. Before anything is unpacked, the archive is verified against either the release checksum file or the exact per-asset SHA-256 digest published for that archive. The unpacked binary must report the pinned version before the atomic replacement begins. Failures before that commit leave the installed binary unchanged; failures after it are reported explicitly through `install_outcome` and `durable`, because the new binary may already be visible even when its ownership marker or directory durability could not be established.
+ * The existing authenticated session is enough; no step-up password prompt is required. Unauthenticated requests remain rejected.
+Installs the one release this build pins, and only when the capability endpoint says it may. Before anything is unpacked, the archive is verified against either the release checksum file or the exact per-asset SHA-256 digest published for that archive. The unpacked binary must report the pinned version before the atomic replacement begins. Failures before that commit leave the installed binary unchanged; failures after it are reported explicitly through `install_outcome` and `durable`, because the new binary may already be visible even when its ownership marker or directory durability could not be established.
 
 Running sing-box transports normally refuse the install, because the binary they are using would be swapped underneath them. An operator who has been told what will happen can consent to it with `stop_running_transports`, and then the daemon stops exactly those transports, installs, and starts exactly those again - including when the install fails.
 

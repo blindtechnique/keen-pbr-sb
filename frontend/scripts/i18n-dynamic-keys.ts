@@ -502,10 +502,13 @@ export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
   },
   {
     file: "src/components/transports/sing-box-install-button.tsx",
-    argument: "singBoxInstallOutcomeKey(*)",
-    keys: ["transports.singBoxInstall.outcome.*"],
+    argument: "singBoxInstallMessageKey(*)",
+    keys: [
+      "transports.singBoxInstall.outcome.*",
+      "transports.singBoxInstall.versionUnavailable",
+    ],
     reason:
-      "install_outcome is the generated union and every member is asserted to have a key.",
+      "The generated outcome union plus the missing-version case; both are tested in sing-box-install-model.test.ts.",
   },
   {
     file: "src/components/transports/sing-box-install-button.tsx",

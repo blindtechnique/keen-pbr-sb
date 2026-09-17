@@ -169,6 +169,6 @@ describe("software update error presentation", () => {
     )
     expect(source).not.toContain("getApiErrorMessage")
     expect(source).toContain("report(data)")
-    expect(source).toContain("singBoxInstallOutcomeKey(result.install_outcome)")
+    expect(source).toContain("singBoxInstallMessageKey(result)")
   })
 })

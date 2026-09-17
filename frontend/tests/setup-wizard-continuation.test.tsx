@@ -11,7 +11,11 @@ import { enTranslation } from "../src/i18n/en"
 import { ruTranslation } from "../src/i18n/ru"
 import SetupWizardPage from "../src/pages/setup-wizard-page"
 
-async function renderWizard(config: ConfigObject, language: "ru" | "en") {
+async function renderWizard(
+  config: ConfigObject,
+  language: "ru" | "en",
+  singBoxInstalled = false
+) {
   const i18n = createInstance()
   await i18n.init({
     lng: language,
@@ -22,6 +26,10 @@ async function renderWizard(config: ConfigObject, language: "ru" | "en") {
     interpolation: { escapeValue: false },
   })
   const client = new QueryClient()
+  client.setQueryData(["transport-environment"], {
+    sing_box_installed: singBoxInstalled,
+    transport_api_version: 2,
+  })
   client.setQueryData(queryKeys.config(), {
     status: 200,
     data: { config, is_draft: false },
@@ -54,7 +62,7 @@ const source = () =>
 
 describe("setup wizard continuation", () => {
   test.each(["ru", "en"] as const)(
-    "offers the existing importer on a clean configuration in %s",
+    "embeds native import without sing-box on a clean configuration in %s",
     async (language) => {
       const html = await renderWizard(
         {
@@ -68,11 +76,15 @@ describe("setup wizard continuation", () => {
       const copy = (language === "ru" ? ruTranslation : enTranslation).pages
         .setupWizard.connection
 
-      expect(html).toContain(copy.otherImport)
-      expect(html).toContain(copy.otherImportHint)
+      const transportCopy = (language === "ru" ? ruTranslation : enTranslation)
+        .transports
+      expect(html).toContain(transportCopy.form.importFile)
+      expect(html).toContain(transportCopy.form.shareLink)
+      expect(html).not.toContain(transportCopy.form.outboundJson)
+      expect(html).not.toContain(copy.otherImportHint)
       expect(html).not.toContain("pages.setupWizard.")
-      expect(html).toContain('id="setup-name"')
-      expect(html).not.toContain('id="setup-name-error"')
+      expect(html).not.toContain(transportCopy.form.countryDisplay)
+      expect(html).not.toContain('aria-invalid="true"')
       expect(html).not.toContain(copy.inventoryUnavailable)
     }
   )
@@ -99,28 +111,33 @@ describe("setup wizard continuation", () => {
     )
   })
 
-  test("explains and focuses invalid names instead of leaving Create unavailable", async () => {
-    const page = await source()
-    const handler = page.slice(
-      page.indexOf("const createTunnel = async"),
-      page.indexOf("const setupMutation =")
-    )
-    const createButton = page.slice(
-      page.indexOf("!link.trim() ||"),
-      page.indexOf("onClick={() => void createTunnel()}")
-    )
+  test("offers JSON only with installed sing-box", async () => {
+    const html = await renderWizard({ outbounds: [] }, "en", true)
+    expect(html).toContain(enTranslation.transports.form.outboundJson)
+    expect(html).not.toContain('aria-invalid="true"')
+    expect(html).not.toContain('id="transport-create-outbound"')
+    expect(html).not.toContain('id="transport-auto-start"')
+  })
 
-    expect(handler).toContain("if (nameError)")
-    expect(handler).toContain("setNameTouched(true)")
-    expect(handler).toContain("nameInputRef.current?.focus()")
-    expect(handler.indexOf("if (nameError)")).toBeLessThan(
-      handler.indexOf("createSetupWizardTransport(")
+  test("uses shared import and recovery rather than leaving the wizard", async () => {
+    const page = await source()
+    const connection = await Bun.file(
+      new URL(
+        "../src/components/transports/setup-vpn-connection.tsx",
+        import.meta.url
+      )
+    ).text()
+    expect(page).toContain("<SetupVpnConnection")
+    expect(page).not.toContain("createSetupWizardTransport(")
+    expect(connection).toContain("<TransportConfigForm")
+    expect(connection).toContain("<NativeMutationRecovery")
+    expect(connection).toContain("createLinkedTransportApplyRequest(transport)")
+    expect(connection).toContain("stagedNativeWireGuardLinkState(")
+    expect(connection).toContain("onImportCompletionStalled=")
+    expect(connection).toContain("await reconnect().catch(")
+    expect(connection).toContain(
+      't("pages.setupWizard.connection.completionPaused")'
     )
-    expect(createButton).not.toContain("nameError")
-    expect(createButton).not.toContain("!tunnelName.trim()")
-    expect(page).toContain("aria-invalid={showNameError}")
-    expect(page).toContain('"setup-name-error"')
-    expect(page).toContain('t("transports.form.displayNameInvalid")')
   })
 
   test("focuses the next step and explains the existing automatic DNS setup", async () => {
