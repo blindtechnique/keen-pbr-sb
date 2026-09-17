@@ -911,11 +911,13 @@ install_sing_box() {
     [ "$requested_version" = "$SING_BOX_PINNED_VERSION" ] ||
         die "разрешена только зафиксированная версия sing-box $SING_BOX_PINNED_VERSION" "only the pinned sing-box version $SING_BOX_PINNED_VERSION is supported"
     case "$KEEN_ARCH" in
-        aarch64) sing_arch="arm64" ;;
+        # Static upstream builds run on Entware without a /lib loader or an
+        # extra libcronet.so. Keep in sync with sing_box_install_policy.cpp.
+        aarch64) sing_arch="arm64-musl" ;;
         armv7) sing_arch="armv7" ;;
-        mipsel) sing_arch="mipsle" ;;
-        mips) sing_arch="mips" ;;
-        x64) sing_arch="amd64" ;;
+        mipsel) sing_arch="mipsle-softfloat" ;;
+        mips) sing_arch="mips-softfloat" ;;
+        x64) sing_arch="amd64-musl" ;;
         *) die "для архитектуры $KEEN_ARCH не задан официальный архив sing-box" "there is no configured official sing-box archive for $KEEN_ARCH" ;;
     esac
 

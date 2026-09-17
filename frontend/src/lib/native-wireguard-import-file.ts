@@ -35,9 +35,7 @@ export function classifyNativeWireGuardSensitiveInput(
   if (/^\s*\[(?:interface|peer)\]\s*(?:[#;].*)?$/im.test(text)) {
     return "config"
   }
-  if (
-    /^\s*(?:private[\s_-]*key|preshared[\s_-]*key)\s*(?:=|:)/im.test(text)
-  ) {
+  if (/^\s*(?:private[\s_-]*key|preshared[\s_-]*key)\s*(?:=|:)/im.test(text)) {
     return "config"
   }
   return undefined
@@ -77,12 +75,14 @@ export function createNativeWireGuardFileReadGate() {
  * the authority on content after this inexpensive pre-read guard.
  */
 export function validateNativeWireGuardImportFile(
-  file: NativeWireGuardImportFileMetadata
+  file: NativeWireGuardImportFileMetadata,
+  allowConnectionDocuments = false
 ): NativeWireGuardImportFileIssue | undefined {
   const name = file.name.trim().toLowerCase()
   const isConf = name.endsWith(".conf")
   const isVpn = name.endsWith(".vpn")
-  if (!isConf && !isVpn) {
+  const isDocument = allowConnectionDocuments && /\.(?:json|txt)$/i.test(name)
+  if (!isConf && !isVpn && !isDocument) {
     return "supported-extension-required"
   }
   if (file.size <= 0) {

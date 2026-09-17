@@ -137,7 +137,7 @@ TEST_CASE("every protected entry names a method that endpoint serves") {
 TEST_CASE("the package and access operations require a step-up") {
     CHECK(requires_step_up("POST", "/api/system/update/rollback"));
     CHECK(requires_step_up("POST", "/api/system/naive-component"));
-    CHECK(requires_step_up("POST", "/api/transports/sing-box/install"));
+    CHECK_FALSE(requires_step_up("POST", "/api/transports/sing-box/install"));
     CHECK(requires_step_up("POST", "/api/nfqws", "install"));
     CHECK(requires_step_up("POST", "/api/nfqws", "restore_component"));
     CHECK(requires_step_up("POST", "/api/backup/restore"));
@@ -184,6 +184,14 @@ TEST_CASE("normal signed self-update uses the existing authenticated session") {
     CHECK(requires_step_up("POST", "/api/backup/restore"));
     CHECK(requires_step_up("POST", "/api/backup/rollback"));
     CHECK(requires_step_up("POST", "/api/system/update/rollback"));
+}
+
+TEST_CASE("pinned sing-box install uses the existing authenticated session") {
+    CHECK_FALSE(requires_step_up("POST", "/api/transports/sing-box/install"));
+    CHECK_FALSE(requires_step_up("POST", "/api/transports/sing-box/install/"));
+    CHECK_FALSE(requires_step_up("POST", "/api/transports/sing-box/install?source=pinned"));
+    CHECK(requires_step_up("POST", "/api/auth/settings"));
+    CHECK(requires_step_up("POST", "/api/backup"));
 }
 
 TEST_CASE("reading what an update would do costs nothing") {

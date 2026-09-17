@@ -114,6 +114,19 @@ function runtimeIncidentIsResolved(
 }
 
 function isDiagnosticOnlyMessage(text: string): boolean {
+  // IPv4-only is a supported mode, including when Keenetic's IPv6 component
+  // is disabled. Older releases incorrectly logged these exact fallbacks as
+  // errors. Keep their journal entries, not false alarms in the bell.
+  if (
+    text === "IPv6 disabled in the configuration; running IPv4-only" ||
+    text ===
+      "IPv6 is not supported by this system; continuing in IPv4-only mode" ||
+    text ===
+      "IPv6 iptables backend is unavailable; skipping IPv6 firewall state and continuing IPv4-only"
+  ) {
+    return true
+  }
+
   // Current builds normalize this old incompatible desired state to durable
   // `enabled: false` and then verify that both owned WAN chains are absent.
   // Keep the historical line in the downloadable log, but do not keep showing

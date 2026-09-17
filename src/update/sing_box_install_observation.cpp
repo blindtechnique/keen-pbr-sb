@@ -80,7 +80,17 @@ std::string select_entware_architecture(const std::string& opkg_output) {
 std::string parse_sing_box_version(const std::string& version_output) {
     std::istringstream lines(version_output);
     std::string first;
-    if (!std::getline(lines, first)) return {};
+    // The captured stream can contain a loader warning before the version.
+    // Match a complete named version line, not a number in arbitrary output.
+    while (std::getline(lines, first)) {
+        std::istringstream heading(first);
+        std::string program;
+        std::string keyword;
+        if (heading >> program >> keyword && program == "sing-box" &&
+            keyword == "version") break;
+        first.clear();
+    }
+    if (first.empty()) return {};
     if (!first.empty() && first.back() == '\r') first.pop_back();
 
     std::istringstream fields(first);

@@ -56,15 +56,11 @@ export function RoutingDiagnosticsResult({
   return (
     <div className="space-y-4">
       {(diagnostics.dns_error ||
-        diagnostics.no_matching_rule ||
         diagnostics.unapplied_draft ||
         hasInsufficientContext) && (
         <Alert className="border-amber-400/40 bg-amber-50 text-amber-900">
           <AlertDescription className="space-y-1 text-sm">
             {diagnostics.dns_error ? <div>{diagnostics.dns_error}</div> : null}
-            {diagnostics.no_matching_rule ? (
-              <div>{t("overview.routingDiagnostics.noMatchingRule")}</div>
-            ) : null}
             {diagnostics.unapplied_draft ? (
               <div>{t("overview.routingDiagnostics.unappliedDraft")}</div>
             ) : null}
@@ -74,6 +70,11 @@ export function RoutingDiagnosticsResult({
           </AlertDescription>
         </Alert>
       )}
+      {diagnostics.no_matching_rule ? (
+        <p className="text-sm text-muted-foreground">
+          {t("overview.routingDiagnostics.noMatchingRule")}
+        </p>
+      ) : null}
 
       {diagnostics.results.length > 0 ? (
         <div className="space-y-4">

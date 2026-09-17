@@ -1735,6 +1735,9 @@ paths:
     post:
       summary: Install the pinned sing-box release
       description: >
+        The existing authenticated session is enough; no step-up password
+        prompt is required. Unauthenticated requests remain rejected.
+
         Installs the one release this build pins, and only when the capability
         endpoint says it may. Before anything is unpacked, the archive is
         verified against either the release checksum file or the exact

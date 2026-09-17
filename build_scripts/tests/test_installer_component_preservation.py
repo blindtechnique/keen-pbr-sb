@@ -140,9 +140,9 @@ printf 'continued\\n'
     def test_full_install_function_preserves_core_after_downloaded_candidate_fails(self):
         self.old_pair()
         self.executable(self.candidate, "exit 1")
-        archive = self.root / "sing-box-1.13.14-linux-arm64.tar.gz"
+        archive = self.root / "sing-box-1.13.14-linux-arm64-musl.tar.gz"
         with tarfile.open(archive, "w:gz") as stream:
-            stream.add(self.candidate, arcname="sing-box-1.13.14-linux-arm64/sing-box")
+            stream.add(self.candidate, arcname="sing-box-1.13.14-linux-arm64-musl/sing-box")
         sums = self.root / "checksums.txt"
         sums.write_text(hashlib.sha256(archive.read_bytes()).hexdigest() + "  " + archive.name + "\n")
         metadata = self.root / "release.json"
@@ -174,6 +174,54 @@ fetch() {{
         self.assertNotEqual(self.publish().returncode, 0)
         self.assertFalse(self.binary.exists())
         self.assertFalse(self.real.exists())
+
+    def test_full_install_selects_the_entware_compatible_asset(self):
+        self.executable(self.candidate, "echo 'sing-box version 1.13.14'")
+        for keen_arch, asset_arch in (
+            ("aarch64", "arm64-musl"), ("armv7", "armv7"),
+            ("mipsel", "mipsle-softfloat"), ("mips", "mips-softfloat"),
+            ("x64", "amd64-musl"),
+        ):
+            with self.subTest(architecture=keen_arch):
+                self.old_pair()
+                shutil.rmtree(self.work / "sing-box", ignore_errors=True)
+                name = f"sing-box-1.13.14-linux-{asset_arch}"
+                archive = self.root / (name + ".tar.gz")
+                with tarfile.open(archive, "w:gz") as stream:
+                    stream.add(self.candidate, arcname=name + "/sing-box")
+                sums = self.root / "checksums.txt"
+                sums.write_text(hashlib.sha256(archive.read_bytes()).hexdigest()
+                                + "  " + archive.name + "\n")
+                url = "https://fixture/" + archive.name
+                metadata = self.root / "release.json"
+                metadata.write_text(json.dumps({"assets": [
+                    {"browser_download_url": "https://fixture/sing-box-1.13.14-linux-arm64.tar.gz"},
+                    {"browser_download_url": "https://fixture/sing-box-1.13.14-linux-amd64.tar.gz"},
+                    {"browser_download_url": url},
+                    {"browser_download_url": "https://fixture/sing-box-1.13.14-checksums.txt"},
+                ]}))
+                overrides = f"""SING_BOX_PINNED_VERSION=1.13.14
+KEEN_ARCH={keen_arch}
+GITHUB_API=https://fixture/api
+fetch() {{
+    case "$1" in
+        *releases/tags*) cp '{metadata}' "$2";;
+        '{url}') cp '{archive}' "$2";;
+        *checksums.txt) cp '{sums}' "$2";;
+        *) printf 'wrong asset: %s\\n' "$1" >&2; exit 99;;
+    esac
+}}"""
+                result = self.run_shell(
+                    ("github_asset_urls", "make_entware_sing_box_wrapper",
+                     "publish_sing_box_candidate", "install_sing_box"),
+                    "install_sing_box 1.13.14", overrides)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse(self.real.exists())
+                self.assertEqual(subprocess.check_output(
+                    [str(self.binary), "version"], text=True).strip(),
+                    "sing-box version 1.13.14")
+                self.assertEqual((self.opt / "etc/keen-pbr/sing-box-managed.path").read_text(),
+                                 str(self.binary) + "\n")
 
     def test_candidate_copy_failure_preserves_old_pair(self):
         self.old_pair()

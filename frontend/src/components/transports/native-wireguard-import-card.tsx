@@ -15,6 +15,7 @@ import {
   type ClipboardEvent,
   type DragEvent,
   type KeyboardEvent,
+  type ReactNode,
 } from "react"
 import { useTranslation } from "react-i18next"
 
@@ -94,6 +95,7 @@ type ImportState =
         | NativeWireGuardImportFileIssue
         | NativeWireGuardImportErrorCode
         | "secret-buffer-failed"
+        | "sing-box-required"
       readonly line?: number
     }
   | {
@@ -150,6 +152,11 @@ const importWasDefinitelyNotStarted = (
 }
 
 export function NativeWireGuardImportFields({
+  beforeImport,
+  compact = false,
+  canImport = true,
+  nativeOnly = false,
+  submitLabel,
   displayName,
   mode,
   readiness,
@@ -166,6 +173,11 @@ export function NativeWireGuardImportFields({
   onImportedIdentityChange,
   onSubscriptionDocument,
 }: {
+  readonly beforeImport?: ReactNode
+  readonly compact?: boolean
+  readonly canImport?: boolean
+  readonly nativeOnly?: boolean
+  readonly submitLabel?: string
   readonly displayName?: string
   readonly mode: "link" | "file"
   readonly readiness?: NdmsNativeImportReadiness
@@ -193,6 +205,11 @@ export function NativeWireGuardImportFields({
 
   return (
     <NativeWireGuardImportFieldsContent
+      beforeImport={beforeImport}
+      compact={compact}
+      canImport={canImport}
+      nativeOnly={nativeOnly}
+      submitLabel={submitLabel}
       displayName={displayName}
       existingInterfaces={existingInterfaces}
       linkRequired={linkRequired}
@@ -222,6 +239,11 @@ export function NativeWireGuardImportFields({
  * Ordinary sing-box links remain editable when native import is unavailable.
  */
 function NativeWireGuardImportFieldsContent({
+  beforeImport,
+  compact,
+  canImport,
+  nativeOnly,
+  submitLabel,
   displayName,
   mode,
   readiness,
@@ -239,6 +261,11 @@ function NativeWireGuardImportFieldsContent({
   onSubscriptionDocument,
   protectedTransport,
 }: {
+  readonly beforeImport?: ReactNode
+  readonly compact: boolean
+  readonly canImport: boolean
+  readonly nativeOnly: boolean
+  readonly submitLabel?: string
   readonly displayName?: string
   readonly mode: "link" | "file"
   readonly readiness?: NdmsNativeImportReadiness
@@ -285,7 +312,6 @@ function NativeWireGuardImportFieldsContent({
         ? { status: "recovery-locked" }
         : { status: "idle" }
   })
-  const [ownerRiskAccepted, setOwnerRiskAccepted] = useState(false)
   const [transportBlocked, setTransportBlocked] = useState(false)
   const admissionRevision = nativeWireGuardImportAdmissionRevision({
     protectedTransport,
@@ -352,7 +378,6 @@ function NativeWireGuardImportFieldsContent({
 
   const resetOperation = () => {
     awaitingRecoveredCompletionRef.current = false
-    setOwnerRiskAccepted(false)
     setOperation({ status: "idle" })
     onImportedIdentityChange?.(null)
   }
@@ -391,7 +416,6 @@ function NativeWireGuardImportFieldsContent({
     readGateRef.current.invalidate()
     vaultRef.current?.revoke()
     queueMicrotask(() => {
-      setOwnerRiskAccepted(false)
       setOperation((current) =>
         nativeWireGuardImportOperationSurvivesContextChange(current)
           ? current
@@ -410,7 +434,6 @@ function NativeWireGuardImportFieldsContent({
     readGateRef.current.invalidate()
     vaultRef.current?.clear()
     queueMicrotask(() => {
-      setOwnerRiskAccepted(false)
       setOperation((current) =>
         nativeWireGuardImportOperationSurvivesContextChange(current)
           ? current
@@ -429,7 +452,6 @@ function NativeWireGuardImportFieldsContent({
           if (submissionActiveRef.current) return
           readGateRef.current.invalidate()
           vaultRef.current?.revoke()
-          setOwnerRiskAccepted(false)
           setState({ status: "empty" })
           onImportedIdentityChange?.(null)
           setOperation({ status: "idle" })
@@ -437,7 +459,6 @@ function NativeWireGuardImportFieldsContent({
         }
         readGateRef.current.invalidate()
         vaultRef.current?.revoke()
-        setOwnerRiskAccepted(false)
         setState({ status: "empty" })
         onImportedIdentityChange?.(null)
         setOperation(
@@ -532,11 +553,23 @@ function NativeWireGuardImportFieldsContent({
     const generation = readGateRef.current.begin()
     const ticket = vaultRef.current!.begin()
     resetOperation()
-    const fileIssue = validateNativeWireGuardImportFile(file)
+    const fileIssue = validateNativeWireGuardImportFile(
+      file,
+      Boolean(onSubscriptionDocument)
+    )
     if (fileIssue) {
       if (readGateRef.current.isCurrent(generation)) {
         vaultRef.current?.clear()
-        setState({ status: "error", fileName: file.name, code: fileIssue })
+        setState({
+          status: "error",
+          fileName: file.name,
+          code:
+            nativeOnly &&
+            /\.(?:json|txt)$/i.test(file.name) &&
+            fileIssue === "supported-extension-required"
+              ? "sing-box-required"
+              : fileIssue,
+        })
       }
       return
     }
@@ -568,6 +601,15 @@ function NativeWireGuardImportFieldsContent({
       lowerFileName.endsWith(".vpn") ||
       sensitiveKind !== undefined ||
       looksLikeWireGuardConfig(text)
+    if (nativeOnly && !sensitiveKind && !looksLikeWireGuardConfig(text)) {
+      vaultRef.current?.clear()
+      setState({
+        status: "error",
+        fileName: file.name,
+        code: "sing-box-required",
+      })
+      return
+    }
     if (onSubscriptionDocument && !nativeFile) {
       readGateRef.current.invalidate()
       vaultRef.current?.clear()
@@ -681,6 +723,7 @@ function NativeWireGuardImportFieldsContent({
 
   const submitImport = async () => {
     if (
+      !canImport ||
       state.status !== "ready" ||
       recoveryLocked ||
       submissionActiveRef.current ||
@@ -692,7 +735,6 @@ function NativeWireGuardImportFieldsContent({
       onDisplayNameRequired?.()
       return
     }
-    if (!ownerRiskAccepted) return
 
     let pendingStarted = false
     submissionActiveRef.current = true
@@ -850,10 +892,16 @@ function NativeWireGuardImportFieldsContent({
       ) : mode === "file" ? (
         <>
           <p className="text-sm text-muted-foreground">
-            {t("transports.nativeImport.fileDescription")}
+            {compact
+              ? t("pages.setupWizard.connection.fileHint")
+              : t("transports.nativeImport.fileDescription")}
           </p>
           <input
-            accept=".conf,.vpn,text/plain"
+            accept={
+              nativeOnly
+                ? ".conf,.vpn,text/plain"
+                : ".conf,.vpn,.json,.txt,text/plain,application/json"
+            }
             className="hidden"
             disabled={intakeLocked}
             onChange={(event: ChangeEvent<HTMLInputElement>) =>
@@ -928,7 +976,11 @@ function NativeWireGuardImportFieldsContent({
             disabled={uriIntakeLocked}
             onChange={(event) => onLinkInput(event.target.value)}
             onPaste={onUriPaste}
-            placeholder="vless://…  vmess://…  trojan://…  vpn://…"
+            placeholder={
+              nativeOnly
+                ? t("pages.setupWizard.connection.nativeOnlyPlaceholder")
+                : "vless://…  vmess://…  trojan://…  vpn://…"
+            }
             required={linkRequired}
             ref={linkInputRef}
             value={linkValue}
@@ -937,7 +989,9 @@ function NativeWireGuardImportFieldsContent({
             className="text-xs text-muted-foreground"
             id="native-wireguard-uri-paste-hint"
           >
-            {t("transports.form.shareLinkHint")}
+            {nativeOnly
+              ? t("pages.setupWizard.connection.nativeOnlyHint")
+              : t("transports.form.shareLinkHint")}
           </p>
         </div>
       )}
@@ -971,7 +1025,11 @@ function NativeWireGuardImportFieldsContent({
                   {state.fileName}
                 </p>
               ) : null}
-              <p>{nativeImportErrorLabel(state.code, state.line, t)}</p>
+              <p>
+                {state.code === "sing-box-required"
+                  ? t("pages.setupWizard.connection.singBoxRequired")
+                  : nativeImportErrorLabel(state.code, state.line, t)}
+              </p>
             </AlertDescription>
           </Alert>
         </div>
@@ -1010,93 +1068,105 @@ function NativeWireGuardImportFieldsContent({
             </Button>
           </div>
 
-          <dl className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2 lg:grid-cols-4">
-            <PreviewField
-              label={t("transports.nativeImport.preview.protocol")}
-              value={
-                state.preview.kind === "amnezia_wireguard"
-                  ? "AmneziaWG"
-                  : "WireGuard"
+          <details open={compact ? undefined : true}>
+            <summary
+              className={
+                compact ? "cursor-pointer text-sm font-medium" : "hidden"
               }
-            />
-            <PreviewField
-              label={t("transports.nativeImport.preview.addresses")}
-              value={String(state.preview.address_count)}
-            />
-            <PreviewField
-              label={t("transports.nativeImport.preview.dns")}
-              value={String(state.preview.dns_count)}
-            />
-            <PreviewField
-              label={t("transports.nativeImport.preview.peers")}
-              value={String(state.preview.peer_count)}
-            />
-            <PreviewField
-              label={t("transports.nativeImport.preview.allowedIps")}
-              value={String(state.preview.allowed_ip_count)}
-            />
-            <PreviewField
-              label={t("transports.nativeImport.preview.privateKey")}
-              value={
-                state.preview.private_key_present
-                  ? t("transports.nativeImport.preview.presentRedacted")
-                  : t("transports.nativeImport.preview.absent")
-              }
-            />
-            <PreviewField
-              label={t("transports.nativeImport.preview.presharedKeys")}
-              value={String(state.preview.preshared_key_peer_count)}
-            />
-            <PreviewField
-              label={t("transports.nativeImport.preview.endpoint")}
-              value={
-                state.preview.endpoint_host && state.preview.endpoint_port
-                  ? formatEndpoint(
-                      state.preview.endpoint_host,
-                      state.preview.endpoint_port
-                    )
-                  : t("transports.nativeImport.preview.hiddenOrMultiple")
-              }
-            />
-            <PreviewField
-              label={t("transports.nativeImport.preview.keepalive")}
-              value={
-                state.preview.persistent_keepalive === undefined
-                  ? t("common.noneShort")
-                  : t("transports.nativeImport.preview.seconds", {
-                      count: state.preview.persistent_keepalive,
-                    })
-              }
-            />
-            <PreviewField
-              label={t("transports.nativeImport.preview.listenPort")}
-              value={
-                state.preview.listen_port === undefined
-                  ? t("common.noneShort")
-                  : String(state.preview.listen_port)
-              }
-            />
-            <PreviewField
-              label={t("transports.nativeImport.preview.mtu")}
-              value={
-                state.preview.mtu === undefined
-                  ? t("common.noneShort")
-                  : String(state.preview.mtu)
-              }
-            />
-            <PreviewField
-              label={t("transports.nativeImport.preview.aliasSuggestion")}
-              value={importAliasSuggestion ?? t("common.noneShort")}
-            />
-            <PreviewField
-              label={t("transports.nativeImport.preview.amneziaParameters")}
-              value={
-                state.preview.amnezia_parameter_names.length
-                  ? state.preview.amnezia_parameter_names.join(", ")
-                  : t("common.noneShort")
-              }
-            />
-          </dl>
+            >
+              {state.preview.kind === "amnezia_wireguard"
+                ? "AmneziaWG"
+                : "WireGuard"}{" "}
+              · {t("pages.setupWizard.connection.previewDetails")}
+            </summary>
+            <dl className="mt-2 grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2 lg:grid-cols-4">
+              <PreviewField
+                label={t("transports.nativeImport.preview.protocol")}
+                value={
+                  state.preview.kind === "amnezia_wireguard"
+                    ? "AmneziaWG"
+                    : "WireGuard"
+                }
+              />
+              <PreviewField
+                label={t("transports.nativeImport.preview.addresses")}
+                value={String(state.preview.address_count)}
+              />
+              <PreviewField
+                label={t("transports.nativeImport.preview.dns")}
+                value={String(state.preview.dns_count)}
+              />
+              <PreviewField
+                label={t("transports.nativeImport.preview.peers")}
+                value={String(state.preview.peer_count)}
+              />
+              <PreviewField
+                label={t("transports.nativeImport.preview.allowedIps")}
+                value={String(state.preview.allowed_ip_count)}
+              />
+              <PreviewField
+                label={t("transports.nativeImport.preview.privateKey")}
+                value={
+                  state.preview.private_key_present
+                    ? t("transports.nativeImport.preview.presentRedacted")
+                    : t("transports.nativeImport.preview.absent")
+                }
+              />
+              <PreviewField
+                label={t("transports.nativeImport.preview.presharedKeys")}
+                value={String(state.preview.preshared_key_peer_count)}
+              />
+              <PreviewField
+                label={t("transports.nativeImport.preview.endpoint")}
+                value={
+                  state.preview.endpoint_host && state.preview.endpoint_port
+                    ? formatEndpoint(
+                        state.preview.endpoint_host,
+                        state.preview.endpoint_port
+                      )
+                    : t("transports.nativeImport.preview.hiddenOrMultiple")
+                }
+              />
+              <PreviewField
+                label={t("transports.nativeImport.preview.keepalive")}
+                value={
+                  state.preview.persistent_keepalive === undefined
+                    ? t("common.noneShort")
+                    : t("transports.nativeImport.preview.seconds", {
+                        count: state.preview.persistent_keepalive,
+                      })
+                }
+              />
+              <PreviewField
+                label={t("transports.nativeImport.preview.listenPort")}
+                value={
+                  state.preview.listen_port === undefined
+                    ? t("common.noneShort")
+                    : String(state.preview.listen_port)
+                }
+              />
+              <PreviewField
+                label={t("transports.nativeImport.preview.mtu")}
+                value={
+                  state.preview.mtu === undefined
+                    ? t("common.noneShort")
+                    : String(state.preview.mtu)
+                }
+              />
+              <PreviewField
+                label={t("transports.nativeImport.preview.aliasSuggestion")}
+                value={importAliasSuggestion ?? t("common.noneShort")}
+              />
+              <PreviewField
+                label={t("transports.nativeImport.preview.amneziaParameters")}
+                value={
+                  state.preview.amnezia_parameter_names.length
+                    ? state.preview.amnezia_parameter_names.join(", ")
+                    : t("common.noneShort")
+                }
+              />
+            </dl>
+          </details>
           {findNativeWireGuardAliasConflict(
             importAliasSuggestion,
             existingInterfaces
@@ -1114,6 +1184,7 @@ function NativeWireGuardImportFieldsContent({
         </div>
       ) : null}
 
+      {state.status === "ready" ? beforeImport : null}
       {state.status === "ready" &&
       (operation.status === "idle" ||
         operation.status === "preflight-error" ||
@@ -1125,25 +1196,10 @@ function NativeWireGuardImportFieldsContent({
               {t("transports.nativeImport.displayNameRequired")}
             </p>
           ) : null}
-          <label className="flex min-h-11 cursor-pointer items-start gap-3 rounded-md p-1 text-sm">
-            <input
-              checked={ownerRiskAccepted}
-              className="mt-0.5 size-5 shrink-0 accent-primary"
-              disabled={
-                operation.status === "preflighting" ||
-                operation.status === "sending"
-              }
-              onChange={(event) => setOwnerRiskAccepted(event.target.checked)}
-              type="checkbox"
-            />
-            <span className="min-w-0 break-words">
-              {t("transports.nativeImport.ownerRiskConsent")}
-            </span>
-          </label>
-          <p className="text-xs break-words text-muted-foreground">
-            {t("transports.nativeImport.ownerRiskExplanation")}
+          <p className="text-sm break-words text-foreground">
+            {t("transports.nativeImport.routerCreationNotice")}
           </p>
-          {readiness ? (
+          {readiness && !compact ? (
             <p className="text-xs break-words text-muted-foreground">
               {t("transports.nativeImport.createOnlyRange", {
                 first: `${readiness.eligible_returned_targets.prefix}${readiness.eligible_returned_targets.first_index}`,
@@ -1155,7 +1211,7 @@ function NativeWireGuardImportFieldsContent({
             <Button
               className="min-h-11 whitespace-normal"
               disabled={
-                (Boolean(displayName?.trim()) && !ownerRiskAccepted) ||
+                !canImport ||
                 operation.status === "preflighting" ||
                 operation.status === "sending"
               }
@@ -1166,7 +1222,7 @@ function NativeWireGuardImportFieldsContent({
                 ? t("transports.nativeImport.preflighting")
                 : operation.status === "sending"
                   ? t("transports.nativeImport.sending")
-                  : t("transports.nativeImport.apply")}
+                  : (submitLabel ?? t("transports.nativeImport.apply"))}
             </Button>
             {operation.status === "preflighting" ||
             operation.status === "sending" ? (

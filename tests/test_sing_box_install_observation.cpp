@@ -75,6 +75,8 @@ TEST_CASE("the Entware architecture is chosen the way the installer chooses") {
 
 TEST_CASE("a version is read only from output shaped like a version") {
     CHECK(parse_sing_box_version("sing-box version 1.13.14\n") == "1.13.14");
+    CHECK(parse_sing_box_version("loader: optional warning\n\nsing-box version 1.13.14\n") == "1.13.14");
+    CHECK(parse_sing_box_version("sing-box version 1.13.14-dirty\nsing-box version 1.13.14\n").empty());
     CHECK(parse_sing_box_version(
               "sing-box version 1.13.14\r\n\r\nEnvironment: go1.22\n") ==
           "1.13.14");

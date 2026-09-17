@@ -58,11 +58,14 @@ std::string sing_box_asset_architecture(
     // to the official asset name. Both steps are reproduced here; a gate
     // compares this table against that file.
     const std::string family = entware_family(entware_architecture);
-    if (family == "aarch64") return "arm64";
+    // The default arm64/amd64 releases now need a /lib ELF interpreter and
+    // libcronet.so. Entware's loader lives under /opt; use the official static
+    // musl variants instead. MIPS Keenetic targets need software floating point.
+    if (family == "aarch64") return "arm64-musl";
     if (family == "armv7") return "armv7";
-    if (family == "mipsel") return "mipsle";
-    if (family == "mips") return "mips";
-    if (family == "x64") return "amd64";
+    if (family == "mipsel") return "mipsle-softfloat";
+    if (family == "mips") return "mips-softfloat";
+    if (family == "x64") return "amd64-musl";
     return {};
 }
 

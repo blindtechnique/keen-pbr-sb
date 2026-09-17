@@ -6,6 +6,7 @@
 #include "../src/util/daemon_signals.hpp"
 #include "../src/util/safe_exec.hpp"
 #include "../src/util/traced_mutex.hpp"
+#include "../src/util/ipv6_support.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -80,6 +81,16 @@ TEST_CASE("trace logger includes trace id and event metadata") {
     CHECK(capture.contains("event=unit-test-event"));
     CHECK(capture.contains("trace=" + std::to_string(trace_id)));
     CHECK(capture.contains("value=42"));
+}
+
+TEST_CASE("supported IPv4-only modes do not emit warnings or errors") {
+    LoggerCapture capture;
+    log_ipv6_support_decision_once(
+        {false, Ipv6SupportDecision::Reason::DisabledByConfig});
+    log_ipv6_support_decision_once(
+        {false, Ipv6SupportDecision::Reason::UnsupportedBySystem});
+    CHECK_FALSE(capture.contains("[E]"));
+    CHECK_FALSE(capture.contains("[W]"));
 }
 
 TEST_CASE("blocking executor emits queue and completion trace events") {

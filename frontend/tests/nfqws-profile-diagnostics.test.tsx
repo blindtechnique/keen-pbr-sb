@@ -58,6 +58,79 @@ async function render(nfqws: RoutingTestNfqws, language: "ru" | "en") {
 
 describe("profile-aware nfqws diagnostics", () => {
   test.each(["ru", "en"] as const)(
+    "restores the matching list and entry above collapsed technical details in %s",
+    async (language) => {
+      const translation = (language === "ru" ? ruTranslation : enTranslation)
+        .overview.targetFacts
+      const matched = profile(1, "matched")
+      matched.matches = [
+        {
+          list: "/opt/etc/nfqws2/user.list",
+          role: "hostlist",
+          includes: true,
+          entry: "example.test",
+          matched: "example.test",
+          exact: true,
+        },
+      ]
+      const html = await render(
+        { available: true, matches: matched.matches, profiles: [matched] },
+        language
+      )
+      const firstDetails = html.indexOf("<details")
+      expect(firstDetails).toBeGreaterThan(0)
+      const visible = html.slice(0, firstDetails)
+      expect(visible).toContain(translation.nfqws.covered)
+      expect(visible).toContain("/opt/etc/nfqws2/user.list")
+      expect(visible).toContain("example.test")
+      expect(visible).not.toContain(translation.nfqwsScope)
+      expect(html.slice(firstDetails)).toContain(translation.nfqwsScope)
+      expect(html).not.toContain("<details open")
+      expect(html).not.toContain("обход DPI к ней применяется")
+      expect(html).not.toContain("overview.targetFacts.")
+    }
+  )
+
+  test.each(["ru", "en"] as const)(
+    "a profile without list restrictions does not invent a matched entry in %s",
+    async (language) => {
+      const translation = (language === "ru" ? ruTranslation : enTranslation)
+        .overview.targetFacts
+      const html = await render(
+        {
+          available: true,
+          matches: [],
+          profiles: [profile(1, "unrestricted")],
+        },
+        language
+      )
+      expect(html).toContain(translation.nfqwsUnrestricted)
+      expect(html).not.toContain(translation.nfqws.covered)
+      expect(html).not.toContain("overview.targetFacts.")
+    }
+  )
+
+  test("parent-domain evidence remains visible without an exact-match claim", async () => {
+    const matched = profile(1, "matched")
+    matched.matches = [
+      {
+        list: "/opt/etc/nfqws2/user.list",
+        role: "hostlist",
+        includes: true,
+        entry: "test",
+        matched: "example.test",
+        exact: false,
+      },
+    ]
+    const html = await render(
+      { available: true, matches: matched.matches, profiles: [matched] },
+      "ru"
+    )
+    const visible = html.slice(0, html.indexOf("<details"))
+    expect(visible).toContain("список доменов: test — совпало с example.test")
+  })
+
+  test.each(["ru", "en"] as const)(
     "different profiles are not presented as a global exclusion in %s",
     async (language) => {
       const translation = (language === "ru" ? ruTranslation : enTranslation)

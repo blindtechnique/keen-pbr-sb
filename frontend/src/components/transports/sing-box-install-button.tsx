@@ -1,6 +1,6 @@
 import { DownloadIcon, Loader2Icon, XIcon } from "lucide-react"
 import { useEffect, useState } from "react"
-import { useMutation } from "@tanstack/react-query"
+import { useMutation, useQueryClient } from "@tanstack/react-query"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
@@ -38,7 +38,7 @@ import {
   singBoxInstallFailureTitleKey,
   singBoxInstallLeftDown,
   singBoxInstallMayHaveApplied,
-  singBoxInstallOutcomeKey,
+  singBoxInstallMessageKey,
   singBoxInstallPhaseKey,
   singBoxInstallRefusedBlockers,
   singBoxInstallResultTone,
@@ -78,6 +78,7 @@ export function SingBoxInstallButton({
   className?: string
 }) {
   const { t } = useTranslation()
+  const queryClient = useQueryClient()
   const capabilityQuery = useGetSingBoxInstallCapability()
   const capability =
     capabilityQuery.data?.status === 200 ? capabilityQuery.data.data : undefined
@@ -98,6 +99,12 @@ export function SingBoxInstallButton({
       return response.status === 200 ? response.data : null
     },
     onSuccess: (data) => {
+      void queryClient.invalidateQueries({
+        queryKey: ["transport-environment"],
+      })
+      void queryClient.invalidateQueries({
+        queryKey: ["/api/transports/environment"],
+      })
       void capabilityQuery.refetch()
       if (!data) return
       report(data)
@@ -132,7 +139,7 @@ export function SingBoxInstallButton({
       result.install_outcome,
       result.durable
     )
-    const message = t(singBoxInstallOutcomeKey(result.install_outcome))
+    const message = t(singBoxInstallMessageKey(result))
 
     // Everything the operator needs to act on, in the order they need it.
     const lines: string[] = []

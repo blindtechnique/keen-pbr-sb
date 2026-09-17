@@ -58,6 +58,8 @@ TEST_CASE("the install replaces the target and leaves it executable") {
     { std::ofstream(paths.binary_path) << "old"; }
     const auto staged = directory.path / "staged-sing-box";
     { std::ofstream(staged) << "new-binary-bytes"; }
+    struct stat staged_metadata {};
+    REQUIRE(::stat(staged.c_str(), &staged_metadata) == 0);
 
     const auto result = steps.install_atomically(staged.string());
     REQUIRE(result.committed);
@@ -67,6 +69,8 @@ TEST_CASE("the install replaces the target and leaves it executable") {
     struct stat metadata {};
     REQUIRE(::stat(paths.binary_path.c_str(), &metadata) == 0);
     CHECK((metadata.st_mode & 0777) == 0755);
+    CHECK(metadata.st_ino == staged_metadata.st_ino);
+    CHECK_FALSE(fs::exists(staged));
 
     // The temporary the install writes before renaming must not survive it.
     CHECK_FALSE(fs::exists(paths.binary_path + ".new"));
@@ -97,7 +101,9 @@ TEST_CASE("an empty staged file is refused before the rename") {
     const auto steps = production_sing_box_install_steps(paths);
     { std::ofstream(paths.binary_path) << "old"; }
     const auto empty = directory.path / "empty";
-    { std::ofstream(empty); }
+    { std::ofstream stream(empty); }
+    REQUIRE(fs::exists(empty));
+    REQUIRE(fs::file_size(empty) == 0);
 
     const auto result = steps.install_atomically(empty.string());
     CHECK_FALSE(result.committed);
@@ -185,6 +191,8 @@ TEST_CASE("a real archive yields an executable staged binary") {
     struct stat metadata {};
     REQUIRE(::stat(staged.c_str(), &metadata) == 0);
     CHECK((metadata.st_mode & 0111) != 0);
+    CHECK_FALSE(fs::exists(fs::path(paths.binary_path).parent_path() /
+                           ".keen-pbr-sing-box-staging/sing-box.tar.gz"));
 
     discard_sing_box_staging(paths);
 }
@@ -246,6 +254,8 @@ TEST_CASE("the install keeps the binary it replaced") {
     const auto steps = production_sing_box_install_steps(paths);
 
     { std::ofstream(paths.binary_path) << "the-old-binary"; }
+    struct stat old_metadata {};
+    REQUIRE(::stat(paths.binary_path.c_str(), &old_metadata) == 0);
     const auto staged = directory.path / "staged-sing-box";
     { std::ofstream(staged) << "the-new-binary"; }
 
@@ -254,6 +264,35 @@ TEST_CASE("the install keeps the binary it replaced") {
     CHECK(result.durable);
     CHECK(read_file(paths.binary_path) == "the-new-binary");
     CHECK(read_file(paths.binary_path + ".previous") == "the-old-binary");
+    struct stat previous_metadata {};
+    REQUIRE(::stat((paths.binary_path + ".previous").c_str(), &previous_metadata) == 0);
+    CHECK(previous_metadata.st_ino == old_metadata.st_ino);
+}
+
+TEST_CASE("a loader failure cannot pass even after printing a valid version") {
+    StepsTempDir directory;
+    const auto steps = production_sing_box_install_steps(paths_in(directory));
+    const auto broken = directory.path / "broken-sing-box";
+    {
+        std::ofstream script(broken);
+        script << "#!/bin/sh\necho 'sing-box version 1.13.14'\n"
+               << "echo 'loader: missing library' >&2\nexit 127\n";
+    }
+    REQUIRE(::chmod(broken.c_str(), 0755) == 0);
+    CHECK(steps.read_staged_version(broken.string()).empty());
+}
+
+TEST_CASE("a staged version tolerates a preceding loader warning") {
+    StepsTempDir directory;
+    const auto steps = production_sing_box_install_steps(paths_in(directory));
+    const auto brief = directory.path / "warning-sing-box";
+    {
+        std::ofstream script(brief);
+        script << "#!/bin/sh\necho 'loader: optional feature unavailable' >&2\n"
+               << "echo 'sing-box version 1.13.14'\n";
+    }
+    REQUIRE(::chmod(brief.c_str(), 0755) == 0);
+    CHECK(steps.read_staged_version(brief.string()) == "1.13.14");
 }
 
 TEST_CASE("a first install has nothing to keep and still installs") {
@@ -271,6 +310,43 @@ TEST_CASE("a first install has nothing to keep and still installs") {
     CHECK(result.durable);
     CHECK(read_file(paths.binary_path) == "the-first-binary");
     CHECK_FALSE(fs::exists(paths.binary_path + ".previous"));
+}
+
+TEST_CASE("replacing an old symlink keeps its binary without modifying its target") {
+    StepsTempDir directory;
+    const auto paths = paths_in(directory);
+    const auto steps = production_sing_box_install_steps(paths);
+    const auto old_binary = directory.path / "old-sing-box";
+    { std::ofstream(old_binary) << "old-binary"; }
+    fs::create_symlink(old_binary, paths.binary_path);
+    const auto staged = directory.path / "new-sing-box";
+    { std::ofstream(staged) << "new-binary"; }
+
+    const auto result = steps.install_atomically(staged.string());
+    REQUIRE(result.committed);
+    CHECK_FALSE(fs::is_symlink(paths.binary_path));
+    CHECK_FALSE(fs::is_symlink(paths.binary_path + ".previous"));
+    CHECK(read_file(paths.binary_path) == "new-binary");
+    CHECK(read_file(paths.binary_path + ".previous") == "old-binary");
+    CHECK(read_file(old_binary) == "old-binary");
+}
+
+TEST_CASE("a staged symlink is not renamed into a broken installed entry point") {
+    StepsTempDir directory;
+    const auto paths = paths_in(directory);
+    const auto steps = production_sing_box_install_steps(paths);
+    { std::ofstream(paths.binary_path) << "old-binary"; }
+    const auto payload = directory.path / "payload";
+    fs::create_directories(payload);
+    { std::ofstream(payload / "real") << "new-binary"; }
+    const auto staged = payload / "sing-box";
+    // This link would no longer resolve after moving it into bin/.
+    fs::create_symlink("real", staged);
+
+    const auto result = steps.install_atomically(staged.string());
+    CHECK_FALSE(result.committed);
+    CHECK(read_file(paths.binary_path) == "old-binary");
+    CHECK(read_file(staged) == "new-binary");
 }
 
 TEST_CASE("a failed directory sync reports committed but not durable") {

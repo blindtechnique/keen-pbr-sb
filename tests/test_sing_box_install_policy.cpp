@@ -34,11 +34,11 @@ bool blocked_by(const SingBoxInstallPolicy& policy, const Blocker blocker) {
 
 TEST_CASE("the asset architecture is mapped, never guessed") {
     // Guessing is how an ARM binary lands on a MIPS router.
-    CHECK(sing_box_asset_architecture("aarch64-3.10") == "arm64");
+    CHECK(sing_box_asset_architecture("aarch64-3.10") == "arm64-musl");
     CHECK(sing_box_asset_architecture("armv7-3.2") == "armv7");
-    CHECK(sing_box_asset_architecture("mipsel-3.4") == "mipsle");
-    CHECK(sing_box_asset_architecture("mips-3.4") == "mips");
-    CHECK(sing_box_asset_architecture("x64-3.2") == "amd64");
+    CHECK(sing_box_asset_architecture("mipsel-3.4") == "mipsle-softfloat");
+    CHECK(sing_box_asset_architecture("mips-3.4") == "mips-softfloat");
+    CHECK(sing_box_asset_architecture("x64-3.2") == "amd64-musl");
 
     for (const char* unmapped :
          {"", "aarch64", "-3.10", "aarch64-", "riscv64-6.1", "arm64-3.10",
@@ -52,7 +52,7 @@ TEST_CASE("a ready router is offered a first install") {
     CHECK(policy.available);
     CHECK(policy.operation == Operation::install);
     CHECK(policy.blockers.empty());
-    CHECK(policy.asset_architecture == "arm64");
+    CHECK(policy.asset_architecture == "arm64-musl");
 }
 
 TEST_CASE("an unreadable architecture is unsupported, not assumed") {

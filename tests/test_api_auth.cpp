@@ -3027,7 +3027,7 @@ TEST_CASE("native secret imports are admitted before bounded body streaming") {
     CHECK(reservations_destroyed.load(std::memory_order_acquire) == 5U);
 }
 
-TEST_CASE("sing-box install requires step-up before its handler runs") {
+TEST_CASE("sing-box install requires a session but not a second password") {
     AuthTempDir directory;
     const auto auth_path = directory.path / "auth.json";
     write_text(
@@ -3059,15 +3059,12 @@ TEST_CASE("sing-box install requires step-up before its handler runs") {
     const httplib::Headers session{{"Cookie", session_cookie(*login)}};
 
     const auto denied = client.Post(
-        "/api/transports/sing-box/install", session,
+        "/api/transports/sing-box/install",
         R"({"stop_running_transports":false})", "application/json");
     REQUIRE(denied != nullptr);
-    CHECK(denied->status == 403);
-    CHECK(nlohmann::json::parse(denied->body).at("error") ==
-          "step_up_required");
+    CHECK(denied->status == 401);
     CHECK(handled.load(std::memory_order_relaxed) == 0U);
 
-    grant_local_step_up(client, session, "admin", "secret");
     const auto granted = client.Post(
         "/api/transports/sing-box/install", session,
         R"({"stop_running_transports":false})", "application/json");

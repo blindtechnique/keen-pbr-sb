@@ -123,13 +123,8 @@ SingBoxInstallSteps production_sing_box_install_steps(
         // Nothing else may read a partially unpacked binary out of here.
         (void)::chmod(staging.c_str(), 0700);
 
-        const auto archive = staging / "sing-box.tar.gz";
-        if (!write_file(archive, archive_bytes, 0600)) return {};
-
-        // These bytes already matched the digest the release publishes, so
-        // this is not an untrusted archive - but it is unpacked into a fresh
-        // private directory anyway, so a path that escaped would land
-        // somewhere bounded rather than in /opt/bin.
+        // The verified archive is already in memory. Feed tar through stdin
+        // instead of storing another 20+ MiB on the router's small /opt volume.
         // Measured on the router: Entware provides /opt/bin/tar and there is
         // no /bin/tar at all, while a development container has the opposite.
         // Both are tried rather than one being assumed, because assuming the
@@ -138,13 +133,14 @@ SingBoxInstallSteps production_sing_box_install_steps(
         for (const char* tar : {"/opt/bin/tar", "/bin/tar", "/usr/bin/tar"}) {
             std::error_code probe;
             if (!fs::exists(tar, probe) || probe) continue;
-            exit_code = safe_exec_capture(
-                              {tar, "-xzf", archive.string(), "-C",
-                               staging.string()},
-                              /*suppress_stderr=*/true,
-                              /*max_bytes=*/64U * 1024U,
-                              /*capture_stderr=*/false)
-                            .exit_code;
+            std::string unpack_error;
+            exit_code = safe_exec_pipe_stdin(
+                {tar, "-xzf", "-", "-C", staging.string()}, archive_bytes,
+                &unpack_error, SafeExecFailureLog::DiagnosticOnly);
+            if (exit_code != 0) {
+                Logger::instance().info("sing-box archive extraction: {}",
+                                        unpack_error.substr(0, 1024));
+            }
             break;
         }
         if (exit_code != 0) {
@@ -177,9 +173,24 @@ SingBoxInstallSteps production_sing_box_install_steps(
         const auto result = safe_exec_capture({staged_binary, "version"},
                                               /*suppress_stderr=*/true,
                                               /*max_bytes=*/8U * 1024U,
-                                              /*capture_stderr=*/false);
-        if (result.exit_code != 0 || result.truncated) return {};
-        return parse_sing_box_version(result.stdout_output);
+                                              /*capture_stderr=*/true);
+        const auto version = parse_sing_box_version(result.stdout_output);
+        if (result.exit_code != 0 || result.truncated || version.empty()) {
+            // A binary with a missing ELF interpreter exits before printing
+            // a version. Keep the bounded execution result in the log instead
+            // of disguising every failure as a different upstream release.
+            auto detail = result.stdout_output.substr(0, 1024);
+            for (auto& ch : detail) {
+                if (static_cast<unsigned char>(ch) < 0x20U || ch == 0x7f)
+                    ch = ' ';
+            }
+            Logger::instance().info(
+                "sing-box staged version check failed: exit_code={} "
+                "truncated={} timed_out={} output={}",
+                result.exit_code, result.truncated, result.timed_out, detail);
+            return {};
+        }
+        return version;
     };
 
     steps.install_atomically =
@@ -187,20 +198,21 @@ SingBoxInstallSteps production_sing_box_install_steps(
             const std::string& staged_binary) -> SingBoxInstallCommitResult {
         const fs::path target(paths.binary_path);
         const auto directory = target.parent_path();
-        const auto pending = directory / (target.filename().string() + ".new");
+        // Staging is on the target filesystem. Sync and rename that exact
+        // verified inode; copying a 60+ MiB binary once more can fill internal
+        // Entware storage even though the installed binary itself fits.
+        const int staged_fd = ::open(
+            staged_binary.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        if (staged_fd < 0) return {};
+        struct stat metadata {};
+        const bool ready = ::fstat(staged_fd, &metadata) == 0 &&
+                           S_ISREG(metadata.st_mode) && metadata.st_size > 0 &&
+                           ::fchmod(staged_fd, 0755) == 0 &&
+                           ::fsync(staged_fd) == 0;
+        const bool closed = ::close(staged_fd) == 0;
+        if (!ready || !closed) return {};
 
         std::error_code error;
-        fs::remove(pending, error);
-        // Copied rather than renamed out of staging: the staged tree is
-        // removed afterwards either way, and a copy leaves the verified file
-        // untouched if this fails partway.
-        std::ifstream input(staged_binary, std::ios::binary);
-        if (!input) return {};
-        const std::string bytes(
-            (std::istreambuf_iterator<char>(input)),
-            std::istreambuf_iterator<char>());
-        if (bytes.empty()) return {};
-        if (!write_file(pending, bytes, 0755)) return {};
 
         // Keep the binary being replaced, byte for byte, beside the target.
         // Without it "undo this install" means "download the old release and
@@ -209,24 +221,29 @@ SingBoxInstallSteps production_sing_box_install_steps(
         // refuse an install the operator asked for - and the capability
         // reports which of those happened rather than assuming.
         //
-        // Costs one binary's worth of space, about 12 MiB, in a directory on
-        // the same filesystem so the copy cannot land somewhere that fills up
-        // separately.
+        // A hard link retains the old inode without a second full copy. Use
+        // the previous copy fallback only on filesystems without hard links
+        // or when the old entry point is a symlink.
         if (fs::exists(target, error) && !error) {
             const auto previous =
                 directory / (target.filename().string() + ".previous");
             fs::remove(previous, error);
-            fs::copy_file(target, previous,
-                          fs::copy_options::overwrite_existing, error);
+            if (!fs::is_symlink(target, error) && !error) {
+                fs::create_hard_link(target, previous, error);
+            } else {
+                error = std::make_error_code(std::errc::operation_not_supported);
+            }
+            if (error) {
+                error.clear();
+                fs::copy_file(target, previous,
+                              fs::copy_options::overwrite_existing, error);
+            }
         }
 
         // The rename is the moment the router changes. Everything before it is
         // reversible by deleting a file nobody runs.
-        fs::rename(pending, target, error);
-        if (error) {
-            fs::remove(pending, error);
-            return {};
-        }
+        fs::rename(staged_binary, target, error);
+        if (error) return {};
         // Without this the rename can be lost while the new file's contents
         // survive, which on the next boot is a target that points nowhere.
         const bool durable =

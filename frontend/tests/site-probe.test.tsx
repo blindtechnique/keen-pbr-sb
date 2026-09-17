@@ -127,7 +127,7 @@ describe("independent website probe presentation", () => {
     expect(markup).toContain("Ответ получен.")
     expect(markup).toContain("Роутер:")
     expect(markup).toContain(
-      "Роутер не смог определить IP-адрес сайта через DNS."
+      "При проверке доступности роутер не получил IP-адрес сайта через DNS."
     )
     expect(markup).toContain("Could not resolve host: example.org")
   })

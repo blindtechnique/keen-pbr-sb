@@ -20,6 +20,7 @@ import {
   singBoxInstallMayHaveApplied,
   singBoxInstallNeedsTransportConsent,
   singBoxInstallOutcomeKey,
+  singBoxInstallMessageKey,
   singBoxInstallPhaseKey,
   singBoxInstallRefusedBlockers,
   singBoxInstallResultTone,
@@ -262,6 +263,36 @@ describe("sing-box install messages", () => {
     ).toBeNull()
   })
 
+  it("does not call an execution failure a different release", () => {
+    for (const staged_version of [undefined, "", "  "]) {
+      const key = singBoxInstallMessageKey({
+        install_outcome: "staged_version_mismatch",
+        pinned_version: "1.13.14",
+        staged_version,
+      })
+      expect(key).toBe("transports.singBoxInstall.versionUnavailable")
+      bothLocales(key)
+    }
+    expect(
+      singBoxInstallMessageKey({
+        install_outcome: "staged_version_mismatch",
+        pinned_version: "1.13.14",
+        staged_version: "1.12.0",
+      })
+    ).toBe(singBoxInstallOutcomeKey("staged_version_mismatch"))
+    for (const install_outcome of Object.values(
+      SingBoxInstallResultInstallOutcome
+    )) {
+      if (install_outcome !== "staged_version_mismatch")
+        expect(
+          singBoxInstallMessageKey({
+            install_outcome,
+            pinned_version: "1.13.14",
+          })
+        ).toBe(singBoxInstallOutcomeKey(install_outcome))
+    }
+  })
+
   it("names the transports that did not come back", () => {
     // Their traffic has nowhere to go and only the operator can put it back,
     // so the tags are reported rather than summarised as a count.
@@ -313,9 +344,9 @@ describe("sing-box install messages", () => {
         blockers: ["transports_running", "moon_phase_wrong"],
       })
     ).toEqual(["transports_running"])
-    expect(singBoxInstallRefusedBlockers({ blockers: ["entware_absent"] })).toEqual(
-      []
-    )
+    expect(
+      singBoxInstallRefusedBlockers({ blockers: ["entware_absent"] })
+    ).toEqual([])
   })
 
   it("has copy for the wizard offer and the consent dialog", () => {

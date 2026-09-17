@@ -65,6 +65,9 @@ import {
 type Props = {
   /** Native interface selected by the pencil before a panel tracker exists. */
   createSeed?: TransportSpec
+  /** First-run uses the same importer, with routing always included. */
+  purpose?: "setup"
+  defaultDisplayName?: string
   existingInterfaces?: readonly string[]
   existingTags?: readonly string[]
   initial?: TransportSpec
@@ -357,6 +360,8 @@ export function normalizeTransportFormComparable(
 }
 
 export function TransportConfigForm({
+  purpose,
+  defaultDisplayName,
   createSeed,
   existingInterfaces = [],
   existingTags = [],
@@ -379,8 +384,8 @@ export function TransportConfigForm({
   const close = useUpsertPageClose()
   const complete = useUpsertPageComplete()
   const catalogNavigation = useCatalogNavigation()
-  const [baseline] = useState<TransportFormValue>(() =>
-    createTransportFormValue(
+  const [baseline] = useState<TransportFormValue>(() => {
+    const value = createTransportFormValue(
       initial,
       initial
         ? undefined
@@ -394,7 +399,14 @@ export function TransportConfigForm({
         createOutbound: initialCreateOutbound,
       }
     )
-  )
+    if (purpose === "setup") {
+      value.spec.display_name = defaultDisplayName
+      value.spec.auto_start = true
+      value.createOutbound = true
+      value.sourceMode = singBoxAvailable ? "link" : "file"
+    }
+    return value
+  })
   const [spec, setSpec] = useState<TransportSpec>(() =>
     structuredClone(baseline.spec)
   )
@@ -420,7 +432,7 @@ export function TransportConfigForm({
   const [subscriptionSeed, setSubscriptionSeed] = useState<
     { readonly url: string } | { readonly document: string } | null
   >(null)
-  const showAdvanced = presentation === "page"
+  const showAdvanced = purpose !== "setup" && presentation === "page"
   const [technicalIdentityAutomatic, setTechnicalIdentityAutomatic] =
     useState(!initial)
   // A transport only becomes a route once an interface outbound points at it,
@@ -545,6 +557,8 @@ export function TransportConfigForm({
     label: `${country.flag} ${country.name} (${country.code})`,
   }))
   const geoSelectionInvalid = isTransportGeoSelectionInvalid(spec)
+  const dependencyMissing =
+    isSingBox && !sourceImportPreviewOnly && !singBoxAvailable
   const formValue: TransportFormValue = {
     spec,
     sourceMode,
@@ -604,7 +618,10 @@ export function TransportConfigForm({
       // discarded that name and let the inventory fallback create
       // "WireguardN" instead.  A missing/invalid name returns to the ordinary
       // form so the operator can explicitly accept the domain/IP suggestion.
-      if (!validateDisplayName(selected.display_name ?? "")) {
+      if (
+        !validateDisplayName(selected.display_name ?? "") &&
+        !isTransportGeoSelectionInvalid(selected)
+      ) {
         const submission = normalizeTransportFormValue(
           {
             spec: selected,
@@ -691,6 +708,7 @@ export function TransportConfigForm({
   }, [spec.interface, spec.type])
 
   const selectSourceMode = (nextSourceMode: SourceMode) => {
+    if (nextSourceMode === "json" && !singBoxAvailable) return
     setNativeUriActive(false)
     setSourceMode(nextSourceMode)
     setSpec((current) =>
@@ -745,104 +763,197 @@ export function TransportConfigForm({
 
   const submit = (event: FormEvent) => {
     event.preventDefault()
-    if (sourceImportPreviewOnly) return
+    if (sourceImportPreviewOnly || dependencyMissing || isPending) return
+    if (displayNameError) {
+      focusRequiredDisplayName()
+      return
+    }
+    if (geoSelectionInvalid || nativeSelectionInvalid) return
     const submission = normalizeTransportFormValue(formValue, Boolean(initial))
     onSubmit(submission.spec, submission.options)
   }
 
-  return (
-    <form className="space-y-6" onSubmit={submit}>
-      <div className="grid content-start gap-4">
-        <Field label={t("transports.form.displayName")}>
-          <Input
-            aria-invalid={showDisplayNameError}
-            className={cn(
-              displayNameAttention && "border-primary ring-3 ring-primary/20"
-            )}
-            onBlur={() => setDisplayNameTouched(true)}
-            onChange={(event) => {
-              setDisplayNameTouched(true)
-              if (!validateDisplayName(event.target.value)) {
-                setDisplayNameAttention(false)
-              }
+  const nameField = (
+    <Field label={t("transports.form.displayName")}>
+      <Input
+        aria-invalid={showDisplayNameError}
+        className={cn(
+          displayNameAttention && "border-primary ring-3 ring-primary/20"
+        )}
+        onBlur={() => setDisplayNameTouched(true)}
+        onChange={(event) => {
+          setDisplayNameTouched(true)
+          if (!validateDisplayName(event.target.value)) {
+            setDisplayNameAttention(false)
+          }
+          setSpec({
+            ...spec,
+            display_name: event.target.value || undefined,
+          })
+        }}
+        placeholder={t("transports.form.displayNamePlaceholder")}
+        required
+        ref={displayNameInputRef}
+        value={spec.display_name ?? ""}
+      />
+      <p className="text-xs text-muted-foreground">
+        {purpose === "setup"
+          ? t("pages.setupWizard.connection.nameHint")
+          : t("transports.form.displayNameHint")}
+      </p>
+      {showDisplayNameError ? (
+        <p className="text-xs text-destructive">
+          {t("transports.form.displayNameInvalid")}
+        </p>
+      ) : null}
+      {aliasSuggestion && aliasSuggestion !== spec.display_name?.trim() ? (
+        <Button
+          className={cn(
+            "h-auto w-fit max-w-full text-left whitespace-normal",
+            displayNameAttention
+              ? "border-primary bg-primary/10 shadow-sm ring-2 ring-primary/20"
+              : "px-0"
+          )}
+          onClick={() => {
+            setDisplayNameTouched(true)
+            setDisplayNameAttention(false)
+            setSpec({ ...spec, display_name: aliasSuggestion })
+          }}
+          size="sm"
+          type="button"
+          variant={displayNameAttention ? "outline" : "link"}
+        >
+          {t("transports.form.useAliasSuggestion", {
+            name: aliasSuggestion,
+          })}
+        </Button>
+      ) : null}
+    </Field>
+  )
+  const countryField = (
+    <Field label={t("transports.form.countryDisplay")}>
+      <div className="grid gap-2">
+        {(["disabled", "manual", "auto"] as const).map((mode) => (
+          <label
+            className="flex cursor-pointer items-start gap-3 rounded-md border border-transparent p-2 has-[:checked]:border-primary has-[:checked]:bg-primary/10"
+            key={mode}
+          >
+            <input
+              checked={(spec.geo_mode ?? "disabled") === mode}
+              className="mt-1 accent-primary"
+              name="transport-geo-mode"
+              onChange={() => setSpec({ ...spec, geo_mode: mode })}
+              type="radio"
+            />
+            <span className="grid gap-0.5">
+              <span className="text-sm font-medium">
+                {purpose === "setup" && mode === "auto"
+                  ? t("pages.setupWizard.connection.geoAuto")
+                  : t(`transports.form.geo.${mode}`)}
+              </span>
+              {mode === "auto" &&
+              (purpose !== "setup" || spec.geo_mode === "auto") ? (
+                <span className="text-xs text-amber-700 dark:text-amber-300">
+                  {t("transports.form.geo.autoWarning")}
+                </span>
+              ) : null}
+            </span>
+          </label>
+        ))}
+        {spec.geo_mode === "manual" ? (
+          <Select
+            items={countryItems}
+            onValueChange={(value) => {
+              const selected = countries.find(
+                (country) => country.code === value
+              )
               setSpec({
                 ...spec,
-                display_name: event.target.value || undefined,
+                country_code: selected?.code,
+                country: selected?.name,
               })
             }}
-            placeholder={t("transports.form.displayNamePlaceholder")}
-            required
-            ref={displayNameInputRef}
-            value={spec.display_name ?? ""}
-          />
-          <p className="text-xs text-muted-foreground">
-            {t("transports.form.displayNameHint")}
-          </p>
-          {showDisplayNameError ? (
-            <p className="text-xs text-destructive">
-              {t("transports.form.displayNameInvalid")}
-            </p>
-          ) : null}
-          {aliasSuggestion && aliasSuggestion !== spec.display_name?.trim() ? (
-            <Button
-              className={cn(
-                "h-auto w-fit max-w-full text-left whitespace-normal",
-                displayNameAttention
-                  ? "border-primary bg-primary/10 shadow-sm ring-2 ring-primary/20"
-                  : "px-0"
-              )}
-              onClick={() => {
-                setDisplayNameTouched(true)
-                setDisplayNameAttention(false)
-                setSpec({ ...spec, display_name: aliasSuggestion })
-              }}
-              size="sm"
-              type="button"
-              variant={displayNameAttention ? "outline" : "link"}
-            >
-              {t("transports.form.useAliasSuggestion", {
-                name: aliasSuggestion,
-              })}
-            </Button>
-          ) : null}
-        </Field>
-        <Field label={t("transports.form.type")}>
-          <Select
-            disabled={nativeSelectionLocked}
-            items={typeOptions}
-            onValueChange={(value) => {
-              const nextType = (value ?? spec.type) as TransportSpec["type"]
-              const firstNative = nativeCandidates.find(
-                (candidate) => candidate.selectable
-              )
-              setSpec((current) =>
-                withAutomaticTechnicalIdentity({
-                  ...current,
-                  type: nextType,
-                  interface:
-                    nextType === TransportSpecType.native
-                      ? (firstNative?.interfaceName ?? "")
-                      : baseline.spec.interface,
-                })
-              )
-            }}
-            value={spec.type}
+            value={spec.country_code?.toUpperCase() ?? ""}
           >
             <SelectTrigger>
-              <SelectValue />
+              <SelectValue
+                placeholder={t("transports.form.geo.countryPlaceholder")}
+              />
             </SelectTrigger>
             <SelectContent>
               <SelectGroup>
-                {typeOptions.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {option.label}
+                {countryItems.map((item) => (
+                  <SelectItem key={item.value} value={item.value}>
+                    {item.label}
                   </SelectItem>
                 ))}
               </SelectGroup>
             </SelectContent>
           </Select>
-        </Field>
-        {spec.type === TransportSpecType.native ? (
+        ) : null}
+        {geoSelectionInvalid ? (
+          <p className="text-xs text-muted-foreground">
+            {t("pages.setupWizard.connection.countryRequired")}
+          </p>
+        ) : null}
+      </div>
+    </Field>
+  )
+  const identityFields = (
+    <div className="grid gap-4">
+      {nameField}
+      {countryField}
+    </div>
+  )
+  const wizardInputReady =
+    spec.type === TransportSpecType.native ||
+    (sourceMode === "json"
+      ? Boolean(spec.outbound_json?.trim())
+      : Boolean(spec.link?.trim()))
+
+  return (
+    <form className="space-y-6" onSubmit={submit}>
+      <div className="grid content-start gap-4">
+        {purpose !== "setup" ? nameField : null}
+        {purpose !== "setup" ? (
+          <Field label={t("transports.form.type")}>
+            <Select
+              disabled={nativeSelectionLocked}
+              items={typeOptions}
+              onValueChange={(value) => {
+                const nextType = (value ?? spec.type) as TransportSpec["type"]
+                const firstNative = nativeCandidates.find(
+                  (candidate) => candidate.selectable
+                )
+                setSpec((current) =>
+                  withAutomaticTechnicalIdentity({
+                    ...current,
+                    type: nextType,
+                    interface:
+                      nextType === TransportSpecType.native
+                        ? (firstNative?.interfaceName ?? "")
+                        : baseline.spec.interface,
+                  })
+                )
+              }}
+              value={spec.type}
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {typeOptions.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          </Field>
+        ) : null}
+        {spec.type === TransportSpecType.native && purpose !== "setup" ? (
           <Field label={t("transports.form.nativeInterface")}>
             <Select
               disabled={nativeSelectionLocked}
@@ -929,7 +1040,7 @@ export function TransportConfigForm({
             </Field>
           </div>
         ) : null}
-        {isSingBox ? (
+        {isSingBox && purpose !== "setup" ? (
           <div className="flex items-center justify-between gap-3 py-1">
             <Label htmlFor="transport-auto-start">
               {t("transports.form.autoStart")}
@@ -945,65 +1056,7 @@ export function TransportConfigForm({
         ) : null}
         {/* Выбор страны доступен и в диалоге (просьба владельца): флаг у
             туннеля помогает различать серверы, это не тонкая настройка. */}
-        <Field label={t("transports.form.countryDisplay")}>
-          <div className="grid gap-2">
-            {(["disabled", "manual", "auto"] as const).map((mode) => (
-              <label
-                className="flex cursor-pointer items-start gap-3 rounded-md border border-transparent p-2 has-[:checked]:border-primary has-[:checked]:bg-primary/10"
-                key={mode}
-              >
-                <input
-                  checked={(spec.geo_mode ?? "disabled") === mode}
-                  className="mt-1 accent-primary"
-                  name="transport-geo-mode"
-                  onChange={() => setSpec({ ...spec, geo_mode: mode })}
-                  type="radio"
-                />
-                <span className="grid gap-0.5">
-                  <span className="text-sm font-medium">
-                    {t(`transports.form.geo.${mode}`)}
-                  </span>
-                  {mode === "auto" ? (
-                    <span className="text-xs text-amber-700 dark:text-amber-300">
-                      {t("transports.form.geo.autoWarning")}
-                    </span>
-                  ) : null}
-                </span>
-              </label>
-            ))}
-            {spec.geo_mode === "manual" ? (
-              <Select
-                items={countryItems}
-                onValueChange={(value) => {
-                  const selected = countries.find(
-                    (country) => country.code === value
-                  )
-                  setSpec({
-                    ...spec,
-                    country_code: selected?.code,
-                    country: selected?.name,
-                  })
-                }}
-                value={spec.country_code?.toUpperCase() ?? ""}
-              >
-                <SelectTrigger>
-                  <SelectValue
-                    placeholder={t("transports.form.geo.countryPlaceholder")}
-                  />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectGroup>
-                    {countryItems.map((item) => (
-                      <SelectItem key={item.value} value={item.value}>
-                        {item.label}
-                      </SelectItem>
-                    ))}
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
-            ) : null}
-          </div>
-        </Field>
+        {purpose !== "setup" ? countryField : null}
         {/* «Сразу создать маршрут» — только в расширенном редакторе: по
             умолчанию туннель и есть маршрут (решение владельца), и в простом
             диалоге этот выбор лишний — маршрут создаётся всегда. */}
@@ -1082,8 +1135,11 @@ export function TransportConfigForm({
             отдельный блок. */}
         {isSingBox ? (
           <div className="grid gap-4">
-            {!singBoxAvailable && sourceMode !== "file" && !nativeUriActive ? (
-              <Alert variant="destructive">
+            {!singBoxAvailable &&
+            sourceMode !== "file" &&
+            !nativeUriActive &&
+            purpose !== "setup" ? (
+              <Alert>
                 <AlertTitle>{t("transports.singBoxMissing.title")}</AlertTitle>
                 <AlertDescription className="space-y-2">
                   <p>{t("transports.singBoxMissing.description")}</p>
@@ -1098,7 +1154,9 @@ export function TransportConfigForm({
               ariaLabel={t("transports.form.sourceMode")}
               onChange={selectSourceMode}
               options={TRANSPORT_SOURCE_MODE_ORDER.filter(
-                (mode) => !initial || mode !== "file"
+                (mode) =>
+                  (!initial || mode !== "file") &&
+                  (mode !== "json" || singBoxAvailable)
               ).map((mode) => {
                 if (mode === "link") {
                   return {
@@ -1125,6 +1183,17 @@ export function TransportConfigForm({
             {sourceMode === "link" ? (
               <>
                 <NativeWireGuardImportFields
+                  beforeImport={
+                    purpose === "setup" ? identityFields : undefined
+                  }
+                  compact={purpose === "setup"}
+                  canImport={!isPending && !geoSelectionInvalid}
+                  nativeOnly={!singBoxAvailable}
+                  submitLabel={
+                    purpose === "setup"
+                      ? t("pages.setupWizard.connection.create")
+                      : undefined
+                  }
                   displayName={
                     displayNameError ? undefined : spec.display_name?.trim()
                   }
@@ -1163,7 +1232,9 @@ export function TransportConfigForm({
                       {t("transports.form.subscriptionDetected")}
                     </p>
                     <Button
+                      disabled={!singBoxAvailable}
                       onClick={() =>
+                        singBoxAvailable &&
                         setSubscriptionSeed({ url: (spec.link ?? "").trim() })
                       }
                       ref={subscriptionOfferButtonRef}
@@ -1177,6 +1248,15 @@ export function TransportConfigForm({
               </>
             ) : sourceMode === "file" ? (
               <NativeWireGuardImportFields
+                beforeImport={purpose === "setup" ? identityFields : undefined}
+                compact={purpose === "setup"}
+                canImport={!isPending && !geoSelectionInvalid}
+                nativeOnly={!singBoxAvailable}
+                submitLabel={
+                  purpose === "setup"
+                    ? t("pages.setupWizard.connection.create")
+                    : undefined
+                }
                 displayName={
                   displayNameError ? undefined : spec.display_name?.trim()
                 }
@@ -1187,8 +1267,10 @@ export function TransportConfigForm({
                 onImportHandedOff={finishHandedOffNativeImport}
                 onImportPending={stageCurrentNativeImportCompletion}
                 onDisplayNameRequired={focusRequiredDisplayName}
-                onSubscriptionDocument={(text) =>
-                  setSubscriptionSeed({ document: text })
+                onSubscriptionDocument={
+                  singBoxAvailable
+                    ? (text) => setSubscriptionSeed({ document: text })
+                    : undefined
                 }
                 onImportedIdentityChange={useImportedNativeIdentity}
                 readiness={nativeImportReadiness}
@@ -1279,20 +1361,27 @@ export function TransportConfigForm({
           </div>
         ) : null}
       </div>
+      {purpose === "setup" && !sourceImportPreviewOnly && wizardInputReady
+        ? identityFields
+        : null}
       <div className="flex justify-end gap-3" data-upsert-actions>
-        <Button
-          disabled={isPending}
-          onClick={close}
-          size="xl"
-          type="button"
-          variant="outline"
-        >
-          {t(sourceImportPreviewOnly ? "common.close" : "common.cancel")}
-        </Button>
-        {!sourceImportPreviewOnly ? (
+        {purpose !== "setup" ? (
+          <Button
+            disabled={isPending}
+            onClick={close}
+            size="xl"
+            type="button"
+            variant="outline"
+          >
+            {t(sourceImportPreviewOnly ? "common.close" : "common.cancel")}
+          </Button>
+        ) : null}
+        {!sourceImportPreviewOnly &&
+        (purpose !== "setup" || wizardInputReady) ? (
           <Button
             disabled={
               isPending ||
+              dependencyMissing ||
               !isDirty ||
               Boolean(displayNameError) ||
               nativeSelectionInvalid ||
@@ -1303,7 +1392,9 @@ export function TransportConfigForm({
           >
             {isPending
               ? t("transports.form.saving")
-              : t("transports.form.save")}
+              : purpose === "setup"
+                ? t("pages.setupWizard.connection.create")
+                : t("transports.form.save")}
           </Button>
         ) : null}
       </div>
