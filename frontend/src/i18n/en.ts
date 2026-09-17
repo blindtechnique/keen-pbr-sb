@@ -1910,6 +1910,8 @@ export const enTranslation = {
     nativeImport: {
       title: "Import WireGuard / AmneziaWG",
       importingToast: "Importing VPN",
+      completionPending:
+        "Could not finish linking the VPN to the panel. Retry the check — there is no need to import the VPN again.",
       importedToast: "VPN added and route connected",
       panelLinkCreationFailed:
         "The VPN was created in KeeneticOS, but the panel could not save its link. Do not import it again; refresh the list and connect the detected interface.",

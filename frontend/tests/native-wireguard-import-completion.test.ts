@@ -7,6 +7,10 @@ import {
   findStagedNativeWireGuardImportIdentity,
   offerNativeWireGuardImportCompletion,
   readStagedNativeWireGuardImportCompletion,
+  readBackgroundNativeWireGuardImportCompletionTag,
+  rememberNativeWireGuardImportedIdentity,
+  stagedNativeWireGuardLinkState,
+  subscribeNativeWireGuardImportCompletion,
   registerActiveNativeWireGuardImportCompletion,
   stageNativeWireGuardImportCompletion,
 } from "@/lib/native-wireguard-import-completion"
@@ -183,5 +187,120 @@ describe("active native import completion hand-off", () => {
         []
       )
     ).toBeUndefined()
+  })
+})
+
+describe("panel completion after the native journal is gone", () => {
+  const plan = {
+    tag: "imported_awg",
+    displayName: "Imported AWG",
+    createOutbound: true,
+    autoStart: false,
+  }
+  const transport = buildStagedNativeWireGuardTransport(plan, identity)
+  const outbound = {
+    type: "interface" as const,
+    tag: plan.tag,
+    interface: identity.kernelInterface,
+  }
+
+  test("a saved tab plan wakes recovery after reload but not while its form owns completion", () => {
+    let changes = 0
+    const stop = subscribeNativeWireGuardImportCompletion(() => {
+      changes++
+    })
+    try {
+      stageNativeWireGuardImportCompletion(plan)
+      expect(readBackgroundNativeWireGuardImportCompletionTag()).toBe(plan.tag)
+      const closeForm = registerActiveNativeWireGuardImportCompletion(
+        () => true
+      )
+      expect(readBackgroundNativeWireGuardImportCompletionTag()).toBeUndefined()
+      closeForm()
+      expect(readBackgroundNativeWireGuardImportCompletionTag()).toBe(plan.tag)
+      clearStagedNativeWireGuardImportCompletion(plan.tag)
+      expect(readBackgroundNativeWireGuardImportCompletionTag()).toBeUndefined()
+      expect(changes).toBe(4)
+    } finally {
+      stop()
+      clearStagedNativeWireGuardImportCompletion()
+    }
+  })
+
+  test("remembers the confirmed interface without depending on its later alias", () => {
+    stageNativeWireGuardImportCompletion(plan)
+    rememberNativeWireGuardImportedIdentity(identity)
+    const stored = readStagedNativeWireGuardImportCompletion()!
+    expect(stored.identity).toEqual(identity)
+    const row = {
+      firmware_interface_name: identity.firmwareInterface,
+      kernel_name: identity.kernelInterface,
+      label: "Renamed VPN",
+      kind: identity.kind,
+      native_mutation: { ownership_state: "panel_owned_active" },
+    }
+    expect(
+      findStagedNativeWireGuardImportIdentity(stored, [row as never], [])
+    ).toEqual(identity)
+    expect(
+      findStagedNativeWireGuardImportIdentity(
+        stored,
+        [{ ...row, kernel_name: "foreign0" } as never],
+        []
+      )
+    ).toBeUndefined()
+    clearStagedNativeWireGuardImportCompletion()
+  })
+
+  test("does not create a duplicate after an apply succeeded but its response was lost", () => {
+    expect(stagedNativeWireGuardLinkState(plan, identity, [], [])).toBe(
+      "create"
+    )
+    expect(
+      stagedNativeWireGuardLinkState(plan, identity, [transport], [outbound])
+    ).toBe("complete")
+  })
+
+  test("does not mistake a visible tracker or a foreign route for completed linking", () => {
+    expect(
+      stagedNativeWireGuardLinkState(plan, identity, [transport], [])
+    ).toBe("conflict")
+    expect(stagedNativeWireGuardLinkState(plan, identity, [], [outbound])).toBe(
+      "conflict"
+    )
+    expect(
+      stagedNativeWireGuardLinkState(
+        plan,
+        identity,
+        [{ ...transport, interface: "foreign0" }],
+        [outbound]
+      )
+    ).toBe("conflict")
+    expect(
+      stagedNativeWireGuardLinkState(
+        plan,
+        identity,
+        [transport],
+        [{ ...outbound, interface: "foreign0" }]
+      )
+    ).toBe("conflict")
+    expect(
+      stagedNativeWireGuardLinkState(
+        plan,
+        identity,
+        [{ ...transport, tag: "existing_vpn" }],
+        []
+      )
+    ).toBe("conflict")
+  })
+
+  test("honors the explicit choice not to create a route", () => {
+    const trackerOnly = { ...plan, createOutbound: false }
+    expect(stagedNativeWireGuardLinkState(trackerOnly, identity, [], [])).toBe(
+      "create"
+    )
+    expect(
+      stagedNativeWireGuardLinkState(trackerOnly, identity, [transport], [])
+    ).toBe("complete")
   })
 })

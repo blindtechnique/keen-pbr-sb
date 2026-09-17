@@ -124,6 +124,8 @@ import {
   NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID,
   offerNativeWireGuardImportCompletion,
   readStagedNativeWireGuardImportCompletion,
+  rememberNativeWireGuardImportedIdentity,
+  stagedNativeWireGuardLinkState,
   type NativeWireGuardImportedIdentity,
 } from "@/lib/native-wireguard-import-completion"
 import {
@@ -620,6 +622,7 @@ export function TransportsPage({
         boundInterfaceNames: new Set(interfaceOutboundByInterface.keys()),
         hiddenIds: hiddenNativeIds,
         dismissedIds: dismissedRouteOffers,
+        pendingImport: readStagedNativeWireGuardImportCompletion(),
       })
     : []
   // Что реально ходит через этот транспорт. Транспорт создаёт интерфейс, на
@@ -954,8 +957,9 @@ export function TransportsPage({
 
   const completeRecoveredImportIdentity = async (
     identity: NativeWireGuardImportedIdentity
-  ): Promise<boolean> => {
+  ): Promise<boolean | undefined> => {
     const { firmwareInterface, kernelInterface } = identity
+    rememberNativeWireGuardImportedIdentity(identity)
     // A bodyless recovery can complete while the original import dialog is
     // still open. Let that dialog persist the operator's alias, country and
     // linked route; only a reload/crash with no active dialog needs the
@@ -971,14 +975,43 @@ export function TransportsPage({
         identity
       )
       try {
-        if (stagedPlan.createOutbound) {
+        const [configuredResult, configResult] = await Promise.all([
+          configQuery.refetch(),
+          keenConfigQuery.refetch(),
+        ])
+        const currentConfig = selectConfig(configResult.data)
+        if (
+          configuredResult.isError ||
+          configResult.isError ||
+          configuredResult.data?.status !== 200 ||
+          !currentConfig
+        )
+          return undefined
+        // Check an acknowledged earlier write before retrying a lost response.
+        // Do not infer completion from a visible but unapplied config draft.
+        if (
+          configResult.data?.status === 200 &&
+          configResult.data.data.is_draft
+        ) {
+          return undefined
+        }
+        const linkState = stagedNativeWireGuardLinkState(
+          stagedPlan,
+          identity,
+          configuredResult.data.data,
+          currentConfig.outbounds ?? []
+        )
+        if (linkState === "conflict") {
+          throw new Error(t("transports.nativeImport.panelLinkCreationFailed"))
+        }
+        if (linkState === "create" && stagedPlan.createOutbound) {
           await recoveredImportApplyMutation.mutateAsync({
             data: createLinkedTransportApplyRequest(
               transport,
               stagedPlan.strictEnforcement
             ),
           })
-        } else {
+        } else if (linkState === "create") {
           const response = await postTransportConfig({
             operation: TransportConfigOperationOperation.create,
             transport,
@@ -994,10 +1027,17 @@ export function TransportsPage({
           stagedPlan.endpointHost,
           stagedPlan.tag
         )
-        toast.success(t("transports.nativeImport.importedToast"), {
-          id: NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID,
-          action: catalogNavigation.successAction(transport.tag),
-        })
+        toast.success(
+          t(
+            stagedPlan.createOutbound
+              ? "transports.nativeImport.importedToast"
+              : "transports.configMessages.nativeLinked"
+          ),
+          {
+            id: NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID,
+            action: catalogNavigation.successAction(transport.tag),
+          }
+        )
         return true
       } catch (mutationError) {
         toast.error(<OperationErrorMessage error={mutationError} />, {
@@ -1084,7 +1124,7 @@ export function TransportsPage({
     ) {
       return
     }
-    await completeRecoveredImportIdentity({
+    return completeRecoveredImportIdentity({
       firmwareInterface: result.created_interface,
       kernelInterface: result.created_kernel_interface,
       kind: result.kind,
@@ -1096,31 +1136,33 @@ export function TransportsPage({
   > => {
     const stagedPlan = readStagedNativeWireGuardImportCompletion()
     if (!stagedPlan) return false
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const [inventoryResult, configuredResult] = await Promise.all([
-        ndmsInventoryQuery.refetch(),
-        configQuery.refetch(),
-      ])
-      if (
-        inventoryResult.data?.status !== 200 ||
-        !inventoryResult.data.data.available ||
-        configuredResult.data?.status !== 200
-      ) {
-        return undefined
-      }
-      const identity = findStagedNativeWireGuardImportIdentity(
-        stagedPlan,
-        inventoryResult.data.data.interfaces,
-        configuredResult.data.data
-          .filter((item) => item.type === TransportSpecType.native)
-          .map((item) => item.interface)
-      )
-      if (identity) return completeRecoveredImportIdentity(identity)
-      if (attempt < 2) {
-        await new Promise<void>((resolve) => window.setTimeout(resolve, 250))
-      }
+    const [inventoryResult, configuredResult] = await Promise.all([
+      ndmsInventoryQuery.refetch(),
+      configQuery.refetch(),
+    ])
+    if (
+      inventoryResult.isError ||
+      configuredResult.isError ||
+      inventoryResult.data?.status !== 200 ||
+      !inventoryResult.data.data.available ||
+      configuredResult.data?.status !== 200
+    ) {
+      return undefined
     }
-    return false
+    const identity = findStagedNativeWireGuardImportIdentity(
+      stagedPlan,
+      inventoryResult.data.data.interfaces,
+      configuredResult.data.data
+        .filter(
+          (item) =>
+            item.type === TransportSpecType.native &&
+            item.tag !== stagedPlan.tag
+        )
+        .map((item) => item.interface)
+    )
+    // A clean native journal does not prove that the inventory cache already
+    // includes the new interface. Preserve the plan for the next observation.
+    return identity ? completeRecoveredImportIdentity(identity) : undefined
   }
   const dismissRouteOffer = (candidate: NativeRouteOfferCandidate) => {
     setDismissedRouteOffers((current) =>

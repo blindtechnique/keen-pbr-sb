@@ -1915,6 +1915,8 @@ export const ruTranslation = {
     nativeImport: {
       title: "Импорт WireGuard / AmneziaWG",
       importingToast: "VPN импортируется",
+      completionPending:
+        "Не удалось завершить привязку VPN к панели. Повторите проверку — заново импортировать VPN не нужно.",
       importedToast: "VPN добавлен, маршрут подключён",
       panelLinkCreationFailed:
         "VPN создан в KeeneticOS, но панели не удалось сохранить его привязку. Не импортируйте его повторно: обновите список и подключите обнаруженный интерфейс.",
