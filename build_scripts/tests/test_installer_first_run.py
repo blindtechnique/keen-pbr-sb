@@ -7,6 +7,7 @@ the shipped standalone -> managed configuration handoff (container only).
 """
 
 from pathlib import Path
+import hashlib
 import io
 import http.server
 import os
@@ -236,6 +237,8 @@ esac
 
     def pending_first(self, unknown=True):
         (self.rescue / "candidate.ipk").write_bytes(self.ipk.read_bytes())
+        (self.rescue / "candidate.ipk.sha256").write_text(
+            hashlib.sha256(self.ipk.read_bytes()).hexdigest() + "\n")
         (self.rescue / "pending").write_text("candidate-staged\n")
         if unknown:
             (self.rescue / "UNKNOWN").write_text("candidate rollback has no verified baseline\n")
@@ -468,13 +471,110 @@ configure_web_auth() {{ echo configure-auth >> '{self.effects}'; }}
         self.assertIn("server=192.0.2.7#5300", self.config.read_text())
         self.assertNotIn("server=9.9.9.9", self.config.read_text())
 
-    def test_different_pending_package_not_resumed(self):
+    def test_new_verified_package_completes_failed_first_install(self):
         self.pending_first()
-        (self.rescue / "candidate.ipk").write_bytes(b"different package")
+        old_package = self.ipk.read_bytes()
+        settings = self.opt / "etc/keen-pbr/config.json"
+        settings.write_bytes(b'{"operator":"keep current settings"}\n')
+        original_snapshot = self.rescue / "pre-update-config"
+        original_snapshot.mkdir()
+        (original_snapshot / "config.json").write_bytes(b'original snapshot\n')
+        self.ipk.write_bytes(b"new-authenticated-package-with-giga-fix\n")
+        result = self.run_shell("prepare_first_install_retry\nprepare_first_install_dns\ninstall_package_transactionally", cleanup=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.rescue / "current.ipk").read_bytes(), self.ipk.read_bytes())
+        self.assertEqual(settings.read_bytes(), b'{"operator":"keep current settings"}\n')
+        self.assertEqual((original_snapshot / "config.json").read_bytes(), b'original snapshot\n')
+        archives = list(self.rescue.glob("failed-first-install.*/candidate.ipk"))
+        self.assertEqual(len(archives), 1)
+        self.assertEqual(archives[0].read_bytes(), old_package)
+        self.assertNotIn("rescue stage", self.effects_text())
+        self.assertFalse((self.rescue / "pending").exists())
+        self.assertFalse((self.rescue / "UNKNOWN").exists())
+
+    def test_new_first_install_package_without_unknown_marker(self):
+        self.pending_first(unknown=False)
+        self.ipk.write_bytes(b"new-verified-package\n")
+        result = self.run_shell("prepare_first_install_retry")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.rescue / "candidate.ipk").read_bytes(), self.ipk.read_bytes())
+        self.assertEqual((self.rescue / "candidate.ipk.sha256").read_text(),
+                         hashlib.sha256(self.ipk.read_bytes()).hexdigest() + "\n")
+        self.assertEqual((self.rescue / "pending").read_text(), "candidate-staged\n")
+        self.assertEqual(self.effects_text(), "")
+
+    def test_interrupted_first_install_candidate_hash_publication_is_retryable(self):
+        self.pending_first()
+        old_package = self.ipk.read_bytes()
+        self.ipk.write_bytes(b"new-verified-package\n")
+        result = self.run_shell("prepare_first_install_retry", '''
+mv() {
+    if [ "$3" = "$RESCUE_DIR/candidate.ipk.sha256" ]; then return 47; fi
+    command mv "$@"
+}
+''')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.rescue / "candidate.ipk").read_bytes(), self.ipk.read_bytes())
+        self.assertEqual((self.rescue / "pending").read_text(), "candidate-staged\n")
+        self.assertTrue((self.rescue / "UNKNOWN").exists())
+        result = self.run_shell("prepare_first_install_retry")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.rescue / "candidate.ipk.sha256").read_text(),
+                         hashlib.sha256(self.ipk.read_bytes()).hexdigest() + "\n")
+        archives = list(self.rescue.glob("failed-first-install.*/candidate.ipk"))
+        self.assertEqual(len(archives), 1)
+        self.assertEqual(archives[0].read_bytes(), old_package)
+
+    def test_same_verified_package_repairs_incomplete_sidecar(self):
+        self.pending_first()
+        digest = hashlib.sha256(self.ipk.read_bytes()).hexdigest()
+        sidecar = self.rescue / "candidate.ipk.sha256"
+        for incomplete in ("", digest, digest + "\n\n"):
+            with self.subTest(sidecar=incomplete):
+                sidecar.write_text(incomplete)
+                result = self.run_shell("prepare_first_install_retry")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(sidecar.read_text(), digest + "\n")
+        self.assertFalse(list(self.rescue.glob("failed-first-install.*")))
+        self.assertTrue((self.rescue / "pending").exists())
+        self.assertTrue((self.rescue / "UNKNOWN").exists())
+
+    def test_candidate_copy_failure_retains_original_failed_package(self):
+        self.pending_first()
+        old_package = self.ipk.read_bytes()
+        self.ipk.write_bytes(b"new-verified-package\n")
+        result = self.run_shell("prepare_first_install_retry", "cp() { return 48; }")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.rescue / "candidate.ipk").read_bytes(), old_package)
+        self.assertEqual((self.rescue / "candidate.ipk.sha256").read_text(),
+                         hashlib.sha256(old_package).hexdigest() + "\n")
+        self.assertTrue((self.rescue / "pending").exists())
+        self.assertTrue((self.rescue / "UNKNOWN").exists())
+
+    def test_candidate_sidecar_symlink_not_followed(self):
+        self.pending_first()
+        old_package = self.ipk.read_bytes()
+        outside = self.root / "outside"
+        outside.write_text("untouched\n")
+        sidecar = self.rescue / "candidate.ipk.sha256"
+        sidecar.unlink()
+        sidecar.symlink_to(outside)
+        self.ipk.write_bytes(b"new-verified-package\n")
         result = self.run_shell("prepare_first_install_retry")
         self.assertNotEqual(result.returncode, 0)
-        self.assertTrue((self.rescue / "UNKNOWN").exists())
+        self.assertEqual((self.rescue / "candidate.ipk").read_bytes(), old_package)
+        self.assertEqual(outside.read_text(), "untouched\n")
         self.assertEqual(self.effects_text(), "")
+
+    def test_later_transaction_phase_is_not_replaced(self):
+        self.pending_first()
+        old_package = self.ipk.read_bytes()
+        (self.rescue / "pending").write_text("candidate-promoting\n")
+        self.ipk.write_bytes(b"new-verified-package\n")
+        result = self.run_shell("prepare_first_install_retry")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.rescue / "candidate.ipk").read_bytes(), old_package)
+        self.assertFalse(list(self.rescue.glob("failed-first-install.*")))
 
     def test_unrelated_unknown_not_resumed(self):
         self.pending_first()
@@ -499,6 +599,12 @@ configure_web_auth() {{ echo configure-auth >> '{self.effects}'; }}
         self.assertIn("update-only", result.stdout)
 
     def test_retry_with_actual_published_rescue_and_startup_guard(self):
+        self.retry_with_actual_helpers(replace_package=False)
+
+    def test_new_package_retry_with_actual_published_helpers(self):
+        self.retry_with_actual_helpers(replace_package=True)
+
+    def retry_with_actual_helpers(self, replace_package):
         # Use the unmodified helpers from the IPK. Only opkg and the service
         # check endpoints are fixtures; journal, snapshots, hashes, lock and
         # the UNKNOWN capability check are the shipped implementations.
@@ -521,9 +627,13 @@ export KEEN_PBR_UPDATE_LOCK_PID=$$
 KEEN_PBR_UPDATE_LOCK_TOKEN=$("$RESCUE_DIR/update-lock.sh" acquire $$)
 export KEEN_PBR_UPDATE_LOCK_TOKEN
 '''
+        replacement = self.root / "verified-replacement.ipk"
+        replacement.write_bytes(b"another-authenticated-package\n")
+        select_package = f"PACKAGE_FILE='{replacement}'" if replace_package else ""
         result = self.run_shell('''
 "$RESCUE_HELPER" stage "$PACKAGE_FILE"
 printf '%s\n' 'candidate rollback has no verified baseline' > "$RESCUE_DIR/UNKNOWN"
+''' + select_package + '''
 prepare_first_install_retry
 prepare_first_install_dns
 install_package_transactionally
@@ -534,7 +644,8 @@ install_package_transactionally
         self.assertFalse((self.rescue / "UNKNOWN").exists())
         self.assertFalse((self.rescue / "pending").exists())
         self.assertTrue((self.rescue / "current.ipk.sha256").exists())
-        self.assertEqual((self.rescue / "current.ipk").read_bytes(), self.ipk.read_bytes())
+        expected_package = replacement if replace_package else self.ipk
+        self.assertEqual((self.rescue / "current.ipk").read_bytes(), expected_package.read_bytes())
 
     @unittest.skipUnless(os.environ.get("KPBR_TEST_REAL_DNS") == "1" and
                          Path("/.dockerenv").exists() and shutil.which("dnsmasq"),

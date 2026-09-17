@@ -1312,9 +1312,10 @@ prepare_first_install_retry() {
        [ ! -e "$RESCUE_DIR/UNKNOWN" ] && [ ! -L "$RESCUE_DIR/UNKNOWN" ]; then
         return 0
     fi
-    # Resume only the identical, freshly authenticated first-install IPK.
-    # There is no older package to roll back to. Do not erase its journal or
-    # configuration snapshot, and do not treat a failed upgrade as this case.
+    # No working baseline exists after a failed first install. A newly signed
+    # package must be able to repair that install, not be rejected merely for
+    # differing from the package which failed. Keep its journal/config snapshot;
+    # never apply this path to an interrupted upgrade with a working baseline.
     local item
     for item in current.ipk current.ipk.sha256 previous.ipk previous.ipk.sha256 \
         pending-baseline.ipk pending-baseline.ipk.sha256; do
@@ -1323,16 +1324,61 @@ prepare_first_install_retry() {
     done
     [ -f "$RESCUE_DIR/pending" ] && [ ! -L "$RESCUE_DIR/pending" ] &&
         [ "$(cat "$RESCUE_DIR/pending")" = candidate-staged ] &&
-        [ -f "$RESCUE_DIR/candidate.ipk" ] && [ ! -L "$RESCUE_DIR/candidate.ipk" ] &&
-        cmp -s "$PACKAGE_FILE" "$RESCUE_DIR/candidate.ipk" ||
-        die "Незавершённая установка относится к другому пакету или этапу. Сохранённые файлы не изменены." "The interrupted installation belongs to a different package or stage. Saved files were not changed."
+        [ -f "$RESCUE_DIR/candidate.ipk" ] && [ ! -L "$RESCUE_DIR/candidate.ipk" ] ||
+        die "Незавершённая установка находится на другом этапе или её пакет отсутствует. Сохранённые файлы не изменены." "The interrupted installation is at a different stage or its package is missing. Saved files were not changed."
     if [ -e "$RESCUE_DIR/UNKNOWN" ] || [ -L "$RESCUE_DIR/UNKNOWN" ]; then
         [ -f "$RESCUE_DIR/UNKNOWN" ] && [ ! -L "$RESCUE_DIR/UNKNOWN" ] &&
             [ "$(cat "$RESCUE_DIR/UNKNOWN")" = 'candidate rollback has no verified baseline' ] ||
             die "Причина незавершённой установки отличается от сбоя первого запуска. Сохранённые файлы не изменены." "The interrupted installation was not caused by first-start failure. Saved files were not changed."
     fi
+    local sidecar="$RESCUE_DIR/candidate.ipk.sha256"
+    [ ! -L "$sidecar" ] && { [ ! -e "$sidecar" ] || [ -f "$sidecar" ]; } ||
+        die "Файл контрольной суммы незавершённой установки повреждён. Сохранённый пакет не изменён." "The interrupted installation checksum path is invalid. The saved package was not changed."
+    # PACKAGE_FILE has already passed download_package's signature, target and
+    # digest verification. Also repair a partial IPK/sidecar publication after
+    # interruption: matching the freshly verified download is the authority,
+    # not the old sidecar. Do not clear PENDING or UNKNOWN before runtime checks.
+    [ -f "$PACKAGE_FILE" ] && [ -s "$PACKAGE_FILE" ] && [ ! -L "$PACKAGE_FILE" ] ||
+        die "Загруженный пакет недоступен. Сохранённая установка не изменена." "The downloaded package is unavailable. The saved installation was not changed."
+    local digest
+    digest=$(sha256sum "$PACKAGE_FILE") || return 1
+    digest=${digest%%[[:space:]]*}
+    [ "${#digest}" -eq 64 ] || return 1
+    case "$digest" in *[!0-9a-f]*) return 1 ;; esac
+    local same_package=0
+    cmp -s "$PACKAGE_FILE" "$RESCUE_DIR/candidate.ipk" && same_package=1
+    if [ "$same_package" != 1 ] || [ "$(cat "$sidecar" 2>/dev/null || true)" != "$digest" ] ||
+       [ "$(wc -l < "$sidecar" 2>/dev/null || true)" -ne 1 ]; then
+        local retry_dir
+        retry_dir=$(mktemp -d "$RESCUE_DIR/.first-install-retry.XXXXXX") || return 1
+        chmod 0700 "$retry_dir" || return 1
+        if ! cp "$PACKAGE_FILE" "$retry_dir/candidate.ipk" ||
+           ! cmp -s "$PACKAGE_FILE" "$retry_dir/candidate.ipk" ||
+           ! printf '%s\n' "$digest" > "$retry_dir/candidate.ipk.sha256" ||
+           ! chmod 0600 "$retry_dir/candidate.ipk" "$retry_dir/candidate.ipk.sha256"; then
+            rm -f "$retry_dir/candidate.ipk" "$retry_dir/candidate.ipk.sha256"
+            rmdir "$retry_dir" 2>/dev/null || true
+            die "Не удалось сохранить новый пакет для повторной установки. Прежний пакет и настройки не изменены; проверьте свободное место Entware." "Could not save the new package for retry. The previous package and settings were not changed; check free space in Entware."
+        fi
+        if [ "$same_package" != 1 ]; then
+            local archive_dir
+            archive_dir=$(mktemp -d "$RESCUE_DIR/failed-first-install.XXXXXX") || return 1
+            chmod 0700 "$archive_dir" &&
+                cp -p "$RESCUE_DIR/candidate.ipk" "$RESCUE_DIR/pending" "$archive_dir/" || return 1
+            [ ! -f "$sidecar" ] || cp -p "$sidecar" "$archive_dir/" || return 1
+            [ ! -f "$RESCUE_DIR/UNKNOWN" ] || cp -p "$RESCUE_DIR/UNKNOWN" "$archive_dir/" || return 1
+            sync || return 1
+            say "Прежний пакет неудачной установки сохранён: $archive_dir" "The previous failed-install package is retained at: $archive_dir"
+        fi
+        # A crash between these renames leaves PENDING intact. Repeating this
+        # same signed download repairs the sidecar and continues normally.
+        mv -f "$retry_dir/candidate.ipk" "$RESCUE_DIR/candidate.ipk" &&
+            mv -f "$retry_dir/candidate.ipk.sha256" "$sidecar" && sync ||
+            die "Подготовка повторной установки прервалась. Повторите ту же команду; настройки и прежний пакет сохранены." "Retry preparation was interrupted. Repeat the same command; settings and the previous package are retained."
+        rmdir "$retry_dir" 2>/dev/null || true
+    fi
     RESUME_FIRST_INSTALL=1
-    say "Завершаю прежнюю первую установку тем же подписанным IPK; настройки и резервная копия сохраняются." "Completing the previous first installation with the same signed IPK; settings and backup will be retained."
+    say "Завершаю первую установку выбранным подписанным IPK; настройки и резервная копия сохраняются." "Completing first installation with the selected signed IPK; settings and backup will be retained."
 }
 
 verify_installed_runtime() {
@@ -1398,7 +1444,7 @@ install_package_transactionally() {
            /opt/bin/opkg --force-reinstall install "$PACKAGE_FILE" &&
        [ -x "$RESCUE_HELPER" ] &&
        verify_installed_runtime "$verification_windows"; then
-        # The no-baseline marker is cleared only after the same signed package
+        # The no-baseline marker is cleared only after the selected signed package
         # has actually started and passed the existing runtime verification.
         if [ "${RESUME_FIRST_INSTALL:-0}" = 1 ]; then
             rm -f "$RESCUE_DIR/UNKNOWN" && sync || return 1
@@ -1469,6 +1515,7 @@ fi
 ensure_release_verifier
 say "Установка keen-pbr-sb для ${KEEN_ARCH}-${KEEN_ABI} из $PROJECT_REPOSITORY" "Installing keen-pbr-sb for ${KEEN_ARCH}-${KEEN_ABI} from $PROJECT_REPOSITORY"
 download_package
+say "Выбран выпуск $RELEASE_TAG. Пакет: $(basename "$PACKAGE_FILE")" "Selected release $RELEASE_TAG. Package: $(basename "$PACKAGE_FILE")"
 bootstrap_rescue_helpers
 if [ "$UPDATE_ONLY" = "1" ]; then
     say "Устанавливаю обновление keen-pbr-sb без изменения пользовательских настроек..." "Installing the keen-pbr-sb update without changing user settings..."
