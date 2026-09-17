@@ -742,6 +742,10 @@ void register_test_routing_handler(ApiServer& server, ApiContext& ctx) {
             if (entry.list_match) {
                 e.list_match = to_api_list_match(*entry.list_match);
             }
+            std::vector<api::ListMatch> list_matches;
+            for (const auto& match : entry.list_matches)
+                list_matches.push_back(to_api_list_match(match));
+            e.list_matches = std::move(list_matches);
             resp.results.push_back(std::move(e));
         }
 

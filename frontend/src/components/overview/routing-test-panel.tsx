@@ -29,6 +29,7 @@ import {
 } from "@/components/ui/input-group"
 import { Skeleton } from "@/components/ui/skeleton"
 import { getApiErrorMessage } from "@/lib/api-errors"
+import { useInterfaceDisplayNames } from "@/hooks/use-interface-display-names"
 
 import { RoutingDiagnosticsResult } from "./routing-diagnostics-result"
 import {
@@ -54,6 +55,7 @@ export function RoutingTestPanel({
   outbounds?: ConfigObject["outbounds"]
 }) {
   const { t } = useTranslation()
+  const { labelFor: interfaceLabelFor } = useInterfaceDisplayNames()
   const [testTarget, setTestTarget] = useState("")
   const [routingInputError, setRoutingInputError] = useState<string | null>(
     null
@@ -319,6 +321,7 @@ export function RoutingTestPanel({
           diagnostics={routingDiagnostics}
           lists={lists}
           outbounds={outbounds}
+          interfaceLabelFor={interfaceLabelFor}
           {...httpControls}
           onHttpProbe={(ip) => {
             if (

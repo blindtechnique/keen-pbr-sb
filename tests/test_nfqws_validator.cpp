@@ -578,7 +578,19 @@ TEST_CASE("nfqws validator: all packaged Keenetic strategies pass structural val
         CHECK(validate_nfqws_candidate(content).empty());
         ++checked;
     }
-    CHECK(checked == 16U);
+    CHECK(checked == 17U);
+}
+
+TEST_CASE("nfqws strategy comparison ignores only an independent runtime IPv6 toggle") {
+    const std::string tail = "NFQWS_ARGS=\"--filter-tcp=443 --lua-desync=fake\"\n";
+    CHECK(nfqws_config_without_runtime_ipv6("IPV6_ENABLED=0\n" + tail) ==
+          nfqws_config_without_runtime_ipv6("IPV6_ENABLED=1\n" + tail));
+    const std::string quoted = "POLICY_NAME='line\nIPV6_ENABLED=1'\n" + tail;
+    CHECK(nfqws_config_without_runtime_ipv6(quoted) == quoted);
+    const std::string dependent = "IPV6_ENABLED=1\nPOLICY_NAME=\"$IPV6_ENABLED\"\n" + tail;
+    CHECK(nfqws_config_without_runtime_ipv6(dependent) == dependent);
+    const std::string invalid = "IPV6_ENABLED=2\n" + tail;
+    CHECK(nfqws_config_without_runtime_ipv6(invalid) == invalid);
 }
 
 TEST_CASE("nfqws validator: dry-run argv mirrors Keenetic CUSTOM UDP QUIC and TCP order") {

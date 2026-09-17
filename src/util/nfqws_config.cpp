@@ -1,4 +1,5 @@
 #include "nfqws_config.hpp"
+#include "nfqws_validator.hpp"
 
 #include <sstream>
 
@@ -105,10 +106,14 @@ bool nfqws_config_matches_packaged_strategy(
     const std::string& content,
     const std::string& packaged_content,
     const std::string& wan_rendered_packaged_content) {
-    const auto identity = nfqws_config_strategy_identity(content);
-    return identity == nfqws_config_strategy_identity(packaged_content) ||
-           identity == nfqws_config_strategy_identity(
-                           wan_rendered_packaged_content);
+    const auto normalize = [](const std::string& value) {
+        return nfqws_config_without_version_metadata(
+            nfqws_config_without_runtime_ipv6(
+                nfqws_config_strategy_identity(value)));
+    };
+    const auto identity = normalize(content);
+    return identity == normalize(packaged_content) ||
+           identity == normalize(wan_rendered_packaged_content);
 }
 
 std::string nfqws_config_with_isp_interfaces(

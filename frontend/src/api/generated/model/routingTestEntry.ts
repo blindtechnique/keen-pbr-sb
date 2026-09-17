@@ -18,6 +18,8 @@ export interface RoutingTestEntry {
   /** Details of the list entry that matched. Absent when no rule matched.
    */
   list_match?: RoutingTestListMatch;
+  /** Matches in locally available configured lists, including lists not attached to any route. Does not imply VPN routing. */
+  list_matches?: RoutingTestListMatch[];
   /**
      * Zero-based active rule index, only for a conclusive configured match.
      * @minimum 0

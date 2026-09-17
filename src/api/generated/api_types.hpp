@@ -1558,6 +1558,7 @@ namespace api {
         std::optional<std::string> rkn_domain;
         std::string service;
         std::optional<std::string> target;
+        std::optional<bool> whitelisted;
     };
 
     struct RegistryConsentRequest {
@@ -1815,6 +1816,7 @@ namespace api {
         std::string ip;
         KernelRoute kernel_route;
         std::optional<ListMatch> list_match;
+        std::optional<std::vector<ListMatch>> list_matches;
         bool ok = false;
         std::optional<PolicyRules> policy_rules;
         std::vector<RoutingTestUnknownConditionElement> unknown_conditions;
@@ -6683,6 +6685,7 @@ namespace api {
         x.rkn_domain = get_stack_optional<std::string>(j, "rkn_domain");
         x.service = j.at("service").get<std::string>();
         x.target = get_stack_optional<std::string>(j, "target");
+        x.whitelisted = get_stack_optional<bool>(j, "whitelisted");
     }
 
     inline void to_json(json & j, const RegistryCheckResponse & x) {
@@ -6699,6 +6702,7 @@ namespace api {
         j["rkn_domain"] = x.rkn_domain;
         j["service"] = x.service;
         j["target"] = x.target;
+        j["whitelisted"] = x.whitelisted;
     }
 
     inline void from_json(const json & j, RegistryConsentRequest& x) {
@@ -7166,6 +7170,7 @@ namespace api {
         x.ip = j.at("ip").get<std::string>();
         x.kernel_route = j.at("kernel_route").get<KernelRoute>();
         x.list_match = get_stack_optional<ListMatch>(j, "list_match");
+        x.list_matches = get_stack_optional<std::vector<ListMatch>>(j, "list_matches");
         x.ok = j.at("ok").get<bool>();
         x.policy_rules = get_stack_optional<PolicyRules>(j, "policy_rules");
         x.unknown_conditions = j.at("unknown_conditions").get<std::vector<RoutingTestUnknownConditionElement>>();
@@ -7182,6 +7187,7 @@ namespace api {
         j["ip"] = x.ip;
         j["kernel_route"] = x.kernel_route;
         j["list_match"] = x.list_match;
+        j["list_matches"] = x.list_matches;
         j["ok"] = x.ok;
         j["policy_rules"] = x.policy_rules;
         j["unknown_conditions"] = x.unknown_conditions;

@@ -228,6 +228,12 @@ nlohmann::json summarise(const nlohmann::json& raw) {
     summary["checked"] = true;
     summary["service"] = kServiceName;
     summary["blocked"] = raw.value("blocked", false);
+    // Cheburcheck reports whitelist membership separately from blocking.
+    // Absence from the blocking registry alone is not whitelist evidence.
+    const auto whitelist = raw.find("whitelist");
+    summary["whitelisted"] = whitelist != raw.end() && whitelist->is_object() &&
+        whitelist->contains("domain") && (*whitelist)["domain"].is_string() &&
+        !(*whitelist)["domain"].get_ref<const std::string&>().empty();
 
     const auto rkn = raw.find("rkn_domain");
     if (rkn != raw.end() && rkn->is_string()) {

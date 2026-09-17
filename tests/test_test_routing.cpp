@@ -337,6 +337,29 @@ bool contains_condition(const std::vector<std::string>& conditions,
 
 } // namespace
 
+TEST_CASE("routing diagnosis finds configured lists without a VPN rule") {
+    const auto temp_dir = make_temp_dir();
+    CacheManager cache(temp_dir);
+    cache.ensure_dir();
+    const auto path = temp_dir / "unbound.txt";
+    { std::ofstream file(path); file << "203.0.113.0/24\n"; }
+    Config config = build_test_config();
+    ListConfig list;
+    list.file = path.string();
+    config.lists = std::map<std::string, ListConfig>{{"unbound", list}};
+    config.route = RouteConfig{};
+    config.route->rules = std::vector<RouteRule>{};
+    const auto result = compute_test_routing(config, cache, "203.0.113.8");
+    REQUIRE(result.entries.size() == 1);
+    const auto& entry = result.entries.front();
+    REQUIRE(entry.list_matches.size() == 1);
+    CHECK(entry.list_matches.front().list_name == "unbound");
+    CHECK_FALSE(entry.list_match);
+    CHECK(entry.expected_outbound == "(default)");
+    CHECK(result.no_matching_rule);
+    std::filesystem::remove_all(temp_dir);
+}
+
 TEST_CASE("compute_test_routing resolves domain through configured system resolver") {
     if (!udp_socket_available()) {
         DOCTEST_INFO("UDP sockets unavailable in current environment");

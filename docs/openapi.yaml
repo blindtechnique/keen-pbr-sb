@@ -7816,6 +7816,11 @@ components:
           $ref: "#/components/schemas/RoutingTestListMatch"
           description: >
             Details of the list entry that matched. Absent when no rule matched.
+        list_matches:
+          type: array
+          items:
+            $ref: "#/components/schemas/RoutingTestListMatch"
+          description: Matches in locally available configured lists, including lists not attached to any route. Does not imply VPN routing.
         expected_rule_index:
           type: integer
           minimum: 0
@@ -8200,6 +8205,9 @@ components:
         blocked:
           type: boolean
           description: The domain itself is on the registry.
+        whitelisted:
+          type: boolean
+          description: The external service explicitly reports whitelist membership; not inferred from blocked=false.
         rkn_domain:
           type: string
           description: The registry entry that covers it, when there is one.

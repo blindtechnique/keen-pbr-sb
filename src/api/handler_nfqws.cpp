@@ -3342,19 +3342,13 @@ void register_nfqws_handler_impl(
         const auto active_config = fs::path(kConfigDir) / "nfqws2.conf";
         if (fs::is_regular_file(active_config, ec)) {
             active_content = read_file(active_config);
-            const auto active_identity =
-                nfqws_config_without_version_metadata(
-                    nfqws_config_strategy_identity(active_content));
             for (const auto& strategy : strategies) {
                 const auto name = strategy.value("name", std::string{});
-                auto expected = strategy.value("content", std::string{});
-                const auto saved_identity = nfqws_config_without_version_metadata(
-                    nfqws_config_strategy_identity(expected));
+                const auto saved = strategy.value("content", std::string{});
+                auto expected = saved;
                 if (automatic_wan_strategy(name)) expected = render_wan_interfaces(expected);
-                if (saved_identity == active_identity ||
-                    nfqws_config_without_version_metadata(
-                        nfqws_config_strategy_identity(expected)) ==
-                    active_identity) {
+                if (nfqws_config_matches_packaged_strategy(
+                        active_content, saved, expected)) {
                     active_strategy = strategy.value("name", std::string{});
                     break;
                 }
@@ -3500,6 +3494,14 @@ void register_nfqws_handler_impl(
                 .dump();
         }
         if (action == "install") {
+            // Capture only a genuinely fresh postinst default, never relabel
+            // an operator's pre-existing configuration as the stock strategy.
+            std::error_code initial_config_error;
+            const auto initial_config_status = fs::symlink_status(
+                fs::path(kConfigDir) / "nfqws2.conf", initial_config_error);
+            const bool remember_initial_default =
+                initial_config_status.type() == fs::file_type::not_found &&
+                (!initial_config_error || initial_config_error == std::errc::no_such_file_or_directory);
             // A fresh installation for a router that does not have the
             // package: the same lease, the same lock order and the same
             // verified download path as the upgrade. What it does not have
@@ -3620,6 +3622,17 @@ void register_nfqws_handler_impl(
                  installed_now != result.target_version);
 
             if (!component_broken) {
+                if (remember_initial_default) {
+                    try {
+                        bool durable = true;
+                        const auto name = save_default_strategy_content(
+                            read_file(fs::path(kConfigDir) / "nfqws2.conf"), durable);
+                        output += "Initial nfqws2 configuration saved as " + name + ".\n";
+                    } catch (const std::exception& error) {
+                        // Catalog bookkeeping must not undo a working install.
+                        output += std::string("Could not save the initial strategy: ") + error.what() + "\n";
+                    }
+                }
                 record.phase = ComponentTransactionPhase::verified;
                 try {
                     write_nfqws_transaction(record);

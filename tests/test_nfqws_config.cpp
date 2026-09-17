@@ -1,4 +1,5 @@
 #include "../src/util/nfqws_config.hpp"
+#include "../src/crypto/sha256.hpp"
 
 #include <doctest/doctest.h>
 
@@ -30,6 +31,20 @@ void replace_once(std::string& content,
 }
 
 } // namespace
+
+TEST_CASE("stock nfqws2 1.2.8 recognizes the untouched Giga configuration") {
+    const auto stock = read_generated_strategy("default (nfqws2 1.2.8)");
+    auto giga = stock;
+    replace_once(giga, "IPV6_ENABLED=1", "IPV6_ENABLED=0");
+    keen_pbr3::Sha256 hash;
+    hash.update(giga);
+    CHECK(hash.hex_digest() == "3ee6bc9484d90e536b20acf810c6fdab3d8b2b227b4e54b0d67c7268fa6cd7fc");
+    CHECK(keen_pbr3::nfqws_config_matches_packaged_strategy(giga, stock, stock));
+    const auto wan = keen_pbr3::nfqws_config_with_isp_interfaces(stock, {"ppp0"});
+    CHECK(keen_pbr3::nfqws_config_matches_packaged_strategy(wan, stock, wan));
+    replace_once(giga, "NFQWS_EXTRA_ARGS=\"$MODE_AUTO\"", "NFQWS_EXTRA_ARGS=\"$MODE_LIST\"");
+    CHECK_FALSE(keen_pbr3::nfqws_config_matches_packaged_strategy(giga, stock, stock));
+}
 
 TEST_CASE("nfqws comparison ignores only IPV6_ENABLED assignment") {
     const std::string base =

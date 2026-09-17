@@ -27,6 +27,8 @@ export interface RegistryCheckResponse {
   target?: string;
   /** The domain itself is on the registry. */
   blocked?: boolean;
+  /** The external service explicitly reports whitelist membership; not inferred from blocked=false. */
+  whitelisted?: boolean;
   /** The registry entry that covers it, when there is one. */
   rkn_domain?: string;
   /** Blocked prefixes covering the target's addresses. A site with no registry entry of its own can still be unreachable through one of these.

@@ -270,7 +270,7 @@ describe("bounded routing evidence", () => {
         const text = (language === "ru" ? ruTranslation : enTranslation)
           .overview.routingDiagnostics
         expect(html).toContain(text.evidence.title)
-        expect(html).toContain(text.resultTitle)
+        expect(html).not.toContain(text.resultTitle)
         expect(html).toContain(text.ruleDetailsTitle)
         expect(html).not.toContain(text.pathTitle)
         expect(html).toMatch(/<details\s[^>]*>/)
@@ -523,7 +523,7 @@ describe("manual route HTTPS presentation", () => {
     })
     expect(html).toContain(text.evidence.httpPending)
     expect(html).toMatch(/<button[^>]*\sdisabled(?:=|\s|>)/)
-    expect(html).toContain(text.resultTitle)
+    expect(html).not.toContain(text.resultTitle)
     expect(html).toContain(text.ruleDetailsTitle)
     expect(html).toContain("nwg1")
     html = await render(data, "en", true, {
@@ -531,7 +531,7 @@ describe("manual route HTTPS presentation", () => {
       httpError: { ip: "2001:db8::1" },
     })
     expect(html).toContain(text.evidence.httpRequestFailed)
-    expect(html).toContain(text.resultTitle)
+    expect(html).not.toContain(text.resultTitle)
     expect(html).not.toMatch(/<button[^>]*\sdisabled(?:=|\s|>)/)
     html = await render(data, "en", false, {
       onHttpProbe: () => undefined,

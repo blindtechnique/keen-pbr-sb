@@ -187,25 +187,19 @@ private:
     std::size_t entry_count_{0};
 };
 
-// Pre-build lookup data for all lists referenced in route rules.
+// Read configured lists from one local cache generation, including lists
+// not yet attached to a rule. This diagnostic never downloads the catalog.
 std::map<std::string, ListLookupData> build_all_lookups(
     const Config& config,
     const CacheManager& cache,
     std::optional<RoutingTestDeadline> deadline) {
     enforce_routing_test_deadline(deadline);
     std::map<std::string, ListLookupData> result;
-    const auto& route_rules =
-        config.route.value_or(RouteConfig{}).rules.value_or(std::vector<RouteRule>{});
     const auto& lists_map =
         config.lists.value_or(std::map<std::string, ListConfig>{});
     std::set<std::string> referenced;
-    for (const auto& rule : route_rules) {
-        if (!route_rule_enabled(rule)) {
-            continue;
-        }
-        for (const auto& list_name : route_rule_lists(rule)) {
-            referenced.insert(list_name);
-        }
+    for (const auto& item : lists_map) {
+        referenced.insert(item.first);
     }
 
     const std::vector<std::string> referenced_names(
@@ -563,6 +557,21 @@ std::optional<ListMatchInfo> find_rule_match(const RouteRule& rule,
         }
     }
     return std::nullopt;
+}
+
+std::vector<ListMatchInfo> find_all_list_matches(
+    const std::map<std::string, ListLookupData>& lookups,
+    const std::string& ip, const std::vector<std::string>& domain_cands,
+    std::optional<RoutingTestDeadline> deadline) {
+    std::vector<ListMatchInfo> matches;
+    for (const auto& item : lookups) {
+        enforce_routing_test_deadline(deadline);
+        RouteRule membership;
+        membership.list = std::vector<std::string>{item.first};
+        if (auto match = find_rule_match(membership, lookups, ip, domain_cands))
+            matches.push_back(std::move(*match));
+    }
+    return matches;
 }
 
 void append_unknown_condition(std::vector<std::string>& conditions,
@@ -1115,6 +1124,7 @@ TestRoutingResult compute_test_routing(const Config& config,
         entry.expected_outbound = expected.outbound;
         entry.expected_rule_index = expected.rule_index;
         entry.list_match = std::move(expected.list_match);
+        entry.list_matches = find_all_list_matches(lookups, "", domain_cands, deadline);
         entry.actual_outbound = "(unknown)";
         entry.ok = false;
         entry.evaluation = RoutingMatchEvaluation::InsufficientContext;
@@ -1154,6 +1164,7 @@ TestRoutingResult compute_test_routing(const Config& config,
         per_ip.entry.expected_outbound = expected.outbound;
         per_ip.entry.expected_rule_index = expected.rule_index;
         per_ip.entry.list_match = std::move(expected.list_match);
+        per_ip.entry.list_matches = find_all_list_matches(lookups, ip, domain_cands, deadline);
         per_ip.entry.evaluation = expected.evaluation;
         per_ip.entry.unknown_conditions = expected.unknown_conditions;
 

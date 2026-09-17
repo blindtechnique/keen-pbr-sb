@@ -885,6 +885,29 @@ std::string nfqws_config_without_version_metadata(const std::string& content) {
     return result;
 }
 
+std::string nfqws_config_without_runtime_ipv6(const std::string& content) {
+    const auto parsed = parse_candidate(content);
+    if (!parsed.issues.empty()) return content;
+    const auto& toggle = value_of(parsed, "IPV6_ENABLED");
+    if (toggle != "0" && toggle != "1") return content;
+    std::string result = content;
+    for (auto assignment = parsed.assignments.rbegin();
+         assignment != parsed.assignments.rend(); ++assignment) {
+        if (assignment->name == "IPV6_ENABLED") {
+            result.erase(assignment->begin, assignment->end - assignment->begin);
+        }
+    }
+    const auto checked = parse_candidate(result);
+    if (!checked.issues.empty()) return content;
+    for (const auto& [name, value] : parsed.values) {
+        if (name == "IPV6_ENABLED") continue;
+        const auto found = checked.values.find(name);
+        if (found == checked.values.end() || found->second != value)
+            return content;
+    }
+    return result;
+}
+
 std::optional<std::string> migrate_nfqws_config_preserving_settings(
     const std::string& previous,
     const std::string& package_defaults) {

@@ -80,7 +80,10 @@ describe("profile-aware nfqws diagnostics", () => {
       const firstDetails = html.indexOf("<details")
       expect(firstDetails).toBeGreaterThan(0)
       const visible = html.slice(0, firstDetails)
-      expect(visible).toContain(translation.nfqws.covered)
+      expect(visible).toContain(translation.nfqwsIncludedList)
+      expect(visible).toContain(
+        'class="text-sm text-green-700"><strong>example.test</strong>'
+      )
       expect(visible).toContain("/opt/etc/nfqws2/user.list")
       expect(visible).toContain("example.test")
       expect(visible).not.toContain(translation.nfqwsScope)
@@ -105,6 +108,9 @@ describe("profile-aware nfqws diagnostics", () => {
         language
       )
       expect(html).toContain(translation.nfqwsUnrestricted)
+      const visible = html.slice(0, html.indexOf("<details"))
+      expect(visible).toContain(translation.nfqwsNotInLists)
+      expect(visible).not.toContain(translation.nfqwsUnrestricted)
       expect(html).not.toContain(translation.nfqws.covered)
       expect(html).not.toContain("overview.targetFacts.")
     }
@@ -155,6 +161,12 @@ describe("profile-aware nfqws diagnostics", () => {
         language
       )
       expect(html).toContain(translation.nfqws.mixed)
+      const visible = html.slice(0, html.indexOf("<details"))
+      expect(visible).toContain(
+        'class="text-sm text-primary"><strong>example.test</strong>'
+      )
+      expect(visible).toContain(translation.nfqwsExcludedList)
+      expect(visible).not.toContain(translation.nfqws.mixed)
       expect(html).toContain(translation.nfqwsScope)
       expect(html).toContain(translation.nfqwsVisibleHost)
       expect(html).toContain(translation.role.hostlist_exclude)

@@ -1,5 +1,6 @@
 import { useTranslation } from "react-i18next"
 import type { TFunction } from "i18next"
+import type { ReactNode } from "react"
 import { Loader2 } from "lucide-react"
 
 import type {
@@ -23,10 +24,12 @@ import {
 export function RoutingEvidenceDetails({
   diagnostics,
   lists,
+  children,
   ...httpControls
 }: {
   diagnostics: RoutingTestResponse
   lists?: ConfigObject["lists"]
+  children?: ReactNode
 } & RoutingHttpProbeControls) {
   const { t } = useTranslation()
   const unknown = t("overview.routingDiagnostics.statusUnknown")
@@ -52,6 +55,7 @@ export function RoutingEvidenceDetails({
         {t("overview.routingDiagnostics.evidence.title")}
       </summary>
       <div className="mt-3 space-y-4">
+        {children}
         <p className="text-muted-foreground">
           {t("overview.routingDiagnostics.evidence.scope")}
         </p>

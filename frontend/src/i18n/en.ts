@@ -2858,10 +2858,12 @@ export const enTranslation = {
       },
       nfqwsTitle: "nfqws",
       nfqwsChecking: "Checking nfqws lists…",
+      nfqwsIncludedList: "is in an nfqws processing list.",
+      nfqwsExcludedList: "is in an nfqws exclusion list.",
+      nfqwsNotInLists: "was not found in the nfqws lists.",
       nfqws: {
-        busy: "Another nfqws coverage check is already running. This routing result is still valid; try the check again.",
-        unknown:
-          "Not all nfqws conditions could be checked: some data is unavailable or needs connection details.",
+        busy: "nfqws list check is busy. Try again shortly.",
+        unknown: "the nfqws lists could not be checked.",
         covered: "The target is in the nfqws lists.",
         excluded:
           "An exclusion matches. It applies only within its own profile, not across all nfqws settings.",
@@ -2914,6 +2916,7 @@ export const enTranslation = {
         "not-checked":
           "The lookup did not run, which is not the same as not being blocked.",
         listed: "This target is on the blocking registry.",
+        whitelisted: "This target is on the whitelist.",
         "not-listed": "This target is not on the registry.",
         "subnet-only":
           "The target itself is not on the registry, but its addresses fall inside blocked prefixes.",
@@ -2942,8 +2945,11 @@ export const enTranslation = {
       emptyDescription: "Try another domain or IP address.",
     },
     routingDiagnostics: {
-      noMatchingRule:
-        "This address has no specific keen-pbr routing rule. nfqws does not need one — its lists are checked separately.",
+      appliedRoute: "Route / VPN",
+      listNotFound: "No match",
+      ruleConditions: "Rule conditions",
+      routeMismatch: "Route mismatch",
+      noMatchingRule: "No separate VPN route is configured for this site.",
       pathTitle: "Routing path check",
       pathDescription:
         "Shows rule, firewall, and router-local route lookup decisions. This is not a website availability test.",

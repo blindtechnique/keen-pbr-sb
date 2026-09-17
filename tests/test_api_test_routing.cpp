@@ -79,6 +79,8 @@ ApiContext make_test_api_context(SseBroadcaster& broadcaster) {
                 "source_address", "destination_port"};
             entry.list_match =
                 ListMatchInfo{"work", "203.0.113.7"};
+            entry.list_matches = {ListMatchInfo{"work", "203.0.113.7"},
+                                  ListMatchInfo{"unbound", "203.0.113.7"}};
             entry.fib.verdict = RoutingFibVerdict::Unavailable;
             entry.fib.detail =
                 "packet context is insufficient for a FIB lookup";
@@ -207,6 +209,8 @@ TEST_CASE("register_test_routing_handler: exposes active scope and honest per-IP
         body.at("rule_diagnostics")[0].at("ip_rows")[0];
     CHECK(row.at("in_lists") == true);
     CHECK(row.at("list_match").at("list") == "work");
+    CHECK(body.at("results").at(0).at("list_matches").size() == 2);
+    CHECK(body.at("results").at(0).at("list_matches").at(1).at("list") == "unbound");
     CHECK(row.at("evaluation") == "insufficient_context");
 }
 

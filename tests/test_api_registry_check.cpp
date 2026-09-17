@@ -303,6 +303,22 @@ TEST_CASE("registry check reports the verdict and credits the service") {
     CHECK(harness.asked() == std::vector<std::string>{"rutracker.org"});
 }
 
+TEST_CASE("registry whitelist is separate explicit evidence") {
+    RegistryHarness harness(18332);
+    httplib::Client client("127.0.0.1", 18332);
+    for (const auto& value : {nlohmann::json(nullptr), nlohmann::json(false), nlohmann::json::object(), nlohmann::json{{"domain", "example.org"}}}) {
+        auto body = nlohmann::json::parse(kBlockedBody);
+        body["blocked"] = false;
+        body["whitelist"] = value;
+        harness.body = body.dump();
+        const auto response = post_check(client, {{"target", "example" + std::to_string(harness.asked().size()) + ".org"}});
+        REQUIRE(response);
+        const auto json = nlohmann::json::parse(response->body);
+        CHECK(json.at("whitelisted") == (value.is_object() && value.contains("domain")));
+        CHECK_FALSE(json.at("blocked").get<bool>());
+    }
+}
+
 TEST_CASE("a second look at the same target does not ask again") {
     constexpr int api_port = 18323;
     RegistryHarness harness(api_port);
