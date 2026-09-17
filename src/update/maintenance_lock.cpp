@@ -729,11 +729,18 @@ void validate_helper_metadata(const std::string& helper_path,
         if (current.size() > 1) current.push_back('/');
         current += component;
 
+        // The shared Entware installation directories may retain a packaging
+        // UID. The package-owned keen-pbr directory and the executable itself
+        // must still be root-owned; no group/world-writable parent is allowed.
+        const bool entware_installation_parent =
+            helper_path == kProductionHelper &&
+            (current == "/opt" || current == "/opt/usr" ||
+             current == "/opt/usr/lib");
         struct stat directory {};
         if (::lstat(current.c_str(), &directory) != 0 ||
             !S_ISDIR(directory.st_mode) ||
             S_ISLNK(directory.st_mode) ||
-            directory.st_uid != 0 ||
+            (!entware_installation_parent && directory.st_uid != 0) ||
             (directory.st_mode & 0022) != 0) {
             throw MaintenanceLockError(
                 MaintenanceLockErrorKind::unsafe_state,

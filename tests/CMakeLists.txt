@@ -82,6 +82,7 @@ add_executable(keen-pbr-tests
   test_ndms_interface_management.cpp
   test_ndms_native_allocator_fence.cpp
   test_ndms_native_writer_lease.cpp
+  test_ndms_native_storage_path.cpp
   test_ndms_native_observation_store.cpp
   test_ndms_native_create_policy.cpp
   test_ndms_native_import_baseline.cpp
@@ -673,6 +674,7 @@ add_executable(keen-pbr-native-tunnel-import-tests
   test_main.cpp
   test_ndms_native_allocator_fence.cpp
   test_ndms_native_writer_lease.cpp
+  test_ndms_native_storage_path.cpp
   test_ndms_native_observation_store.cpp
   test_ndms_native_create_policy.cpp
   test_ndms_native_import_baseline.cpp
@@ -758,6 +760,7 @@ add_executable(keen-pbr-native-tunnel-import-tests
   ../src/keenetic/ndms_interface_inventory.cpp
   ../src/http/http_client.cpp
   ../src/http/http_transport.cpp
+  ../src/update/maintenance_lock.cpp
 )
 set_target_properties(keen-pbr-native-tunnel-import-tests PROPERTIES
   CXX_STANDARD 17

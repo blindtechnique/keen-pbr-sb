@@ -1,4 +1,5 @@
 #include "ndms_native_secret_snapshot.hpp"
+#include "ndms_native_storage_path.hpp"
 
 #include "ndms_wireguard_identity.hpp"
 
@@ -389,8 +390,7 @@ SecretFileDescriptor open_directory(
                     "native secret directory is not exact owner-only 0700");
             }
         } else if (policy.require_root_process &&
-                   (opened.st_uid != 0 ||
-                    (opened.st_mode & 0022) != 0)) {
+                   !ndms_native_parent_metadata_allowed(components, index, opened)) {
             throw std::runtime_error(
                 "native secret parent is not root protected");
         }
