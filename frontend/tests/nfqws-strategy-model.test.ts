@@ -4,12 +4,50 @@ import {
   canSnapshotActiveNfqwsConfig,
   canonicalNfqwsProfileTier,
   nfqwsProfileMatchesPackage,
+  nfqwsStrategyIsApplied,
   nfqwsBreakdownSubject,
   nfqwsBuiltinStrategyDisplayKey,
   parseNfqwsProfileMarker,
   parseNfqwsStrategy,
   parseShellAssignments,
 } from "../src/pages/nfqws-strategy-model"
+
+describe("applied nfqws strategy content", () => {
+  const saved = {
+    name: "default (nfqws2 1.2.8)",
+    activeStrategy: "default (nfqws2 1.2.8)",
+    savedContent: "NFQWS_ARGS='--filter-tcp=443'",
+  }
+
+  test("unchanged active content cannot be reapplied", () => {
+    expect(nfqwsStrategyIsApplied(saved)).toBe(true)
+  })
+
+  test("real draft changes allow applying, including an empty draft", () => {
+    for (const draftContent of ["NFQWS_ARGS='--filter-tcp=80'", ""]) {
+      expect(nfqwsStrategyIsApplied({ ...saved, draftContent })).toBe(false)
+    }
+  })
+
+  test("reverting a draft restores the applied state", () => {
+    expect(
+      nfqwsStrategyIsApplied({ ...saved, draftContent: saved.savedContent })
+    ).toBe(true)
+  })
+
+  test("other saved strategies are still available to apply", () => {
+    expect(nfqwsStrategyIsApplied({ ...saved, name: "My strategy" })).toBe(
+      false
+    )
+  })
+
+  test("an unmatched active config or missing strategy is not applied", () => {
+    expect(nfqwsStrategyIsApplied({ ...saved, activeStrategy: "" })).toBe(false)
+    expect(nfqwsStrategyIsApplied({ ...saved, savedContent: undefined })).toBe(
+      false
+    )
+  })
+})
 
 describe("active nfqws config snapshot", () => {
   test("is offered only for a loaded custom configuration", () => {

@@ -1,11 +1,9 @@
-import { CircleCheck, CircleHelp, CircleX } from "lucide-react"
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 
 import type {
   ConfigObject,
   RoutingTestResponse,
-  RoutingTestEntry,
   RoutingTestListMatch,
   RuntimeOutboundState,
 } from "@/api/generated/model"
@@ -173,9 +171,6 @@ export function RoutingDiagnosticsResult({
                   <TableHead className="min-w-40">
                     {t("overview.routingDiagnostics.appliedRoute")}
                   </TableHead>
-                  <TableHead className="text-center">
-                    {t("overview.routingDiagnostics.status")}
-                  </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -268,9 +263,6 @@ export function RoutingDiagnosticsResult({
                             : null}
                         </div>
                       </TableCell>
-                      <TableCell className="text-center">
-                        <RoutingStatus result={result} />
-                      </TableCell>
                     </TableRow>
                   )
                 })}
@@ -334,28 +326,6 @@ function ListMatch({
             via: match.via,
           })}
     </div>
-  )
-}
-
-function RoutingStatus({ result }: { result?: RoutingTestEntry }) {
-  const { t } = useTranslation()
-  const unknown =
-    !result ||
-    result.evaluation === "insufficient_context" ||
-    result.expected_outbound === "(unknown)" ||
-    result.actual_outbound === "(unknown)"
-  const Icon = unknown ? CircleHelp : result.ok ? CircleCheck : CircleX
-  return (
-    <span
-      className={`inline-flex items-center gap-1 font-medium ${unknown ? "text-muted-foreground" : result.ok ? "text-green-700" : "text-red-600"}`}
-    >
-      <Icon aria-hidden="true" className="h-4 w-4 shrink-0" />
-      {unknown
-        ? t("overview.routingDiagnostics.pathUnknown")
-        : result.ok
-          ? "OK"
-          : t("overview.routingDiagnostics.routeMismatch")}
-    </span>
   )
 }
 

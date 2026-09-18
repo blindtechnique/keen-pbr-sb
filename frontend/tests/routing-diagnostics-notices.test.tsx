@@ -132,7 +132,7 @@ describe("routing notices remain separate from nfqws lists", () => {
         expect(body).toContain(
           language === "ru" ? "В правиле:" : "In the rule:"
         )
-        expect(body).toContain(
+        expect(body).not.toContain(
           language === "ru"
             ? "Не удалось подтвердить"
             : enTranslation.overview.routingDiagnostics.pathUnknown
@@ -177,14 +177,14 @@ describe("routing notices remain separate from nfqws lists", () => {
       ruTranslation.overview.routingDiagnostics.pathDefault
     )
     expect(body).toContain("techcorner.ignorelist.com")
-    expect(body).toContain(
+    expect(body).not.toContain(
       ruTranslation.overview.routingDiagnostics.routeMismatch
     )
     expect(body).not.toContain("OK")
   })
 
   test.each(["ru", "en"] as const)(
-    "list membership, friendly VPN name and OK share one table in %s",
+    "list membership and friendly VPN name remain without a status column in %s",
     async (language) => {
       const result: RoutingTestEntry = {
         ip: "203.0.113.1",
@@ -227,7 +227,12 @@ describe("routing notices remain separate from nfqws lists", () => {
       expect(table).toContain("User sites")
       expect(table).toContain("techcorner.ignorelist.com")
       expect(table).not.toContain(">nwg0<")
-      expect(table).toContain("OK")
+      expect(table).not.toContain("OK")
+      expect(table).not.toContain(
+        `>${(language === "ru" ? ruTranslation : enTranslation).overview.routingDiagnostics.status}<`
+      )
+      expect(table.match(/<th\b/g)).toHaveLength(4)
+      expect(table.match(/<td\b/g)).toHaveLength(4)
       expect(table).not.toContain("(unknown)")
       expect(table).not.toContain("(default)")
     }
