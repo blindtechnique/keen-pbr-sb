@@ -2031,9 +2031,14 @@ static void register_transports_handler_impl(
             httplib::Client client(endpoint.host, endpoint.port);
             client.set_connection_timeout(1, 0);
             client.set_read_timeout(15, 0);
-            const httplib::Headers headers{
+            httplib::Headers headers{
                 {"Authorization", "Bearer " + endpoint.api_key},
             };
+            // Panel power is a saved preference, unlike the installer's
+            // temporary stop/resume or an ordinary process restart.
+            if (action == "up" || action == "down") {
+                headers.emplace("X-KeenPbr-Persist-Enabled", "1");
+            }
             maintenance->verify_held();
             const auto response = client.Post(
                 "/v1/transports/" + tag + "/" + action,

@@ -226,6 +226,63 @@ func TestSharedRuntimeStartsAllDesiredMembersInOneProcess(t *testing.T) {
 	}
 }
 
+func TestSharedPowerChangesOnlyAddressedMember(t *testing.T) {
+	fake := &fakeSharedRuntime{failStartAt: make(map[int]error)}
+	group, err := newSharedSingBoxGroup(
+		sharedRuntimeSpecs(), "sing-box", t.TempDir(), RoutingHealthEndpoint{}, fake.hooks(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer group.cancelLifetime()
+	if err := group.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, enabled := range []bool{false, true} {
+		if err := group.ApplyPower(context.Background(), "proxy_a", enabled, enabled); err != nil {
+			t.Fatal(err)
+		}
+		first := group.memberStatus(context.Background(), "proxy_a")
+		second := group.memberStatus(context.Background(), "proxy_b")
+		if first.DesiredUp != enabled || !second.DesiredUp || second.State != StateUp {
+			t.Fatalf("wrong shared member state: %#v / %#v", first, second)
+		}
+		group.mu.RLock()
+		firstBoot, secondBoot := group.specs["proxy_a"].AutoStart, group.specs["proxy_b"].AutoStart
+		group.mu.RUnlock()
+		if firstBoot != enabled || !secondBoot {
+			t.Fatalf("wrong shared boot preferences: %v / %v", firstBoot, secondBoot)
+		}
+	}
+}
+
+func TestSharedPowerRollbackPreservesAnEarlierManualStop(t *testing.T) {
+	fake := &fakeSharedRuntime{check: func([]byte) error { return errors.New("binary unavailable") }}
+	group, err := newSharedSingBoxGroup(
+		sharedRuntimeSpecs(), "sing-box", t.TempDir(), RoutingHealthEndpoint{}, fake.hooks(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer group.cancelLifetime()
+	group.restoreInitialDesired(map[string]bool{"proxy_a": false, "proxy_b": false})
+	if err := group.ApplyPower(context.Background(), "proxy_a", false, false); err != nil {
+		t.Fatal(err)
+	}
+	// The disk save failed: restore auto_start=true without reviving the old
+	// manual OFF state, and without executing or validating any binary.
+	if err := group.ApplyPower(context.Background(), "proxy_a", true, false); err != nil {
+		t.Fatal(err)
+	}
+	group.mu.RLock()
+	boot, desired := group.specs["proxy_a"].AutoStart, group.desired["proxy_a"]
+	group.mu.RUnlock()
+	if !boot || desired || fake.startCount() != 0 || fake.checkCalls != 0 {
+		t.Fatalf("rollback revived a manually stopped member: boot=%v desired=%v starts=%d checks=%d",
+			boot, desired, fake.startCount(), fake.checkCalls)
+	}
+}
+
 func TestSharedRuntimeReadinessChecksProcessInterfaceAndRules(t *testing.T) {
 	fake := &fakeSharedRuntime{failStartAt: make(map[int]error)}
 	group, err := newSharedSingBoxGroup(

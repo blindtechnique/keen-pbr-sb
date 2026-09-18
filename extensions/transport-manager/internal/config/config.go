@@ -691,6 +691,62 @@ func (a *Admin) Update(ctx context.Context, tag string, spec transport.Transport
 	return a.updateLocked(ctx, tag, spec)
 }
 
+// SetEnabled is the panel power switch: change both runtime intent and the
+// next-boot preference through the existing durable configuration save. Internal
+// installer stops/restarts still use the temporary runtime actions directly.
+func (a *Admin) SetEnabled(ctx context.Context, tag string, enabled bool) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	index := a.index(tag)
+	if index < 0 {
+		return fmt.Errorf("transport %q not found", tag)
+	}
+	spec := a.config.Transports[index]
+	if spec.Type == "native" {
+		return errors.New("native interface power is managed by the router")
+	}
+	if a.shared != nil && isSharedSpec(spec) {
+		return a.setSharedEnabledLocked(ctx, index, enabled)
+	}
+	if spec.AutoStart == enabled {
+		if enabled {
+			return a.supervisor.Up(ctx, tag)
+		}
+		return a.supervisor.Down(ctx, tag)
+	}
+	spec.AutoStart = enabled
+	return a.updateLocked(ctx, tag, spec)
+}
+
+func (a *Admin) setSharedEnabledLocked(ctx context.Context, index int, enabled bool) error {
+	spec := a.config.Transports[index]
+	previous, err := a.supervisor.Status(ctx, spec.Tag)
+	if err != nil {
+		return err
+	}
+	// Use the existing shared process transition, not a full inventory edit:
+	// stopping a member must not validate disabled outbounds or need a binary
+	// when all members are off. Both old boot preference and manual intent are
+	// retained, so a failed save never briefly revives a manually stopped VPN.
+	if err := a.shared.ApplyPower(ctx, spec.Tag, enabled, enabled); err != nil {
+		return err
+	}
+	if spec.AutoStart == enabled {
+		return nil
+	}
+	next := a.config
+	next.Transports = append([]transport.TransportSpec(nil), a.config.Transports...)
+	next.Transports[index].AutoStart = enabled
+	revision, err := saveAdminConfig(a.path, next)
+	if err != nil {
+		rollbackCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		return errors.Join(err, a.shared.ApplyPower(rollbackCtx, spec.Tag, spec.AutoStart, previous.DesiredUp))
+	}
+	a.config, a.revision = next, revision
+	return nil
+}
+
 // UpdateIfRevision updates a transport only while expectedRevision still
 // identifies the durable configuration loaded by this Admin.
 func (a *Admin) UpdateIfRevision(

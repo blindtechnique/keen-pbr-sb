@@ -652,6 +652,12 @@ TEST_CASE("external lifecycle actions wait behind the sing-box install fence") {
             response.status = 401;
             return;
         }
+        const bool power = request.path != "/v1/transports/reality/restart";
+        if (request.get_header_value("X-KeenPbr-Persist-Enabled") !=
+            (power ? "1" : "")) {
+            response.status = 400;
+            return;
+        }
         action_calls.fetch_add(1U, std::memory_order_relaxed);
         response.set_content(
             nlohmann::json{{"status", "accepted"}}.dump(),

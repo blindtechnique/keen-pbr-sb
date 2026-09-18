@@ -27,12 +27,15 @@ type shutdownSettingsStub struct {
 }
 
 func (*shutdownSettingsStub) Settings() configpkg.RuntimeSettings { return configpkg.RuntimeSettings{} }
+func (s *shutdownSettingsStub) SetEnabled(ctx context.Context, _ string, _ bool) error {
+	return s.operation(ctx)
+}
 func (s *shutdownSettingsStub) SetSingBoxProcessMode(ctx context.Context, _ configpkg.SingBoxProcessMode) (configpkg.RuntimeSettings, error) {
 	return configpkg.RuntimeSettings{}, s.operation(ctx)
 }
 
 func TestLifecycleActionsFollowServiceCancellationNotBrowser(t *testing.T) {
-	for _, action := range []string{"up", "down", "restart", "settings"} {
+	for _, action := range []string{"up", "down", "restart", "settings", "power-up", "power-down"} {
 		t.Run(action, func(t *testing.T) {
 			serviceCtx, cancelService := context.WithCancel(context.Background())
 			defer cancelService()
@@ -49,10 +52,16 @@ func TestLifecycleActionsFollowServiceCancellationNotBrowser(t *testing.T) {
 			if action == "settings" {
 				method, path, body = http.MethodPut, "/v1/config/settings", `{"sing_box_process_mode":"isolated"}`
 			}
+			if strings.HasPrefix(action, "power-") {
+				path = "/v1/transports/proxy/" + strings.TrimPrefix(action, "power-")
+			}
 			browserCtx, cancelBrowser := context.WithCancel(context.Background())
 			cancelBrowser()
 			request := httptest.NewRequest(method, path, strings.NewReader(body)).WithContext(browserCtx)
 			request.Header.Set("Authorization", "Bearer test-key")
+			if strings.HasPrefix(action, "power-") {
+				request.Header.Set("X-KeenPbr-Persist-Enabled", "1")
+			}
 			response := httptest.NewRecorder()
 			done := make(chan struct{})
 			go func() { handler.ServeHTTP(response, request); close(done) }()
