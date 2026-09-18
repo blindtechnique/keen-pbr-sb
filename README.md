@@ -353,7 +353,7 @@ sing-box и nfqws2 опциональны. Базовый сценарий со 
 
 **Alpha — тестовый канал. Сейчас его полный IPK публикуется для `aarch64-3.10`; MIPS/MIPSEL не подменяются этим пакетом.** Перед установкой выполните требования выше, сохраните резервную копию keen-pbr-sb и экспорт KeeneticOS. Команды запускаются от `root` по SSH в Entware, не в командной строке KeeneticOS.
 
-Команды ниже скачивают установщик из ветки `alpha` и устанавливают **последний опубликованный Alpha IPK** для вашей архитектуры. Номер выпуска в ссылке менять не нужно; параметр `--alpha` выбирает именно тестовый канал, а не Stable/Latest.
+Команды ниже скачивают установщик из ветки `alpha` и устанавливают **последний опубликованный Alpha IPK** для вашей архитектуры. Номер выпуска в ссылке менять не нужно; параметр `--alpha` выбирает именно тестовый канал, а не Stable/Latest. Переменная `KEEN_PBR_UPDATE_RELEASE_TAG=` снимает закрепление старого выпуска, если оно осталось в SSH-сессии. Установщик и временные файлы размещаются в `/tmp`, не занимая лишнее место в `/opt`.
 
 ### Подготовка HTTPS
 
@@ -383,13 +383,13 @@ opkg install curl ca-certificates
 Через **wget**:
 
 ```sh
-sh -c "$(wget -qO- https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/alpha/install.sh)" -- --alpha
+wget -O /tmp/keen-pbr-alpha-install.sh -T 30 https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/alpha/install.sh && TMPDIR=/tmp KEEN_PBR_INSTALL_LANGUAGE=ru KEEN_PBR_UPDATE_RELEASE_TAG= sh /tmp/keen-pbr-alpha-install.sh --alpha
 ```
 
 Или через **curl**:
 
 ```sh
-sh -c "$(curl -fsSL https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/alpha/install.sh)" -- --alpha
+curl -fL --connect-timeout 30 -o /tmp/keen-pbr-alpha-install.sh https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/alpha/install.sh && TMPDIR=/tmp KEEN_PBR_INSTALL_LANGUAGE=ru KEEN_PBR_UPDATE_RELEASE_TAG= sh /tmp/keen-pbr-alpha-install.sh --alpha
 ```
 
 ### Обновление
@@ -397,13 +397,13 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb
 **Если keen-pbr-sb уже установлен**, включая переход со Stable, добавьте `--update`. Если загрузчик ещё не подготовлен, сначала выполните подготовку HTTPS выше. Готовая команда через **wget**:
 
 ```sh
-sh -c "$(wget -qO- https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/alpha/install.sh)" -- --alpha --update
+wget -O /tmp/keen-pbr-alpha-install.sh -T 30 https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/alpha/install.sh && TMPDIR=/tmp KEEN_PBR_INSTALL_LANGUAGE=ru KEEN_PBR_UPDATE_RELEASE_TAG= sh /tmp/keen-pbr-alpha-install.sh --alpha --update
 ```
 
 Или через **curl**:
 
 ```sh
-sh -c "$(curl -fsSL https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/alpha/install.sh)" -- --alpha --update
+curl -fL --connect-timeout 30 -o /tmp/keen-pbr-alpha-install.sh https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/alpha/install.sh && TMPDIR=/tmp KEEN_PBR_INSTALL_LANGUAGE=ru KEEN_PBR_UPDATE_RELEASE_TAG= sh /tmp/keen-pbr-alpha-install.sh --alpha --update
 ```
 
 Режим `--update` не запускает заново первичную настройку авторизации, DNS, sing-box и nfqws2. Во время установки панель и сетевые службы могут быть временно недоступны; не запускайте вторую установку, пока первая не завершилась.
