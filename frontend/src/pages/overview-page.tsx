@@ -292,6 +292,9 @@ export function OverviewPage() {
         <RoutingTestPanel
           lists={loadedConfig?.lists}
           outbounds={loadedConfig?.outbounds}
+          runtimeOutbounds={
+            runtimeOutboundsQuery.isError ? undefined : runtimeOutbounds
+          }
         />
       </div>
 

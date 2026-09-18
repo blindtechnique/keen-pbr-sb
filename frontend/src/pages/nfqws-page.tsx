@@ -3,7 +3,6 @@ import {
   ArchiveIcon,
   BookmarkIcon,
   ChevronDownIcon,
-  ChevronRightIcon,
   DownloadIcon,
   EraserIcon,
   ExternalLinkIcon,
@@ -29,6 +28,7 @@ import { toast } from "sonner"
 
 import { KeenPencilIcon, KeenTrashIcon } from "@/components/shared/keen-icons"
 import { NfqwsProfileCards } from "@/components/nfqws/profile-cards"
+import { NfqwsLegacyStrategies } from "@/components/nfqws/legacy-strategies"
 import { NfqwsValidationErrorMessage } from "@/components/nfqws/validation-error-message"
 import {
   NfqwsFileContent,
@@ -1886,17 +1886,6 @@ function StrategiesEditor({
   const [editorViewChoice, setEditorViewChoice] = useState<"breakdown" | "raw">(
     "breakdown"
   )
-  const [showLegacy, setShowLegacy] = useState(() => {
-    const active = status.strategies.find(
-      (item) => item.name === status.active_strategy
-    )
-    // Тот же отказ от `overridden`: применение помечает пресет изменённым, и
-    // блок «старые пресеты» переставал раскрываться ровно тогда, когда в нём
-    // лежит применённая стратегия — то есть когда это и нужно.
-    return Boolean(
-      active?.builtin && parseNfqwsProfileMarker(active.content) === undefined
-    )
-  })
   // «Подробнее» на карточке профиля открывает разбор ниже по странице — и
   // должно туда доводить. Раньше кнопка только меняла выбранную стратегию:
   // на длинной странице разбор оставался за экраном, и нажатие выглядело
@@ -2070,9 +2059,6 @@ function StrategiesEditor({
   const customNames = names.filter(
     (name) => !profileNames.has(name) && !legacySet.has(name)
   )
-  const activeIsLegacy = legacySet.has(status.active_strategy)
-
-  const legacyExpanded = activeIsLegacy || showLegacy
   const displayStrategyName = (name: string | null): string => {
     if (!name) return ""
     const item = status.strategies.find((candidate) => candidate.name === name)
@@ -2237,9 +2223,8 @@ function StrategiesEditor({
         </Alert>
       ) : null}
 
-      {/* Three current profiles stay prominent. Custom, overridden and unknown
-          entries remain in a full table; only untouched legacy built-ins may
-          be collapsed. */}
+      {/* Current profiles, custom entries and the applied preset stay visible.
+          Other legacy built-ins are collapsed until the user opens them. */}
       {names.length === 0 ? (
         <ListPlaceholder
           action={
@@ -2280,41 +2265,13 @@ function StrategiesEditor({
             </div>
           ) : null}
 
-          {legacyNames.length > 0 ? (
-            <div className="space-y-2">
-              {!activeIsLegacy ? (
-                <div className="flex justify-start">
-                  <Button
-                    onClick={() => setShowLegacy((current) => !current)}
-                    size="sm"
-                    variant="ghost"
-                  >
-                    {legacyExpanded ? (
-                      <ChevronDownIcon />
-                    ) : (
-                      <ChevronRightIcon />
-                    )}
-                    {legacyExpanded
-                      ? t("nfqws.legacyHide")
-                      : t("nfqws.legacyShow", { count: legacyNames.length })}
-                  </Button>
-                </div>
-              ) : null}
-              {legacyExpanded ? (
-                <div className="space-y-2">
-                  <p className="text-xs text-muted-foreground">
-                    {t("nfqws.legacyDescription")}
-                  </p>
-                  <DataTable
-                    columnClassNames={strategyColumnClassNames}
-                    headers={strategyHeaders}
-                    narrowColumns={[1, 2]}
-                    rows={legacyNames.map(strategyRow)}
-                  />
-                </div>
-              ) : null}
-            </div>
-          ) : null}
+          <NfqwsLegacyStrategies
+            activeName={status.active_strategy}
+            columnClassNames={strategyColumnClassNames}
+            headers={strategyHeaders}
+            names={legacyNames}
+            renderRow={strategyRow}
+          />
         </div>
       )}
 
