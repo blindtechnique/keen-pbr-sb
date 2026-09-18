@@ -107,6 +107,7 @@ check-shell: ## Parse every shipped shell script with the target BusyBox and sca
 	bash build_scripts/check-shell-busybox.sh
 	BUSYBOX="$(BUSYBOX)" python3 -m unittest build_scripts.tests.test_signed_update_integration.InstallerBootstrapArchiveTest build_scripts.tests.test_signed_update_integration.InstallerBootstrapSyntaxTest -v
 	BUSYBOX="$(BUSYBOX)" python3 -m unittest build_scripts.tests.test_persistent_recovery_boundary -v
+	BUSYBOX="$(BUSYBOX)" python3 -m unittest build_scripts.tests.test_update_space build_scripts.tests.test_transport_upgrade_state build_scripts.tests.test_installer_first_run -v
 
 check-ndmc-env: ## Prove the shipped installer/uninstaller run ndmc with a scrubbed LD_LIBRARY_PATH
 	sh tests/package_it/run-ndmc-env-contract.sh install.sh uninstall.sh

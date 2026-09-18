@@ -18,6 +18,21 @@ WORK_DIR=
 RUN_FILE_OWNED=0
 finished=0
 
+space_failure_message() {
+    local kind needed available extra
+    [ -n "$WORK_DIR" ] && [ -f "$WORK_DIR/space-report" ] || return 1
+    IFS=' ' read -r kind needed available extra < "$WORK_DIR/space-report" || return 1
+    [ -z "$extra" ] || return 1
+    case "$needed:$available" in *[!0-9:]*|:*|*:) return 1 ;; esac
+    case "$kind" in
+        storage) kind=/opt ;;
+        temporary) kind=TMPDIR ;;
+        memory) kind=RAM ;;
+        *) return 1 ;;
+    esac
+    printf 'Недостаточно места в %s: нужно %s КиБ, доступно %s КиБ. Установленная версия не изменена. Освободите место и повторите обновление.\n' "$kind" "$needed" "$available"
+}
+
 write_state() {
     phase=$1
     percent=$2
@@ -43,7 +58,11 @@ write_state() {
 cleanup() {
     status=$?
     if [ "$status" -ne 0 ] && [ "$finished" -eq 0 ]; then
-        write_state failed 100 "Обновление завершилось с ошибкой" false false ||
+        failure_message="Обновление завершилось с ошибкой"
+        if [ "$status" -eq 28 ]; then
+            failure_message=$(space_failure_message) || failure_message="Недостаточно места для обновления. Установленная версия не изменена. Освободите место и повторите обновление."
+        fi
+        write_state failed 100 "$failure_message" false false ||
             true
     fi
     if [ "$RUN_FILE_OWNED" -eq 1 ]; then
@@ -149,6 +168,7 @@ write_state installer 30 "Подпись установщика проверен
 
 write_state installing 40 "Устанавливаю пакет keen-pbr-sb" null true
 KEEN_PBR_UPDATE_RELEASE_TAG="$release_tag" \
+    KEEN_PBR_UPDATE_SPACE_REPORT="$WORK_DIR/space-report" \
     KEEN_PBR_UPDATE_LOCK_TRANSFER=1 /bin/sh "$INSTALLER" --update
 write_state installed 90 "Пакет установлен, службы перезапущены" null true
 

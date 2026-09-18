@@ -71,7 +71,7 @@ class InstallerBootstrapArchiveTest(unittest.TestCase):
 set -eu
 die() { printf '%s\n' "$*" >&2; exit 1; }
 tar() { "$BUSYBOX" tar "$@"; }
-''' + extraction
+''' + shell_function(source, "check_bootstrap_space", "find_existing_sing_box") + extraction
             result = subprocess.run(
                 [BUSYBOX, "sh", "-c", script],
                 env={**os.environ, "BUSYBOX": BUSYBOX, "TMP_DIR": str(work),

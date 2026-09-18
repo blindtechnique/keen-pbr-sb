@@ -32,7 +32,7 @@ class TransportUpgradeStateTest(unittest.TestCase):
         self.init = self.opt / "etc/init.d"
         self.state = self.rescue / "transport-upgrade-state.json"
         self.events = self.root / "events"
-        for directory in (self.rescue, self.config, self.init):
+        for directory in (self.rescue, self.config, self.init, self.root / "tmp"):
             directory.mkdir(parents=True)
         (self.config / "transports.json").write_text('{"auto_start":true}\n')
         self.executable(self.opt / "usr/bin/transport-manager", 'echo legacy-cli-called >> "$EVENTS"; exit 99')

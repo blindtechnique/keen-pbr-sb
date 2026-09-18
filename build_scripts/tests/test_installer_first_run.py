@@ -109,7 +109,8 @@ esac
         self.executable(self.rescue / "rescue-update.sh", f'''
 echo "rescue $1" >> '{self.effects}'
 case "$1" in
-    stage)
+    space-protocol) echo 1;;
+    stage-checked)
         [ ! -e '{self.rescue}/pending' ] && [ ! -e '{self.rescue}/UNKNOWN' ] || exit 8
         cp "$2" '{self.rescue}/candidate.ipk'
         echo candidate-staged > '{self.rescue}/pending';;
@@ -140,7 +141,7 @@ esac
     def run_shell(self, tail, overrides="", cleanup=False):
         names = ("cleanup", "read_dns_override_state", "restore_dns_setup", "configure_dns",
                  "ask_dns_setup", "choose_optional_setup", "prepare_first_install_dns", "prepare_first_install_retry",
-                 "verify_installed_runtime", "install_package_transactionally", "remember_initial_nfqws_config", "configure_nfqws2")
+                 "verify_installed_runtime", "legacy_update_space_check", "install_package_transactionally", "remember_initial_nfqws_config", "configure_nfqws2")
         definitions = self.map_paths("\n".join(function(name) for name in names))
         script = f'''set -eu
 TMP_DIR='{self.work}'
@@ -622,13 +623,18 @@ mv() {
             'echo installed >',
             f'KEEN_PBR_PACKAGE_POSTINST=1 "{self.rescue}/rescue-startup-guard.sh" start\n        echo installed >'))
         overrides = f'''
+export TMPDIR='{self.work}'
 export KEEN_PBR_RESCUE_ROOT='{self.root}'
 export KEEN_PBR_UPDATE_LOCK_PID=$$
 KEEN_PBR_UPDATE_LOCK_TOKEN=$("$RESCUE_DIR/update-lock.sh" acquire $$)
 export KEEN_PBR_UPDATE_LOCK_TOKEN
 '''
         replacement = self.root / "verified-replacement.ipk"
-        replacement.write_bytes(b"another-authenticated-package\n")
+        # Space preflight consumes actual IPK control metadata, not an opaque
+        # marker. Keep this fixture tiny but use the same archive shape.
+        from build_scripts.tests.test_update_space import package
+        package(self.ipk, "3.3.2-old", size=4096, installed=8192)
+        package(replacement, "3.3.2-new", size=4096, installed=8192)
         select_package = f"PACKAGE_FILE='{replacement}'" if replace_package else ""
         result = self.run_shell('''
 "$RESCUE_HELPER" stage "$PACKAGE_FILE"
