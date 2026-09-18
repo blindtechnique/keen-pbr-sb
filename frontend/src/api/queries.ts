@@ -68,7 +68,7 @@ export function useGetNdmsInterfaceInventory() {
       // NDMS metadata changes only when the firmware configuration changes.
       // Live link state comes from the shared runtime SSE snapshot instead of
       // adding a permanent polling loop on a resource-constrained router.
-      // Retry only while the server is refreshing an unavailable catalog.
+      // Retry only while the server is refreshing a previously known catalog.
       refetchInterval: (query) =>
         nativeInventoryRetryInterval(
           query.state.data?.status === 200 ? query.state.data.data : undefined

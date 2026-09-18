@@ -84,9 +84,28 @@ describe("native catalog refresh presentation", () => {
     )
   })
 
-  test("only a temporary unavailable catalog is retried", () => {
-    expect(nativeInventoryRetryInterval({ available: false })).toBe(5_000)
-    expect(nativeInventoryRetryInterval({ available: true })).toBe(false)
+  test("only a known stale catalog is retried, not unsupported firmware", () => {
+    expect(
+      nativeInventoryRetryInterval({
+        available: false,
+        catalog_status: "stale",
+      })
+    ).toBe(5_000)
+    expect(
+      nativeInventoryRetryInterval({ available: true, catalog_status: "fresh" })
+    ).toBe(false)
+    expect(
+      nativeInventoryRetryInterval({
+        available: false,
+        catalog_status: "unavailable",
+      })
+    ).toBe(false)
+    expect(
+      nativeInventoryRetryInterval({
+        available: false,
+        catalog_status: "fresh",
+      })
+    ).toBe(false)
     expect(nativeInventoryRetryInterval(undefined)).toBe(false)
   })
 })
