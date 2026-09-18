@@ -158,7 +158,6 @@ import {
 import {
   dedupeLegacyNativeTransports,
   getNativeBindBlockReason,
-  mapNativeInterfaces,
   nativeInterfaceConnectionState,
   type NativeInterfaceModel,
 } from "@/lib/native-interfaces"
@@ -167,6 +166,7 @@ import {
   updateHiddenNativeInterfacePreference,
 } from "@/lib/hidden-native-interfaces"
 import { selectTransportOrphanOutbounds } from "@/lib/transport-orphan-outbounds"
+import { nativeInventoryPresentation } from "@/lib/native-inventory-presentation"
 
 type NativeDeleteSelection = Readonly<{
   id: string
@@ -323,22 +323,21 @@ export function TransportsPage({
       ),
     [runtimeInterfacesQuery.data]
   )
-  const nativeInterfaces = useMemo(
+  const {
+    interfaces: nativeInterfaces,
+    authoritative: nativeInventoryAuthoritative,
+  } = useMemo(
     () =>
-      mapNativeInterfaces(
-        ndmsInventoryQuery.data?.status === 200 &&
-          ndmsInventoryQuery.data.data.available
-          ? ndmsInventoryQuery.data.data.interfaces
-          : [],
+      nativeInventoryPresentation(
+        ndmsInventoryQuery.data?.status === 200
+          ? ndmsInventoryQuery.data.data
+          : undefined,
         runtimeInterfacesQuery.data?.status === 200
           ? runtimeInterfacesQuery.data.data.interfaces
           : []
       ),
     [ndmsInventoryQuery.data, runtimeInterfacesQuery.data]
   )
-  const nativeInventoryAuthoritative =
-    ndmsInventoryQuery.data?.status === 200 &&
-    ndmsInventoryQuery.data.data.available
   const nativeMutationStatus =
     ndmsInventoryQuery.data?.status === 200
       ? ndmsInventoryQuery.data.data.native_mutation_status
@@ -1547,13 +1546,16 @@ export function TransportsPage({
     )
     const nativeCountryFlag = countryMark(nativeLocation)
     const deleteReady =
+      nativeInventoryAuthoritative &&
       nativeInterface.source.native_mutation.delete_candidate &&
       Boolean(nativeInterface.source.native_mutation.ownership_revision)
     const editReady =
-      Boolean(nativeTracker) ||
-      (Boolean(nativeInterface.kernelName) &&
-        getNativeBindBlockReason(nativeInterface) === undefined)
+      nativeInventoryAuthoritative &&
+      (Boolean(nativeTracker) ||
+        (Boolean(nativeInterface.kernelName) &&
+          getNativeBindBlockReason(nativeInterface) === undefined))
     const lifecycleReady =
+      nativeInventoryAuthoritative &&
       nativeInterface.source.role !== "server" &&
       (nativeInterface.source.kind === "wireguard" ||
         nativeInterface.source.kind === "amnezia_wireguard") &&
@@ -2038,6 +2040,14 @@ export function TransportsPage({
         onInventoryRefresh={refreshNativeMutationInventory}
         retainedDeletions={nativeRetainedDeletions}
       />
+
+      {!nativeInventoryAuthoritative && nativeInterfaces.length > 0 ? (
+        <Alert>
+          <AlertDescription>
+            {t("transports.nativeInterface.catalogRefreshing")}
+          </AlertDescription>
+        </Alert>
+      ) : null}
 
       {error ? (
         <Alert variant="destructive">

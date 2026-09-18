@@ -1492,6 +1492,8 @@ export const enTranslation = {
       "This is a KeeneticOS interface. You can start, stop, restart and link it to a route here; creation and parameter editing stay in KeeneticOS.",
     nativeInterface: {
       keeneticOwner: "KeeneticOS",
+      catalogRefreshing:
+        "Keenetic VPN details are refreshing. Names and types are shown from the last received data.",
       managedByFirmware:
         "Creation and parameter editing stay in KeeneticOS; start, stop and restart are available here",
       logicalName: "Keenetic interface",
@@ -2932,7 +2934,7 @@ export const enTranslation = {
           "The router received a site response, but this device's browser did not. The connection path or browser-check restrictions may explain the difference; it does not prove a DNS problem.",
         dns: "The DNS request in the availability check failed. The routing check runs separately and may obtain an IP address. Check DNS if the error repeats.",
         service:
-          "The service did not provide a result. Check its status first; the site's availability is still unknown.",
+          "The service did not return all check results. Website responses are shown above. Check the service status and try again.",
         openDns: "View DNS diagnostics",
         openService: "View service status",
       },
