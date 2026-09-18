@@ -191,7 +191,7 @@ file_mode() {
 }
 
 write_ipk_hash() {
-    archive=$1
+    local archive=$1 digest sidecar sidecar_tmp
     valid_ipk_payload "$archive" || return 1
     digest=$(read_hash "$archive") || return 1
     sidecar="${archive}.sha256"
@@ -205,7 +205,7 @@ write_ipk_hash() {
 }
 
 valid_ipk_file() {
-    archive=$1
+    local archive=$1 sidecar expected actual
     sidecar="${archive}.sha256"
     valid_ipk_payload "$archive" &&
         [ -f "$sidecar" ] && [ ! -L "$sidecar" ] ||
@@ -511,27 +511,39 @@ restore_config() {
 }
 
 replace_file_from() {
-    source=$1
-    destination=$2
+    local source=$1 destination=$2 temporary temporary_hash linked=0
     valid_ipk_file "$source" || return 1
     temporary="${destination}.tmp.$$"
     temporary_hash="${temporary}.sha256"
-    if ! cp -p "$source" "$temporary" ||
+    # These archives are immutable: every replacement uses rename, never an
+    # in-place write. Only link our private, verified rescue inventory. An IPK
+    # supplied by the caller must still be copied by import_file_from().
+    case "$source" in
+        "$CURRENT_IPK"|"$PREVIOUS_IPK"|"$CANDIDATE_IPK"|"$PENDING_BASELINE_IPK"|"$PENDING_TARGET_IPK")
+            ln "$source" "$temporary" 2>/dev/null && linked=1 ;;
+    esac
+    if { [ "$linked" -ne 1 ] && ! cp -p "$source" "$temporary"; } ||
        ! cp -p "${source}.sha256" "$temporary_hash" ||
        ! valid_ipk_file "$temporary"; then
         rm -f "$temporary" "$temporary_hash"
         return 1
     fi
-    if ! mv -f "$temporary" "$destination" ||
-       ! mv -f "$temporary_hash" "${destination}.sha256"; then
+    # Retrying a durable rotation can find both names on the same inode.
+    # GNU mv rejects that no-op; rename alone would leave the extra name.
+    if [ ! -L "$destination" ] && [ "$temporary" -ef "$destination" ]; then
+        rm -f "$temporary" || return 1
+    elif ! mv -f "$temporary" "$destination"; then
+        rm -f "$temporary" "$temporary_hash"
+        return 1
+    fi
+    if ! mv -f "$temporary_hash" "${destination}.sha256"; then
         rm -f "$temporary" "$temporary_hash"
         return 1
     fi
 }
 
 import_file_from() {
-    source=$1
-    destination=$2
+    local source=$1 destination=$2 temporary
     valid_ipk_payload "$source" || return 1
     temporary="${destination}.tmp.$$"
     if ! cp -p "$source" "$temporary" ||
@@ -545,6 +557,206 @@ import_file_from() {
         rm -f "$temporary" "${temporary}.sha256"
         return 1
     fi
+}
+
+# Exit 28 means no package mutation has started. Both the console installer
+# and self-update.sh use the same preflight and machine-readable explanation.
+space_error() {
+    local kind=$1 needed=$2 available=$3 location message
+    case "$kind" in
+        storage) location=/opt ;;
+        memory) location=RAM ;;
+        *) location=TMPDIR ;;
+    esac
+    if [ "${KEEN_PBR_INSTALL_LANGUAGE:-ru}" = en ]; then
+        message="Not enough space in $location: need $needed KiB, available $available KiB. The installed version has not been changed. Free space and retry."
+    else
+        message="Недостаточно места в $location: нужно $needed КиБ, доступно $available КиБ. Установленная версия не изменена. Освободите место и повторите обновление."
+    fi
+    printf '%s\n' "$message" >&2
+    if [ -n "${KEEN_PBR_UPDATE_SPACE_REPORT:-}" ]; then
+        printf '%s %s %s\n' "$kind" "$needed" "$available" > "$KEEN_PBR_UPDATE_SPACE_REPORT" || true
+    fi
+    return 28
+}
+
+available_kib() {
+    local observation
+    observation=$(LC_ALL=C df -Pk "$1" 2>/dev/null) || {
+        echo "Cannot determine free space; update stopped before package installation." >&2
+        return 1
+    }
+    printf '%s\n' "$observation" | awk 'NR > 1 { n=$4 } END {
+        if (n !~ /^[0-9]+$/) exit 1; print n
+    }'
+}
+
+file_kib() {
+    local bytes
+    bytes=$(wc -c < "$1") || return 1
+    printf '%s\n' "$bytes" | awk '$1 ~ /^[0-9]+$/ { print int(($1+1023)/1024); ok=1 } END { if (!ok) exit 1 }'
+}
+
+check_temporary_space() {
+    local needed=$1 directory=${TMPDIR:-${ROOT}/tmp} available device memory
+    available=$(available_kib "$directory") || return 1
+    [ "$available" -ge "$needed" ] || { space_error temporary "$needed" "$available"; return 28; }
+    device=$(LC_ALL=C df -Pk "$directory" | awk 'NR > 1 { device=$1 } END { print device }') || return 1
+    case "$device" in
+        tmpfs|rootfs)
+            memory=$(awk '/^MemAvailable:/ { n=$2; found=1 } END { if (found) print n }' "${ROOT}/proc/meminfo" 2>/dev/null) || memory=
+            case "$memory" in
+                ''|*[!0-9]*) ;;
+                *) [ "$memory" -ge "$((needed + 8192))" ] || {
+                    space_error memory "$((needed + 8192))" "$memory"; return 28;
+                } ;;
+            esac ;;
+    esac
+}
+
+read_package_space_metadata() {
+    local archive=$1 directory status=0 values
+    directory=$(mktemp -d "${TMPDIR:-${ROOT}/tmp}/kpbr-ipk-space.XXXXXX") || return 1
+    if ! tar -xzOf "$archive" ./control.tar.gz > "$directory/control.tar.gz" ||
+       ! tar -xzOf "$directory/control.tar.gz" ./control > "$directory/control"; then
+        status=1
+    else
+        values=$(awk -F ': ' '
+            /^Package: / { package=$2; packages++ }
+            /^Version: / { version=$2; versions++ }
+            /^Installed-Size: / { size=$2; sizes++ }
+            END {
+                if (packages!=1 || package!="keen-pbr" || versions!=1 ||
+                    version !~ /^[A-Za-z0-9][A-Za-z0-9._+~-]*$/ || sizes!=1 ||
+                    size !~ /^[0-9]+$/ || size<1 || size>1073741824) exit 1
+                print version, int((size+1023)/1024)
+            }' "$directory/control") || status=1
+    fi
+    rm -f "$directory/control.tar.gz" "$directory/control"
+    rmdir "$directory" || return 1
+    [ "$status" -eq 0 ] || {
+        echo "Cannot read package size; update stopped before package installation." >&2
+        return 1
+    }
+    set -- $values
+    SPACE_PACKAGE_VERSION=$1
+    SPACE_PACKAGE_KIB=$2
+}
+
+rescue_hardlinks_available() {
+    local probe
+    probe=$(mktemp "$RESCUE_DIR/.link-probe.XXXXXX") || return 1
+    if ln "$probe" "$probe.link" 2>/dev/null; then
+        rm -f "$probe" "$probe.link"
+        return 0
+    fi
+    rm -f "$probe" "$probe.link"
+    return 1
+}
+
+config_snapshot_kib() {
+    local name size total=64
+    for name in $(managed_config_files); do
+        [ ! -f "$CONFIG_DIR/$name" ] || {
+            size=$(file_kib "$CONFIG_DIR/$name") || return 1
+            total=$((total + size + 4))
+        }
+    done
+    printf '%s\n' "$total"
+}
+
+prepare_update_space() {
+    local archive=$1 staged=${2:-0} archive_kib baseline_kib=0 installed_kib
+    local config_kib needed available temporary_needed copy_kib=0
+    local baseline_version= installed_version= reclaim=0 opt_device tmp_device legacy_copy=0
+    valid_ipk_payload "$archive" || return 2
+    # Metadata extraction is small and is checked before unpacking anything.
+    check_temporary_space 1024 || return $?
+    read_package_space_metadata "$archive" || return 2
+    installed_kib=$SPACE_PACKAGE_KIB
+    archive_kib=$(file_kib "$archive") || return 1
+    if valid_ipk_payload "$CURRENT_IPK"; then
+        read_package_space_metadata "$CURRENT_IPK" || return 2
+        if valid_ipk_file "$CURRENT_IPK"; then
+            baseline_version=$SPACE_PACKAGE_VERSION
+        else
+            # A legacy archive without a sidecar is migrated by copying it.
+            legacy_copy=1
+        fi
+        [ "$installed_kib" -ge "$SPACE_PACKAGE_KIB" ] || installed_kib=$SPACE_PACKAGE_KIB
+        baseline_kib=$(file_kib "$CURRENT_IPK") || return 1
+    fi
+    config_kib=$(config_snapshot_kib) || return 1
+    # No credit for removing installed files: opkg must have enough space even
+    # BEFORE prerm. This also covers rollback to a larger previous version.
+    needed=$((installed_kib + 3 * config_kib + 1024))
+    if [ "$staged" -eq 0 ]; then
+        needed=$((needed + archive_kib))
+        if rescue_hardlinks_available; then
+            [ "$legacy_copy" -eq 0 ] || needed=$((needed + baseline_kib))
+        else
+            copy_kib=$baseline_kib
+            [ "$copy_kib" -ge "$archive_kib" ] || copy_kib=$archive_kib
+            needed=$((needed + baseline_kib + copy_kib))
+        fi
+    fi
+    # Capture and opkg use the same private temporary filesystem, not /opt.
+    temporary_needed=$((archive_kib + installed_kib + 1024))
+    check_temporary_space "$temporary_needed" || return $?
+    opt_device=$(LC_ALL=C df -Pk "${ROOT}/opt" | awk 'NR>1 {d=$1} END {print d}') || return 1
+    tmp_device=$(LC_ALL=C df -Pk "${TMPDIR:-${ROOT}/tmp}" | awk 'NR>1 {d=$1} END {print d}') || return 1
+    [ "$opt_device" != "$tmp_device" ] || needed=$((needed + temporary_needed))
+    available=$(available_kib "${ROOT}/opt") || return 1
+    [ "$available" -lt "$needed" ] || return 0
+
+    # Only the older rollback slot is expendable, never the installed version
+    # or its settings. Verify its replacement matches the installed package
+    # before reclaiming anything; re-read df rather than assuming bytes freed
+    # (hard links and compressed UBIFS can reclaim less than the file size).
+    if [ "$staged" -eq 0 ] && [ -n "$baseline_version" ] &&
+       valid_ipk_file "$PREVIOUS_IPK" && validate_snapshot "$PREVIOUS_CONFIG"; then
+        installed_version=$("$OPKG" status keen-pbr 2>/dev/null | awk '
+            /^Version: / { v=$2 }
+            /^Status: / && $NF=="installed" { installed=1 }
+            END { if (installed) print v }') || return 1
+        reclaim=$(file_kib "$PREVIOUS_IPK") || return 1
+        if [ "$installed_version" = "$baseline_version" ] &&
+           [ "$((available + reclaim))" -ge "$needed" ]; then
+            # Keep a checked snapshot of today's settings before rotating the
+            # older rollback slot, even if staging is interrupted afterwards.
+            snapshot_config "$PRE_UPDATE_CONFIG" &&
+                validate_snapshot "$PRE_UPDATE_CONFIG" && sync || return 1
+            rm -f "$PREVIOUS_IPK" "${PREVIOUS_IPK}.sha256" || return 1
+            rm -rf "$PREVIOUS_CONFIG" || return 1
+            sync || return 1
+            if [ "${KEEN_PBR_INSTALL_LANGUAGE:-ru}" = en ]; then
+                echo "Older rollback archive retired to free space; the verified installed IPK is retained for rollback." >&2
+            else
+                echo "Для освобождения места удалён устаревший резервный IPK. Проверенная копия установленной версии сохранена для отката." >&2
+            fi
+            available=$(available_kib "${ROOT}/opt") || return 1
+        fi
+    fi
+    [ "$available" -ge "$needed" ] || { space_error storage "$needed" "$available"; return 28; }
+}
+
+stage_checked_candidate() {
+    local archive=$1 status
+    ensure_known_idle || return 3
+    # Post-commit leftovers can be collected without touching either retained
+    # release. No PENDING marker is published until all preparation succeeds.
+    cleanup_pending_artifacts || return 1
+    prepare_update_space "$archive" || return $?
+    stage_candidate "$archive" || return $?
+    if prepare_update_space "$CANDIDATE_IPK" 1; then
+        return 0
+    else
+        status=$?
+    fi
+    # No opkg invocation or service stop has occurred; discard only this newly
+    # staged attempt, so a low-space failure does not block subsequent updates.
+    clear_pending || return 1
+    return "$status"
 }
 
 pending_phase() {
@@ -872,16 +1084,53 @@ verify_runtime() {
     return 1
 }
 
+managed_runtime_absent() {
+    local cmdline
+    [ -d "${ROOT}/proc" ] || return 1
+    for cmdline in "${ROOT}"/proc/[0-9]*/cmdline; do
+        [ -r "$cmdline" ] || continue
+        # Entware can start an executable through an ELF loader. Do not
+        # confuse a shell merely inspecting a filename with a running daemon.
+        if tr '\000' '\n' < "$cmdline" 2>/dev/null | awk '
+            function base(v,a,n) {n=split(v,a,"/"); return a[n]}
+            function managed(v) {return v=="keen-pbr" || v=="transport-manager"}
+            NR==1 {
+                b=base($0); if (managed(b)) found=1
+                loader=(b ~ /^ld-linux/ || b ~ /^ld-musl/ || b ~ /^ld-[0-9]/ || b=="ld.so")
+                next
+            }
+            loader && !program {
+                if (skip) {skip=0; next}
+                if ($0=="--library-path" || $0=="--preload" || $0=="--audit" || $0=="--inhibit-rpath" || $0=="--argv0" || $0=="--glibc-hwcaps-mask" || $0=="--glibc-hwcaps-prepend") {skip=1; next}
+                if ($0 ~ /^-/) next
+                program=1; if (managed(base($0))) found=1
+            }
+            END {exit !found}
+        '; then
+            echo "Cannot restore package while a managed daemon is still running ($cmdline)." >&2
+            return 1
+        fi
+    done
+}
+
 stop_runtime() {
-    [ -x "$KEEN_PBR_INIT" ] && [ -x "$TRANSPORT_INIT" ] || return 1
-    stop_failed=0
-    if ! "$KEEN_PBR_INIT" stop >/dev/null 2>&1; then
-        "$KEEN_PBR_INIT" check >/dev/null 2>&1 && stop_failed=1
-    fi
-    if ! "$TRANSPORT_INIT" stop >/dev/null 2>&1; then
-        "$TRANSPORT_INIT" check >/dev/null 2>&1 && stop_failed=1
-    fi
-    [ "$stop_failed" -eq 0 ]
+    local init missing=0
+    for init in "$KEEN_PBR_INIT" "$TRANSPORT_INIT"; do
+        if [ -x "$init" ]; then
+            if ! "$init" stop >/dev/null 2>&1; then
+                "$init" check >/dev/null 2>&1 && return 1
+            fi
+        elif [ -e "$init" ] || [ -L "$init" ]; then
+            return 1
+        else
+            # opkg --force-reinstall can remove the old init scripts and then
+            # fail to install the new package. Their absence must not prevent
+            # reinstallation of the retained baseline after the old daemons
+            # have already stopped.
+            missing=1
+        fi
+    done
+    [ "$missing" -eq 0 ] || managed_runtime_absent
 }
 
 restart_runtime() {
@@ -894,7 +1143,7 @@ opkg_install_archive() {
     valid_ipk_file "$archive" || return 2
     PKG_UPGRADE=1 \
         KEEN_PBR_REPLACE_DNSMASQ_DEFAULTS=N \
-        "$OPKG" --force-reinstall install "$archive"
+        "$OPKG" --force-reinstall --tmp-dir "${TMPDIR:-/tmp}" install "$archive"
 }
 
 INSTALL_COMPENSATED=0
@@ -950,15 +1199,15 @@ install_archive() {
 }
 
 capture_candidate_transport_state() {
+    local capture_dir capture_status=0
     # This runs before opkg/prerm stops anything. Use the already authenticated
     # candidate's static binary so the old installed manager needs no new CLI
     # or API. Extraction mirrors the installer's existing gzip IPK bootstrap.
     [ -x "${ROOT}/opt/usr/bin/transport-manager" ] &&
         [ -f "$CONFIG_DIR/transports.json" ] || return 0
     "$TRANSPORT_INIT" check >/dev/null 2>&1 || return 0
-    capture_dir="$RESCUE_DIR/.transport-upgrade-capture.$$"
-    mkdir "$capture_dir" && chmod 0700 "$capture_dir" || return 1
-    capture_status=0
+    capture_dir=$(mktemp -d "${TMPDIR:-${ROOT}/tmp}/kpbr-transport-upgrade.XXXXXX") || return 1
+    chmod 0700 "$capture_dir" || return 1
     if tar -xzOf "$CANDIDATE_IPK" ./data.tar.gz > "$capture_dir/data.tar.gz" &&
        tar -xzOf "$capture_dir/data.tar.gz" ./opt/usr/bin/transport-manager \
            > "$capture_dir/transport-manager" &&
@@ -1253,8 +1502,11 @@ status_json() {
 
 command=${1:-}
 case "$command" in
-    status|can-rollback-previous)
-        if [ "$command" = status ]; then
+    status|can-rollback-previous|space-protocol)
+        if [ "$command" = space-protocol ]; then
+            [ "$#" -eq 1 ] || exit 2
+            printf '1\n'
+        elif [ "$command" = status ]; then
             [ "$#" -eq 1 ] || exit 2
             status_json
         else
@@ -1274,6 +1526,14 @@ case "$command" in
 esac
 
 case "$command" in
+    stage-checked)
+        [ "$#" -eq 2 ] || exit 2
+        stage_checked_candidate "$2"
+        ;;
+    check-install-space)
+        [ "$#" -eq 1 ] || exit 2
+        prepare_update_space "$CANDIDATE_IPK" 1
+        ;;
     stage)
         [ "$#" -eq 2 ] || exit 2
         stage_candidate "$2"
@@ -1303,7 +1563,7 @@ case "$command" in
         recover_pending_explicit
         ;;
     *)
-        echo "Usage: $0 {stage IPK|verify|promote|rollback-candidate|rollback-previous|recover-startup|recover-pending|can-rollback-previous|status}" >&2
+        echo "Usage: $0 {stage-checked IPK|check-install-space|stage IPK|verify|promote|rollback-candidate|rollback-previous|recover-startup|recover-pending|can-rollback-previous|status}" >&2
         exit 2
         ;;
 esac

@@ -707,6 +707,9 @@ download_package() {
 }
 
 bootstrap_rescue_helpers() {
+    # The authenticated archive is already downloaded. Check the additional
+    # payload extraction before writing another archive to the temporary FS.
+    check_bootstrap_space
     payload="$TMP_DIR/data.tar.gz"
     helper_tree="$TMP_DIR/package-helpers"
     mkdir "$helper_tree" || die "не удалось подготовить каталог rescue helper" "could not prepare the recovery helper directory"
@@ -781,6 +784,32 @@ bootstrap_rescue_helpers() {
     "$LOCK_HELPER" transfer "$LOCK_OWNER_PID" "$LOCK_TOKEN" \
         "$LOCK_OWNER_PID" >/dev/null ||
         die "не удалось перевести блокировку обновления в безопасный формат" "could not migrate the update lock format"
+}
+
+check_bootstrap_space() {
+    local bytes needed available memory device
+    bytes=$(wc -c < "$PACKAGE_FILE") || return 1
+    needed=$(printf '%s\n' "$bytes" | awk '{ print int(($1+1023)/1024)+1024 }')
+    available=$(LC_ALL=C df -Pk "$TMP_DIR" | awk 'NR>1 {n=$4} END {if (n !~ /^[0-9]+$/) exit 1; print n}') || return 1
+    device=$(LC_ALL=C df -Pk "$TMP_DIR" | awk 'NR>1 {d=$1} END {print d}') || return 1
+    local kind=temporary
+    case "$device" in
+        tmpfs|rootfs)
+            memory=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null) || memory=
+            case "$memory" in
+                ''|*[!0-9]*) ;;
+                *) if [ "$memory" -lt "$((needed + 8192))" ]; then
+                    kind=memory; needed=$((needed + 8192)); available=$memory
+                fi ;;
+            esac ;;
+    esac
+    [ "$available" -ge "$needed" ] || {
+        say "Недостаточно места для распаковки: нужно $needed КиБ, доступно $available КиБ. Установленная версия не изменена. Освободите место и повторите обновление." "Not enough space to unpack: need $needed KiB, available $available KiB. The installed version has not been changed. Free space and retry." >&2
+        if [ -n "${KEEN_PBR_UPDATE_SPACE_REPORT:-}" ]; then
+            printf '%s %s %s\n' "$kind" "$needed" "$available" > "$KEEN_PBR_UPDATE_SPACE_REPORT" || true
+        fi
+        return 28
+    }
 }
 
 find_existing_sing_box() {
@@ -1408,6 +1437,37 @@ verify_installed_runtime() {
     return "$result"
 }
 
+legacy_update_space_check() {
+    # A source installer can select an older signed Latest package. Its
+    # packaged helper predates stage-checked and still copies archives and
+    # extracts the capture binary on flash. Keep that release installable,
+    # but budget its actual, less efficient preparation before calling opkg.
+    local control="$TMP_DIR/space-control.tar.gz" size bytes baseline=0 configs=0 needed available
+    tar -xzOf "$PACKAGE_FILE" ./control.tar.gz > "$control" || return 1
+    tar -xzOf "$control" ./control > "$TMP_DIR/space-control" || return 1
+    size=$(awk '/^Installed-Size: / {n++; s=$2} END {
+        if (n!=1 || s !~ /^[0-9]+$/ || s<1 || s>1073741824) exit 1;
+        print int((s+1023)/1024)
+    }' "$TMP_DIR/space-control") || return 1
+    bytes=$(wc -c < "$PACKAGE_FILE") || return 1
+    bytes=$(((bytes + 1023) / 1024))
+    if [ -f "$RESCUE_DIR/current.ipk" ]; then
+        baseline=$(wc -c < "$RESCUE_DIR/current.ipk") || return 1
+        baseline=$(((baseline + 1023) / 1024))
+    fi
+    configs=$(du -sk /opt/etc/keen-pbr 2>/dev/null | awk '{print $1}') || return 1
+    case "$configs" in ''|*[!0-9]*) return 1 ;; esac
+    needed=$((size + 3 * (bytes + baseline + configs) + 1024))
+    available=$(LC_ALL=C df -Pk /opt | awk 'NR>1 {n=$4} END {if (n !~ /^[0-9]+$/) exit 1; print n}') || return 1
+    [ "$available" -ge "$needed" ] || {
+        say "Недостаточно места в /opt для этого выпуска: нужно $needed КиБ, доступно $available КиБ. Установленная версия не изменена. Выберите более новый IPK с экономным обновлением или освободите место." "Not enough space in /opt for this release: need $needed KiB, available $available KiB. The installed version has not been changed. Select a newer IPK with low-space update support or free space." >&2
+        if [ -n "${KEEN_PBR_UPDATE_SPACE_REPORT:-}" ]; then
+            printf 'storage %s %s\n' "$needed" "$available" > "$KEEN_PBR_UPDATE_SPACE_REPORT" || true
+        fi
+        return 28
+    }
+}
+
 install_package_transactionally() {
     [ ! -L "$RESCUE_DIR" ] &&
         { [ ! -e "$RESCUE_DIR" ] || [ -d "$RESCUE_DIR" ]; } ||
@@ -1417,8 +1477,17 @@ install_package_transactionally() {
         die "не удалось защитить каталог rescue" "could not set permissions on the recovery directory"
     [ -x "$RESCUE_HELPER" ] ||
         die "rescue helper не установлен" "the recovery helper is not installed"
-    if [ "${RESUME_FIRST_INSTALL:-0}" != 1 ]; then
-        "$RESCUE_HELPER" stage "$PACKAGE_FILE"
+    if [ "$("$RESCUE_HELPER" space-protocol 2>/dev/null || true)" = 1 ]; then
+        if [ "${RESUME_FIRST_INSTALL:-0}" != 1 ]; then
+            "$RESCUE_HELPER" stage-checked "$PACKAGE_FILE" || return $?
+        else
+            "$RESCUE_HELPER" check-install-space || return $?
+        fi
+    else
+        legacy_update_space_check || return $?
+        if [ "${RESUME_FIRST_INSTALL:-0}" != 1 ]; then
+            "$RESCUE_HELPER" stage "$PACKAGE_FILE" || return $?
+        fi
     fi
 
     local recovery_capability=
@@ -1443,7 +1512,7 @@ install_package_transactionally() {
            KEEN_PBR_RESCUE_TRANSACTION=1 \
            KEEN_PBR_PACKAGE_UNKNOWN_RECOVERY="$recovery_capability" \
            KEEN_PBR_REPLACE_DNSMASQ_DEFAULTS=N \
-           /opt/bin/opkg --force-reinstall install "$PACKAGE_FILE" &&
+           /opt/bin/opkg --force-reinstall --tmp-dir "${TMPDIR:-/tmp}" install "$PACKAGE_FILE" &&
        [ -x "$RESCUE_HELPER" ] &&
        verify_installed_runtime "$verification_windows"; then
         # The no-baseline marker is cleared only after the selected signed package
@@ -1503,6 +1572,12 @@ case "$TMP_DIR" in
     *) die "mktemp вернул небезопасный путь" "mktemp returned an unsafe path" ;;
 esac
 chmod 0700 "$TMP_DIR" || die "не удалось защитить временный каталог" "could not set permissions on the temporary directory"
+# Keep helper extraction and opkg scratch files on the selected temporary
+# filesystem. Do not export our disposable directory: postinst's daemons
+# inherit TMPDIR and must still be able to create files after cleanup.
+TMPDIR=$TMP_BASE
+export TMPDIR
+export KEEN_PBR_INSTALL_LANGUAGE="$INSTALL_LANGUAGE"
 acquire_update_lock || die "другое обновление или откат keen-pbr-sb уже выполняется" "another keen-pbr-sb update or rollback is already running"
 if [ "$AUTH_SETUP_ONLY" = 1 ]; then
     configure_web_auth
