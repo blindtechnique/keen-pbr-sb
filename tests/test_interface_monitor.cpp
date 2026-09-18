@@ -52,6 +52,7 @@ TEST_CASE("InterfaceMonitor classifies link creation and deletion as topology ch
         "nwg6", true, true, true);
     CHECK_FALSE(duplicate.topology_changed);
     CHECK_FALSE(duplicate.administrative_state_changed);
+    CHECK_FALSE(interface_event_requires_runtime_observation(duplicate));
 
     const auto renamed =
         InterfaceMonitor::describe_indexed_link_transition(
@@ -65,6 +66,71 @@ TEST_CASE("InterfaceMonitor classifies link creation and deletion as topology ch
             "nwg7", true, std::nullopt, std::nullopt, true);
     CHECK(name_reused_by_new_index.topology_changed);
     CHECK_FALSE(name_reused_by_new_index.administrative_state_changed);
+}
+
+TEST_CASE("InterfaceMonitor yields under continuous unchanged link notifications") {
+    const auto unchanged = InterfaceMonitor::describe_link_transition(
+        "nwg5", true, true, true);
+    std::size_t received = 0;
+    std::size_t runtime_refreshes = 0;
+    std::size_t other_handlers = 0;
+    for (std::size_t turn = 0; turn < 4U; ++turn) {
+        InterfaceMonitor::drain_pending_batches([&]() {
+            ++received;
+            if (interface_event_requires_runtime_observation(unchanged)) {
+                ++runtime_refreshes;
+            }
+            return true; // The producer never lets the socket reach EAGAIN.
+        });
+        // The same epoll pass can now serve DNS, timers and control requests.
+        ++other_handlers;
+        CHECK(received == (turn + 1U) *
+                              InterfaceMonitor::max_receive_batches_per_dispatch);
+    }
+    CHECK(other_handlers == 4U);
+    CHECK(runtime_refreshes == 0U);
+}
+
+TEST_CASE("InterfaceMonitor keeps remaining batches for the next dispatch") {
+    const auto limit = InterfaceMonitor::max_receive_batches_per_dispatch;
+    const auto total = limit + 3U;
+    std::size_t received = 0;
+    auto receive = [&]() {
+        if (received == total) return false;
+        ++received;
+        return true;
+    };
+    InterfaceMonitor::drain_pending_batches(receive);
+    CHECK(received == limit);
+    InterfaceMonitor::drain_pending_batches(receive);
+    CHECK(received == total);
+
+    std::size_t empty_checks = 0;
+    InterfaceMonitor::drain_pending_batches([&]() {
+        ++empty_checks;
+        return false;
+    });
+    CHECK(empty_checks == 1U);
+}
+
+TEST_CASE("InterfaceMonitor still observes real link and address transitions") {
+    for (const auto& event : {
+             InterfaceMonitor::describe_link_transition(
+                 "nwg5", true, false, true),
+             InterfaceMonitor::describe_link_transition(
+                 "nwg5", true, true, false),
+             InterfaceMonitor::describe_link_transition(
+                 "nwg5", false, true, false),
+             InterfaceMonitor::describe_link_transition(
+                 "nwg5", true, std::nullopt, true)}) {
+        CHECK(interface_event_requires_runtime_observation(event));
+    }
+    InterfaceMonitor::Event address;
+    address.address_changed = true;
+    CHECK(interface_event_requires_runtime_observation(address));
+    const auto stopped_duplicate = InterfaceMonitor::describe_link_transition(
+        "nwg5", true, false, false);
+    CHECK_FALSE(interface_event_requires_runtime_observation(stopped_duplicate));
 }
 
 TEST_CASE("InterfaceMonitor observation gaps require runtime resynchronization") {
