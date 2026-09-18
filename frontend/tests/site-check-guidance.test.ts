@@ -19,6 +19,16 @@ describe("completed site check actions", () => {
     })
   })
 
+  test("a routing timeout leaves the two independent successful responses intact", () => {
+    const input = { ...complete, routingStatus: "error" as const }
+    expect(siteCheckPresentation(input)).toEqual({
+      retry: true,
+      guidance: "service",
+    })
+    expect(input.browserProbe.status).toBe("responded")
+    expect(input.routerProbe.status).toBe("responded")
+  })
+
   test("a changed or invalid input is not a repeat of the previous target", () => {
     for (const inputTarget of ["different.example", null]) {
       expect(siteCheckPresentation({ ...complete, inputTarget }).retry).toBe(

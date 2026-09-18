@@ -14,6 +14,7 @@ import {
   useGetRoutingRegistryConsent as useGeneratedRoutingRegistryConsent,
   useGetTunnelProbeState as useGeneratedTunnelProbeState,
 } from "@/api/generated/keen-api"
+import { nativeInventoryRetryInterval } from "@/lib/native-inventory-presentation"
 
 export {
   getConfig,
@@ -66,7 +67,13 @@ export function useGetNdmsInterfaceInventory() {
     query: {
       // NDMS metadata changes only when the firmware configuration changes.
       // Live link state comes from the shared runtime SSE snapshot instead of
-      // adding another polling loop on a resource-constrained router.
+      // adding a permanent polling loop on a resource-constrained router.
+      // Retry only while the server is refreshing an unavailable catalog.
+      refetchInterval: (query) =>
+        nativeInventoryRetryInterval(
+          query.state.data?.status === 200 ? query.state.data.data : undefined
+        ),
+      refetchIntervalInBackground: false,
       refetchOnReconnect: false,
       refetchOnWindowFocus: false,
       staleTime: Number.POSITIVE_INFINITY,
