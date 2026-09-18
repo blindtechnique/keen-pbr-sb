@@ -660,6 +660,21 @@ export function nfqwsProfileMatchesPackage(
   return strategy.canonical === true
 }
 
+/** A changed draft can be applied; reverting it restores the applied state. */
+export function nfqwsStrategyIsApplied(params: {
+  readonly name: string
+  readonly activeStrategy: string
+  readonly savedContent: string | undefined
+  readonly draftContent?: string
+}): boolean {
+  return (
+    params.savedContent !== undefined &&
+    params.name === params.activeStrategy &&
+    (params.draftContent === undefined ||
+      params.draftContent === params.savedContent)
+  )
+}
+
 /**
  * The active file needs a snapshot only when it matches no saved strategy.
  * Loading the file is a separate prerequisite: an empty file is still a

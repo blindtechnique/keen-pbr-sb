@@ -155,6 +155,7 @@ import {
   canonicalNfqwsProfileTier,
   nfqwsBreakdownSubject,
   nfqwsProfileMatchesPackage,
+  nfqwsStrategyIsApplied,
   NFQWS_PROFILE_ORDER,
   nfqwsBuiltinStrategyDisplayKey,
   parseNfqwsProfileMarker,
@@ -1836,7 +1837,7 @@ function NfqwsField({
   )
 }
 
-function StrategiesEditor({
+export function StrategiesEditor({
   onDirtyChange,
   refresh,
   runOperation,
@@ -1874,15 +1875,19 @@ function StrategiesEditor({
     (item) => item.name === effectiveSelected
   )
   const content = draftContent[effectiveSelected] ?? strategy?.content ?? ""
-  // «Применена» — только когда применён именно этот текст. Правки снимают
-  // запрет: иначе применить их было бы нечем. Без этого кнопка оставалась
-  // активной у уже применённой стратегии, и второе нажатие перезапускало
-  // службу впустую.
   const selectedHasEdits =
     draftContent[effectiveSelected] !== undefined &&
     draftContent[effectiveSelected] !== strategy?.content
-  const selectedIsApplied =
-    effectiveSelected === status.active_strategy && !selectedHasEdits
+  // Rows, editor and submit must agree: only unchanged active content is applied.
+  const strategyIsApplied = (name: string) =>
+    nfqwsStrategyIsApplied({
+      name,
+      activeStrategy: status.active_strategy,
+      savedContent: status.strategies.find((item) => item.name === name)
+        ?.content,
+      draftContent: draftContent[name],
+    })
+  const selectedIsApplied = strategyIsApplied(effectiveSelected)
   const [editorViewChoice, setEditorViewChoice] = useState<"breakdown" | "raw">(
     "breakdown"
   )
@@ -1964,6 +1969,7 @@ function StrategiesEditor({
     : content
   const run = async (action: string, name: string) => {
     if (action === "apply_strategy") {
+      if (strategyIsApplied(name)) return
       const completed = await runOperation(
         t("nfqws.applyStrategy"),
         () =>
@@ -2074,7 +2080,7 @@ function StrategiesEditor({
 
   const strategyRow = (name: string): ReactNode[] => {
     const item = status.strategies.find((candidate) => candidate.name === name)
-    const isActive = name === status.active_strategy
+    const isApplied = strategyIsApplied(name)
     const isDraft = item === undefined
     const isEditing = name === effectiveSelected
 
@@ -2099,7 +2105,7 @@ function StrategiesEditor({
               ? t("nfqws.strategyOrigin.builtin")
               : t("nfqws.strategyOrigin.custom")}
       </span>,
-      isActive ? (
+      isApplied ? (
         <KeeneticStatus key="state" tone="success">
           {t("nfqws.strategyState.active")}
         </KeeneticStatus>
@@ -2110,8 +2116,10 @@ function StrategiesEditor({
       ),
       <span className="flex items-center justify-end gap-1" key="actions">
         <Button
-          aria-label={t("nfqws.applyStrategy")}
-          disabled={isDraft}
+          aria-label={
+            isApplied ? t("nfqws.profiles.applied") : t("nfqws.applyStrategy")
+          }
+          disabled={isDraft || isApplied}
           onClick={() => {
             setSelected(name)
             setApplying(name)
@@ -2120,12 +2128,14 @@ function StrategiesEditor({
           title={
             isDraft
               ? t("nfqws.strategySaveBeforeApply")
-              : t("nfqws.applyStrategy")
+              : isApplied
+                ? t("nfqws.strategyAlreadyApplied")
+                : t("nfqws.applyStrategy")
           }
           variant="outline"
         >
           <PlayIcon />
-          {t("nfqws.applyStrategy")}
+          {isApplied ? t("nfqws.profiles.applied") : t("nfqws.applyStrategy")}
         </Button>
         <span className="keen-row-actions flex items-center gap-1">
           <Button
