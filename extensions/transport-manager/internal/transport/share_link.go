@@ -20,8 +20,8 @@ func outboundFromSpec(spec TransportSpec) (map[string]any, error) {
 		if err := json.Unmarshal([]byte(spec.OutboundJSON), &outbound); err != nil {
 			return nil, fmt.Errorf("invalid sing-box outbound JSON: %w", err)
 		}
-		if outbound["type"] == nil || outbound["type"] == "" {
-			return nil, fmt.Errorf("sing-box outbound JSON must contain type")
+		if protocol, ok := outbound["type"].(string); !ok || strings.TrimSpace(protocol) == "" {
+			return nil, fmt.Errorf("sing-box outbound JSON must contain a non-empty string type")
 		}
 		return outbound, nil
 	}
@@ -51,10 +51,10 @@ func legacyVLESSOutbound(v *VLESSSpec) (map[string]any, error) {
 }
 
 func parseShareLink(link string) (map[string]any, error) {
-	if strings.HasPrefix(strings.ToLower(link), "vmess://") {
+	if len(link) >= len("vmess://") && strings.EqualFold(link[:len("vmess://")], "vmess://") {
 		return parseVMessLink(link)
 	}
-	if strings.HasPrefix(strings.ToLower(link), "ss://") {
+	if len(link) >= len("ss://") && strings.EqualFold(link[:len("ss://")], "ss://") {
 		return parseShadowsocksLink(link)
 	}
 	u, err := url.Parse(link)
@@ -208,7 +208,11 @@ func parseProxyLink(u *url.URL) (map[string]any, error) {
 }
 
 func parseVMessLink(link string) (map[string]any, error) {
-	payload, err := decodeBase64(strings.TrimPrefix(strings.TrimPrefix(link, "vmess://"), "VMESS://"))
+	scheme, encoded, found := strings.Cut(link, "://")
+	if !found || !strings.EqualFold(scheme, "vmess") {
+		return nil, fmt.Errorf("invalid vmess link scheme")
+	}
+	payload, err := decodeBase64(encoded)
 	if err != nil {
 		return nil, fmt.Errorf("invalid vmess link: %w", err)
 	}
@@ -254,7 +258,10 @@ func parseVMessLink(link string) (map[string]any, error) {
 }
 
 func parseShadowsocksLink(link string) (map[string]any, error) {
-	raw := strings.TrimPrefix(strings.TrimPrefix(link, "ss://"), "SS://")
+	scheme, raw, found := strings.Cut(link, "://")
+	if !found || !strings.EqualFold(scheme, "ss") {
+		return nil, fmt.Errorf("invalid shadowsocks link scheme")
+	}
 	if index := strings.IndexByte(raw, '#'); index >= 0 {
 		raw = raw[:index]
 	}
@@ -456,6 +463,9 @@ func summariseOutbound(outbound map[string]any) outboundSummary {
 	switch value := outbound["server_port"].(type) {
 	case int:
 		result.port = value
+	case uint16:
+		// Legacy VLESSSpec stores the port as uint16 before JSON encoding.
+		result.port = int(value)
 	case float64:
 		result.port = int(value)
 	}

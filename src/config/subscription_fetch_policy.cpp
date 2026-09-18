@@ -57,25 +57,24 @@ SubscriptionDestinationVerdict judge_ipv4(const in_addr& address) noexcept {
         return SubscriptionDestinationVerdict::multicast_or_broadcast;
     }
     // 0.0.0.0/8, 192.0.0.0/24, 192.0.2.0/24, 198.18.0.0/15, 198.51.100.0/24,
-    // 203.0.113.0/24 and 240.0.0.0/4 are all special-use. None of them is a
-    // place a subscription legitimately lives.
+    // 203.0.113.0/24 and 240.0.0.0/4 are special-use prefixes excluded by this
+    // fetch policy. Match the /24s exactly; neighbouring public IPs are valid.
     if (first == 0U) return SubscriptionDestinationVerdict::reserved;
-    if (first == 192U && second == 0U) {
+    if (first == 192U && second == 0U && (third == 0U || third == 2U)) {
         return SubscriptionDestinationVerdict::reserved;
     }
     // 192.88.99.0/24 - the deprecated 6to4 relay anycast block. It is not a
-    // public destination even though it sits outside the broader 192.0/16
-    // protocol-assignment block above.
+    // subscription destination under this policy.
     if (first == 192U && second == 88U && third == 99U) {
         return SubscriptionDestinationVerdict::reserved;
     }
     if (first == 198U && (second == 18U || second == 19U)) {
         return SubscriptionDestinationVerdict::reserved;
     }
-    if (first == 198U && second == 51U) {
+    if (first == 198U && second == 51U && third == 100U) {
         return SubscriptionDestinationVerdict::reserved;
     }
-    if (first == 203U && second == 0U) {
+    if (first == 203U && second == 0U && third == 113U) {
         return SubscriptionDestinationVerdict::reserved;
     }
     if (first >= 240U) return SubscriptionDestinationVerdict::reserved;

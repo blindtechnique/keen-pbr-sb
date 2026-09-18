@@ -190,14 +190,52 @@ managed_process_names(
         ? config_names : restore_names;
 }
 
-bool production_runtime_active(
-    backup::RecoveryOperation operation) {
+bool managed_process_command(
+    const std::vector<std::string>& arguments,
+    const std::vector<std::string>& managed_names) {
+    const auto managed = [&](const std::string& executable) {
+        auto name = fs::path(executable).filename().string();
+        // The Entware wrapper may launch the real binary through ld.so.
+        if (name == "sing-box.real") name = "sing-box";
+        return std::find(managed_names.begin(), managed_names.end(), name) !=
+               managed_names.end();
+    };
+    if (arguments.empty()) return false;
+    if (managed(arguments.front())) return true;
+
+    const auto launcher = fs::path(arguments.front()).filename().string();
+    const bool loader = launcher == "ld.so" || launcher == "ld.so.1" ||
+        launcher == "ld64.so.1" || launcher == "ld64.so.2" ||
+        (launcher.rfind("ld-", 0) == 0 && launcher.find(".so") != std::string::npos);
+    if (!loader) return false;
+    // Inspect the loader's program operand, not arbitrary later arguments.
+    // A library path or argv0 value named sing-box is not the running program.
+    for (std::size_t index = 1; index < arguments.size(); ++index) {
+        const auto& argument = arguments[index];
+        if (argument == "--") {
+            return index + 1 < arguments.size() && managed(arguments[index + 1]);
+        }
+        if (argument == "--library-path" || argument == "--preload" ||
+            argument == "--audit" || argument == "--inhibit-rpath" ||
+            argument == "--argv0" || argument == "--glibc-hwcaps-prepend" ||
+            argument == "--glibc-hwcaps-mask") {
+            ++index;
+            continue;
+        }
+        if (!argument.empty() && argument.front() == '-') continue;
+        return managed(argument);
+    }
+    return false;
+}
+
+bool runtime_active_in(
+    const fs::path& proc_root, backup::RecoveryOperation operation) {
     const auto& managed_names =
         managed_process_names(operation);
     const auto self = ::getpid();
     std::error_code error;
     fs::directory_iterator iterator(
-        "/proc",
+        proc_root,
         fs::directory_options::skip_permission_denied,
         error);
     if (error) {
@@ -225,21 +263,20 @@ bool production_runtime_active(
 
         std::ifstream cmdline(
             entry.path() / "cmdline", std::ios::binary);
-        std::string executable;
+        std::vector<std::string> arguments;
         if (cmdline) {
-            std::getline(cmdline, executable, '\0');
+            std::string argument;
+            while (std::getline(cmdline, argument, '\0')) {
+                arguments.push_back(std::move(argument));
+            }
         }
-        if (executable.empty()) {
+        if (arguments.empty() || arguments.front().empty()) {
             std::ifstream comm(entry.path() / "comm");
+            std::string executable;
             std::getline(comm, executable);
+            arguments = {std::move(executable)};
         }
-        if (executable.empty()) continue;
-        const auto executable_name =
-            fs::path(executable).filename().string();
-        if (std::find(
-                managed_names.begin(),
-                managed_names.end(),
-                executable_name) != managed_names.end()) {
+        if (managed_process_command(arguments, managed_names)) {
             return true;
         }
     }
@@ -402,6 +439,11 @@ recovery_managed_process_names_for_testing(
     backup::RecoveryOperation operation) {
     return managed_process_names(operation);
 }
+
+bool recovery_runtime_active_for_testing(
+    const fs::path& proc_root, backup::RecoveryOperation operation) {
+    return runtime_active_in(proc_root, operation);
+}
 #endif
 
 int run_recover_persistent_state(
@@ -518,7 +560,7 @@ int run_recover_persistent_state_command() {
         };
     options.runtime_active_probe =
         [](backup::RecoveryOperation operation) {
-            return production_runtime_active(operation);
+            return runtime_active_in("/proc", operation);
         };
     return run_recover_persistent_state(
         options, std::cout);

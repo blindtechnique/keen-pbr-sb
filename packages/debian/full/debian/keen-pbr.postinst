@@ -2,6 +2,10 @@
 
 set -e
 
+# dpkg also calls postinst for abort/remove recovery; those calls must not
+# initialise DNS or enable services as though this were a fresh configure.
+[ "${1:-configure}" = configure ] || exit 0
+
 DNSMASQ_HELPER="/usr/lib/keen-pbr/dnsmasq.sh"
 DNSMASQ_CONF="/etc/dnsmasq.conf"
 DNSMASQ_TEMPLATE="/usr/lib/keen-pbr/dnsmasq.conf.template"
@@ -15,13 +19,18 @@ answer=""
 if [ -f "$DNSMASQ_TEMPLATE" ]; then
     if [ -n "${KEEN_PBR_REPLACE_DNSMASQ_DEFAULTS:-}" ]; then
         answer="$KEEN_PBR_REPLACE_DNSMASQ_DEFAULTS"
-    elif [ "${DEBIAN_FRONTEND:-}" = "noninteractive" ]; then
+    elif [ ! -e "$DNSMASQ_CONF" ] && [ ! -L "$DNSMASQ_CONF" ]; then
         answer="Y"
+    elif [ -n "${2:-}" ]; then
+        # configure <previous-version> is an upgrade, not initial setup.
+        answer="N"
+    elif [ "${DEBIAN_FRONTEND:-}" = "noninteractive" ]; then
+        answer="N"
     elif [ -t 0 ] && [ -t 1 ]; then
         echo "Tip: set KEEN_PBR_REPLACE_DNSMASQ_DEFAULTS=Y or N to automate keen-pbr installation."
         while :; do
             printf "Replace %s with recommended keen-pbr dnsmasq defaults? [y/n]: " "$DNSMASQ_CONF"
-            read answer || answer=""
+            read answer || answer="N"
             case "$answer" in
                 y|Y|n|N)
                     break
@@ -39,8 +48,12 @@ fi
 case "$answer" in
     y|Y)
         if [ -f "$DNSMASQ_CONF" ]; then
-            printf "Backing up existing %s to %s\n" "$DNSMASQ_CONF" "$DNSMASQ_BACKUP"
-            cp "$DNSMASQ_CONF" "$DNSMASQ_BACKUP"
+            backup_path="$DNSMASQ_BACKUP"
+            if [ -e "$backup_path" ] || [ -L "$backup_path" ]; then
+                backup_path=$(mktemp "${DNSMASQ_BACKUP}.XXXXXX")
+            fi
+            printf "Backing up existing %s to %s\n" "$DNSMASQ_CONF" "$backup_path"
+            (umask 077; cp "$DNSMASQ_CONF" "$backup_path")
         fi
         printf "Installing recommended keen-pbr dnsmasq base config to %s\n" "$DNSMASQ_CONF"
         cp "$DNSMASQ_TEMPLATE" "$DNSMASQ_CONF"
