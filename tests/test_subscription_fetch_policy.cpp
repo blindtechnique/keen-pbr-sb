@@ -176,6 +176,50 @@ TEST_CASE("a port does not launder a refused destination") {
           Url::destination_not_permitted);
 }
 
+TEST_CASE("special-use IPv4 /24s do not reserve neighbouring public prefixes") {
+    for (const char* address : {
+             "191.255.255.255", "192.0.1.0", "192.0.1.255", "192.0.3.0",
+             "192.0.3.10", "192.0.255.255", "198.51.1.10", "198.51.99.255",
+             "198.51.101.0", "198.51.255.255", "203.0.10.1", "203.0.112.255",
+             "203.0.114.0", "203.0.255.255"}) {
+        CAPTURE(address);
+        CHECK(subscription_destination_permitted(address) == Dest::allowed);
+        CHECK(classify_subscription_url(std::string("https://") + address + "/sub") ==
+              Url::allowed);
+        for (const char* prefix : {"::ffff:", "64:ff9b::"}) {
+            const auto embedded = std::string(prefix) + address;
+            CHECK(subscription_destination_permitted(embedded) == Dest::allowed);
+            CHECK(classify_subscription_url("https://[" + embedded + "]/sub") ==
+                  Url::allowed);
+        }
+    }
+    for (const char* address : {
+             "192.0.0.0", "192.0.0.255", "192.0.2.0", "192.0.2.255",
+             "198.51.100.0", "198.51.100.255", "203.0.113.0", "203.0.113.255"}) {
+        CAPTURE(address);
+        CHECK(subscription_destination_permitted(address) == Dest::reserved);
+        CHECK(classify_subscription_url(std::string("https://") + address + "/sub") ==
+              Url::destination_not_permitted);
+        for (const char* prefix : {"::ffff:", "64:ff9b::"}) {
+            const auto embedded = std::string(prefix) + address;
+            CHECK(subscription_destination_permitted(embedded) == Dest::reserved);
+            CHECK(classify_subscription_url("https://[" + embedded + "]/sub") ==
+                  Url::destination_not_permitted);
+        }
+    }
+}
+
+TEST_CASE("6to4 observes the same exact IPv4 special-use boundaries") {
+    for (const char* address : {
+             "2002:c000:30a::1", "2002:c633:10a::1", "2002:cb00:a01::1"}) {
+        CHECK(subscription_destination_permitted(address) == Dest::allowed);
+    }
+    for (const char* address : {
+             "2002:c000:20a::1", "2002:c633:640a::1", "2002:cb00:7101::1"}) {
+        CHECK(subscription_destination_permitted(address) == Dest::reserved);
+    }
+}
+
 TEST_CASE("the body bound is small enough to be configuration") {
     // A subscription is configuration, not payload, and this router shares
     // 1 GiB with the routing daemon.

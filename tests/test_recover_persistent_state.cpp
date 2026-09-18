@@ -341,6 +341,103 @@ TEST_CASE("persistent recovery rejects local UNKNOWN without acquiring maintenan
           "unknown_state");
 }
 
+TEST_CASE("persistent recovery identifies direct and loader-managed processes") {
+    RecoveryCommandTempDir directory;
+    const auto proc_root = directory.path / "proc";
+    const auto process = proc_root / "10000000";
+    const std::vector<std::vector<std::string>> commands{
+        {"/opt/usr/bin/keen-pbr"},
+        {"/opt/usr/bin/transport-manager"},
+        {"/opt/bin/sing-box", "run", "-c", "/run/keen-pbr/vpn.json"},
+        {"/opt/bin/sing-box.real", "run"},
+        {"/opt/lib/ld-2.27.so", "/opt/bin/sing-box", "run"},
+        {"/lib/ld-musl-aarch64.so.1", "--library-path", "/opt/lib:/opt/usr/lib",
+         "/opt/bin/sing-box.real", "run"},
+        {"/lib64/ld-linux-x86-64.so.2", "--inhibit-cache", "--argv0", "alias",
+         "--library-path=/opt/lib", "/opt/bin/sing-box", "run"},
+        {"/opt/lib/ld.so", "--", "/opt/bin/sing-box", "run"},
+    };
+    for (const auto& arguments : commands) {
+        std::string cmdline;
+        for (const auto& argument : arguments) cmdline += argument + '\0';
+        write_file(process / "cmdline", cmdline);
+        CHECK(recovery_runtime_active_for_testing(
+            proc_root, backup::RecoveryOperation::config_save));
+    }
+    write_file(process / "cmdline", "");
+    write_file(process / "comm", "sing-box\n");
+    CHECK(recovery_runtime_active_for_testing(
+        proc_root, backup::RecoveryOperation::config_save));
+}
+
+TEST_CASE("persistent recovery does not mistake program arguments for a managed process") {
+    RecoveryCommandTempDir directory;
+    const auto proc_root = directory.path / "proc";
+    const auto process = proc_root / "10000000";
+    const std::vector<std::vector<std::string>> commands{
+        {"/bin/cat", "/opt/bin/sing-box"},
+        {"/bin/echo", "/opt/bin/sing-box", "run"},
+        {"/bin/sh", "-c", "/opt/bin/sing-box run -c /tmp/example"},
+        {"/lib64/ld-linux-x86-64.so.2", "/bin/echo", "/opt/bin/sing-box", "run"},
+        {"/opt/lib/ld-2.27.so", "--library-path", "/opt/bin/sing-box", "/bin/sleep", "1"},
+        {"/opt/lib/ld-2.27.so", "--argv0", "sing-box", "/bin/sleep", "1"},
+        {"/opt/lib/ld-2.27.so", "--preload", "/opt/bin/sing-box"},
+    };
+    for (const auto& arguments : commands) {
+        std::string cmdline;
+        for (const auto& argument : arguments) cmdline += argument + '\0';
+        write_file(process / "cmdline", cmdline);
+        CHECK_FALSE(recovery_runtime_active_for_testing(
+            proc_root, backup::RecoveryOperation::config_save));
+    }
+}
+
+TEST_CASE("loader detection preserves the config-save versus backup-restore boundary") {
+    RecoveryCommandTempDir directory;
+    const auto proc_root = directory.path / "proc";
+    for (const char* executable : {"nfqws", "nfqws2"}) {
+        std::string cmdline = "/opt/lib/ld-2.27.so";
+        cmdline += '\0';
+        cmdline += std::string("/opt/bin/") + executable;
+        cmdline += '\0';
+        write_file(proc_root / "10000000" / "cmdline", cmdline);
+        CHECK_FALSE(recovery_runtime_active_for_testing(
+            proc_root, backup::RecoveryOperation::config_save));
+        CHECK(recovery_runtime_active_for_testing(
+            proc_root, backup::RecoveryOperation::backup_restore));
+    }
+}
+
+TEST_CASE("loader-run VPN blocks persistent recovery before maintenance and file writes") {
+    RecoveryCommandTempDir directory;
+    const auto layout = command_layout(directory.path);
+    create_private_directory(layout.state_root);
+    const auto operation_directory = layout.state_root / "config-save";
+    create_private_directory(operation_directory);
+    write_file(operation_directory / "active.json", "{}\n");
+    const auto proc_root = directory.path / "proc";
+    std::string cmdline;
+    for (const char* argument : {
+             "/opt/lib/ld-2.27.so", "--library-path", "/opt/lib",
+             "/opt/bin/sing-box", "run"}) {
+        cmdline += argument;
+        cmdline += '\0';
+    }
+    write_file(proc_root / "10000000" / "cmdline", cmdline);
+    LeaseCounters counters;
+    auto options = command_options(layout, counters);
+    options.runtime_active_probe = [&](backup::RecoveryOperation operation) {
+        return recovery_runtime_active_for_testing(proc_root, operation);
+    };
+    std::ostringstream output;
+    CHECK(run_recover_persistent_state(options, output) ==
+          static_cast<int>(RecoverPersistentStateExitCode::blocked));
+    CHECK(parse_result(output).at("error").at("code") == "runtime_still_active");
+    CHECK(counters.factories == 0);
+    CHECK(read_file(operation_directory / "active.json") == "{}\n");
+    CHECK_FALSE(fs::exists(layout.state_root / "UNKNOWN"));
+}
+
 TEST_CASE("persistent recovery rejects global UNKNOWN without acquiring maintenance") {
     RecoveryCommandTempDir directory;
     const auto layout = command_layout(directory.path);

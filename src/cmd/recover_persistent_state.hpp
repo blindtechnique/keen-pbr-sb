@@ -4,6 +4,7 @@
 #include "../update/maintenance_lock.hpp"
 
 #include <functional>
+#include <filesystem>
 #include <memory>
 #include <ostream>
 #include <string>
@@ -44,6 +45,11 @@ int run_recover_persistent_state_command();
 // Config-save may own transports.json; only backup restore also owns nfqws.
 std::vector<std::string>
 recovery_managed_process_names_for_testing(
+    backup::RecoveryOperation operation);
+
+// Exercise the production process probe against an isolated proc fixture.
+bool recovery_runtime_active_for_testing(
+    const std::filesystem::path& proc_root,
     backup::RecoveryOperation operation);
 #endif
 
