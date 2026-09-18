@@ -240,6 +240,16 @@ constexpr bool runtime_firewall_lifecycle_is_config_generation(
            kind == RuntimeFirewallLifecycleKind::config_rollback;
 }
 
+// Use the same contract when preparing a worker and consuming its result.
+// Config generations verify their own SNAT in the backend transaction and
+// retain pending old-generation recovery for the post-publication refresh.
+// They do not produce the optional legacy before/after observations.
+constexpr bool runtime_firewall_lifecycle_observes_owned_snat(
+    RuntimeFirewallLifecycleKind kind, bool recovery_requested) noexcept {
+    return !runtime_firewall_lifecycle_is_config_generation(kind) &&
+           (runtime_firewall_lifecycle_is_preapply(kind) || recovery_requested);
+}
+
 constexpr bool runtime_firewall_lifecycle_is_urltest_candidate(
     RuntimeFirewallLifecycleKind kind) noexcept {
     return kind == RuntimeFirewallLifecycleKind::urltest_candidate;

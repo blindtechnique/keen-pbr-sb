@@ -50,6 +50,10 @@ type TransportConfigExporter interface {
 	ExportSpecs() []transport.TransportSpec
 }
 
+type TransportEnabledAdmin interface {
+	SetEnabled(context.Context, string, bool) error
+}
+
 type TransportConfigRevisionProvider interface {
 	Revision() string
 }
@@ -733,20 +737,34 @@ func (a *API) action(w http.ResponseWriter, r *http.Request) {
 	// transport permanently down. Service shutdown must still cancel the action.
 	ctx, cancel := context.WithTimeout(a.lifecycle, 90*time.Second)
 	defer cancel()
-	switch r.PathValue("action") {
-	case "up":
-		err = a.manager.Up(ctx, r.PathValue("tag"))
-	case "down":
-		if r.Header.Get("X-KeenPbr-Temporary-Stop") == "1" {
-			err = a.temporaryInstallStop(r.Context(), r.PathValue("tag"), temporaryInstallStopTimeout)
-		} else {
-			err = a.manager.Down(ctx, r.PathValue("tag"))
+	action := r.PathValue("action")
+	if r.Header.Get("X-KeenPbr-Persist-Enabled") == "1" {
+		if (action != "up" && action != "down") || r.Header.Get("X-KeenPbr-Temporary-Stop") == "1" {
+			write(w, http.StatusBadRequest, map[string]string{"error": "persistent power requires an ordinary up or down action"})
+			return
 		}
-	case "restart":
-		err = a.manager.Restart(ctx, r.PathValue("tag"))
-	default:
-		write(w, http.StatusNotFound, map[string]string{"error": "unknown action"})
-		return
+		admin, ok := a.admin.(TransportEnabledAdmin)
+		if !ok {
+			write(w, http.StatusServiceUnavailable, map[string]string{"error": "persistent transport power unavailable"})
+			return
+		}
+		err = admin.SetEnabled(ctx, r.PathValue("tag"), action == "up")
+	} else {
+		switch action {
+		case "up":
+			err = a.manager.Up(ctx, r.PathValue("tag"))
+		case "down":
+			if r.Header.Get("X-KeenPbr-Temporary-Stop") == "1" {
+				err = a.temporaryInstallStop(r.Context(), r.PathValue("tag"), temporaryInstallStopTimeout)
+			} else {
+				err = a.manager.Down(ctx, r.PathValue("tag"))
+			}
+		case "restart":
+			err = a.manager.Restart(ctx, r.PathValue("tag"))
+		default:
+			write(w, http.StatusNotFound, map[string]string{"error": "unknown action"})
+			return
+		}
 	}
 	if err != nil {
 		write(w, http.StatusBadRequest, map[string]string{"error": err.Error()})

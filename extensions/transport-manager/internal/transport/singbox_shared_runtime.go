@@ -411,6 +411,17 @@ func (g *SharedSingBoxGroup) ApplyInventory(ctx context.Context, all []Transport
 }
 
 func (g *SharedSingBoxGroup) setDesired(ctx context.Context, tag string, desired bool) error {
+	return g.setPower(ctx, tag, desired, nil)
+}
+
+// ApplyPower changes only one known member's boot preference and runtime
+// intent under the same process-operation lock. Separate values allow an exact
+// rollback to a previous manual stop when durable configuration saving fails.
+func (g *SharedSingBoxGroup) ApplyPower(ctx context.Context, tag string, autoStart, desired bool) error {
+	return g.setPower(ctx, tag, desired, &autoStart)
+}
+
+func (g *SharedSingBoxGroup) setPower(ctx context.Context, tag string, desired bool, autoStart *bool) error {
 	ctx, cancel := g.operationContext(ctx)
 	defer cancel()
 	if err := lockMutexContext(ctx, &g.opMu); err != nil {
@@ -425,6 +436,11 @@ func (g *SharedSingBoxGroup) setDesired(ctx context.Context, tag string, desired
 	nextSpecs := cloneSpecMap(g.specs)
 	nextDesired := cloneBoolMap(g.desired)
 	g.mu.RUnlock()
+	if autoStart != nil {
+		spec := nextSpecs[tag]
+		spec.AutoStart = *autoStart
+		nextSpecs[tag] = spec
+	}
 	nextDesired[tag] = desired
 	return g.transitionLocked(ctx, nextSpecs, nextDesired, false)
 }

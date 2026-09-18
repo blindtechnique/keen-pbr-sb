@@ -9399,8 +9399,8 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
             !has_explicit_inbound_scope && !has_native_vpn_bypass;
 
         generation_snapshot.cleanup.inspect_owned_snat =
-            !lifecycle_config_generation &&
-            (lifecycle_preapply || snat_recovery.requested);
+            runtime_firewall_lifecycle_observes_owned_snat(
+                context->lifecycle_kind, snat_recovery.requested);
         if (lifecycle_preapply) {
             generation_snapshot.cleanup
                 .pre_mutation_owned_conntrack_cleanup_snapshot =
@@ -12972,7 +12972,8 @@ void Daemon::drain_runtime_firewall_terminal(
         }
 
         bool snat_healthy = true;
-        if (processed_recovery.requested) {
+        if (runtime_firewall_lifecycle_observes_owned_snat(
+                context->lifecycle_kind, processed_recovery.requested)) {
             OwnedSnatState before = OwnedSnatState::unknown;
             if (result_valid &&
                 worker_result->owned_snat_before.state.has_value() &&

@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include "../src/daemon/runtime_firewall_worker_attempt.hpp"
+#include "../src/daemon/runtime_firewall_operation_owner.hpp"
 #include "../src/daemon/runtime_config_terminal_policy.hpp"
 #include "../src/lists/list_entry_visitor.hpp"
 
@@ -643,6 +644,84 @@ TEST_CASE("route worker exception cannot claim the configuration base survived")
     REQUIRE(result);
     CHECK(firewall_calls == 0);
     CHECK_FALSE(result->configuration_base_certainly_retained());
+}
+
+TEST_CASE("config generation does not require omitted legacy SNAT observations") {
+    for (const auto kind : {
+             RuntimeFirewallLifecycleKind::config_candidate,
+             RuntimeFirewallLifecycleKind::config_rollback,
+             RuntimeFirewallLifecycleKind::config_bootstrap_from_stopped}) {
+        WorkerAttemptTempDirectory temp;
+        std::vector<std::string> order;
+        WorkerAttemptFirewall firewall{order};
+        WorkerAttemptMetaServices meta{order};
+        auto input = worker_attempt_input(temp.path());
+        OwnedSnatRecovery recovery;
+        recovery.requested = true;
+        recovery.missing_observed = true;
+        recovery.cleanup_snapshot =
+            input.pre_mutation_owned_conntrack_cleanup_snapshot;
+        input.inspect_owned_snat =
+            runtime_firewall_lifecycle_observes_owned_snat(
+                kind, recovery.requested);
+
+        const auto result = execute_runtime_firewall_worker_attempt(
+            input, firewall, meta);
+        REQUIRE(result.transaction.committed());
+        CHECK(firewall.owned_snat_inspections == 0U);
+        CHECK_FALSE(result.owned_snat_after.state.has_value());
+        // Nightly list reloads inherit pending SNAT recovery. Requiring this
+        // absent optional observation used to reject candidate AND rollback.
+        CHECK_FALSE(runtime_firewall_lifecycle_observes_owned_snat(
+            kind, recovery.requested));
+        const auto retained = merge_owned_snat_recovery({}, recovery);
+        CHECK(retained.requested);
+        CHECK(retained.missing_observed);
+        REQUIRE(retained.cleanup_snapshot.has_value());
+        CHECK(retained.cleanup_snapshot->runtime_generation == 83U);
+    }
+}
+
+TEST_CASE("SNAT observation remains required for recovery and preapply") {
+    for (const auto kind : {
+             RuntimeFirewallLifecycleKind::background,
+             RuntimeFirewallLifecycleKind::cold_boot,
+             RuntimeFirewallLifecycleKind::start_from_stopped,
+             RuntimeFirewallLifecycleKind::restart_active,
+             RuntimeFirewallLifecycleKind::urltest_candidate,
+             RuntimeFirewallLifecycleKind::urltest_rollback,
+             RuntimeFirewallLifecycleKind::keenetic_dns_candidate,
+             RuntimeFirewallLifecycleKind::keenetic_dns_rollback}) {
+        CHECK(runtime_firewall_lifecycle_observes_owned_snat(kind, true));
+        CHECK_FALSE(runtime_firewall_lifecycle_observes_owned_snat(kind, false));
+    }
+    CHECK(runtime_firewall_lifecycle_observes_owned_snat(
+        RuntimeFirewallLifecycleKind::config_preapply, false));
+    CHECK(runtime_firewall_lifecycle_observes_owned_snat(
+        RuntimeFirewallLifecycleKind::config_preapply, true));
+}
+
+TEST_CASE("config generation still rejects an unverified backend commit") {
+    for (const auto kind : {
+             RuntimeFirewallLifecycleKind::config_candidate,
+             RuntimeFirewallLifecycleKind::config_rollback,
+             RuntimeFirewallLifecycleKind::config_bootstrap_from_stopped}) {
+        WorkerAttemptTempDirectory temp;
+        std::vector<std::string> order;
+        WorkerAttemptFirewall firewall{order};
+        WorkerAttemptMetaServices meta{order};
+        auto input = worker_attempt_input(temp.path());
+        input.inspect_owned_snat =
+            runtime_firewall_lifecycle_observes_owned_snat(kind, true);
+        firewall.throw_after_publication = true;
+
+        const auto result = execute_runtime_firewall_worker_attempt(
+            input, firewall, meta);
+        CHECK_FALSE(result.transaction.committed());
+        REQUIRE(result.transaction.failure.has_value());
+        CHECK_FALSE(result.previous_generation_certainly_retained());
+        CHECK(firewall.apply_calls == 1U);
+    }
 }
 
 TEST_CASE("worker attempt keeps observations and commit in exact order") {
