@@ -429,19 +429,29 @@ int InterfaceMonitor::fd() const {
     return nl_socket_get_fd(impl_->socket);
 }
 
+void InterfaceMonitor::drain_pending_batches(
+    const std::function<bool()>& receive_batch) {
+    for (std::size_t batch = 0;
+         batch < max_receive_batches_per_dispatch;
+         ++batch) {
+        if (!receive_batch()) return;
+    }
+}
+
 void InterfaceMonitor::handle_events() {
     if (!impl_ || !impl_->socket) {
         return;
     }
 
-    while (true) {
+    drain_pending_batches([this]() {
+        errno = 0;
         int err = nl_recvmsgs_default(impl_->socket);
         if (err == 0) {
-            continue;
+            return true;
         }
 
         if (err == -NLE_AGAIN || errno == EAGAIN || errno == EWOULDBLOCK) {
-            break;
+            return false;
         }
 
         // ENOBUFS is not a failure, it is a gap: the kernel dropped events we
@@ -465,12 +475,12 @@ void InterfaceMonitor::handle_events() {
                     true,
                 });
             }
-            break;
+            return false;
         }
 
         throw InterfaceMonitorError(
             format("Failed to receive interface monitor netlink messages: {}", nl_geterror(err)));
-    }
+    });
 }
 
 void InterfaceMonitor::reconnect() {

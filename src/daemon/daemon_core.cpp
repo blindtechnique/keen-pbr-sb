@@ -14591,6 +14591,14 @@ void Daemon::handle_interface_event(const InterfaceMonitor::Event& event) {
         }
         return;
     }
+    // Keenetic also emits RTM_NEWLINK for unchanged links (for example,
+    // counters/carrier metadata). Do not run synchronous firewall commands,
+    // tear down conntrack, or invalidate the status stream for those hints.
+    // At router event rates that work can keep the netlink drain permanently
+    // busy and starve probes, DNS replies, traffic samples and control tasks.
+    if (!interface_event_requires_runtime_observation(event)) {
+        return;
+    }
     auto& log = Logger::instance();
 #ifdef WITH_API
     teardown_conntrack_events();
@@ -14602,9 +14610,6 @@ void Daemon::handle_interface_event(const InterfaceMonitor::Event& event) {
     // to keen-pbr routing rules.
     request_remote_access_reconcile_from_control("interface event");
 #endif
-    if (!interface_event_requires_runtime_observation(event)) {
-        return;
-    }
     routing_observation_epoch_.fetch_add(1U, std::memory_order_acq_rel);
     if (!routing_runtime_active()) return;
     if (event.observation_gap) {

@@ -88,6 +88,13 @@ public:
     void handle_events();
     void reconnect();
 
+    // The socket is level-triggered: unread datagrams remain ready for the
+    // next epoll pass. Finish each datagram, but never drain a continuously
+    // replenished socket until EAGAIN at the expense of all other handlers.
+    static constexpr std::size_t max_receive_batches_per_dispatch = 8U;
+    static void drain_pending_batches(
+        const std::function<bool()>& receive_batch);
+
     // Pure transition classifier shared by the netlink adapter and tests.
     // link_present=false represents RTM_DELLINK. A missing previous state on
     // RTM_NEWLINK is a topology event, not an administrative-state event.
