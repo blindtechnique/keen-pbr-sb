@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { createInstance } from "i18next"
 import { renderToStaticMarkup } from "react-dom/server"
 import { I18nextProvider } from "react-i18next"
+import type { ComponentProps } from "react"
 
 import type {
   RoutingTestResponse,
@@ -13,7 +14,8 @@ import { ruTranslation } from "../src/i18n/ru"
 
 async function render(
   language: "ru" | "en",
-  overrides: Partial<RoutingTestResponse> = {}
+  overrides: Partial<RoutingTestResponse> = {},
+  props: Partial<ComponentProps<typeof RoutingDiagnosticsResult>> = {}
 ) {
   const i18n = createInstance()
   await i18n.init({
@@ -43,12 +45,144 @@ async function render(
           results: [],
           ...overrides,
         }}
+        {...props}
       />
     </I18nextProvider>
   )
 }
 
 describe("routing notices remain separate from nfqws lists", () => {
+  test.each(["ru", "en"] as const)(
+    "shows the configured single VPN or group even when the path is unconfirmed in %s",
+    async (language) => {
+      for (const grouped of [false, true]) {
+        const tag = grouped ? "gr1" : "nwg0"
+        const result: RoutingTestEntry = {
+          ip: "149.154.167.99",
+          expected_outbound: "(unknown)",
+          actual_outbound: "(unknown)",
+          ok: false,
+          evaluation: "insufficient_context",
+          unknown_conditions: ["inbound_interface"],
+          kernel_route: {
+            route_status: "unavailable",
+            interface: "",
+            detail: "",
+          },
+        }
+        const html = await render(
+          language,
+          {
+            target: "telegram.org",
+            resolved_ips: [result.ip],
+            no_matching_rule: false,
+            results: [result],
+            rule_diagnostics: [
+              {
+                rule_index: 0,
+                rule: { outbound: tag, display_name: "Telegram rule" },
+                outbound: tag,
+                interface_name: grouped ? "-" : "nwg0",
+                target_in_lists: true,
+                target_match: { list: "Telegram", via: "telegram.org" },
+                ip_rows: [
+                  {
+                    ip: result.ip,
+                    in_lists: true,
+                    in_ipset: true,
+                    evaluation: "insufficient_context",
+                    unknown_conditions: ["inbound_interface"],
+                  },
+                ],
+              },
+            ],
+          },
+          {
+            outbounds: [
+              { tag: "gr1", type: "urltest" },
+              { tag: "nwg0", type: "interface", interface: "nwg0" },
+            ],
+            runtimeOutbounds: [
+              {
+                tag: "gr1",
+                type: "urltest",
+                status: "healthy",
+                interfaces: [
+                  {
+                    outbound_tag: "nwg0",
+                    interface_name: "nwg0",
+                    status: "active",
+                  },
+                  {
+                    outbound_tag: "vless",
+                    interface_name: "vless1",
+                    status: "available",
+                  },
+                ],
+              },
+            ],
+          }
+        )
+        const table = html.slice(
+          html.indexOf("<table"),
+          html.indexOf("</table>")
+        )
+        const body = table.slice(table.indexOf("<tbody"))
+        expect(body).toContain("techcorner.ignorelist.com")
+        expect(body).toContain(
+          language === "ru" ? "В правиле:" : "In the rule:"
+        )
+        expect(body).toContain(
+          language === "ru"
+            ? "Не удалось подтвердить"
+            : enTranslation.overview.routingDiagnostics.pathUnknown
+        )
+        expect(body).not.toContain("OK")
+        expect(body).not.toContain("(unknown)")
+        expect(body).not.toContain(">nwg0<")
+        if (grouped) {
+          expect(table).toContain(">gr1<")
+          expect(table).not.toContain(">-<")
+          expect(body).toContain(
+            language === "ru"
+              ? "В группе выбран: techcorner.ignorelist.com"
+              : "Selected in group: techcorner.ignorelist.com"
+          )
+          expect(body).not.toContain("vless1")
+        }
+      }
+    }
+  )
+
+  test("a route mismatch keeps both the observed path and configured VPN visible", async () => {
+    const html = await render("ru", {
+      results: [
+        {
+          ip: "203.0.113.1",
+          expected_outbound: "nwg0",
+          actual_outbound: "(default)",
+          ok: false,
+          evaluation: "matched",
+          unknown_conditions: [],
+          kernel_route: {
+            route_status: "resolved",
+            interface: "eth3",
+            detail: "",
+          },
+        },
+      ],
+    })
+    const body = html.slice(html.indexOf("<tbody"), html.indexOf("</tbody>"))
+    expect(body).toContain(
+      ruTranslation.overview.routingDiagnostics.pathDefault
+    )
+    expect(body).toContain("techcorner.ignorelist.com")
+    expect(body).toContain(
+      ruTranslation.overview.routingDiagnostics.routeMismatch
+    )
+    expect(body).not.toContain("OK")
+  })
+
   test.each(["ru", "en"] as const)(
     "list membership, friendly VPN name and OK share one table in %s",
     async (language) => {

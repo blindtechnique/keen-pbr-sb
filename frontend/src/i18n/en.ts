@@ -2946,6 +2946,8 @@ export const enTranslation = {
     },
     routingDiagnostics: {
       appliedRoute: "Route / VPN",
+      configuredPath: "In the rule:",
+      selectedGroupMember: "Selected in group: {{member}}",
       listNotFound: "No match",
       ruleConditions: "Rule conditions",
       routeMismatch: "Route mismatch",

@@ -7,11 +7,11 @@ import type {
   RoutingTestResponse,
   RoutingTestEntry,
   RoutingTestListMatch,
+  RuntimeOutboundState,
 } from "@/api/generated/model"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Checkbox } from "@/components/ui/checkbox"
 import { getListReferenceLabel } from "@/lib/list-display"
-import { getOutboundSelectDisplayName } from "@/lib/outbound-display"
 import { getRouteRuleDisplayName } from "@/pages/routing-rules-utils"
 import {
   Table,
@@ -30,6 +30,12 @@ import {
 import { RoutingLegend } from "./routing-legend"
 import { RoutingEvidenceDetails } from "./routing-evidence-details"
 import type { RoutingHttpProbeControls } from "./routing-http-probe-state"
+import {
+  getConfiguredRoutingOutbounds,
+  getRoutingOutboundLabel,
+  getSelectedRoutingGroupPath,
+  isKnownRoutingOutbound,
+} from "./routing-diagnostics-path"
 
 const emptyRuleDiagnostics: RoutingTestResponse["rule_diagnostics"] = []
 
@@ -38,12 +44,14 @@ export function RoutingDiagnosticsResult({
   lists,
   outbounds,
   interfaceLabelFor,
+  runtimeOutbounds = [],
   ...httpControls
 }: {
   diagnostics: RoutingTestResponse
   lists?: ConfigObject["lists"]
   outbounds?: ConfigObject["outbounds"]
   interfaceLabelFor?: (name: string) => string
+  runtimeOutbounds?: readonly RuntimeOutboundState[]
 } & RoutingHttpProbeControls) {
   const { t } = useTranslation()
   const [showAllRules, setShowAllRules] = useState(false)
@@ -60,21 +68,37 @@ export function RoutingDiagnosticsResult({
       ...diagnostics.results.map((result) => result.ip),
     ]),
   ]
-  const outboundNames = new Map(
-    (outbounds ?? []).map((outbound) => [
-      outbound.tag,
-      getOutboundSelectDisplayName(outbound, interfaceLabelFor),
-    ])
-  )
   const outboundLabel = (tag: string, iface?: string) => {
     if (tag === "(default)") return t("overview.routingDiagnostics.pathDefault")
-    if (!tag || tag === "(unknown)")
+    if (!isKnownRoutingOutbound(tag))
       return t("overview.routingDiagnostics.pathUnknown")
-    const name = outboundNames.get(tag)
-    if (name && name !== tag) return name
-    const interfaceName =
-      iface || outbounds?.find((outbound) => outbound.tag === tag)?.interface
-    return (interfaceName && interfaceLabelFor?.(interfaceName)) || name || tag
+    const reportedInterface =
+      iface ??
+      ruleDiagnostics.find(
+        (diagnostic) =>
+          (diagnostic.rule.outbound || diagnostic.outbound) === tag
+      )?.interface_name
+    return getRoutingOutboundLabel(
+      tag,
+      outbounds ?? [],
+      interfaceLabelFor,
+      reportedInterface
+    )
+  }
+  const groupSelection = (tag: string) => {
+    const selected = getSelectedRoutingGroupPath(tag, runtimeOutbounds)
+    if (!selected.length) return null
+    return (
+      <div className="text-xs font-normal text-muted-foreground">
+        {t("overview.routingDiagnostics.selectedGroupMember", {
+          member: selected
+            .map((child) =>
+              outboundLabel(child.outbound_tag, child.interface_name)
+            )
+            .join(" → "),
+        })}
+      </div>
+    )
   }
 
   return (
@@ -131,7 +155,11 @@ export function RoutingDiagnosticsResult({
                           {getRouteRuleDisplayName(rule.rule, rule.rule_index)}
                         </div>
                         <div title={rule.outbound}>
-                          {outboundLabel(rule.outbound, rule.interface_name)}
+                          {outboundLabel(
+                            rule.rule.outbound || rule.outbound,
+                            rule.interface_name
+                          )}
+                          {groupSelection(rule.rule.outbound || rule.outbound)}
                         </div>
                         <details className="text-xs font-normal text-muted-foreground">
                           <summary className="cursor-pointer">
@@ -154,6 +182,14 @@ export function RoutingDiagnosticsResult({
                 {ipRows.map((ip) => {
                   const result = diagnostics.results.find(
                     (entry) => entry.ip === ip
+                  )
+                  const actual = isKnownRoutingOutbound(result?.actual_outbound)
+                    ? result.actual_outbound
+                    : undefined
+                  const configured = getConfiguredRoutingOutbounds(
+                    result,
+                    ip,
+                    ruleDiagnostics
                   )
                   const matches = [
                     ...new Map(
@@ -205,7 +241,32 @@ export function RoutingDiagnosticsResult({
                         )
                       })}
                       <TableCell>
-                        {outboundLabel(result?.actual_outbound ?? "(unknown)")}
+                        <div className="space-y-2">
+                          {actual ? (
+                            <div className="font-medium">
+                              {outboundLabel(actual)}
+                              {groupSelection(actual)}
+                            </div>
+                          ) : null}
+                          {configured
+                            .filter((tag) => tag !== actual)
+                            .map((tag) => (
+                              <div key={tag}>
+                                <div className="text-xs text-muted-foreground">
+                                  {t(
+                                    "overview.routingDiagnostics.configuredPath"
+                                  )}
+                                </div>
+                                <div className="font-medium">
+                                  {outboundLabel(tag)}
+                                </div>
+                                {groupSelection(tag)}
+                              </div>
+                            ))}
+                          {!actual && !configured.length
+                            ? outboundLabel("(unknown)")
+                            : null}
+                        </div>
                       </TableCell>
                       <TableCell className="text-center">
                         <RoutingStatus result={result} />

@@ -6,7 +6,10 @@ import { toast } from "sonner"
 import { Link } from "wouter"
 
 import type { ApiError } from "@/api/client"
-import type { NfqwsActionResult } from "@/api/generated/model"
+import type {
+  NfqwsActionResult,
+  RuntimeOutboundState,
+} from "@/api/generated/model"
 import {
   usePostRoutingRegistryConsentMutation,
   usePostRoutingTestMutation,
@@ -50,9 +53,11 @@ import {
 export function RoutingTestPanel({
   lists,
   outbounds,
+  runtimeOutbounds,
 }: {
   lists?: ConfigObject["lists"]
   outbounds?: ConfigObject["outbounds"]
+  runtimeOutbounds?: readonly RuntimeOutboundState[]
 }) {
   const { t } = useTranslation()
   const { labelFor: interfaceLabelFor } = useInterfaceDisplayNames()
@@ -321,6 +326,7 @@ export function RoutingTestPanel({
           diagnostics={routingDiagnostics}
           lists={lists}
           outbounds={outbounds}
+          runtimeOutbounds={runtimeOutbounds}
           interfaceLabelFor={interfaceLabelFor}
           {...httpControls}
           onHttpProbe={(ip) => {

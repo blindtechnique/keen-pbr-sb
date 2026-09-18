@@ -2962,6 +2962,8 @@ export const ruTranslation = {
     },
     routingDiagnostics: {
       appliedRoute: "Маршрут / VPN",
+      configuredPath: "В правиле:",
+      selectedGroupMember: "В группе выбран: {{member}}",
       listNotFound: "Не найдено",
       ruleConditions: "Условия правила",
       routeMismatch: "Маршрут не совпал",
