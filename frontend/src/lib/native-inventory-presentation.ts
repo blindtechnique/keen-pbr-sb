@@ -31,9 +31,13 @@ export function nativeInventoryPresentation(
   }
 }
 
-/** Retry a temporary catalog miss; a fresh catalog remains event-driven. */
+/** Retry a known catalog refresh, never poll permanently unsupported firmware. */
 export function nativeInventoryRetryInterval(
-  inventory: Pick<Inventory, "available"> | undefined
+  inventory:
+    | Pick<NdmsInterfaceInventoryResponse, "available" | "catalog_status">
+    | undefined
 ): number | false {
-  return inventory?.available === false ? 5_000 : false
+  return inventory?.available === false && inventory.catalog_status === "stale"
+    ? 5_000
+    : false
 }
