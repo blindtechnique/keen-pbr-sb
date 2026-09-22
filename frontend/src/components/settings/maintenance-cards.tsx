@@ -1,4 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
+import type { SystemUpdateStatus } from "@/api/generated/model"
+import { UpdateChannelControl } from "./update-channel-control"
+import { softwareUpdateRequest } from "./software-update-channel"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 import {
@@ -60,28 +63,41 @@ import {
   type UpdateAttempt,
 } from "./software-update-session"
 
-type SoftwareUpdateStatus = {
-  current: string
-  latest: string
-  available: boolean
-  current_ahead: boolean
-  release_name: string
-  release_notes: string
-  release_url: string
-  changelog_url: string
-  running: boolean
-  log: string
-  phase?: string
-  percent?: number
-  message?: string
-  success?: boolean | null
-  updated_at?: number
-  package_rescue_ready?: boolean
-  package_rollback_available?: boolean
-  package_rollback_state?: string
-  check_error?: string
-  cached?: boolean
-}
+type SoftwareUpdateStatus = Partial<
+  Pick<
+    SystemUpdateStatus,
+    | "channel"
+    | "installed_channel"
+    | "release_tag"
+    | "source"
+    | "channel_change"
+    | "installable"
+    | "package_rescue_ready"
+    | "package_rollback_available"
+    | "check_error"
+    | "cached"
+  >
+> &
+  Pick<
+    SystemUpdateStatus,
+    | "current"
+    | "latest"
+    | "available"
+    | "current_ahead"
+    | "release_name"
+    | "release_notes"
+    | "release_url"
+    | "changelog_url"
+    | "running"
+    | "log"
+  > & {
+    phase?: string
+    percent?: number
+    message?: string
+    success?: boolean | null
+    updated_at?: number
+    package_rollback_state?: string
+  }
 
 const emptyUpdateStatus = (): SoftwareUpdateStatus => ({
   current: __APP_VERSION__,
@@ -154,6 +170,7 @@ export function SoftwareUpdateCard() {
   const [confirmInstall, setConfirmInstall] = useState(false)
   const [confirmRollback, setConfirmRollback] = useState(false)
   const [checking, setChecking] = useState(false)
+  const [savingChannel, setSavingChannel] = useState(false)
   const [starting, setStarting] = useState(false)
   const [backupPending, setBackupPending] = useState(false)
   const [backupError, setBackupError] = useState<unknown>(null)
@@ -396,7 +413,9 @@ export function SoftwareUpdateCard() {
   }, [showUpdateLog, status?.log])
 
   const startOperation = async (kind: UpdateAttempt["kind"]) => {
-    if (attemptRef.current || starting || backupPending) return
+    if (attemptRef.current || starting || backupPending || savingChannel) return
+    const selection = kind === "update" ? softwareUpdateRequest(status) : null
+    if (kind === "update" && !selection) return
     setConfirmInstall(false)
     setConfirmRollback(false)
     setShowResult(true)
@@ -429,7 +448,15 @@ export function SoftwareUpdateCard() {
         kind === "update"
           ? "/api/system/update"
           : "/api/system/update/rollback",
-        { method: "POST" },
+        {
+          method: "POST",
+          ...(selection
+            ? {
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(selection),
+              }
+            : {}),
+        },
         (input, init) => fetchUpdateCommand(input, init)
       )
       const body = (await response.json().catch(() => ({}))) as {
@@ -499,22 +526,49 @@ export function SoftwareUpdateCard() {
             версии сверху, кнопки под ними, ничего не растянуто на всю
             ширину карточки. */}
         <CardContent className="flex max-w-[480px] flex-col gap-3">
+          <UpdateChannelControl
+            channel={status?.channel}
+            disabled={
+              activeAttempt || !!status?.running || starting || checking
+            }
+            saving={savingChannel}
+            onSaving={setSavingChannel}
+            onSaved={(channel) => {
+              refreshGeneration.current += 1
+              setConfirmInstall(false)
+              setStatus((previous) => ({
+                ...emptyUpdateStatus(),
+                current: previous?.current ?? __APP_VERSION__,
+                installed_channel: previous?.installed_channel,
+                channel,
+              }))
+              void refresh(true)
+            }}
+          />
           <div className="flex min-w-0 flex-col items-start gap-2">
             <KeeneticStatus tone={status?.available ? "success" : "neutral"}>
-              {status?.available
-                ? t("common.updateStatus.available")
-                : status?.check_error
-                  ? t("common.updateStatus.unavailable")
-                  : status
-                    ? t("common.updateStatus.current")
-                    : t("common.updateStatus.checking")}
+              {checking
+                ? t("common.updateStatus.checking")
+                : status?.installable && status.channel_change
+                  ? t("pages.settings.softwareUpdate.switchAvailable")
+                  : status?.available
+                    ? t("common.updateStatus.available")
+                    : status?.check_error
+                      ? t("common.updateStatus.unavailable")
+                      : status
+                        ? t("common.updateStatus.current")
+                        : t("common.updateStatus.checking")}
             </KeeneticStatus>
             <UpdateVersionSummary status={status} />
           </div>
           <div className="flex flex-wrap gap-2">
             <Button
               disabled={
-                activeAttempt || status?.running || starting || checking
+                activeAttempt ||
+                status?.running ||
+                starting ||
+                checking ||
+                savingChannel
               }
               onClick={() => void refresh(true)}
               variant="outline"
@@ -532,7 +586,7 @@ export function SoftwareUpdateCard() {
             </Button>
             <Button onClick={() => setOpen(true)}>
               <DownloadIcon />
-              {status?.available
+              {status?.installable
                 ? t("pages.settings.softwareUpdate.install")
                 : t("pages.settings.softwareUpdate.title")}
             </Button>
@@ -653,7 +707,7 @@ export function SoftwareUpdateCard() {
             {status && showUpdateLog ? (
               <UpdateProgress status={status} />
             ) : null}
-            {status?.available && !showUpdateLog ? (
+            {status?.installable && !showUpdateLog ? (
               <ReleaseNotes status={status} />
             ) : null}
             {showUpdateLog ? (
@@ -736,7 +790,7 @@ export function SoftwareUpdateCard() {
                 !status?.package_rollback_available ||
                 activeAttempt ||
                 backupPending ||
-                status.running ||
+                status?.running ||
                 starting ||
                 confirmRollback
               }
@@ -764,10 +818,11 @@ export function SoftwareUpdateCard() {
             </Button>
             <Button
               disabled={
-                !status?.available ||
+                !softwareUpdateRequest(status) ||
+                savingChannel ||
                 activeAttempt ||
                 backupPending ||
-                status.running ||
+                status?.running ||
                 starting ||
                 confirmInstall
               }
@@ -792,11 +847,25 @@ function UpdateVersionSummary({
 
   return (
     <div className="grid min-w-0 gap-y-1 text-sm">
+      {(status?.channel === "alpha" || status?.channel === "stable") && (
+        <div>
+          <span className="text-muted-foreground">
+            {t("pages.settings.softwareUpdate.channel")}:{" "}
+          </span>
+          {status.channel === "alpha" ? "Alpha" : "Stable (main)"}
+        </div>
+      )}
       <div>
         <span className="text-muted-foreground">
           {t("pages.settings.softwareUpdate.current")}:{" "}
         </span>
         <code>{status?.current || __APP_VERSION__ || "—"}</code>
+        {status?.installed_channel && (
+          <span>
+            {" "}
+            · {status.installed_channel === "alpha" ? "Alpha" : "Stable (main)"}
+          </span>
+        )}
       </div>
       <div>
         <span className="text-muted-foreground">
@@ -809,6 +878,20 @@ function UpdateVersionSummary({
               : "—")}
         </code>
       </div>
+      {status?.source && (
+        <div className="text-muted-foreground">
+          {t("pages.settings.softwareUpdate.source")}: {status.source}
+        </div>
+      )}
+      {status?.channel_change && (
+        <p className="text-sm text-warning">
+          {t(
+            status.current_ahead
+              ? "pages.settings.softwareUpdate.downgradeBlocked"
+              : "pages.settings.softwareUpdate.channelSwitchPending"
+          )}
+        </p>
+      )}
     </div>
   )
 }
@@ -865,6 +948,7 @@ function UpdateStateMessage({
   // A failed release check may still carry a cached `available: false`.
   // That is not confirmation that the installed version is current.
   if (status?.check_error) return null
+  if (status?.channel_change) return null
   if (status?.current_ahead) {
     return (
       <p className="text-sm text-muted-foreground">

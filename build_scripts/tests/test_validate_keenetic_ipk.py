@@ -163,6 +163,7 @@ def make_ipk(
     compressed_frontend_version: str | None = None,
     compressed_index_content: bytes | None = None,
     binary_extra: bytes = b"",
+    update_channel: bytes = b"alpha\n",
 ) -> None:
     executable = 0o755
     config = json.dumps(
@@ -210,6 +211,7 @@ def make_ipk(
             ),
             "opt/etc/keen-pbr/config.json": (b"{}", 0o600),
             "opt/etc/keen-pbr/transports.json": (config, 0o600),
+            "opt/usr/lib/keen-pbr/update-channel": (update_channel, 0o644),
             "opt/usr/lib/keen-pbr/nfqws-tcp-window.awk": (b"# test planner\n", 0o644),
             "opt/usr/lib/keen-pbr/libkeen-pbr-connndmmark.so": (elf(), 0o644),
             "opt/usr/share/keen-pbr/catalog.json": (
@@ -366,6 +368,26 @@ class ValidateKeeneticIpkTest(unittest.TestCase):
                         control_commit=commit,
                     )
                     VALIDATOR.validate(package, "aarch64", commit)
+
+    def test_update_channel_must_match_release_channel(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "keen-pbr.ipk"
+            for channel in ("alpha", "stable"):
+                with self.subTest(channel=channel):
+                    make_ipk(package, update_channel=(channel + "\n").encode())
+                    VALIDATOR.validate(package, "aarch64", expected_channel=channel)
+                    other = "stable" if channel == "alpha" else "alpha"
+                    with self.assertRaisesRegex(VALIDATOR.ValidationError, "does not match.*release channel"):
+                        VALIDATOR.validate(package, "aarch64", expected_channel=other)
+
+    def test_rejects_invalid_update_channel_even_without_expected_channel(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "keen-pbr.ipk"
+            for marker in (b"", b"next\n", b"beta\n", b"alpha", b"alpha\r\n", b"alpha\nstable\n", b"alpha\x00\n"):
+                with self.subTest(marker=marker):
+                    make_ipk(package, update_channel=marker)
+                    with self.assertRaisesRegex(VALIDATOR.ValidationError, "invalid package update channel"):
+                        VALIDATOR.validate(package, "aarch64")
 
     def test_rejects_commit_prefix_match_with_fresh_control(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -175,6 +175,32 @@ TEST_CASE("failed unchanged publication without current authority is quiet") {
     CHECK_FALSE(stale_generation.full_refresh);
 }
 
+TEST_CASE("balanced generic COMMIT ambiguity does not blame Meta") {
+    RuntimeFirewallMetaTailFacts facts;
+    facts.worker_commit_ambiguous = true;
+    const auto plan = plan_runtime_firewall_meta_tail(facts);
+    CHECK_FALSE(plan.schedule_cleanup());
+    CHECK(plan.incident_action == RuntimeFirewallMetaIncidentAction::none);
+    CHECK(plan.incident_detail.empty());
+    CHECK(plan.full_refresh);
+    CHECK(plan.refresh_detail ==
+          "could not resnapshot firewall after an ambiguous delayed COMMIT");
+}
+
+TEST_CASE("Meta evidence retains the warning even without a cleanup plan") {
+    for (const bool active : {false, true}) {
+        RuntimeFirewallMetaTailFacts facts;
+        facts.worker_commit_ambiguous = true;
+        facts.meta_policy_active = active;
+        facts.publication_epoch_changed = !active;
+        const auto plan = plan_runtime_firewall_meta_tail(facts);
+        CHECK(plan.report_degraded());
+        CHECK_FALSE(plan.schedule_cleanup());
+        CHECK(plan.full_refresh);
+        CHECK(plan.incident_detail.find("Meta") != std::string_view::npos);
+    }
+}
+
 TEST_CASE("committed core ignores failure-only previous publication facts") {
     MetaUdp443ActivationPlan previous;
     RuntimeFirewallMetaTailFacts facts;

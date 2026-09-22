@@ -19,6 +19,7 @@ public:
     RouterInfoMetadata(RciGetFn rci_get, VersionGetFn version_get,
                        RouterInfoCache::NowFn now = {});
     nlohmann::json get();
+    nlohmann::json devices();
     // Only marks the affected observations dirty. No RCI/network activity in
     // a netlink callback; the next ordinary API reader performs the refresh.
     bool invalidate(const InterfaceMonitor::Event& event);

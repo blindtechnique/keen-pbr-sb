@@ -135,6 +135,7 @@ define Package/keen-pbr/install
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/dnsmasq.sh $(1)/opt/usr/lib/keen-pbr/dnsmasq.sh
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/dnsmasq-package.sh $(1)/opt/usr/lib/keen-pbr/dnsmasq-package.sh
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/self-update.sh $(1)/opt/usr/lib/keen-pbr/self-update.sh
+	$(INSTALL_DATA) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/update-channel $(1)/opt/usr/lib/keen-pbr/update-channel
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/release-verify.sh $(1)/opt/usr/lib/keen-pbr/release-verify.sh
 	$(INSTALL_DATA) $(PKG_BUILD_DIR)/packages/keys/keenetic-release-public.pem $(1)/opt/etc/keen-pbr/keys/release-public.pem
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-update.sh $(1)/opt/usr/lib/keen-pbr/rescue-update.sh

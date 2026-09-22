@@ -7,7 +7,9 @@ RUN_FILE=/opt/var/run/keen-pbr-self-update.pid
 LOG_FILE=/opt/var/log/keen-pbr-self-update.log
 STATE_FILE=/opt/var/run/keen-pbr-self-update.json
 LOCK_HELPER=/opt/var/lib/keen-pbr/rescue/update-lock.sh
-RELEASE_API=https://api.github.com/repos/blindtechnique/keen-pbr-sb/releases/latest
+CHANNEL_FILE=/opt/usr/lib/keen-pbr/update-channel
+CHANNEL_PREFERENCE=/opt/etc/keen-pbr/update-channel
+RELEASE_API=https://api.github.com/repos/blindtechnique/keen-pbr-sb/releases
 RELEASE_REPOSITORY=blindtechnique/keen-pbr-sb
 RELEASE_VERIFIER=/opt/usr/lib/keen-pbr/release-verify.sh
 RELEASE_PUBLIC_KEY=/opt/etc/keen-pbr/keys/release-public.pem
@@ -17,6 +19,25 @@ LOCK_TOKEN=
 WORK_DIR=
 RUN_FILE_OWNED=0
 finished=0
+REQUESTED_CHANNEL=
+REQUESTED_TAG=
+EXPECTED_VERSION=
+while [ "$#" -gt 0 ]; do
+    [ "$#" -ge 2 ] || exit 2
+    case "$1" in
+        --channel) REQUESTED_CHANNEL=$2 ;;
+        --release-tag) REQUESTED_TAG=$2 ;;
+        --expected-version) EXPECTED_VERSION=$2 ;;
+        *) exit 2 ;;
+    esac
+    shift 2
+done
+if [ -n "$REQUESTED_CHANNEL$REQUESTED_TAG$EXPECTED_VERSION" ]; then
+    case "$REQUESTED_CHANNEL" in stable|alpha) ;; *) exit 2 ;; esac
+    case "$REQUESTED_TAG" in ""|*[!A-Za-z0-9._-]*) exit 2 ;; esac
+    case "$EXPECTED_VERSION" in v[0-9]*-[0-9]*) ;; *) exit 2 ;; esac
+    case "$EXPECTED_VERSION" in *[!v0-9.-]*) exit 2 ;; esac
+fi
 
 space_failure_message() {
     local kind needed available extra
@@ -142,7 +163,46 @@ if ! command -v openssl >/dev/null 2>&1 && [ ! -x /opt/bin/openssl ]; then
     exit 1
 fi
 
-fetch_url "$RELEASE_JSON" "$RELEASE_API"
+# The package marker identifies what is installed. The user preference is a
+# separate config file, preserved by opkg and the rescue snapshots.
+RELEASE_CHANNEL=$(cat "$CHANNEL_FILE") || exit 1
+case "$RELEASE_CHANNEL" in stable|alpha) ;; *) exit 1 ;; esac
+if [ -e "${CHANNEL_PREFERENCE:-/opt/etc/keen-pbr/update-channel}" ] ||
+   [ -L "${CHANNEL_PREFERENCE:-/opt/etc/keen-pbr/update-channel}" ]; then
+    [ -f "$CHANNEL_PREFERENCE" ] && [ ! -L "$CHANNEL_PREFERENCE" ] || exit 1
+    RELEASE_CHANNEL=$(cat "$CHANNEL_PREFERENCE") || exit 1
+fi
+case "$RELEASE_CHANNEL" in stable|alpha) ;; *) exit 1 ;; esac
+if [ -n "${REQUESTED_CHANNEL:-}" ]; then
+    [ "$REQUESTED_CHANNEL" = "$RELEASE_CHANNEL" ] || {
+        echo "ОШИБКА: канал изменился после подтверждения. Проверьте обновления ещё раз."
+        exit 1
+    }
+fi
+if [ -n "${REQUESTED_TAG:-}" ]; then
+    release_tag=$REQUESTED_TAG
+    fetch_url "$RELEASE_JSON" "$RELEASE_API/tags/$release_tag"
+else
+case "$RELEASE_CHANNEL" in
+    alpha)
+        fetch_url "$RELEASE_JSON" "$RELEASE_API?per_page=100"
+        release_tag=$(tr ',' '\n' < "$RELEASE_JSON" \
+            | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\(alpha-[0-9][0-9]*-[0-9][0-9]*\)".*/\1/p' \
+            | LC_ALL=C sort -t- -k2,2nr -k3,3nr | head -n 1)
+        [ -n "$release_tag" ] || {
+            echo "ОШИБКА: опубликованный выпуск Alpha не найден; канал обновления не изменён."
+            exit 1
+        }
+        fetch_url "$RELEASE_JSON" "$RELEASE_API/tags/$release_tag"
+        ;;
+    stable) fetch_url "$RELEASE_JSON" "$RELEASE_API/latest" ;;
+    *)
+        echo "ОШИБКА: канал установленного пакета неизвестен. Обновление не началось."
+        exit 1
+        ;;
+esac
+fi
+selected_tag=${release_tag:-}
 write_state release 15 "Проверяю выпуск GitHub" null true
 # The GitHub API may answer with pretty-printed or compact JSON. Splitting on
 # commas first makes the extraction work for both instead of relying on the
@@ -153,6 +213,14 @@ release_tag=$(tr ',' '\n' < "$RELEASE_JSON" \
 case "$release_tag" in
     ""|*[!A-Za-z0-9._-]*) echo "ОШИБКА: GitHub вернул некорректный тег выпуска"; exit 1 ;;
 esac
+if [ -n "$selected_tag" ] && [ "$release_tag" != "$selected_tag" ]; then
+    echo "ОШИБКА: GitHub вернул другой выпуск Alpha. Обновление не началось."
+    exit 1
+fi
+if ! tr ',' '\n' < "$RELEASE_JSON" | grep -Eq '^[[:space:]{]*"draft"[[:space:]]*:[[:space:]]*false[[:space:]}]*$'; then
+    echo "ОШИБКА: выпуск не опубликован. Обновление не началось."
+    exit 1
+fi
 RELEASE_BASE="https://github.com/$RELEASE_REPOSITORY/releases/download/$release_tag"
 INSTALLER_URL="$RELEASE_BASE/install.sh"
 fetch_url "$INSTALLER" "$INSTALLER_URL"
@@ -160,16 +228,29 @@ fetch_url "$WORK_DIR/release-manifest.tsv" "$RELEASE_BASE/release-manifest.tsv"
 fetch_url "$WORK_DIR/release-manifest.sig" "$RELEASE_BASE/release-manifest.sig"
 if ! /bin/sh "$RELEASE_VERIFIER" "$WORK_DIR/release-manifest.tsv" \
     "$WORK_DIR/release-manifest.sig" "$RELEASE_PUBLIC_KEY" \
-    "$RELEASE_REPOSITORY" stable "$release_tag" installer any any install.sh "$INSTALLER"; then
+    "$RELEASE_REPOSITORY" "$RELEASE_CHANNEL" "$release_tag" installer any any install.sh "$INSTALLER"; then
     echo "ОШИБКА: подпись установщика не подтверждена. Обновление не началось; установленная версия не изменена."
     exit 1
+fi
+if [ -n "${EXPECTED_VERSION:-}" ]; then
+    # The signed manifest must name the package version the user confirmed.
+    # Never let a moved tag silently substitute another build (or downgrade).
+    awk -F '\t' -v expected="${EXPECTED_VERSION#v}" '
+        $1 == "file" && $2 == "package" { count++; if ($5 != expected) bad=1 }
+        END { exit !(count > 0 && !bad) }
+    ' "$WORK_DIR/release-manifest.tsv" || {
+        echo "ОШИБКА: подписанная версия отличается от подтверждённой. Установленная версия не изменена."
+        exit 1
+    }
 fi
 write_state installer 30 "Подпись установщика проверена" null true
 
 write_state installing 40 "Устанавливаю пакет keen-pbr-sb" null true
+set -- --update
+[ "$RELEASE_CHANNEL" != alpha ] || set -- "$@" --alpha
 KEEN_PBR_UPDATE_RELEASE_TAG="$release_tag" \
     KEEN_PBR_UPDATE_SPACE_REPORT="$WORK_DIR/space-report" \
-    KEEN_PBR_UPDATE_LOCK_TRANSFER=1 /bin/sh "$INSTALLER" --update
+    KEEN_PBR_UPDATE_LOCK_TRANSFER=1 /bin/sh "$INSTALLER" "$@"
 write_state installed 90 "Пакет установлен, службы перезапущены" null true
 
 # postinst starts keen-pbr through S80keen-pbr. That init script activates the

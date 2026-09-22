@@ -1,4 +1,73 @@
 export const enTranslation = {
+  deviceVpn: {
+    ingressRestriction:
+      "Global settings restrict ingress interfaces. The device's network must be included; this assignment does not extend that allowlist.",
+    blockScopeWarning:
+      "This rule matches all IPv4 traffic from the device. Blocking on VPN failure may also block access to the router or other local networks. Keep management access from another device.",
+    lowerPriority:
+      "Other rules above may match first. Saving this assignment moves it to the top.",
+    title: "VPN for devices",
+    description:
+      "Send a device's sites and apps through a VPN or group using its reserved IPv4 address.",
+    add: "Assign VPN to a device",
+    edit: "Device VPN",
+    editNamed: "Edit VPN for {{name}}",
+    allRules: "All routing rules",
+    device: "Choose device",
+    chooseDevice: "Choose a device or enter its IPv4 below",
+    address: "Device IPv4 address",
+    name: "Device name — optional",
+    outbound: "VPN or group",
+    enabled: "Use this assignment",
+    disabled: "Disabled",
+    addressHint:
+      "Reserve this IPv4 for the device in Keenetic/Netcraze. If it changes or is assigned to another device, the rule follows the address. DHCP is not changed automatically.",
+    formDescription:
+      "Choose the device and VPN. All of its IPv4 connections match this rule, regardless of website lists.",
+    inventoryHint:
+      "Devices known to the router. Being listed does not prove that their IPv4 is reserved.",
+    inventoryEmpty:
+      "The router lists no IPv4 devices. You can enter a reserved address manually.",
+    inventoryUnavailable:
+      "A fresh device list is unavailable. Refresh it or enter a known reserved IPv4 manually.",
+    inventoryTruncated:
+      "Only part of the device list is shown. Enter the reserved IPv4 manually if your device is missing.",
+    refreshDevices: "Refresh device list",
+    conflict: "Address shared by several devices",
+    noOutbounds:
+      "First create a VPN with a route or a group under VPNs, proxies, groups.",
+    ipv6Warning:
+      "IPv4 only. This assignment does not route IPv6 through the VPN. If the device uses IPv6, some connections may take a different path.",
+    priorityHint:
+      "Saving puts this rule first, above website rules. Existing connections may keep their old path — reconnect the app after applying.",
+    rulesHint:
+      "This view shows simple single-IPv4 assignments, also accessible in routing rules. Removing an assignment restores the other rules, not necessarily direct access.",
+    advanced: "When the VPN is unavailable and other conditions",
+    scopeHint:
+      "Global routing and ingress-interface settings still apply. Traffic to other local networks also matches: place any required exceptions above this assignment in routing rules. This assignment does not redirect the router's own DNS queries. A saved rule does not prove that the VPN works.",
+    emptyTitle: "No device VPN assignments yet",
+    emptyDescription:
+      "Choose Assign VPN to a device, then its reserved IPv4 and a VPN or group.",
+    save: "Save assignment",
+    saved: "Assignment saved to the draft. Apply the changes in the panel.",
+    remove: "Remove assignment",
+    removeTitle: "Remove this device's VPN assignment?",
+    removeDescription:
+      "After applying, the device follows the remaining routing rules. The VPN, its settings and DHCP are unchanged.",
+    errors: {
+      address:
+        "Enter one ordinary device IPv4, such as 192.168.1.50. Networks, IPv6 and address lists are not accepted here.",
+      name: "Use at most 80 characters, without control characters.",
+      outbound:
+        "Choose an existing routed VPN or group. The outgoing path may have been removed — refresh the rules.",
+      duplicate:
+        "A simple rule already exists for this IPv4, possibly disabled. Edit it in VPN for devices or in routing rules instead of adding a duplicate.",
+      changed:
+        "The rule changed, was removed or has extra conditions. Close the form and reopen it from the current rule list.",
+      fallback:
+        "Choose a different existing VPN or group as the fallback path.",
+    },
+  },
   ruleCounters: {
     ipv4: "IPv4",
     ipv6: "IPv6",
@@ -1351,6 +1420,8 @@ export const enTranslation = {
         "Some conditions in list “{{name}}” could not be imported from SRS. Check source-format compatibility; omitted conditions are listed in the details.",
       metaPolicyUnverified:
         "Meta/WhatsApp traffic rules could not be confirmed. Check the current routing state on the dashboard.",
+      firewallRefreshUnverified:
+        "The routing-rule update could not be verified. A recheck is scheduled. Check the current state on the dashboard.",
       accelerationRulesUnverified:
         "Traffic-visibility rules for hardware acceleration could not be reconciled. Check this item in dashboard diagnostics.",
       tunnelProbeRouted:
@@ -3902,6 +3973,22 @@ export const enTranslation = {
           "URL lists currently inheriting this chain: {{count}}.",
       },
       softwareUpdate: {
+        channel: "Update channel",
+        stableChannel: "Stable (main)",
+        alphaChannel: "Alpha",
+        saveChannel: "Save channel",
+        switchAvailable: "Channel switch available",
+        channelHint:
+          "Choosing a channel does not install an update or change VPN or DNS settings.",
+        alphaWarning:
+          "Alpha contains test builds and may have bugs. Save a backup before installing.",
+        channelSaveFailed:
+          "Could not save the channel. Check its current value before trying again.",
+        source: "Source",
+        channelSwitchPending:
+          "Channel saved. The installed package has not changed. Install the selected channel's release separately to switch.",
+        downgradeBlocked:
+          "The selected channel offers an older version. The panel does not downgrade: wait for a newer release or use a verified rollback with its matching configuration.",
         cancel: "Cancel",
         rollbackConfirmTitle: "Restore the previous keen-pbr-sb version?",
         rollbackConfirmHint:
@@ -3943,7 +4030,7 @@ export const enTranslation = {
         inProgress: "Update in progress",
         title: "keen-pbr-sb update",
         description:
-          "Checks the latest published Release, verifies SHA256SUMS, and installs the IPK while preserving configuration, tunnel and proxy interfaces, and the web account.",
+          "Checks the latest release in the selected channel, its signature and checksums. Updates the IPK while preserving settings, VPNs, proxies, and the panel account.",
         current: "Installed",
         latest: "Latest release",
         check: "Check for updates",

@@ -95,6 +95,7 @@ import type {
   RemoteAccessRequest,
   RemoteAccessResult,
   RemoteAccessState,
+  RouterDevices,
   RouterInfo,
   RouterMetrics,
   RoutingHealthErrorResponse,
@@ -118,6 +119,7 @@ import type {
   SubscriptionSettingsRequest,
   SubscriptionSourceRequest,
   SystemUpdateLocalStatus,
+  SystemUpdateRequest,
   SystemUpdateStatus,
   TransportActionRequest,
   TransportActionResponse,
@@ -137,6 +139,7 @@ import type {
   TunnelProbeHostRequest,
   TunnelProbeHostsResponse,
   TunnelProbeStateResponse,
+  UpdateChannelPreference,
   UpdateStartedResponse
 } from './model';
 
@@ -3640,7 +3643,7 @@ export function useGetNdmsVpnServerServices<TData = Awaited<ReturnType<typeof ge
 
 
 /**
- * Answers two different questions in one payload: what this router is running right now, and what the fork's latest release is. The release half is served from a local cache while it is fresh, so opening the panel does not contact GitHub on every render; `cached` says which of the two you got and `check_error` says why a fresh check failed while still returning the cached answer. An empty `latest` means no release is known at all - it is not a claim that the router is up to date.
+ * Answers two different questions in one payload: what this router is running right now, and the latest release in the selected channel. The release half is served from a local cache while it is fresh, so opening the panel does not contact GitHub on every render; `cached` says which of the two you got and `check_error` says why a fresh check failed while still returning the cached answer. An empty `latest` means no release is known at all - it is not a claim that the router is up to date.
 
  * @summary Installed version, the latest release, and update progress
  */
@@ -3755,6 +3758,8 @@ export function useGetSystemUpdate<TData = Awaited<ReturnType<typeof getSystemUp
 /**
  * Starts the self-update helper in the background and returns as soon as the helper has actually started, not when the update finishes - poll `/api/system/update/status` for progress. A full rollback backup is captured locally before the helper runs; no backup credentials are returned to the caller. The existing authenticated session is enough: this operation does not require step-up reauthentication. The installed helper verifies the signed release before replacing software; the caller cannot provide an installer or package URL. Explicit backup export and package rollback still require step-up reauthentication.
 
+The request must match the freshly checked channel, tag and full package version. The signed manifest is checked against that version before running the installer. A channel switch may install an equal version but never an older one.
+
 Refused rather than attempted when the helper is not installed, when an update or rollback is already running, or when package recovery is pending or in an unknown state, because a second concurrent update is how a router ends up with a half-replaced package.
 
  * @summary Start the keen-pbr-sb self-update
@@ -3791,14 +3796,15 @@ export const getPostSystemUpdateUrl = () => {
   return `/api/system/update`
 }
 
-export const postSystemUpdate = async ( options?: RequestInit): Promise<postSystemUpdateResponse> => {
+export const postSystemUpdate = async (systemUpdateRequest: SystemUpdateRequest, options?: RequestInit): Promise<postSystemUpdateResponse> => {
 
   return apiFetch<postSystemUpdateResponse>(getPostSystemUpdateUrl(),
   {
     ...options,
-    method: 'POST'
-
-
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      systemUpdateRequest,)
   }
 );}
 
@@ -3806,8 +3812,8 @@ export const postSystemUpdate = async ( options?: RequestInit): Promise<postSyst
 
 
 export const getPostSystemUpdateMutationOptions = <TError = ErrorResponse,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSystemUpdate>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
-): UseMutationOptions<Awaited<ReturnType<typeof postSystemUpdate>>, TError,void, TContext> => {
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSystemUpdate>>, TError,{data: SystemUpdateRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postSystemUpdate>>, TError,{data: SystemUpdateRequest}, TContext> => {
 
 const mutationKey = ['postSystemUpdate'];
 const {mutation: mutationOptions, request: requestOptions} = options ?
@@ -3819,10 +3825,10 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
 
 
-      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postSystemUpdate>>, void> = () => {
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postSystemUpdate>>, {data: SystemUpdateRequest}> = (props) => {
+          const {data} = props ?? {};
 
-
-          return  postSystemUpdate(requestOptions)
+          return  postSystemUpdate(data,requestOptions)
         }
 
 
@@ -3833,21 +3839,118 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
   return  { mutationFn, ...mutationOptions }}
 
     export type PostSystemUpdateMutationResult = NonNullable<Awaited<ReturnType<typeof postSystemUpdate>>>
-
+    export type PostSystemUpdateMutationBody = SystemUpdateRequest
     export type PostSystemUpdateMutationError = ErrorResponse
 
     /**
  * @summary Start the keen-pbr-sb self-update
  */
 export const usePostSystemUpdate = <TError = ErrorResponse,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSystemUpdate>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSystemUpdate>>, TError,{data: SystemUpdateRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
  , queryClient?: QueryClient): UseMutationResult<
         Awaited<ReturnType<typeof postSystemUpdate>>,
         TError,
-        void,
+        {data: SystemUpdateRequest},
         TContext
       > => {
       return useMutation(getPostSystemUpdateMutationOptions(options), queryClient);
+    }
+
+/**
+ * Persists only the update preference. Does not apply routing config, restart services, or contact GitHub. Stable is the normal default; an existing Alpha installation inherits Alpha until explicitly changed. Invalid preferences fail closed. The installed package channel remains separate. Refused while updating, rolling back or recovering.
+
+ * @summary Save the preferred update channel without installing
+ */
+export type postSystemUpdateChannelResponse200 = {
+  data: UpdateChannelPreference
+  status: 200
+}
+
+export type postSystemUpdateChannelResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postSystemUpdateChannelResponse409 = {
+  data: ErrorResponse
+  status: 409
+}
+
+export type postSystemUpdateChannelResponseSuccess = (postSystemUpdateChannelResponse200) & {
+  headers: Headers;
+};
+export type postSystemUpdateChannelResponseError = (postSystemUpdateChannelResponse400 | postSystemUpdateChannelResponse409) & {
+  headers: Headers;
+};
+
+export type postSystemUpdateChannelResponse = (postSystemUpdateChannelResponseSuccess | postSystemUpdateChannelResponseError)
+
+export const getPostSystemUpdateChannelUrl = () => {
+
+
+
+
+  return `/api/system/update/channel`
+}
+
+export const postSystemUpdateChannel = async (updateChannelPreference: UpdateChannelPreference, options?: RequestInit): Promise<postSystemUpdateChannelResponse> => {
+
+  return apiFetch<postSystemUpdateChannelResponse>(getPostSystemUpdateChannelUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      updateChannelPreference,)
+  }
+);}
+
+
+
+
+export const getPostSystemUpdateChannelMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSystemUpdateChannel>>, TError,{data: UpdateChannelPreference}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postSystemUpdateChannel>>, TError,{data: UpdateChannelPreference}, TContext> => {
+
+const mutationKey = ['postSystemUpdateChannel'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postSystemUpdateChannel>>, {data: UpdateChannelPreference}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postSystemUpdateChannel(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostSystemUpdateChannelMutationResult = NonNullable<Awaited<ReturnType<typeof postSystemUpdateChannel>>>
+    export type PostSystemUpdateChannelMutationBody = UpdateChannelPreference
+    export type PostSystemUpdateChannelMutationError = ErrorResponse
+
+    /**
+ * @summary Save the preferred update channel without installing
+ */
+export const usePostSystemUpdateChannel = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSystemUpdateChannel>>, TError,{data: UpdateChannelPreference}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postSystemUpdateChannel>>,
+        TError,
+        {data: UpdateChannelPreference},
+        TContext
+      > => {
+      return useMutation(getPostSystemUpdateChannelMutationOptions(options), queryClient);
     }
 
 /**
@@ -6076,6 +6179,119 @@ export function useGetSystemMetrics<TData = Awaited<ReturnType<typeof getSystemM
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getGetSystemMetricsQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
+ * Reuses the router client-inventory cache; no permanent poll, DHCP mutation or network scan. These are suggestions, not proof of a reserved address. Last-good entries may be returned with available=false.
+
+ * @summary Read known IPv4 devices for a routing-rule picker
+ */
+export type getSystemDevicesResponse200 = {
+  data: RouterDevices
+  status: 200
+}
+
+export type getSystemDevicesResponseSuccess = (getSystemDevicesResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getSystemDevicesResponse = (getSystemDevicesResponseSuccess)
+
+export const getGetSystemDevicesUrl = () => {
+
+
+
+
+  return `/api/system/devices`
+}
+
+export const getSystemDevices = async ( options?: RequestInit): Promise<getSystemDevicesResponse> => {
+
+  return apiFetch<getSystemDevicesResponse>(getGetSystemDevicesUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetSystemDevicesQueryKey = () => {
+    return [
+    `/api/system/devices`
+    ] as const;
+    }
+
+
+export const getGetSystemDevicesQueryOptions = <TData = Awaited<ReturnType<typeof getSystemDevices>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemDevices>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetSystemDevicesQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getSystemDevices>>> = ({ signal }) => getSystemDevices({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getSystemDevices>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetSystemDevicesQueryResult = NonNullable<Awaited<ReturnType<typeof getSystemDevices>>>
+export type GetSystemDevicesQueryError = unknown
+
+
+export function useGetSystemDevices<TData = Awaited<ReturnType<typeof getSystemDevices>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemDevices>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getSystemDevices>>,
+          TError,
+          Awaited<ReturnType<typeof getSystemDevices>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetSystemDevices<TData = Awaited<ReturnType<typeof getSystemDevices>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemDevices>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getSystemDevices>>,
+          TError,
+          Awaited<ReturnType<typeof getSystemDevices>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetSystemDevices<TData = Awaited<ReturnType<typeof getSystemDevices>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemDevices>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Read known IPv4 devices for a routing-rule picker
+ */
+
+export function useGetSystemDevices<TData = Awaited<ReturnType<typeof getSystemDevices>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemDevices>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetSystemDevicesQueryOptions(options)
 
   const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
 

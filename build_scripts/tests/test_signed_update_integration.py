@@ -247,7 +247,9 @@ class SignedUpdateIntegrationTest(unittest.TestCase):
         (self.assets / PACKAGE).write_bytes(b"test fixture, not an installable IPK\n")
         self.source_installer = self.root / "trusted-fixture-installer.sh"
         self.source_installer.write_text(
-            '#!/bin/sh\nprintf "%s\\n" "$KEEN_PBR_UPDATE_RELEASE_TAG" > "$WORK_DIR/executed"\n',
+            '#!/bin/sh\nprintf "%s\\n" "$KEEN_PBR_UPDATE_RELEASE_TAG" > "$WORK_DIR/executed"\n'
+            'printf "%s\\n" "$@" > "$WORK_DIR/installer-args"\n'
+            'printf "%s\\n" "$KEEN_PBR_UPDATE_LOCK_TRANSFER" > "$WORK_DIR/lock-transfer"\n',
             encoding="utf8")
         self.args = argparse.Namespace(
             assets=self.assets, installer=self.source_installer, key=self.key,
@@ -255,9 +257,9 @@ class SignedUpdateIntegrationTest(unittest.TestCase):
             release=RELEASE, source="a" * 40, build="3.3.1-test")
         self.signer.sign(self.args)
 
-    def metadata(self):
+    def metadata(self, tag=RELEASE, draft=False):
         (self.assets / "metadata").write_text(json.dumps({
-            "tag_name": RELEASE,
+            "tag_name": tag, "draft": draft, "prerelease": tag.startswith("alpha-"),
             "assets": [{"browser_download_url":
                         f"https://github.com/{REPOSITORY}/releases/download/{RELEASE}/{name}"}
                        for name in (PACKAGE, "SHA256SUMS")],
@@ -269,7 +271,7 @@ class SignedUpdateIntegrationTest(unittest.TestCase):
         env = {**os.environ, "WORK_DIR": str(self.work), "TMP_DIR": str(self.work),
                "FIXTURE_ASSETS": str(self.assets), "RELEASE_VERIFIER": str(VERIFIER),
                "RELEASE_PUBLIC_KEY": str(self.public_key), **variables}
-        return subprocess.run(["sh", "-c", script], env=env,
+        return subprocess.run(getattr(self, "shell_command", ["sh"]) + ["-c", script], env=env,
                               capture_output=True, text=True, timeout=15)
 
     def download(self, repository=REPOSITORY):
@@ -295,27 +297,77 @@ fetch() {
 ''' + functions + '\ndownload_package\nprintf done > "$TMP_DIR/bootstrap-reached"\n'
         return self.run_shell(script, PROJECT_REPOSITORY=repository)
 
-    def self_update(self):
-        self.metadata()
+    def self_update(self, channel="stable", tag=RELEASE, releases=None, draft=False,
+                    network_failure=False, preference=None, requested_channel="",
+                    requested_tag="", expected_version=""):
+        self.metadata(tag, draft=draft)
+        if channel is not None:
+            (self.work / "update-channel").write_text(channel + "\n", encoding="utf8")
+        if releases is not None:
+            (self.assets / "releases").write_text(json.dumps(releases), encoding="utf8")
+        if preference is not None:
+            (self.work / "preferred-channel").write_text(preference + "\n", encoding="utf8")
         source = SELF_UPDATE.read_text(encoding="utf8")
         segment = source[source.index('if [ ! -r "$RELEASE_VERIFIER" ]'):
                          source.index('write_state installed 90')]
         script = r'''
 set -eu
 RELEASE_REPOSITORY=blindtechnique/keen-pbr-sb
-RELEASE_API=https://api.github.com/repos/blindtechnique/keen-pbr-sb/releases/latest
+RELEASE_API=https://api.github.com/repos/blindtechnique/keen-pbr-sb/releases
+CHANNEL_FILE="$WORK_DIR/update-channel"
+CHANNEL_PREFERENCE="$WORK_DIR/preferred-channel"
 RELEASE_JSON="$WORK_DIR/release.json"
 INSTALLER="$WORK_DIR/install.sh"
 write_state() { printf '%s\n' "$1" >> "$WORK_DIR/phases"; }
 fetch_url() {
     printf '%s\n' "$2" >> "$WORK_DIR/requests"
+    [ "$TEST_NETWORK_FAILURE" != 1 ] || return 28
     case "$2" in
-        */releases/latest) cp "$FIXTURE_ASSETS/metadata" "$1" ;;
+        *'/releases?per_page=100') cp "$FIXTURE_ASSETS/releases" "$1" ;;
+        */releases/latest|*/releases/tags/*) cp "$FIXTURE_ASSETS/metadata" "$1" ;;
         *) cp "$FIXTURE_ASSETS/${2##*/}" "$1" ;;
     esac
 }
 ''' + segment
-        return self.run_shell(script)
+        return self.run_shell(script, TEST_NETWORK_FAILURE="1" if network_failure else "0",
+                              REQUESTED_CHANNEL=requested_channel, REQUESTED_TAG=requested_tag,
+                              EXPECTED_VERSION=expected_version)
+
+    def test_preference_overrides_marker_but_pins_the_confirmed_signed_release(self):
+        result = self.self_update("alpha", preference="stable", requested_channel="stable",
+                                 requested_tag=RELEASE, expected_version="v3.3.1-test")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.work / "executed").read_text().strip(), RELEASE)
+        requests = (self.work / "requests").read_text()
+        self.assertIn("/releases/tags/" + RELEASE, requests)
+        self.assertNotIn("/releases/latest", requests)
+        self.assertEqual((self.work / "preferred-channel").read_text(), "stable\n")
+
+    def test_changed_preference_after_confirmation_does_not_fetch_or_install(self):
+        result = self.self_update("alpha", preference="alpha", requested_channel="stable",
+                                 requested_tag=RELEASE, expected_version="v3.3.1-test")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.work / "requests").exists())
+        self.assertFalse((self.work / "executed").exists())
+
+    def test_signed_version_must_match_confirmation(self):
+        result = self.self_update(requested_channel="stable", requested_tag=RELEASE,
+                                 expected_version="v3.3.2-20260919120000")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.work / "executed").exists())
+
+    def test_pinned_stable_tag_must_match_returned_metadata(self):
+        result = self.self_update(tag="v3.3.2-20260919120000",
+                                 requested_channel="stable", requested_tag=RELEASE,
+                                 expected_version="v3.3.1-test")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.work / "executed").exists())
+        self.assertEqual(len((self.work / "requests").read_text().splitlines()), 1)
+
+    def test_invalid_preference_never_falls_back_to_installed_channel(self):
+        result = self.self_update(preference="next")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.work / "requests").exists())
 
     def test_authenticated_package_reaches_only_the_bootstrap_sentinel(self):
         result = self.download()
@@ -347,6 +399,78 @@ fetch_url() {
         self.assertIn("installing", (self.work / "phases").read_text().splitlines())
         self.assertFalse(any("raw.githubusercontent.com" in url for url in
                              (self.work / "requests").read_text().splitlines()))
+        self.assertEqual((self.work / "installer-args").read_text().splitlines(), ["--update"])
+        self.assertEqual((self.work / "lock-transfer").read_text().strip(), "1")
+
+    def test_alpha_uses_its_signed_installer_and_keeps_the_channel_handoff(self):
+        tag = "alpha-100-10"
+        self.args.channel = "alpha"
+        self.args.release = tag
+        self.signer.sign(self.args)
+        releases = [{"tag_name": value} for value in
+                    ("alpha-99-9", "v3.3.2-20260918174022", "alpha-100-2", tag)]
+        result = self.self_update("alpha", tag, releases)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.work / "executed").read_text().strip(), tag)
+        self.assertEqual((self.work / "installer-args").read_text().splitlines(),
+                         ["--update", "--alpha"])
+        self.assertEqual((self.work / "lock-transfer").read_text().strip(), "1")
+        requests = (self.work / "requests").read_text()
+        self.assertIn("/releases?per_page=100", requests)
+        self.assertIn("/releases/tags/alpha-100-10", requests)
+        self.assertNotIn("/releases/latest", requests)
+
+    def test_alpha_never_falls_back_to_latest_without_a_matching_release(self):
+        result = self.self_update("alpha", releases=[{"tag_name": RELEASE}])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.work / "executed").exists())
+        requests = (self.work / "requests").read_text().splitlines()
+        self.assertEqual(len(requests), 1)
+        self.assertNotIn("/latest", requests[0])
+
+    @unittest.skipUnless(BUSYBOX, "BusyBox is required")
+    def test_alpha_handoff_with_busybox_shell(self):
+        self.shell_command = [BUSYBOX, "sh"]
+        self.test_alpha_uses_its_signed_installer_and_keeps_the_channel_handoff()
+
+    def test_alpha_network_failure_does_not_start_installer_or_fetch_latest(self):
+        result = self.self_update("alpha", network_failure=True)
+        self.assertEqual(result.returncode, 28)
+        self.assertFalse((self.work / "executed").exists())
+        requests = (self.work / "requests").read_text().splitlines()
+        self.assertEqual(len(requests), 1)
+        self.assertTrue(requests[0].endswith("/releases?per_page=100"))
+
+    def test_missing_installed_channel_does_not_fetch_or_execute(self):
+        result = self.self_update(None)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.work / "requests").exists())
+        self.assertFalse((self.work / "executed").exists())
+
+    def test_unknown_installed_channel_does_not_fetch_or_execute(self):
+        result = self.self_update("unknown")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.work / "requests").exists())
+        self.assertFalse((self.work / "executed").exists())
+
+    def test_alpha_rejects_wrong_tag_and_draft_before_asset_download(self):
+        for tag, draft in ((RELEASE, False), ("alpha-100-1", True)):
+            with self.subTest(tag=tag, draft=draft):
+                (self.work / "requests").unlink(missing_ok=True)
+                result = self.self_update("alpha", tag,
+                                         [{"tag_name": "alpha-100-1"}], draft=draft)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(len((self.work / "requests").read_text().splitlines()), 2)
+                self.assertFalse((self.work / "executed").exists())
+
+    def test_alpha_rejects_a_stable_manifest_even_with_a_valid_signature(self):
+        self.args.release = "alpha-100-1"
+        self.signer.sign(self.args)  # Deliberately signed for stable, not Alpha.
+        result = self.self_update("alpha", self.args.release,
+                                 [{"tag_name": self.args.release, "draft": False}])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.work / "executed").exists())
+        self.assertNotIn("installing", (self.work / "phases").read_text().splitlines())
 
     def test_modified_installer_never_executes_or_starts_install_phase(self):
         with (self.assets / "install.sh").open("a", encoding="utf8") as stream:

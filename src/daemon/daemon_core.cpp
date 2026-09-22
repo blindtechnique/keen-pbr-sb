@@ -13768,6 +13768,7 @@ void Daemon::drain_runtime_firewall_terminal(
              !worker_result->fastnat_after_commit.failure.failed());
         facts.worker_commit_ambiguous =
             context->worker_commit_ambiguous;
+        facts.meta_policy_active = committed_meta_udp443_fwmark_.has_value();
         facts.publication_epoch_changed =
             worker_result != nullptr &&
             meta_udp443_publication_may_have_changed(
@@ -13789,7 +13790,7 @@ void Daemon::drain_runtime_firewall_terminal(
             plan_runtime_firewall_meta_tail(facts);
         dispatch_runtime_firewall_meta_tail_effects(
             meta_tail,
-            [this, current_generation, candidate_cleanup_epoch](
+            [this, &state, current_generation, candidate_cleanup_epoch](
                 RuntimeFirewallMetaTailEffect effect,
                 const RuntimeFirewallMetaTailPlan& plan) {
                 switch (effect) {
@@ -13798,7 +13799,12 @@ void Daemon::drain_runtime_firewall_terminal(
                             "meta-udp443-activation");
                         break;
                     case RuntimeFirewallMetaTailEffect::report_degraded:
-                        report_meta_udp443_degraded(plan.incident_detail);
+                        report_meta_udp443_degraded(
+                            state.worker_failure_detail.empty()
+                                ? std::string(plan.incident_detail)
+                                : std::string(plan.incident_detail) +
+                                      "; worker cause: " +
+                                      state.worker_failure_detail);
                         break;
                     case RuntimeFirewallMetaTailEffect::schedule_cleanup:
                         schedule_meta_udp443_activation_cleanup_retry(
@@ -14444,7 +14450,7 @@ void Daemon::drain_runtime_firewall_terminal(
             // previous route snapshot merely because the new one is complete.
             dispatch_runtime_firewall_background_failure_effects(
                 context->worker_commit_ambiguous,
-                [this, &state](
+                [this, &state, ambiguous = context->worker_commit_ambiguous](
                     RuntimeFirewallBackgroundFailureEffect effect) {
                     switch (effect) {
                         case RuntimeFirewallBackgroundFailureEffect::
@@ -14469,8 +14475,14 @@ void Daemon::drain_runtime_firewall_terminal(
                                 runtime_firewall_incidents_.record_failure(
                                     "runtime-firewall-reconciliation",
                                     /*notify_immediately=*/
-                                        !state.worker_failure_transient);
-                            if (state.worker_failure_transient) {
+                                        ambiguous || !state.worker_failure_transient);
+                            if (ambiguous && incident.notify) {
+                                Logger::instance().warn(
+                                    "Delayed runtime firewall COMMIT outcome is "
+                                    "unverified: {}. A bounded recovery will "
+                                    "resnapshot the backend.",
+                                    state.worker_failure_detail);
+                            } else if (state.worker_failure_transient) {
                                 Logger::instance().info(
                                     "Delayed runtime firewall refresh remains "
                                     "pending: {}",

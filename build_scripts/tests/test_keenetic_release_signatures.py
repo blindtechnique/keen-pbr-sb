@@ -111,26 +111,47 @@ class KeeneticReleaseSignaturesTest(unittest.TestCase):
                 self.assertEqual(result.stdout, "")
                 self.assertEqual(result.stderr, "")
 
-    def test_other_release_channels_use_same_signature_format(self):
-        for channel in ("alpha", "beta", "next"):
+    def test_alpha_uses_same_signature_format(self):
+        result = self.sign(channel="alpha", release="alpha-123-1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.verify(channel="alpha", release="alpha-123-1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_retired_channels_cannot_sign_new_assets(self):
+        self.prepare()
+        before = {path.name: path.read_bytes() for path in self.assets.iterdir()}
+        for channel in ("beta", "next"):
             with self.subTest(channel=channel):
                 result = self.sign(channel=channel, release=f"{channel}-123-1")
-                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("new release channel must be stable or alpha", result.stderr)
+                self.assertEqual({path.name: path.read_bytes() for path in self.assets.iterdir()}, before)
+
+    def test_historical_signed_channels_remain_verifiable_without_new_publication(self):
+        self.prepare()
+        original = self.manifest.read_bytes()
+        for channel in ("beta", "next"):
+            with self.subTest(channel=channel):
+                # Reconstruct historical bytes using only the temporary test
+                # key. The production signer no longer issues these channels.
+                self.resign(original.replace(b"channel\tstable\n", f"channel\t{channel}\n".encode())
+                            .replace(f"release\t{RELEASE}\n".encode(), f"release\t{channel}-123-1\n".encode()))
                 result = self.verify(channel=channel, release=f"{channel}-123-1")
                 self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotEqual(self.verify().returncode, 0)
 
-    def test_beta_manifest_covers_all_keenetic_profiles(self):
+    def test_alpha_manifest_covers_all_keenetic_profiles(self):
         for arch in ("mips", "mipsel"):
             (self.assets / f"keen-pbr_3.3.1-test_keenetic_{arch}-3.4.ipk").write_bytes(b"test-only IPK\n")
-        result = self.sign(channel="beta", release="beta-123-1")
+        result = self.sign(channel="alpha", release="alpha-123-1")
         self.assertEqual(result.returncode, 0, result.stderr)
         for arch, abi in (("aarch64", "3.10"), ("mips", "3.4"), ("mipsel", "3.4")):
             with self.subTest(arch=arch):
                 filename = f"keen-pbr_3.3.1-test_keenetic_{arch}-{abi}.ipk"
-                result = self.verify(channel="beta", release="beta-123-1", arch=arch, abi=abi,
+                result = self.verify(channel="alpha", release="alpha-123-1", arch=arch, abi=abi,
                                      filename=filename, localfile=self.assets / filename)
                 self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotEqual(self.verify(channel="stable", release="beta-123-1").returncode, 0)
+        self.assertNotEqual(self.verify(channel="stable", release="alpha-123-1").returncode, 0)
 
     def test_lf_check_does_not_require_full_od_applet(self):
         self.prepare()

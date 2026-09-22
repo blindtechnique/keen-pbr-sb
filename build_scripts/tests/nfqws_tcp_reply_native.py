@@ -16,8 +16,10 @@ import shlex
 import shutil
 import socket
 import ssl
+import struct
 import subprocess
 import sys
+import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -25,6 +27,8 @@ LIB = ROOT / 'packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr'
 COMPANION = ROOT / 'packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/nfqws-lua/rotator-telemetry.lua'
 HOOKS = ROOT / 'packages/keenetic/keen-pbr/files/opt/etc/ndm/netfilter.d'
 ALERT = bytes.fromhex('1503030002023215030300020100')
+REPLIES = {'alert': ALERT, 'empty-fin': b'',
+           'server-data-fin': bytes.fromhex('15030300020100'), 'client-fin': b''}
 NATIVE_INPUT_MATCH = '-m state --state RELATED,ESTABLISHED -m connmark --mark 0x1/0x1'
 KEENETIC_INPUT_MATCH = '-m state --state RELATED,ESTABLISHED -m connndmmark ! --mark 0x20/0x20'
 NATIVE_INPUT_ACCEPT = '-A INPUT ' + NATIVE_INPUT_MATCH + ' -j ACCEPT'
@@ -49,7 +53,8 @@ function circular(ctx,d)
     local h=autostate and autostate.tcp_general and autostate.tcp_general[keen_pbr_tcp_endpoint(d)] or {}
     local row={'PACKET',tostring(d.outgoing),tostring(ids[state] or 0),tostring(pos_get(d,'s')),
         tostring(d.l7payload),tostring(#(d.dis.payload or '')),tostring(h.nstrategy),
-        tostring(c.failure or false),tostring(tcp.th_sport),tostring(tcp.th_dport)}
+        tostring(c.failure or false),tostring(tcp.th_sport),tostring(tcp.th_dport),
+        tostring(tcp.th_flags or 0)}
     io.stdout:write(table.concat(row,'\t')..'\n'); io.stdout:flush()
     return verdict
 end
@@ -83,7 +88,38 @@ def close(process):
             process.wait(timeout=2)
 
 
-def serve(address, port, count, udp=False):
+def tcp_retransmissions(conn):
+    # Linux UAPI tcp_info: tcpi_total_retrans at byte 100 (native uint32).
+    # https://github.com/torvalds/linux/blob/v6.1/include/uapi/linux/tcp.h
+    return struct.unpack_from('=I', conn.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 104), 100)[0]
+
+
+def wait_for_fin_ack(conn):
+    deadline = time.monotonic() + 2
+    while True:
+        state = conn.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 104)[0]
+        if state in (6, 7):  # Linux TCP_TIME_WAIT / TCP_CLOSE: our FIN was ACKed
+            return
+        if time.monotonic() > deadline:
+            raise RuntimeError('controlled server close was not acknowledged')
+        time.sleep(.005)
+
+
+def retry_budget(output, expected):
+    values = re.findall(r'^TCP_RETRANSMISSIONS=(\d+)$', output, re.M)
+    assert len(values) == expected, ('missing socket retransmission evidence', expected, values)
+    return sum(map(int, values))
+
+
+def verify_observation_count(observed, connections, retransmissions, label):
+    # Scheduling delays can trigger real TCP retransmissions even on a veth.
+    # Do not mistake these for double queueing, but require kernel evidence for
+    # every extra observation; deduplicated connection coverage is checked too.
+    assert connections <= observed <= connections + retransmissions, (
+        label, 'missing or duplicate queue observation', observed, connections, retransmissions)
+
+
+def serve(address, port, count, udp=False, reply_kind='alert'):
     family = socket.AF_INET6 if ':' in address else socket.AF_INET
     with socket.socket(family, socket.SOCK_DGRAM if udp else socket.SOCK_STREAM) as listener:
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -107,11 +143,23 @@ def serve(address, port, count, udp=False):
                         raise RuntimeError('incomplete ClientHello')
                     data += part
                 assert data[0] == 22 and data[5] == 1
-                conn.sendall(ALERT)
+                before_retrans = tcp_retransmissions(conn)
+                if reply_kind == 'client-fin':
+                    # Wait for the client's half-close before initiating ours.
+                    while conn.recv(4096):
+                        pass
+                if REPLIES[reply_kind]:
+                    conn.sendall(REPLIES[reply_kind])
                 conn.shutdown(socket.SHUT_WR)
+                # Keep the socket until the client closes, so late response
+                # retries are visible in TCP_INFO instead of losing the fd.
+                while conn.recv(4096):
+                    pass
+                wait_for_fin_ack(conn)
+                print('TCP_RETRANSMISSIONS=' + str(tcp_retransmissions(conn) - before_retrans), flush=True)
 
 
-def request(server, port, sources, udp=False, same_port=False):
+def request(server, port, sources, udp=False, same_port=False, reply_kind='alert'):
     incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
     context = ssl.create_default_context()
     tls = context.wrap_bio(incoming, outgoing, server_hostname='example.invalid')
@@ -127,7 +175,10 @@ def request(server, port, sources, udp=False, same_port=False):
                 conn.settimeout(3)
                 conn.bind((source, 45100 + attempt if same_port else 0))
                 conn.connect((server, port))
+                before_retrans = tcp_retransmissions(conn) if not udp else 0
                 conn.sendall(b'isolated-udp-test' if udp else hello)
+                if not udp and reply_kind == 'client-fin':
+                    conn.shutdown(socket.SHUT_WR)
                 if udp:
                     reply = conn.recv(1024)
                     assert reply == b'isolated-udp-test'
@@ -138,7 +189,8 @@ def request(server, port, sources, udp=False, same_port=False):
                         if not part:
                             break
                         reply += part
-                    assert reply == ALERT, reply.hex()
+                    assert reply == REPLIES[reply_kind], reply.hex()
+                    print('TCP_RETRANSMISSIONS=' + str(tcp_retransmissions(conn) - before_retrans), flush=True)
             print('REPLY_OK', source, attempt + 1, flush=True)
 
 
@@ -363,7 +415,10 @@ def main(args):
                 # running process, pidfile, queue or filesystem: / is still
                 # this disposable container's real root.
                 env['KEEN_PBR_NFQWS_WINDOW_ROOT'] = '/'
-            with path.open('w') as log:
+            # Per-packet debug output on a host bind mount can stall the queue
+            # and provoke unrelated TCP retries. Capture inside the container;
+            # persist the complete evidence after the engine has stopped.
+            with tempfile.TemporaryFile(mode='w+', encoding='utf-8') as log:
                 engine = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, env=env)
                 try:
                     pidfile.write_text(str(engine.pid) + '\n')
@@ -373,7 +428,7 @@ def main(args):
                             row.split() and row.split()[0] == str(queue)
                             for row in queue_file.read_text().splitlines())):
                         if engine.poll() is not None or time.monotonic() > deadline:
-                            raise RuntimeError(path.read_text()[-2000:])
+                            raise RuntimeError(f'NFQUEUE startup failed; inspect {path}')
                         time.sleep(.02)
                     before = run(command + '-save', '-t', 'mangle')
                     (args.output / (name + '.before.rules')).write_text(before)
@@ -424,11 +479,13 @@ def main(args):
                     (args.output / (name + '.rules')).write_text(run(command + '-save', '-t', 'mangle'))
                     assert run('sysctl', '-n', 'net.ipv6.conf.all.forwarding').strip() == '1', 'IPv6 forwarding changed during case'
                     count = 3 * len(sources)
-                    srv = subprocess.Popen(ns(server_ns, sys.executable, __file__, 'serve', server, port, count, int(udp)),
+                    srv = subprocess.Popen(ns(server_ns, sys.executable, __file__, 'serve', server, port,
+                                              count, int(udp), args.reply_kind),
                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                     try:
                         assert srv.stdout.readline().strip() == 'READY'
-                        req = [sys.executable, __file__, 'request', server, port, ','.join(sources), int(udp), int(origin == 'two')]
+                        req = [sys.executable, __file__, 'request', server, port, ','.join(sources),
+                               int(udp), int(origin == 'two'), args.reply_kind]
                         if source_ns: req = ns(source_ns, *req)
                         try:
                             result = run(*req)
@@ -448,6 +505,10 @@ def main(args):
                             raise
                         assert result.count('REPLY_OK') == count, result
                         assert srv.wait(timeout=4) == 0, srv.stderr.read()
+                        server_output = srv.stdout.read()
+                        client_retries = retry_budget(result, count) if not udp else 0
+                        server_retries = retry_budget(server_output, count) if not udp else 0
+                        (args.output / (name + '.sockets.log')).write_text(result + server_output)
                     finally:
                         close(srv)
                     time.sleep(.05)
@@ -463,13 +524,20 @@ def main(args):
                 finally:
                     close(engine)
                     pidfile.unlink(missing_ok=True)
+                    log.seek(0)
+                    path.write_text(log.read())
             text = path.read_text()
             rows = [x.split('\t') for x in text.splitlines() if x.startswith('PACKET\t')]
             hellos = [r for r in rows if r[1] == 'true' and r[4] == 'tls_client_hello']
             out = {r[2] for r in hellos}
-            assert len(hellos) == len(out), (name, 'ClientHello queued twice', hellos)
-            alerts = [r for r in rows if r[1] == 'false' and r[3] == '1' and r[5] == str(len(ALERT))]
-            incoming = {r[2] for r in alerts}
+            verify_observation_count(len(hellos), len(out), client_retries, name + ' ClientHello')
+            if args.reply_kind in ('empty-fin', 'client-fin'):
+                responses = [r for r in rows if r[1] == 'false' and r[3] == '1'
+                             and r[5] == '0' and int(r[10]) & 1]
+            else:
+                responses = [r for r in rows if r[1] == 'false' and r[3] == '1'
+                             and r[5] == str(len(REPLIES[args.reply_kind]))]
+            incoming = {r[2] for r in responses}
             slots = {r[6] for r in rows}
             failed = {r[2] for r in rows if r[7] == 'true'}
             excluded = policy in ('mark', 'connmark', 'processed', 'port', 'iface', 'udp')
@@ -478,7 +546,7 @@ def main(args):
             # replies only. Existing client cases mark both directions.
             incoming_excluded = policy == 'keenetic-input-processed'
             if earlier_accept or incoming_excluded:
-                assert len(out) == count and not alerts and not failed, (name, out, alerts, failed)
+                assert len(out) == count and not responses and not failed, (name, out, responses, failed)
                 assert not any(r[1] == 'false' for r in rows), (name, 'excluded reply was queued')
                 assert '2' not in slots, 'must respect preceding policy and processed-reply exclusion'
             elif excluded:
@@ -494,27 +562,35 @@ def main(args):
                     assert text.count('UDP_PACKET false') == 0, text[-3000:]
                     assert text.count('proto=udp ') == 2 * count, 'UDP queued twice'
             else:
-                assert len(out) == count and len(alerts) == count, (name, out, alerts)
+                assert len(out) == count and len(incoming) == count, (name, out, responses)
+                verify_observation_count(len(responses), count, server_retries, name + ' response')
                 expected = not nat or mode not in ('none', 'remove')
                 assert (out == incoming) == expected, (name, out, incoming)
-                assert ('2' in slots) == expected, (name, slots)
-                assert len(failed) == (count if expected else 0), (name, failed)
+                expected_failure = expected and args.reply_kind in ('alert', 'empty-fin')
+                assert ('2' in slots) == expected_failure, (name, slots)
+                assert len(failed) == (count if expected_failure else 0), (name, failed)
             print(json.dumps(dict(case=name, replies=count, outgoing_contexts=len(out),
-                                  incoming_alerts=len(alerts), shared_contexts=bool(out) and out == incoming,
+                                  client_retries=client_retries, server_retries=server_retries,
+                                  reply_kind=args.reply_kind, incoming_responses=len(responses),
+                                  incoming_alerts=len(responses) if args.reply_kind == 'alert' else 0,
+                                  shared_contexts=bool(out) and out == incoming,
                                   failed_contexts=len(failed), slots=sorted(slots),
                                   policy_preserved=True if excluded or earlier_accept or incoming_excluded else None,
                                   input_shortcut_model=policy.startswith('keenetic-input'))), flush=True)
-        print(f'{len(cases)} native packet cases passed; no live router/Chrome acceptance', flush=True)
+        print(f'{len(cases)} native packet cases passed ({args.reply_kind}); no live router/Chrome acceptance', flush=True)
 
 
 if __name__ == '__main__':
     if sys.argv[1:2] == ['serve']:
-        serve(sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), bool(int(sys.argv[5])))
+        serve(sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), bool(int(sys.argv[5])), sys.argv[6])
     elif sys.argv[1:2] == ['request']:
-        request(sys.argv[2], int(sys.argv[3]), sys.argv[4].split(','), bool(int(sys.argv[5])), bool(int(sys.argv[6])))
+        request(sys.argv[2], int(sys.argv[3]), sys.argv[4].split(','), bool(int(sys.argv[5])),
+                bool(int(sys.argv[6])), sys.argv[7])
     else:
         parser = argparse.ArgumentParser()
         parser.add_argument('--upstream', required=True, type=Path)
         parser.add_argument('--output', required=True, type=Path)
         parser.add_argument('--case', action='append', help='run a named case (default: all)')
+        parser.add_argument('--reply-kind', choices=tuple(REPLIES), default='alert',
+                            help='controlled server response or client-initiated close')
         main(parser.parse_args())

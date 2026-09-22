@@ -76,6 +76,10 @@ export function AppSidebar(props: ComponentProps<typeof Sidebar>) {
             url: "/rules",
             aliases: ["/routing-rules", "/dns-rules"],
           },
+          {
+            title: t("deviceVpn.title"),
+            url: "/device-vpn",
+          },
         ],
       },
     ],

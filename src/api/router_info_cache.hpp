@@ -32,6 +32,14 @@ public:
 
     nlohmann::json get();
 
+    struct Snapshot {
+        nlohmann::json value;
+        bool fresh{false};
+    };
+    // Same single-flight cache, with explicit freshness for device pickers.
+    // Last-good data remains useful for labels, not proof of a current lease.
+    Snapshot get_snapshot();
+
     // Mark the observation dirty without I/O or dropping last-good data.
     // Events coalesce until get() can refresh, subject to failure_retry and
     // the event cooldown after the last completed attempt. An event arriving

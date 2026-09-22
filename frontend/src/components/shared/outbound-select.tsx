@@ -32,6 +32,7 @@ type OutboundSelectProps = {
   placeholder?: string
   groupLabel?: string
   ariaInvalid?: boolean
+  ariaLabelledBy?: string
   disabled?: boolean
 }
 
@@ -44,6 +45,7 @@ export function OutboundSelect({
   placeholder,
   groupLabel,
   ariaInvalid,
+  ariaLabelledBy,
   disabled,
 }: OutboundSelectProps) {
   const { t } = useTranslation()
@@ -89,7 +91,10 @@ export function OutboundSelect({
       onValueChange={(nextValue) => onValueChange(nextValue ?? "")}
       value={selectedValue}
     >
-      <SelectTrigger aria-invalid={ariaInvalid}>
+      <SelectTrigger
+        aria-invalid={ariaInvalid}
+        aria-labelledby={ariaLabelledBy}
+      >
         <SelectValue placeholder={resolvedPlaceholder}>
           {(selected) => {
             if (!selected) {

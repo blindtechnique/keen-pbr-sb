@@ -161,7 +161,7 @@ describe("software update error presentation", () => {
     expect(dialog).not.toContain("showCloseButton={")
     // Admission stays guarded even when the progress dialog is closed.
     expect(source).toContain(
-      "if (attemptRef.current || starting || backupPending) return"
+      "if (attemptRef.current || starting || backupPending || savingChannel) return"
     )
   })
 

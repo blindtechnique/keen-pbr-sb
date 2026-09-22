@@ -4,7 +4,7 @@ export type RuleWithStableId = {
   id?: string
 }
 
-export type RuleRouteCollection = "dns-rules" | "routing-rules"
+export type RuleRouteCollection = "dns-rules" | "routing-rules" | "device-vpn"
 
 export function getRuleEditHref(
   collection: RuleRouteCollection,

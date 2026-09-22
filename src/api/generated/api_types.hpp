@@ -1683,6 +1683,20 @@ namespace api {
         int64_t table_id = 0;
     };
 
+    struct RouterDevice {
+        std::optional<bool> active;
+        std::optional<bool> conflict;
+        std::string ipv4;
+        std::optional<std::string> mac;
+        std::optional<std::string> name;
+    };
+
+    struct RouterDevices {
+        bool available = false;
+        std::vector<RouterDevice> devices;
+        bool truncated = false;
+    };
+
     struct RouterInfo {
         std::optional<std::string> arch;
         std::optional<int64_t> cpu_load_percent;
@@ -2263,6 +2277,14 @@ namespace api {
         bool running = false;
     };
 
+    enum class Channel : int { ALPHA, STABLE };
+
+    struct SystemUpdateRequest {
+        Channel channel;
+        std::string release_tag;
+        std::string version;
+    };
+
     struct SystemUpdateStatus {
         std::string log;
         bool package_recovery_pending = false;
@@ -2274,13 +2296,19 @@ namespace api {
         bool available = false;
         bool cached = false;
         std::string changelog_url;
+        std::optional<std::string> channel;
+        std::optional<bool> channel_change;
         std::string check_error;
         std::string current;
         bool current_ahead = false;
+        std::optional<bool> installable;
+        std::optional<std::string> installed_channel;
         std::string latest;
         std::string release_name;
         std::string release_notes;
+        std::optional<std::string> release_tag;
         std::string release_url;
+        std::optional<std::string> source;
     };
 
     enum class TransportActionRequestAction : int { DOWN, RESTART, UP };
@@ -2510,6 +2538,10 @@ namespace api {
         std::optional<std::string> summary;
     };
 
+    struct UpdateChannelPreference {
+        Channel channel;
+    };
+
     struct UpdateStartedResponse {
         bool ok = false;
         bool started = false;
@@ -2711,6 +2743,8 @@ namespace api {
         std::optional<ResolverConfigSyncState> resolver_config_sync_state;
         std::optional<Retry> retry_config;
         std::optional<Route> route_config;
+        std::optional<RouterDevice> router_device;
+        std::optional<RouterDevices> router_devices;
         std::optional<RouterInfo> router_info;
         std::optional<RouterMetrics> router_metrics;
         std::optional<RouteRuleElement> route_rule;
@@ -2782,6 +2816,7 @@ namespace api {
         std::optional<SubscriptionSettingsRequest> subscription_settings_request;
         std::optional<SubscriptionSourceRequest> subscription_source_request;
         std::optional<SystemUpdateLocalStatus> system_update_local_status;
+        std::optional<SystemUpdateRequest> system_update_request;
         std::optional<SystemUpdateStatus> system_update_status;
         std::optional<TransportActionRequest> transport_action_request;
         std::optional<TransportActionResponse> transport_action_response;
@@ -2807,6 +2842,7 @@ namespace api {
         std::optional<TunnelProbeHostsResponse> tunnel_probe_hosts_response;
         std::optional<TunnelProbeStateResponse> tunnel_probe_state_response;
         std::optional<UiPreferences> ui_preferences_config;
+        std::optional<UpdateChannelPreference> update_channel_preference;
         std::optional<UpdateStartedResponse> update_started_response;
         std::optional<ValidationErrorElement> validation_error;
         std::optional<Vless> vless_reality_spec;
@@ -3266,6 +3302,12 @@ void to_json(json & j, const RemoteAccessState & x);
 void from_json(const json & j, RouteTableCheck & x);
 void to_json(json & j, const RouteTableCheck & x);
 
+void from_json(const json & j, RouterDevice & x);
+void to_json(json & j, const RouterDevice & x);
+
+void from_json(const json & j, RouterDevices & x);
+void to_json(json & j, const RouterDevices & x);
+
 void from_json(const json & j, RouterInfo & x);
 void to_json(json & j, const RouterInfo & x);
 
@@ -3440,6 +3482,9 @@ void to_json(json & j, const SubscriptionSourceRequest & x);
 void from_json(const json & j, SystemUpdateLocalStatus & x);
 void to_json(json & j, const SystemUpdateLocalStatus & x);
 
+void from_json(const json & j, SystemUpdateRequest & x);
+void to_json(json & j, const SystemUpdateRequest & x);
+
 void from_json(const json & j, SystemUpdateStatus & x);
 void to_json(json & j, const SystemUpdateStatus & x);
 
@@ -3511,6 +3556,9 @@ void to_json(json & j, const TunnelProbeHostsResponse & x);
 
 void from_json(const json & j, TunnelProbeStateResponse & x);
 void to_json(json & j, const TunnelProbeStateResponse & x);
+
+void from_json(const json & j, UpdateChannelPreference & x);
+void to_json(json & j, const UpdateChannelPreference & x);
 
 void from_json(const json & j, UpdateStartedResponse & x);
 void to_json(json & j, const UpdateStartedResponse & x);
@@ -3898,6 +3946,9 @@ void to_json(json & j, const DocumentKind & x);
 
 void from_json(const json & j, PackageRollbackState & x);
 void to_json(json & j, const PackageRollbackState & x);
+
+void from_json(const json & j, Channel & x);
+void to_json(json & j, const Channel & x);
 
 void from_json(const json & j, TransportActionRequestAction & x);
 void to_json(json & j, const TransportActionRequestAction & x);
@@ -7045,6 +7096,36 @@ namespace api {
         j["table_id"] = x.table_id;
     }
 
+    inline void from_json(const json & j, RouterDevice& x) {
+        x.active = get_stack_optional<bool>(j, "active");
+        x.conflict = get_stack_optional<bool>(j, "conflict");
+        x.ipv4 = j.at("ipv4").get<std::string>();
+        x.mac = get_stack_optional<std::string>(j, "mac");
+        x.name = get_stack_optional<std::string>(j, "name");
+    }
+
+    inline void to_json(json & j, const RouterDevice & x) {
+        j = json::object();
+        j["active"] = x.active;
+        j["conflict"] = x.conflict;
+        j["ipv4"] = x.ipv4;
+        j["mac"] = x.mac;
+        j["name"] = x.name;
+    }
+
+    inline void from_json(const json & j, RouterDevices& x) {
+        x.available = j.at("available").get<bool>();
+        x.devices = j.at("devices").get<std::vector<RouterDevice>>();
+        x.truncated = j.at("truncated").get<bool>();
+    }
+
+    inline void to_json(json & j, const RouterDevices & x) {
+        j = json::object();
+        j["available"] = x.available;
+        j["devices"] = x.devices;
+        j["truncated"] = x.truncated;
+    }
+
     inline void from_json(const json & j, RouterInfo& x) {
         x.arch = get_stack_optional<std::string>(j, "arch");
         x.cpu_load_percent = get_stack_optional<int64_t>(j, "cpu_load_percent");
@@ -8103,6 +8184,19 @@ namespace api {
         j["running"] = x.running;
     }
 
+    inline void from_json(const json & j, SystemUpdateRequest& x) {
+        x.channel = j.at("channel").get<Channel>();
+        x.release_tag = j.at("release_tag").get<std::string>();
+        x.version = j.at("version").get<std::string>();
+    }
+
+    inline void to_json(json & j, const SystemUpdateRequest & x) {
+        j = json::object();
+        j["channel"] = x.channel;
+        j["release_tag"] = x.release_tag;
+        j["version"] = x.version;
+    }
+
     inline void from_json(const json & j, SystemUpdateStatus& x) {
         x.log = j.at("log").get<std::string>();
         x.package_recovery_pending = j.at("package_recovery_pending").get<bool>();
@@ -8114,13 +8208,19 @@ namespace api {
         x.available = j.at("available").get<bool>();
         x.cached = j.at("cached").get<bool>();
         x.changelog_url = j.at("changelog_url").get<std::string>();
+        x.channel = get_stack_optional<std::string>(j, "channel");
+        x.channel_change = get_stack_optional<bool>(j, "channel_change");
         x.check_error = j.at("check_error").get<std::string>();
         x.current = j.at("current").get<std::string>();
         x.current_ahead = j.at("current_ahead").get<bool>();
+        x.installable = get_stack_optional<bool>(j, "installable");
+        x.installed_channel = get_stack_optional<std::string>(j, "installed_channel");
         x.latest = j.at("latest").get<std::string>();
         x.release_name = j.at("release_name").get<std::string>();
         x.release_notes = j.at("release_notes").get<std::string>();
+        x.release_tag = get_stack_optional<std::string>(j, "release_tag");
         x.release_url = j.at("release_url").get<std::string>();
+        x.source = get_stack_optional<std::string>(j, "source");
     }
 
     inline void to_json(json & j, const SystemUpdateStatus & x) {
@@ -8135,13 +8235,19 @@ namespace api {
         j["available"] = x.available;
         j["cached"] = x.cached;
         j["changelog_url"] = x.changelog_url;
+        j["channel"] = x.channel;
+        j["channel_change"] = x.channel_change;
         j["check_error"] = x.check_error;
         j["current"] = x.current;
         j["current_ahead"] = x.current_ahead;
+        j["installable"] = x.installable;
+        j["installed_channel"] = x.installed_channel;
         j["latest"] = x.latest;
         j["release_name"] = x.release_name;
         j["release_notes"] = x.release_notes;
+        j["release_tag"] = x.release_tag;
         j["release_url"] = x.release_url;
+        j["source"] = x.source;
     }
 
     inline void from_json(const json & j, TransportActionRequest& x) {
@@ -8549,6 +8655,15 @@ namespace api {
         j["summary"] = x.summary;
     }
 
+    inline void from_json(const json & j, UpdateChannelPreference& x) {
+        x.channel = j.at("channel").get<Channel>();
+    }
+
+    inline void to_json(json & j, const UpdateChannelPreference & x) {
+        j = json::object();
+        j["channel"] = x.channel;
+    }
+
     inline void from_json(const json & j, UpdateStartedResponse& x) {
         x.ok = j.at("ok").get<bool>();
         x.started = j.at("started").get<bool>();
@@ -8756,6 +8871,8 @@ namespace api {
         x.resolver_config_sync_state = get_stack_optional<ResolverConfigSyncState>(j, "ResolverConfigSyncState");
         x.retry_config = get_stack_optional<Retry>(j, "RetryConfig");
         x.route_config = get_stack_optional<Route>(j, "RouteConfig");
+        x.router_device = get_stack_optional<RouterDevice>(j, "RouterDevice");
+        x.router_devices = get_stack_optional<RouterDevices>(j, "RouterDevices");
         x.router_info = get_stack_optional<RouterInfo>(j, "RouterInfo");
         x.router_metrics = get_stack_optional<RouterMetrics>(j, "RouterMetrics");
         x.route_rule = get_stack_optional<RouteRuleElement>(j, "RouteRule");
@@ -8827,6 +8944,7 @@ namespace api {
         x.subscription_settings_request = get_stack_optional<SubscriptionSettingsRequest>(j, "SubscriptionSettingsRequest");
         x.subscription_source_request = get_stack_optional<SubscriptionSourceRequest>(j, "SubscriptionSourceRequest");
         x.system_update_local_status = get_stack_optional<SystemUpdateLocalStatus>(j, "SystemUpdateLocalStatus");
+        x.system_update_request = get_stack_optional<SystemUpdateRequest>(j, "SystemUpdateRequest");
         x.system_update_status = get_stack_optional<SystemUpdateStatus>(j, "SystemUpdateStatus");
         x.transport_action_request = get_stack_optional<TransportActionRequest>(j, "TransportActionRequest");
         x.transport_action_response = get_stack_optional<TransportActionResponse>(j, "TransportActionResponse");
@@ -8852,6 +8970,7 @@ namespace api {
         x.tunnel_probe_hosts_response = get_stack_optional<TunnelProbeHostsResponse>(j, "TunnelProbeHostsResponse");
         x.tunnel_probe_state_response = get_stack_optional<TunnelProbeStateResponse>(j, "TunnelProbeStateResponse");
         x.ui_preferences_config = get_stack_optional<UiPreferences>(j, "UiPreferencesConfig");
+        x.update_channel_preference = get_stack_optional<UpdateChannelPreference>(j, "UpdateChannelPreference");
         x.update_started_response = get_stack_optional<UpdateStartedResponse>(j, "UpdateStartedResponse");
         x.validation_error = get_stack_optional<ValidationErrorElement>(j, "ValidationError");
         x.vless_reality_spec = get_stack_optional<Vless>(j, "VlessRealitySpec");
@@ -9054,6 +9173,8 @@ namespace api {
         j["ResolverConfigSyncState"] = x.resolver_config_sync_state;
         j["RetryConfig"] = x.retry_config;
         j["RouteConfig"] = x.route_config;
+        j["RouterDevice"] = x.router_device;
+        j["RouterDevices"] = x.router_devices;
         j["RouterInfo"] = x.router_info;
         j["RouterMetrics"] = x.router_metrics;
         j["RouteRule"] = x.route_rule;
@@ -9125,6 +9246,7 @@ namespace api {
         j["SubscriptionSettingsRequest"] = x.subscription_settings_request;
         j["SubscriptionSourceRequest"] = x.subscription_source_request;
         j["SystemUpdateLocalStatus"] = x.system_update_local_status;
+        j["SystemUpdateRequest"] = x.system_update_request;
         j["SystemUpdateStatus"] = x.system_update_status;
         j["TransportActionRequest"] = x.transport_action_request;
         j["TransportActionResponse"] = x.transport_action_response;
@@ -9150,6 +9272,7 @@ namespace api {
         j["TunnelProbeHostsResponse"] = x.tunnel_probe_hosts_response;
         j["TunnelProbeStateResponse"] = x.tunnel_probe_state_response;
         j["UiPreferencesConfig"] = x.ui_preferences_config;
+        j["UpdateChannelPreference"] = x.update_channel_preference;
         j["UpdateStartedResponse"] = x.update_started_response;
         j["ValidationError"] = x.validation_error;
         j["VlessRealitySpec"] = x.vless_reality_spec;
@@ -11752,6 +11875,20 @@ namespace api {
             case PackageRollbackState::RECOVERY_UNKNOWN: j = "recovery_unknown"; break;
             case PackageRollbackState::SNAPSHOT_UNVERIFIED: j = "snapshot_unverified"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"PackageRollbackState\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, Channel & x) {
+        if (j == "alpha") x = Channel::ALPHA;
+        else if (j == "stable") x = Channel::STABLE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"Channel\""); }
+    }
+
+    inline void to_json(json & j, const Channel & x) {
+        switch (x) {
+            case Channel::ALPHA: j = "alpha"; break;
+            case Channel::STABLE: j = "stable"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"Channel\": " + std::to_string(static_cast<int>(x)));
         }
     }
 

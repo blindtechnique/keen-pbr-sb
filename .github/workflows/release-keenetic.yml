@@ -4,17 +4,15 @@ on:
   push:
     tags:
       - "v*"
-    # Alpha and next produce an aarch64 test IPK. Main builds an all-profile
-    # Beta prerelease; promotion to Latest separately reuses its signed assets.
+    # Main and Alpha produce all-profile prereleases. Promotion of a main
+    # candidate to Latest separately reuses its signed assets.
     branches:
       - alpha
       - main
-      - next
   pull_request:
     branches:
       - alpha
       - main
-      - next
   workflow_dispatch:
     inputs:
       release_tag:
@@ -730,84 +728,6 @@ jobs:
             release-assets/install.sh release-assets/release-manifest.tsv \
             release-assets/release-manifest.sig
 
-  upload-next-artifact:
-    if: github.repository == 'blindtechnique/keen-pbr-sb' && github.event_name != 'pull_request' && needs.resolve-source.outputs.channel == 'next'
-    needs:
-      - resolve-source
-      - build
-      - backend
-      - crash-diagnostics-smoke
-      - clang-thread-safety
-      - firewall-integration
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.resolve-source.outputs.source_sha }}
-
-      - name: Checkout reviewed release signing tools
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ github.sha }}
-          path: .release-signing-tools
-          sparse-checkout: |
-            build_scripts
-            packages/keys
-            packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr
-          persist-credentials: false
-
-      - name: Download aarch64 test IPK
-        uses: actions/download-artifact@v8
-        with:
-          name: keenetic-ipk-aarch64-3.10
-          path: release-assets
-
-      - name: Create checksum
-        run: |
-          cd release-assets
-          sha256sum keen-pbr_*.ipk > SHA256SUMS
-
-      - name: Sign next manifest and installer
-        env:
-          SOURCE_SHA: ${{ needs.resolve-source.outputs.source_sha }}
-          KEENETIC_RELEASE_SIGNING_KEY: ${{ secrets.KEENETIC_RELEASE_SIGNING_KEY }}
-        run: |
-          set -euo pipefail
-          umask 077
-          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-          if [ -z "${KEENETIC_RELEASE_SIGNING_KEY:-}" ]; then
-            echo "::error::KEENETIC_RELEASE_SIGNING_KEY is not configured; signed artifact was not uploaded."
-            exit 1
-          fi
-          signing_key=$(mktemp "$RUNNER_TEMP/keenetic-release-key.XXXXXX")
-          trap 'rm -f -- "$signing_key"' EXIT
-          printf '%s\n' "$KEENETIC_RELEASE_SIGNING_KEY" > "$signing_key"
-          unset KEENETIC_RELEASE_SIGNING_KEY
-          python3 .release-signing-tools/build_scripts/embed-release-verifier.py \
-            --installer install.sh \
-            --verifier .release-signing-tools/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/release-verify.sh \
-            --public-key .release-signing-tools/packages/keys/keenetic-release-public.pem --check
-          python3 .release-signing-tools/build_scripts/sign-keenetic-release.py \
-            --assets release-assets --installer install.sh \
-            --key "$signing_key" \
-            --public-key .release-signing-tools/packages/keys/keenetic-release-public.pem \
-            --repository "$GITHUB_REPOSITORY" --channel next \
-            --release "next-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --source "$SOURCE_SHA" \
-            --build "github-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-
-      - name: Upload workflow artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: keen-pbr-ipk
-          path: |
-            release-assets/keen-pbr_*.ipk
-            release-assets/SHA256SUMS
-            release-assets/install.sh
-            release-assets/release-manifest.tsv
-            release-assets/release-manifest.sig
-          if-no-files-found: error
-
   upload-alpha-artifact:
     if: github.repository == 'blindtechnique/keen-pbr-sb' && github.event_name != 'pull_request' && needs.resolve-source.outputs.channel == 'alpha'
     permissions:
@@ -837,14 +757,36 @@ jobs:
             packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr
           persist-credentials: false
 
-      - name: Download aarch64 alpha IPK
+      - name: Download all alpha IPKs
         uses: actions/download-artifact@v8
         with:
-          name: keenetic-ipk-aarch64-3.10
+          pattern: keenetic-ipk-*
+          merge-multiple: true
           path: release-assets
 
-      - name: Create checksum
+      - name: Verify all alpha IPKs and create checksums
+        env:
+          SOURCE_SHA: ${{ needs.resolve-source.outputs.source_sha }}
         run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          EXPECTED_COMMIT=$(git rev-parse --short=12 "$SOURCE_SHA")
+          shopt -s nullglob
+          packages=(release-assets/keen-pbr_*.ipk)
+          test "${#packages[@]}" -eq 3
+          expected_version=""
+          for config in aarch64-3.10 mips-3.4 mipsel-3.4; do
+            packages=(release-assets/keen-pbr_*_keenetic_${config}.ipk)
+            test "${#packages[@]}" -eq 1
+            package=$(basename "${packages[0]}")
+            version=${package#keen-pbr_}
+            version=${version%_keenetic_${config}.ipk}
+            test -z "$expected_version" || test "$version" = "$expected_version"
+            expected_version="$version"
+            python3 build_scripts/validate-keenetic-ipk.py "${packages[0]}" \
+              --arch "${config%%-*}" --expected-commit "$EXPECTED_COMMIT" \
+              --expected-channel alpha
+          done
           cd release-assets
           sha256sum keen-pbr_*.ipk > SHA256SUMS
 
@@ -906,10 +848,13 @@ jobs:
               exit "$tag_status"
             fi
           fi
-          package=$(basename release-assets/keen-pbr_*.ipk)
+          shopt -s nullglob
+          packages=(release-assets/keen-pbr_*_keenetic_aarch64-3.10.ipk)
+          test "${#packages[@]}" -eq 1
+          package=$(basename "${packages[0]}")
           version=${package#keen-pbr_}
           version=${version%_keenetic_aarch64-3.10.ipk}
-          printf 'Alpha %s. Keenetic/Netcraze: aarch64-3.10.\n\nSource: `%s`.\n\nSigned manifest and SHA256SUMS are attached. This prerelease does not change Stable/Latest.\n\nInstallation with wget or curl, requirements and known limitations: [Alpha README](https://github.com/%s/blob/%s/README.md#установка-alpha).\n' \
+          printf 'Alpha %s. Keenetic/Netcraze profiles: aarch64-3.10, mips-3.4, mipsel-3.4. Builds do not imply hardware acceptance on every profile.\n\nSource: `%s`.\n\nSigned manifest and SHA256SUMS are attached. This prerelease does not change Stable/Latest.\n\nInstallation with wget or curl, requirements and known limitations: [Alpha README](https://github.com/%s/blob/%s/README.md#установка-alpha).\n' \
             "$version" "$SOURCE_SHA" "$GITHUB_REPOSITORY" "$SOURCE_SHA" > ALPHA_NOTES.md
           gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
             --target "$SOURCE_SHA" --prerelease --latest=false \

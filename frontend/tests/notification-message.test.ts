@@ -10,6 +10,10 @@ import { ruTranslation } from "../src/i18n/ru"
 
 const liveIncidents = [
   [
+    "Delayed runtime firewall COMMIT outcome is unverified: routing fence changed during cleanup. A bounded recovery will resnapshot the backend.",
+    "firewallRefreshUnverified",
+  ],
+  [
     "Runtime state running -> broken: configuration generation terminal is unknown",
     "runtimeApplyUnverified",
   ],
@@ -244,5 +248,16 @@ describe("specific list and routing causes", () => {
     )
     expect(ppe.text).toContain("аппаратном ускорении")
     expect(ppe.text).not.toContain("PPE")
+  })
+
+  test("generic uncertainty is not a WhatsApp outage and keeps the worker cause", async () => {
+    const raw =
+      "Delayed runtime firewall COMMIT outcome is unverified: routing fence changed during cleanup. A bounded recovery will resnapshot the backend."
+    for (const language of ["ru", "en"] as const) {
+      const result = await present(raw, "warning", language)
+      expect(result.text).not.toContain("WhatsApp")
+      expect(result.text).not.toContain("Meta")
+      expect(result.details).toBe(raw)
+    }
   })
 })

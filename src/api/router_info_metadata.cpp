@@ -1,4 +1,5 @@
 #include "router_info_metadata.hpp"
+#include "device_inventory.hpp"
 
 #include <chrono>
 #include <utility>
@@ -88,10 +89,11 @@ RouterInfoCache::FetchResult RouterInfoMetadata::fetch_clients() {
     for (const auto& host : *hosts) {
         if (!host.is_object()) continue;
         ++total;
-        if (host.value("active", false)) ++active;
+        if (boolean_field(host, "active") && host.at("active").get<bool>()) ++active;
     }
     out["clients_active"] = active;
     out["clients_total"] = total;
+    out["device_inventory"] = device_inventory(*hosts);
     return {std::move(out), true};
 }
 
@@ -101,7 +103,17 @@ nlohmann::json RouterInfoMetadata::get() {
     auto out = version_get_();
     if (!out.is_object()) out = nlohmann::json::object();
     out.update(wan_.get());
-    out.update(clients_.get());
+    auto clients = clients_.get();
+    clients.erase("device_inventory");
+    out.update(clients);
+    return out;
+}
+
+nlohmann::json RouterInfoMetadata::devices() {
+    const auto snapshot = clients_.get_snapshot();
+    auto out = snapshot.value.value("device_inventory",
+        nlohmann::json{{"devices", nlohmann::json::array()}, {"truncated", false}});
+    out["available"] = snapshot.fresh && snapshot.value.contains("device_inventory");
     return out;
 }
 

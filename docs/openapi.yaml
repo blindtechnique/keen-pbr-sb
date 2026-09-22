@@ -1447,7 +1447,7 @@ paths:
       summary: Installed version, the latest release, and update progress
       description: >
         Answers two different questions in one payload: what this router is
-        running right now, and what the fork's latest release is. The release
+        running right now, and the latest release in the selected channel. The release
         half is served from a local cache while it is fresh, so opening the
         panel does not contact GitHub on every render; `cached` says which of
         the two you got and `check_error` says why a fresh check failed while
@@ -1475,11 +1475,23 @@ paths:
         export and package rollback still require step-up reauthentication.
 
 
+        The request must match the freshly checked channel, tag and full
+        package version. The signed manifest is checked against that version
+        before running the installer. A channel switch may install an equal
+        version but never an older one.
+
+
         Refused rather than attempted when the helper is not installed, when an
         update or rollback is already running, or when package recovery is
         pending or in an unknown state, because a second concurrent update is
         how a router ends up with a half-replaced package.
       operationId: postSystemUpdate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SystemUpdateRequest"
       responses:
         "200":
           description: The helper started; the update itself runs in background
@@ -1497,6 +1509,42 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "500":
           description: The helper could not be started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/system/update/channel:
+    post:
+      summary: Save the preferred update channel without installing
+      description: >
+        Persists only the update preference. Does not apply routing config,
+        restart services, or contact GitHub. Stable is the normal default;
+        an existing Alpha installation inherits Alpha until explicitly changed.
+        Invalid preferences fail closed. The installed package channel remains
+        separate. Refused while updating, rolling back or recovering.
+      operationId: postSystemUpdateChannel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateChannelPreference"
+      responses:
+        "200":
+          description: Saved update preference
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpdateChannelPreference"
+        "400":
+          description: Not one of the two supported channels
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Update or recovery in progress
           content:
             application/json:
               schema:
@@ -2097,6 +2145,22 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RouterMetrics"
+
+  /api/system/devices:
+    get:
+      summary: Read known IPv4 devices for a routing-rule picker
+      description: >
+        Reuses the router client-inventory cache; no permanent poll, DHCP
+        mutation or network scan. These are suggestions, not proof of a
+        reserved address. Last-good entries may be returned with available=false.
+      operationId: getSystemDevices
+      responses:
+        "200":
+          description: Bounded known-device inventory, possibly unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RouterDevices"
 
   /api/system/router:
     get:
@@ -4585,6 +4649,38 @@ components:
           type: integer
           format: int64
 
+    RouterDevice:
+      type: object
+      required: [ipv4]
+      properties:
+        ipv4:
+          type: string
+          description: Observed IPv4 address, not a DHCP reservation.
+        name:
+          type: string
+        mac:
+          type: string
+          description: Display-only identity hint; the rule matches IPv4, not MAC.
+        active:
+          type: boolean
+        conflict:
+          type: boolean
+          description: Different observed MACs share this address; do not offer it as a device choice.
+    RouterDevices:
+      type: object
+      required: [available, truncated, devices]
+      properties:
+        available:
+          type: boolean
+          description: Whether the cached observation is fresh.
+        truncated:
+          type: boolean
+        devices:
+          type: array
+          maxItems: 512
+          items:
+            $ref: "#/components/schemas/RouterDevice"
+
     RouterInfo:
       type: object
       description: >
@@ -5087,6 +5183,32 @@ components:
             - package_unverified
             - snapshot_unverified
 
+    UpdateChannelPreference:
+      type: object
+      additionalProperties: false
+      required: [channel]
+      properties:
+        channel:
+          type: string
+          enum: [stable, alpha]
+
+    SystemUpdateRequest:
+      type: object
+      additionalProperties: false
+      required: [channel, release_tag, version]
+      description: >
+        Exact selection from a fresh update check. A stale channel, tag or
+        version is refused before starting the helper. Older versions are
+        explicitly refused; no automatic downgrade or unsigned fallback.
+      properties:
+        channel:
+          type: string
+          enum: [stable, alpha]
+        release_tag:
+          type: string
+        version:
+          type: string
+
     SystemUpdateStatus:
       description: >
         Local update state plus the release comparison. Every release field is
@@ -5107,6 +5229,24 @@ components:
             - cached
             - check_error
           properties:
+            channel:
+              type: string
+              description: Selected channel; empty if the setting is invalid.
+            installed_channel:
+              type: string
+              description: Package-owned channel, independent of the preference.
+            release_tag:
+              type: string
+              description: Immutable tag to confirm when starting an update.
+            source:
+              type: string
+            channel_change:
+              type: boolean
+            installable:
+              type: boolean
+              description: >
+                Known release, no check error, not older than the current
+                package, and either newer or an explicit channel switch.
             current:
               type: string
               description: Version this daemon reports, as `v<version>-<build timestamp>`.

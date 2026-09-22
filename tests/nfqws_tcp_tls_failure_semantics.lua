@@ -44,7 +44,8 @@ local function equal(actual, expected, label)
     assert(actual == expected, label .. ': expected ' .. tostring(expected) .. ', got ' .. tostring(actual))
 end
 local function fresh()
-    return {lua_state={}, pos={client={tcp={seq0=100000, uppos=2155}}, server={tcp={}}}}
+    return {lua_state={}, pos={client={tcp={seq0=100000, uppos=2155}},
+        server={tcp={seq0=400000, uppos=0}}}}
 end
 local function packet(track, payload, seq, outgoing, override)
     local d = {track=track, outgoing=outgoing or false, sequence=seq,
@@ -200,5 +201,124 @@ for _,ip in ipairs({'198.51.100.10','198.51.100.11','2001:db8::10'}) do
     local address=function(d) d.target.ip=ip end
     arm(c,address); packet(c,fatal,1,false,address)
     equal(autostate.tcp_general[ip..'|443'].failure_counter,1,'address key isolated')
+end
+-- Empty server FIN before any response: use stock failure counting and rotate
+-- only after two separate connections, never twice for a FIN retransmission.
+local function fin(track, override)
+    return packet(track, '', 1, false, function(d)
+        d.dis.tcp.th_flags = 17 -- FIN|ACK
+        if override then override(d) end
+    end)
+end
+reset(); c=fresh(); arm(c)
+host,connection=fin(c)
+equal(host.failure_counter,1,'empty early FIN counts one failure')
+equal(host.nstrategy,1,'early FIN preserves the two-connection threshold')
+equal(connection.nocheck,true,'stock closes FIN observation after failure')
+equal(connection.keen_pbr_tls_fin_end,false,'early FIN state is released')
+fin(c); fin(c)
+packet(c,'',2155,true,function(d) d.dis.tcp.th_flags=17 end)
+equal(host.failure_counter,1,'FIN retransmissions and client close cannot double count')
+c=fresh(); arm(c); host=fin(c)
+equal(host.nstrategy,2,'second early FIN connection rotates')
+equal(host.failure_counter,nil,'stock resets FIN failure count on rotation')
+local _,_,after_fin=arm(fresh())
+equal(after_fin.selected,2,'new connection uses next choice after early FIN')
+
+reset(); c=fresh(); arm(c); packet(c,fatal,1); host=fin(c)
+equal(host.failure_counter,1,'FIN cannot recount an already counted TLS alert')
+reset(); c=fresh(); arm(c)
+packet(c,'',1,false,function(d) d.dis.tcp.th_flags=20 end)
+host=fin(c)
+equal(host.failure_counter,1,'FIN cannot recount an already counted RST')
+
+-- Exact ACK of the observed bytes, larger observed ACK, and wire sequence
+-- wrap all work; no absolute sequence ordering or extra success is invented.
+for _,seq0 in ipairs({100000,4294967290}) do
+    for _,acknowledged in ipairs({1+#hello,2155}) do
+        reset(); c=fresh(); c.pos.client.tcp.seq0=seq0; arm(c)
+        host=fin(c,function(d) d.dis.tcp.th_ack=(seq0+acknowledged)%4294967296 end)
+        equal(host.failure_counter,1,'FIN acknowledges observed bytes across sequence wrap')
+    end
+end
+
+local fin_negatives = {
+    {'FIN without ACK',function(d) d.dis.tcp.th_flags=1 end},
+    {'no FIN',function(d) d.dis.tcp.th_flags=16 end},
+    {'SYN plus FIN',function(d) d.dis.tcp.th_flags=19 end},
+    {'missing ACK value',function(d) d.dis.tcp.th_ack=nil end},
+    {'ACK before ClientHello end',function(d) d.dis.tcp.th_ack=100000+#hello end},
+    {'ACK beyond observed bytes',function(d) d.dis.tcp.th_ack=102156 end},
+    {'old ACK',function(d) d.dis.tcp.th_ack=99999 end},
+    {'server data in FIN',function(d) d.dis.payload='x' end},
+    {'server sequence zero',function(d) d.sequence=0 end},
+    {'server sequence negative',function(d) d.sequence=-1 end},
+    {'server sequence fractional',function(d) d.sequence=1.5 end},
+    {'server data before reordered FIN',function(d) d.sequence=2 end},
+    {'previous server bytes in tracker',function(d) d.track.pos.server.tcp.uppos=2 end},
+    {'client half-stream overflow',function(d) d.track.pos.client.tcp.rseq_over_2G=true end},
+    {'server half-stream overflow',function(d) d.track.pos.server.tcp.rseq_over_2G=true end},
+    {'missing client history',function(d) d.track.pos.client.tcp.seq0=nil end},
+    {'missing observed client end',function(d) d.track.pos.client.tcp.uppos=nil end},
+    {'missing observed server end',function(d) d.track.pos.server.tcp.uppos=nil end},
+}
+for _,case in ipairs(fin_negatives) do
+    reset(); c=fresh(); arm(c)
+    host,connection=fin(c,case[2])
+    equal(host.failure_counter,nil,case[1]..' is not an early FIN failure')
+    equal(connection.nocheck,nil,case[1]..' does not invent success/failure')
+end
+
+reset(); c=fresh(); host=fin(c)
+equal(host.failure_counter,nil,'FIN without observed ClientHello is ignored')
+for _,kind in ipairs({'http_req','mtproto_initial','unknown','empty'}) do
+    reset(); c=fresh(); arm(c,function(d) d.l7payload=kind end)
+    host=fin(c)
+    equal(host.failure_counter,nil,kind..' does not arm early FIN detection')
+end
+reset(); c=fresh(); arm(c,function(d) d.dis.payload='' end); host=fin(c)
+equal(host.failure_counter,nil,'empty outgoing TLS descriptor does not arm FIN detection')
+reset(); c=fresh(); arm(c,function(d) d.sequence=2 end); host=fin(c)
+equal(host.failure_counter,nil,'midstream ClientHello does not arm FIN detection')
+reset(); c=fresh(); c.pos.client.tcp.uppos=#hello; arm(c); host=fin(c)
+equal(host.failure_counter,nil,'unobserved end of ClientHello cannot arm FIN detection')
+reset(); c=fresh(); c.pos.server.tcp.uppos=20; arm(c)
+c.pos.server.tcp.uppos=0; arm(c); host=fin(c)
+equal(host.failure_counter,nil,'midstream history cannot be rearmed by another ClientHello')
+
+for _,flags in ipairs({17,20}) do
+    reset(); c=fresh(); arm(c)
+    packet(c,'',2155,true,function(d) d.dis.tcp.th_flags=flags end)
+    arm(c) -- reordered ClientHello must not undo the client cancellation
+    host=fin(c)
+    equal(host.failure_counter,nil,'client FIN/RST disables early FIN classification')
+end
+for _,record in ipairs({close,'x',string.char(22,3,3,0,2,2,0),
+        string.char(23,3,3,0,2,2,0)}) do
+    reset(); c=fresh(); arm(c)
+    packet(c,record,1); arm(c); host=fin(c)
+    equal(host.failure_counter,nil,'reply then close is not an early FIN failure')
+    equal(c.lua_state.automate.keen_pbr_tls_fin_end,false,'server data permanently disarms FIN detector')
+end
+reset(); c=fresh(); arm(c); packet(c,'healthy response',26001); host=fin(c)
+equal(host.failure_counter,nil,'close after confirmed success remains ignored')
+
+reset(); c=fresh(); arm(c,other_pool); fin(c,other_pool)
+equal(autostate.another_tcp_pool['198.51.100.10|443'].failure_counter,nil,'FIN leaves other pools unchanged')
+for _,mode in ipairs({'address','port'}) do
+    reset()
+    for index=1,2 do
+        c=fresh()
+        local ip=mode=='address' and (index==1 and '198.51.100.10' or '2001:db8::10') or '198.51.100.10'
+        local port=mode=='port' and (index==1 and 443 or 8443) or 443
+        local endpoint=function(d)
+            d.target.ip=ip
+            if d.outgoing then d.dis.tcp.th_dport=port else d.dis.tcp.th_sport=port end
+        end
+        arm(c,endpoint); fin(c,endpoint)
+        local h=autostate.tcp_general[ip..'|'..port]
+        equal(h.failure_counter,1,'FIN failure isolated by '..mode)
+        equal(h.nstrategy,1,'one failure cannot rotate another '..mode)
+    end
 end
 print('TCP early TLS failure semantics: '..checks..' checks passed')

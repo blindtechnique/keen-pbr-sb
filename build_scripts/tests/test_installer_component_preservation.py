@@ -474,7 +474,7 @@ prepare_release_verifier() {{ printf 'prepare verifier\\n' >> '{effects}'; }}'''
     def test_signed_self_updater_still_requires_preinstalled_openssl(self):
         source = (ROOT / "packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/self-update.sh").read_text()
         start = source.index('if [ ! -r "$RELEASE_VERIFIER" ]')
-        end = source.index('\nfetch_url "$RELEASE_JSON" "$RELEASE_API"', start)
+        end = source.index('\n# The package marker identifies what is installed.', start)
         verifier = self.root / "verifier"
         key = self.root / "key"
         verifier.write_text("fixture")

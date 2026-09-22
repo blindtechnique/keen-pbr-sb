@@ -143,6 +143,9 @@ function summarizeKnownMessage(
   ) {
     return t("notifications.messages.metaPolicyUnverified")
   }
+  if (/^Delayed runtime firewall COMMIT outcome is unverified: .+$/.test(raw)) {
+    return t("notifications.messages.firewallRefreshUnverified")
+  }
   if (/^PPE de-offload reconciliation degraded: .+$/.test(raw)) {
     return t("notifications.messages.accelerationRulesUnverified")
   }

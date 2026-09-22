@@ -168,7 +168,7 @@ class ResolveReleaseSourceTest(unittest.TestCase):
                     )
                     self.assertNotEqual(result.returncode, 0)
                     self.assertEqual(result.stdout, "")
-                    self.assertIn(f"rerun the original {channel} workflow", result.stderr)
+                    self.assertIn(f"{channel} prerelease tags cannot be published as stable", result.stderr)
                     self.assertEqual(output_path.read_text(encoding="utf-8"), "previous=value\n")
 
     def test_prerelease_tag_ref_cannot_enter_stable_publisher(self) -> None:
@@ -178,7 +178,7 @@ class ResolveReleaseSourceTest(unittest.TestCase):
                     result = self.resolve(event, f"refs/tags/{channel}-123-1")
                     self.assertNotEqual(result.returncode, 0)
                     self.assertEqual(result.stdout, "")
-                    self.assertIn(f"rerun the original {channel} workflow", result.stderr)
+                    self.assertIn(f"{channel} prerelease tags cannot be published as stable", result.stderr)
 
     def test_missing_remote_tag_never_falls_back_to_branch_sha_or_local_tag(self) -> None:
         for tag in ("branch-only", "local-only", "not-present", self.head_sha):
@@ -237,8 +237,29 @@ class ResolveReleaseSourceTest(unittest.TestCase):
                     self.assertEqual(output["release"], "false")
                     self.assertEqual(output["release_tag"], self.timestamp_tag if branch == "main" else "")
                     self.assertEqual(output["candidate"], "true" if branch == "main" else "false")
-                    self.assertEqual(output["channel"], {"main": "stable", "beta": "none"}.get(branch, branch))
-                    self.assert_architectures(output, ["aarch64", "mips", "mipsel"] if branch in ("main", "beta") else ["aarch64"])
+                    self.assertEqual(output["channel"], {"main": "stable", "alpha": "alpha"}.get(branch, "none"))
+                    self.assert_architectures(output, ["aarch64", "mips", "mipsel"])
+
+    def test_alpha_release_matrix_covers_every_supported_architecture_and_abi(self) -> None:
+        for event in ("push", "workflow_dispatch"):
+            with self.subTest(event=event):
+                output = self.successful(self.resolve(event, "refs/heads/alpha"))
+                self.assertEqual(output["channel"], "alpha")
+                self.assertEqual(output["build_matrix"], {"include": [
+                    {"config": "aarch64-3.10", "arch": "aarch64"},
+                    {"config": "mips-3.4", "arch": "mips"},
+                    {"config": "mipsel-3.4", "arch": "mipsel"},
+                ]})
+
+    def test_retired_branch_defaults_do_not_sign_or_publish(self) -> None:
+        for event in ("push", "workflow_dispatch"):
+            for branch in ("next", "beta"):
+                with self.subTest(event=event, branch=branch):
+                    output = self.successful(self.resolve(event, f"refs/heads/{branch}"))
+                    self.assertEqual(output["channel"], "none")
+                    self.assertEqual(output["candidate"], "false")
+                    self.assertEqual(output["release"], "false")
+                    self.assertEqual(output["release_tag"], "")
 
     def test_pull_request_keeps_merge_sha_and_cannot_publish_a_release(self) -> None:
         output = self.successful(self.resolve(
@@ -265,7 +286,7 @@ class ResolveReleaseSourceTest(unittest.TestCase):
     def test_github_output_matches_stdout_and_preserves_previous_keys(self) -> None:
         output_path = self.root / "github-output"
         output_path.write_text("previous=value\n", encoding="utf-8")
-        output = self.successful(self.resolve("workflow_dispatch", "refs/heads/next", tag=self.release_tag, github_output=output_path))
+        output = self.successful(self.resolve("workflow_dispatch", "refs/heads/alpha", tag=self.release_tag, github_output=output_path))
         fields = dict(line.split("=", 1) for line in output_path.read_text(encoding="utf-8").splitlines())
         self.assertEqual(fields.pop("previous"), "value")
         fields["build_matrix"] = json.loads(fields["build_matrix"])
@@ -282,10 +303,9 @@ class ResolveReleaseSourceTest(unittest.TestCase):
                     output = self.successful(result)
                     self.assertEqual(output["release_tag"], self.timestamp_tag_for("3.3.0", sha))
                     self.assertEqual(output["candidate"], "true")
-                # Development channels and PRs do not need a release pin.
-                for branch in ("alpha", "next"):
-                    output = self.successful(self.resolve("push", f"refs/heads/{branch}", sha=sha))
-                    self.assertEqual(output["candidate"], "false")
+                # Alpha and PRs do not need a legacy stable release pin.
+                output = self.successful(self.resolve("push", "refs/heads/alpha", sha=sha))
+                self.assertEqual(output["candidate"], "false")
                 self.successful(self.resolve("pull_request", "refs/pull/23/merge", sha=sha))
 
     def test_same_base_version_uses_newer_commit_utc_timestamp_without_release_bump(self) -> None:

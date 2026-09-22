@@ -23,6 +23,7 @@
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -34,6 +35,8 @@ namespace keen_pbr3 {
 namespace {
 
 constexpr const char* kUpdatePidFile = "/opt/var/run/keen-pbr-self-update.pid";
+constexpr const char* kUpdateChannelPreference = "/opt/etc/keen-pbr/update-channel";
+constexpr const char* kInstalledUpdateChannel = "/opt/usr/lib/keen-pbr/update-channel";
 constexpr const char* kUpdateLogFile = "/opt/var/log/keen-pbr-self-update.log";
 constexpr const char* kUpdateStateFile = "/opt/var/run/keen-pbr-self-update.json";
 constexpr const char* kUpdateLockPid =
@@ -253,6 +256,7 @@ nlohmann::json read_release_cache() {
 }
 
 void write_release_cache(const nlohmann::json& release,
+                         const std::string& channel,
                          std::int64_t cached_at) {
     AtomicFileWriteOptions options;
     options.create_parent_directories = true;
@@ -262,7 +266,8 @@ void write_release_cache(const nlohmann::json& release,
     try {
         write_file_atomically(
             kReleaseCacheFile,
-            nlohmann::json{{"cached_at", cached_at}, {"release", release}}
+            nlohmann::json{{"cached_at", cached_at}, {"release", release},
+                           {"channel", channel}}
                 .dump(),
             options);
     } catch (const std::exception& error) {
@@ -281,8 +286,10 @@ std::int64_t unix_time_now() {
 }
 
 bool release_cache_is_fresh(const nlohmann::json& cache,
+                            const std::string& channel,
                             std::int64_t now) {
-    if (!cache.contains("release") || !cache["release"].is_object())
+    if (!release_cache_matches_channel(cache, channel) ||
+        !cache.contains("cached_at") || !cache["cached_at"].is_number_integer())
         return false;
     const auto cached_at = cache.value("cached_at", std::int64_t{0});
     const auto ttl = std::chrono::duration_cast<std::chrono::seconds>(
@@ -291,13 +298,34 @@ bool release_cache_is_fresh(const nlohmann::json& cache,
     return cached_at > 0 && now >= cached_at && now - cached_at < ttl;
 }
 
-nlohmann::json download_latest_release() {
+std::string installed_update_channel() {
+    // Package-owned, not a conffile: an explicit CLI channel switch replaces
+    // this marker together with the binary/helper. Missing is not "stable".
+    return read_update_channel(kInstalledUpdateChannel).value_or("");
+}
+
+std::string selected_update_channel() {
+    const auto installed = installed_update_channel();
+    if (!valid_update_channel(installed))
+        throw std::runtime_error("Installed update channel is missing or invalid");
+    return read_update_channel(kUpdateChannelPreference).value_or(installed);
+}
+
+nlohmann::json download_latest_release(const std::string& channel) {
+    if (channel != "alpha" && channel != "stable")
+        throw std::runtime_error("Installed update channel is missing or invalid");
     HttpClient client;
     client.set_timeout(std::chrono::seconds(15));
     client.set_user_agent("keen-pbr-sb/" KEEN_PBR3_VERSION_STRING);
-    client.set_max_response_size(512U * 1024U);
-    return nlohmann::json::parse(client.download(
-        "https://api.github.com/repos/blindtechnique/keen-pbr-sb/releases/latest"));
+    client.set_max_response_size(channel == "alpha" ? 8U * 1024U * 1024U : 512U * 1024U);
+    const auto endpoint = std::string(
+        "https://api.github.com/repos/blindtechnique/keen-pbr-sb/releases") +
+        (channel == "alpha" ? "?per_page=100" : "/latest");
+    auto release = select_channel_release(
+        nlohmann::json::parse(client.download(endpoint)), channel);
+    if (published_fork_version(release).empty())
+        throw std::runtime_error("No published package found in the installed update channel");
+    return release;
 }
 
 std::string release_string(const nlohmann::json& release,
@@ -313,21 +341,31 @@ nlohmann::json software_update_status(bool force_remote_check) {
     const std::string current = format_fork_version(
         KEEN_PBR3_VERSION_STRING, KEEN_PBR3_VERSION_RELEASE_STRING);
     const auto now = unix_time_now();
+    std::string channel;
+    std::string installed_channel;
     const auto cache = read_release_cache();
     nlohmann::json release = nlohmann::json::object();
     bool cached = false;
     std::string check_error;
+    try {
+        installed_channel = installed_update_channel();
+        channel = selected_update_channel();
+    } catch (const std::exception& error) {
+        check_error = error.what();
+    }
 
-    if (!force_remote_check && release_cache_is_fresh(cache, now)) {
+    if (!check_error.empty()) {
+        // An invalid preference is not authority to switch channels.
+    } else if (!force_remote_check && release_cache_is_fresh(cache, channel, now)) {
         release = cache["release"];
         cached = true;
     } else {
         try {
-            release = download_latest_release();
-            write_release_cache(release, now);
+            release = download_latest_release(channel);
+            write_release_cache(release, channel, now);
         } catch (const std::exception& error) {
             check_error = error.what();
-            if (cache.contains("release") && cache["release"].is_object()) {
+            if (release_cache_matches_channel(cache, channel)) {
                 release = cache["release"];
                 cached = true;
             }
@@ -356,6 +394,14 @@ nlohmann::json software_update_status(bool force_remote_check) {
 
     response.update(
         nlohmann::json{{"current", current},
+                       {"channel", channel},
+                       {"installed_channel", installed_channel},
+                       {"release_tag", release_tag},
+                       {"source", "blindtechnique/keen-pbr-sb"},
+                       {"channel_change", valid_update_channel(channel) &&
+                           valid_update_channel(installed_channel) && channel != installed_channel},
+                       {"installable", check_error.empty() &&
+                           channel_release_installable(current, latest, installed_channel, channel)},
                        {"latest", latest},
                        {"available",
                         !latest.empty() &&
@@ -402,7 +448,22 @@ void register_health_service_handler(ApiServer& server, ApiContext& ctx) {
         return local_update_status().dump();
     });
 
-    server.post("/api/system/update", [&ctx]() -> std::string {
+    server.post("/api/system/update/channel", [](const std::string& body) -> std::string {
+        const std::lock_guard lock(update_start_mutex());
+        const auto request = nlohmann::json::parse(body, nullptr, false);
+        if (!request.is_object() || request.size() != 1 ||
+            !request.contains("channel") || !request["channel"].is_string() ||
+            !valid_update_channel(request["channel"].get<std::string>()))
+            throw ApiError("Choose stable or alpha", 400);
+        if (update_is_running() || update_recovery_is_blocked())
+            throw ApiError("Update channel cannot change during an update or recovery", 409);
+        const auto channel = request["channel"].get<std::string>();
+        save_update_channel(kUpdateChannelPreference, channel);
+        // No daemon config apply, remote request, service restart or install.
+        return nlohmann::json{{"channel", channel}}.dump();
+    });
+
+    server.post("/api/system/update", [&ctx](const std::string& body) -> std::string {
         const std::lock_guard lock(update_start_mutex());
         const std::filesystem::path helper =
             "/opt/usr/lib/keen-pbr/self-update.sh";
@@ -415,9 +476,32 @@ void register_health_service_handler(ApiServer& server, ApiContext& ctx) {
             throw ApiError(
                 "package recovery is pending or has unknown state; run rescue recovery before starting another update",
                 409);
+        const auto request = nlohmann::json::parse(body, nullptr, false);
+        if (!request.is_object() || request.size() != 3 ||
+            !request.contains("channel") || !request["channel"].is_string() ||
+            !request.contains("release_tag") || !request["release_tag"].is_string() ||
+            !request.contains("version") || !request["version"].is_string())
+            throw ApiError("Check the release and confirm its channel, tag and version", 400);
+        const auto channel = selected_update_channel();
+        const auto cache = read_release_cache();
+        if (request["channel"] != channel ||
+            !release_cache_is_fresh(cache, channel, unix_time_now()))
+            throw ApiError("Update channel or release changed; check updates again", 409);
+        const auto& release = cache["release"];
+        const auto tag = release_string(release, "tag_name");
+        const auto version = published_fork_version(release);
+        const auto current = format_fork_version(
+            KEEN_PBR3_VERSION_STRING, KEEN_PBR3_VERSION_RELEASE_STRING);
+        if (!safe_github_tag(tag) || !safe_github_tag(version) ||
+            request["release_tag"] != tag || request["version"] != version ||
+            !channel_release_installable(current, version, installed_update_channel(), channel))
+            throw ApiError("Release is no longer installable; downgrades are not supported by the panel", 409);
         create_full_rollback_backup(ctx);
-        const int status = std::system(
-            "/opt/usr/lib/keen-pbr/self-update.sh >/dev/null 2>&1 &");
+        // Every token is from validated release metadata, not a caller URL.
+        const std::string command = "/opt/usr/lib/keen-pbr/self-update.sh --channel " +
+            channel + " --release-tag " + tag + " --expected-version " +
+            version + " >/dev/null 2>&1 &";
+        const int status = std::system(command.c_str());
         if (status != 0 || !wait_for_update_start())
             throw ApiError("failed to start keen-pbr-sb update", 500);
         return R"({"ok":true,"started":true})";

@@ -21,6 +21,8 @@ constexpr std::string_view CLEAN_BALANCED_REFRESH_DETAIL =
     "could not clean stale balanced-mode Meta UDP/443 artifacts";
 constexpr std::string_view RESNAPSHOT_AMBIGUOUS_REFRESH_DETAIL =
     "could not resnapshot Meta UDP/443 after an ambiguous delayed COMMIT";
+constexpr std::string_view RESNAPSHOT_FIREWALL_REFRESH_DETAIL =
+    "could not resnapshot firewall after an ambiguous delayed COMMIT";
 
 } // namespace
 
@@ -76,11 +78,21 @@ RuntimeFirewallMetaTailPlan plan_runtime_firewall_meta_tail(
         plan.cleanup_plan = facts.previous_plan;
         plan.cleanup_attempt = facts.previous_attempt;
     } else if (publication_may_have_changed) {
-        plan.incident_action =
-            RuntimeFirewallMetaIncidentAction::degraded;
-        plan.incident_detail = AMBIGUOUS_COMMIT_DEGRADED_DETAIL;
+        // An uncertain generic COMMIT is not evidence of a Meta policy
+        // change. Still discard unproven cleanup authority and resnapshot;
+        // the ordinary runtime incident tail reports the actual worker cause.
+        const bool meta_affected = facts.publication_epoch_changed ||
+            facts.meta_policy_active || facts.candidate_plan != nullptr ||
+            facts.previous_plan != nullptr;
+        if (meta_affected) {
+            plan.incident_action =
+                RuntimeFirewallMetaIncidentAction::degraded;
+            plan.incident_detail = AMBIGUOUS_COMMIT_DEGRADED_DETAIL;
+        }
         plan.full_refresh = true;
-        plan.refresh_detail = RESNAPSHOT_AMBIGUOUS_REFRESH_DETAIL;
+        plan.refresh_detail = meta_affected
+            ? RESNAPSHOT_AMBIGUOUS_REFRESH_DETAIL
+            : RESNAPSHOT_FIREWALL_REFRESH_DETAIL;
     }
 
     return plan;

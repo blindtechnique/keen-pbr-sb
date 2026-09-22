@@ -110,8 +110,58 @@ local function early_tls_decode_error(desync, connection)
     return true
 end
 
+-- A peer may reject ClientHello with an empty FIN rather than RST or an alert.
+-- Count only a server-initiated close before ANY server data, acknowledging
+-- observed client bytes. A client abort, missing history, a reordered FIN after
+-- server data, or a close after an ordinary reply must not rotate the pool.
+-- One scalar per conntrack (nil / expected ACK / disarmed=false); no new cache,
+-- timer, packet injection or independent failure counter.
+local function early_tls_empty_fin(desync, connection)
+    local tcp = desync.dis and desync.dis.tcp
+    if not connection or not desync.track or not tcp
+        or not desync.arg or desync.arg.key ~= "tcp_general" then return false end
+    local positions = desync.track.pos
+    local client = positions and positions.client and positions.client.tcp
+    local server = positions and positions.server and positions.server.tcp
+    if not client or not server or client.rseq_over_2G or server.rseq_over_2G
+        or type(client.seq0) ~= "number" or type(client.uppos) ~= "number"
+        or type(server.uppos) ~= "number" or server.uppos > 1 then
+        connection.keen_pbr_tls_fin_end = false
+        return false
+    end
+    local seq, flags = pos_get(desync, "s"), tcp.th_flags or 0
+    local payload = desync.dis.payload or ""
+    if desync.outgoing then
+        if bitand(flags, 1 + 4) ~= 0 then -- client FIN/RST, including a half-close
+            connection.keen_pbr_tls_fin_end = false
+        elseif connection.keen_pbr_tls_fin_end ~= false
+            and desync.l7payload == "tls_client_hello" and seq == 1
+            and #payload > 0 and bitand(flags, 2) == 0
+            and 1 + #payload <= client.uppos then
+            connection.keen_pbr_tls_fin_end = math.max(
+                connection.keen_pbr_tls_fin_end or 0, 1 + #payload)
+        end
+        return false
+    end
+    if #payload > 0 or type(seq) == "number" and seq > 1 then
+        connection.keen_pbr_tls_fin_end = false
+        return false
+    end
+    local expected = connection.keen_pbr_tls_fin_end
+    if type(expected) ~= "number" or seq ~= 1
+        or bitand(flags, 1 + 2 + 4 + 16) ~= 1 + 16 -- only FIN|ACK, not SYN/RST
+        or type(tcp.th_ack) ~= "number" then return false end
+    local acknowledged = (tcp.th_ack - client.seq0) % 4294967296
+    if acknowledged < expected or acknowledged >= 2147483648
+        or acknowledged > client.uppos then return false end
+    connection.keen_pbr_tls_fin_end = false
+    DLOG("keen_pbr_syn_failure_detector: server closed before TLS response")
+    return true
+end
+
 function keen_pbr_syn_failure_detector(desync, connection)
-    if early_tls_decode_error(desync, connection) then return true end
+    if early_tls_decode_error(desync, connection)
+        or early_tls_empty_fin(desync, connection) then return true end
     if connection and connection.keen_pbr_syn_sent and plain_client_syn(desync) then
         connection.keen_pbr_syn_retries = (connection.keen_pbr_syn_retries or 0) + 1
         return connection.keen_pbr_syn_retries >= (tonumber(desync.arg.retrans) or 3)

@@ -28,7 +28,6 @@ SIGNING_JOBS = {
     "publish-release": "Sign release manifest and installer",
     "upload-stable-candidate-artifact": "Sign stable candidate manifest and installer",
     "upload-alpha-artifact": "Sign alpha manifest and installer",
-    "upload-next-artifact": "Sign next manifest and installer",
 }
 
 
@@ -97,7 +96,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
         required_jobs = {
             "frontend", "backend", "crash-diagnostics-smoke", "clang-thread-safety",
             "firewall-integration", "transport-manager", "build", "publish-release",
-            "upload-alpha-artifact", "upload-next-artifact", "upload-stable-candidate-artifact",
+            "upload-alpha-artifact", "upload-stable-candidate-artifact",
         }
         self.assertTrue(required_jobs <= self.jobs.keys())
         for name, job in self.jobs.items():
@@ -130,15 +129,23 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertEqual(expression(matrix), f"fromJSON({SOURCE}build_matrix)")
         publish_if, _ = field(self.jobs["publish-release"], "if", 4)
         self.assertEqual(expression(publish_if), TRUSTED_PUBLISHER + SOURCE + "release == 'true'")
-        for channel in ("alpha", "next"):
-            with self.subTest(channel=channel):
-                condition, _ = field(self.jobs[f"upload-{channel}-artifact"], "if", 4)
-                self.assertEqual(expression(condition), TRUSTED_PUBLISHER + SOURCE + f"channel == '{channel}'")
+        condition, _ = field(self.jobs["upload-alpha-artifact"], "if", 4)
+        self.assertEqual(expression(condition), TRUSTED_PUBLISHER + SOURCE + "channel == 'alpha'")
         condition, _ = field(self.jobs["upload-stable-candidate-artifact"], "if", 4)
         self.assertEqual(expression(condition), TRUSTED_PUBLISHER + SOURCE + "candidate == 'true'")
         # Manual release-tag rebuilds run on their selected source, not on the
-        # dispatch UI's alpha/next branch. Resolver tests cover channel=stable and
+        # dispatch UI's branch. Resolver tests cover channel=stable and
         # the full architecture matrix for those releases.
+
+    def test_retired_channels_have_no_branch_trigger_or_publisher(self) -> None:
+        trigger_text = self.text.split('\njobs:', 1)[0]
+        for channel in ('next', 'beta'):
+            with self.subTest(channel=channel):
+                self.assertNotIn(f'      - {channel}\n', trigger_text)
+                self.assertNotIn(f'upload-{channel}-artifact', self.jobs)
+                self.assertNotIn(f'--channel {channel}', self.text)
+        for branch in ('main', 'alpha'):
+            self.assertEqual(trigger_text.count(f'      - {branch}\n'), 2)
 
     def test_native_dependency_steps_use_only_ubuntu_without_changing_packages(self) -> None:
         common = ['libcurl4-openssl-dev', 'libnl-3-dev', 'libnl-route-3-dev', 'libunwind-dev']
@@ -348,7 +355,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
                 self.assertIn('--public-key .release-signing-tools/packages/keys/keenetic-release-public.pem', code)
                 self.assertLess(code.index('embed-release-verifier.py'), code.index('sign-keenetic-release.py'))
                 self.assertIn('--key "$signing_key"', code)
-                channel = {'publish-release': 'stable', 'upload-stable-candidate-artifact': 'stable', 'upload-alpha-artifact': 'alpha', 'upload-next-artifact': 'next'}[name]
+                channel = {'publish-release': 'stable', 'upload-stable-candidate-artifact': 'stable', 'upload-alpha-artifact': 'alpha'}[name]
                 self.assertIn('--channel ' + channel, code)
                 if channel == 'stable':
                     self.assertIn('--release "$RELEASE_TAG"', code)
@@ -416,6 +423,12 @@ class ReleaseWorkflowTest(unittest.TestCase):
         job_steps = steps(job)
         names = list(job_steps)
         publish_name = 'Publish immutable Alpha Pre-release'
+        verify_name = 'Verify all alpha IPKs and create checksums'
+        self.assertLess(names.index(verify_name), names.index(SIGNING_JOBS['upload-alpha-artifact']))
+        download = job_steps['Download all alpha IPKs']
+        self.assertIn('pattern: keenetic-ipk-*', download)
+        self.assertIn('merge-multiple: true', download)
+        self.assertNotIn('name: keenetic-ipk-aarch64', download)
         self.assertLess(names.index(SIGNING_JOBS['upload-alpha-artifact']), names.index(publish_name))
         self.assertLess(names.index('Upload alpha workflow artifact'), names.index(publish_name))
         self.assertIn('--release "alpha-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"', job)
@@ -435,7 +448,8 @@ gh() { printf '%s\\n' "$*" >> "$FIXTURE_CALLS"; }
                 root = Path(temporary)
                 assets = root / 'release-assets'
                 assets.mkdir()
-                (assets / 'keen-pbr_3.3.2-20260914010000_keenetic_aarch64-3.10.ipk').touch()
+                for profile in ('aarch64-3.10', 'mips-3.4', 'mipsel-3.4'):
+                    (assets / f'keen-pbr_3.3.2-20260914010000_keenetic_{profile}.ipk').touch()
                 calls = root / 'calls'
                 env = dict(os.environ, SOURCE_SHA='a' * 40, GITHUB_RUN_ID='123', GITHUB_RUN_ATTEMPT='2',
                            GITHUB_REPOSITORY='blindtechnique/keen-pbr-sb', FIXTURE_TAG_STATUS=str(status),
@@ -450,6 +464,66 @@ gh() { printf '%s\\n' "$*" >> "$FIXTURE_CALLS"; }
                     self.assertIn('--target ' + 'a' * 40 + ' --prerelease --latest=false', command)
                     self.assertIn('3.3.2-20260914010000 — Alpha', command)
                     self.assertIn('release-manifest.sig', command)
+                    for profile in ('aarch64-3.10', 'mips-3.4', 'mipsel-3.4'):
+                        self.assertIn(f'_keenetic_{profile}.ipk', command)
+                        self.assertIn(profile, (root / 'ALPHA_NOTES.md').read_text())
+
+    @unittest.skipUnless(shutil.which('bash'), 'workflow fixtures require bash')
+    def test_alpha_bundle_gate_rejects_missing_duplicate_foreign_and_mixed_packages(self) -> None:
+        step = steps(self.jobs['upload-alpha-artifact'])['Verify all alpha IPKs and create checksums']
+        _, environment = field(step, 'env', 8)
+        source, _ = field(environment, 'SOURCE_SHA', 10)
+        self.assertEqual(expression(source), SOURCE + 'source_sha')
+        _, body = field(step, 'run', 8)
+        fake = '''
+git() {
+  case "$2" in
+    HEAD) printf '%s\\n' "$FIXTURE_HEAD" ;;
+    --short=12) printf '%s\\n' "${SOURCE_SHA:0:12}" ;;
+    *) return 99 ;;
+  esac
+}
+python3() {
+  printf '%s\\n' "$*" >> "$FIXTURE_CALLS"
+  test "$FIXTURE_SCENARIO" != validation-failed
+}
+'''
+        version = '3.3.2-20260914010000'
+        profiles = ['aarch64-3.10', 'mips-3.4', 'mipsel-3.4']
+        expected_files = [f'keen-pbr_{version}_keenetic_{profile}.ipk' for profile in profiles]
+        cases = {
+            'complete': expected_files,
+            'missing': expected_files[:-1],
+            'duplicate': expected_files + [f'keen-pbr_3.3.2-other_keenetic_mips-3.4.ipk'],
+            'wrong-profile': expected_files[:-1] + [f'keen-pbr_{version}_keenetic_mipsel-9.9.ipk'],
+            'mixed-version': expected_files[:-1] + ['keen-pbr_3.3.2-other_keenetic_mipsel-3.4.ipk'],
+            'validation-failed': expected_files,
+            'wrong-source': expected_files,
+        }
+        for scenario, files in cases.items():
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                assets = root / 'release-assets'
+                assets.mkdir()
+                for filename in files:
+                    (assets / filename).write_bytes(b'Test fixture, not an installable IPK.\n')
+                calls = root / 'validation-calls'
+                env = dict(os.environ, SOURCE_SHA='a' * 40,
+                           FIXTURE_HEAD=('b' if scenario == 'wrong-source' else 'a') * 40,
+                           FIXTURE_SCENARIO=scenario, FIXTURE_CALLS=str(calls))
+                result = subprocess.run(['bash', '-c', fake + textwrap.dedent(body)],
+                                        cwd=root, env=env, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode == 0, scenario == 'complete', result.stderr)
+                self.assertEqual((assets / 'SHA256SUMS').exists(), scenario == 'complete')
+                if scenario == 'complete':
+                    lines = calls.read_text().splitlines()
+                    self.assertEqual(len(lines), 3)
+                    for line, arch in zip(lines, ('aarch64', 'mips', 'mipsel')):
+                        self.assertIn('--arch ' + arch + ' --expected-commit ' + 'a' * 12, line)
+                        self.assertIn('--expected-channel alpha', line)
+                    sums = (assets / 'SHA256SUMS').read_text()
+                    for filename in files:
+                        self.assertIn(filename, sums)
 
     @unittest.skipUnless(shutil.which('bash'), 'publication fixtures require bash')
     def test_publishers_never_replace_existing_release_assets_or_promote_on_rerun(self) -> None:
