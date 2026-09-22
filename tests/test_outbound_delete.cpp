@@ -287,6 +287,23 @@ TEST_CASE("native outbound delete plans active and rebound draft tags independen
           nlohmann::json(active));
 }
 
+TEST_CASE("deleting an unused group then its two tunnels preserves the active route and DNS") {
+    auto config = fixture();
+    const auto healthy = nlohmann::json(config);
+    config.outbounds->push_back(interface_outbound("hy_one"));
+    config.outbounds->push_back(interface_outbound("hy_two"));
+    config.outbounds->push_back(selector("unused_hysteria", {{"hy_one", "hy_two"}}));
+    for (const auto* tag : {"unused_hysteria", "hy_one", "hy_two"}) {
+        auto expected = config;
+        auto& outbounds = *expected.outbounds;
+        outbounds.erase(std::remove_if(outbounds.begin(), outbounds.end(),
+            [&](const auto& item) { return item.tag == tag; }), outbounds.end());
+        config = remove_outbound_dependencies(config, {tag});
+        CHECK(nlohmann::json(config) == nlohmann::json(expected));
+    }
+    CHECK(nlohmann::json(config) == healthy);
+}
+
 TEST_CASE("native outbound delete keeps group membership as an explicit user change") {
     const auto original = fixture();
     const auto plan = plan_native_interface_outbound_delete(original, "tun-vpn");

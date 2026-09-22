@@ -37,6 +37,14 @@ const DnsRuleUpsertPage = lazy(() =>
 const RulesPage = lazy(() =>
   import("@/pages/rules-page").then((m) => ({ default: m.RulesPage }))
 )
+const DeviceVpnPage = lazy(() =>
+  import("@/pages/device-vpn-page").then((m) => ({ default: m.DeviceVpnPage }))
+)
+const DeviceVpnUpsertPage = lazy(() =>
+  import("@/pages/device-vpn-upsert-page").then((m) => ({
+    default: m.DeviceVpnUpsertPage,
+  }))
+)
 const RoutesAndTunnelsPage = lazy(() =>
   import("@/pages/routes-and-tunnels-page").then((m) => ({
     default: m.RoutesAndTunnelsPage,
@@ -189,6 +197,26 @@ function RoutingRuleEditorRoute({
         mode={mode}
         presentation="dialog"
         ruleId={ruleId}
+      />
+    </>
+  )
+}
+
+function DeviceVpnEditorRoute({
+  mode,
+  ruleId,
+}: {
+  mode: "create" | "edit"
+  ruleId?: string
+}) {
+  const presentation = useEditorPresentation()
+  return (
+    <>
+      {presentation === "dialog" ? <DeviceVpnPage /> : null}
+      <DeviceVpnUpsertPage
+        mode={mode}
+        ruleId={ruleId}
+        presentation={presentation}
       />
     </>
   )
@@ -383,6 +411,20 @@ function App() {
             </Route>
             <Route path="/rules">
               <RulesPage />
+            </Route>
+            <Route path="/device-vpn/create">
+              <DeviceVpnEditorRoute mode="create" />
+            </Route>
+            <Route path="/device-vpn/:ruleId/edit">
+              {(params) => (
+                <DeviceVpnEditorRoute
+                  mode="edit"
+                  ruleId={decodeURIComponent(params.ruleId)}
+                />
+              )}
+            </Route>
+            <Route path="/device-vpn">
+              <DeviceVpnPage />
             </Route>
             <Route>
               <Redirect to="/" />

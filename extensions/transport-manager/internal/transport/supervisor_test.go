@@ -178,6 +178,78 @@ func TestSupervisorDoesNotRegisterNativeTransport(t *testing.T) {
 	}
 }
 
+func TestIsolatedCrashRecoveryNeverRestartsHealthyOrDisabledSiblings(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager()
+	supervisor := newSupervisor(manager, time.Second, time.Hour, time.Hour)
+	crashed := &supervisorFake{tag: "crashed"}
+	healthy := &supervisorFake{tag: "healthy"}
+	disabled := &supervisorFake{tag: "disabled"}
+	for _, fake := range []*supervisorFake{crashed, healthy, disabled} {
+		if err := manager.Add(fake); err != nil {
+			t.Fatal(err)
+		}
+		supervisor.Register(TransportSpec{Tag: fake.tag, Type: "sing-box", AutoStart: fake != disabled})
+	}
+	// Use the production scheduler, awaiting completion rather than depending
+	// on millisecond wall-clock windows. Backoff expiry is injected explicitly.
+	tick := func() {
+		supervisor.reconcile(ctx)
+		waitFor(t, func() bool {
+			supervisor.mu.Lock()
+			defer supervisor.mu.Unlock()
+			for _, state := range supervisor.states {
+				if state.inFlight {
+					return false
+				}
+			}
+			return true
+		})
+	}
+	tick()
+	tick() // Observe successful startup before injecting a local crash.
+	if err := crashed.Down(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 12; i++ {
+		tick()
+		for _, tag := range []string{"crashed", "healthy", "disabled"} {
+			if _, err := supervisor.Status(ctx, tag); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	status, err := supervisor.Status(ctx, "crashed")
+	if err != nil || status.RetryCount != 1 || status.NextRetryAt == nil {
+		t.Fatalf("local crash did not use bounded backoff: %#v, %v", status, err)
+	}
+	if _, calls := crashed.snapshot(); calls != 1 {
+		t.Fatalf("polling bypassed retry delay: starts=%d", calls)
+	}
+	supervisor.mu.Lock()
+	supervisor.states["crashed"].next = time.Time{}
+	supervisor.mu.Unlock()
+	tick()
+	if up, calls := crashed.snapshot(); !up || calls != 2 {
+		t.Fatalf("failed member did not recover exactly once: up=%v starts=%d", up, calls)
+	}
+	if up, calls := healthy.snapshot(); !up || calls != 1 {
+		t.Fatalf("healthy sibling was restarted: up=%v starts=%d", up, calls)
+	}
+	if up, calls := disabled.snapshot(); up || calls != 0 {
+		t.Fatalf("disabled sibling was started: up=%v starts=%d", up, calls)
+	}
+	if err := supervisor.Down(ctx, "crashed"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		tick()
+	}
+	if up, calls := crashed.snapshot(); up || calls != 2 {
+		t.Fatalf("manual disable after recovery was lost: up=%v starts=%d", up, calls)
+	}
+}
+
 // enforcerFake reports as healthy from the start and counts how often the
 // supervisor asks it to restore its firewall rules.
 type enforcerFake struct {

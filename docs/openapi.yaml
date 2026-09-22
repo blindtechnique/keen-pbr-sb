@@ -118,6 +118,38 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/lists/hints:
+    post:
+      summary: Inspect optional list hints without changing configuration
+      description: >
+        Reads one visible configuration and existing local/cached list sources.
+        Never downloads, resolves DNS, creates a draft, changes routing, or
+        publishes notifications. URL bodies must match the configured source;
+        missing or unreadable sources are reported as partial coverage.
+        Domain examples compare enabled routing rules with identical additional
+        conditions and different outbounds. Original rule order is retained;
+        examples are not proof of runtime traffic or erroneous configuration.
+        References from disabled rules, DNS, reconnect policy and tunnel probe
+        count as usage. Wide CIDRs mean IPv4 prefix <=16 or IPv6 prefix <=32.
+        The report is bounded to 100 hints, 100 source issues, 100000 entries and
+        index owners, 8 MiB aggregate input, 2 MiB per file, and a cooperative
+        two-second analysis budget. Cache verification and file I/O may extend
+        elapsed wall time. Limits affect only this optional diagnostic.
+      operationId: postListHints
+      responses:
+        "200":
+          description: Bounded read-only report, possibly partial
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListHintsResponse"
+        "503":
+          description: Another optional list analysis is in progress
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/lists/preview:
     post:
       summary: Preview a remote or inline list in an explicitly selected format
@@ -432,6 +464,45 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "500":
           description: Unexpected server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/routing/counters:
+    get:
+      summary: Read a partial snapshot of applied routing rule counters
+      description: >
+        On-demand, read-only PREROUTING classifier observations. Labels and
+        indices come from one captured applied configuration, never an editor
+        draft. Reads existing kernel counters through the bounded diagnostics
+        executor; no probes, polling, counter reset, health update or firewall
+        writes. IPv4 and IPv6 reads are not atomic with each other or rule
+        replacement. No rates or deltas are calculated: physical positions are
+        not persistent identities and the last reset time is unknown.
+        These are NOT complete per-site, per-rule or per-outbound traffic totals.
+      operationId: getRoutingCounters
+      responses:
+        "200":
+          description: Partial counter snapshot, including unavailable observations
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuleCountersResponse"
+        "401":
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Diagnostics busy or unavailable; routing is not changed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "504":
+          description: Snapshot deadline exceeded; routing is not changed
           content:
             application/json:
               schema:
@@ -1376,7 +1447,7 @@ paths:
       summary: Installed version, the latest release, and update progress
       description: >
         Answers two different questions in one payload: what this router is
-        running right now, and what the fork's latest release is. The release
+        running right now, and the latest release in the selected channel. The release
         half is served from a local cache while it is fresh, so opening the
         panel does not contact GitHub on every render; `cached` says which of
         the two you got and `check_error` says why a fresh check failed while
@@ -1396,15 +1467,31 @@ paths:
         Starts the self-update helper in the background and returns as soon as
         the helper has actually started, not when the update finishes - poll
         `/api/system/update/status` for progress. A full rollback backup is
-        captured before the helper runs.
+        captured locally before the helper runs; no backup credentials are
+        returned to the caller. The existing authenticated session is enough:
+        this operation does not require step-up reauthentication. The installed
+        helper verifies the signed release before replacing software; the
+        caller cannot provide an installer or package URL. Explicit backup
+        export and package rollback still require step-up reauthentication.
+
+
+        The request must match the freshly checked channel, tag and full
+        package version. The signed manifest is checked against that version
+        before running the installer. A channel switch may install an equal
+        version but never an older one.
 
 
         Refused rather than attempted when the helper is not installed, when an
         update or rollback is already running, or when package recovery is
         pending or in an unknown state, because a second concurrent update is
-        how a router ends up with a half-replaced package. Requires step-up
-        reauthentication.
+        how a router ends up with a half-replaced package.
       operationId: postSystemUpdate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SystemUpdateRequest"
       responses:
         "200":
           description: The helper started; the update itself runs in background
@@ -1422,6 +1509,42 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "500":
           description: The helper could not be started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/system/update/channel:
+    post:
+      summary: Save the preferred update channel without installing
+      description: >
+        Persists only the update preference. Does not apply routing config,
+        restart services, or contact GitHub. Stable is the normal default;
+        an existing Alpha installation inherits Alpha until explicitly changed.
+        Invalid preferences fail closed. The installed package channel remains
+        separate. Refused while updating, rolling back or recovering.
+      operationId: postSystemUpdateChannel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateChannelPreference"
+      responses:
+        "200":
+          description: Saved update preference
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpdateChannelPreference"
+        "400":
+          description: Not one of the two supported channels
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Update or recovery in progress
           content:
             application/json:
               schema:
@@ -2022,6 +2145,22 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RouterMetrics"
+
+  /api/system/devices:
+    get:
+      summary: Read known IPv4 devices for a routing-rule picker
+      description: >
+        Reuses the router client-inventory cache; no permanent poll, DHCP
+        mutation or network scan. These are suggestions, not proof of a
+        reserved address. Last-good entries may be returned with available=false.
+      operationId: getSystemDevices
+      responses:
+        "200":
+          description: Bounded known-device inventory, possibly unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RouterDevices"
 
   /api/system/router:
     get:
@@ -4510,6 +4649,38 @@ components:
           type: integer
           format: int64
 
+    RouterDevice:
+      type: object
+      required: [ipv4]
+      properties:
+        ipv4:
+          type: string
+          description: Observed IPv4 address, not a DHCP reservation.
+        name:
+          type: string
+        mac:
+          type: string
+          description: Display-only identity hint; the rule matches IPv4, not MAC.
+        active:
+          type: boolean
+        conflict:
+          type: boolean
+          description: Different observed MACs share this address; do not offer it as a device choice.
+    RouterDevices:
+      type: object
+      required: [available, truncated, devices]
+      properties:
+        available:
+          type: boolean
+          description: Whether the cached observation is fresh.
+        truncated:
+          type: boolean
+        devices:
+          type: array
+          maxItems: 512
+          items:
+            $ref: "#/components/schemas/RouterDevice"
+
     RouterInfo:
       type: object
       description: >
@@ -5012,6 +5183,32 @@ components:
             - package_unverified
             - snapshot_unverified
 
+    UpdateChannelPreference:
+      type: object
+      additionalProperties: false
+      required: [channel]
+      properties:
+        channel:
+          type: string
+          enum: [stable, alpha]
+
+    SystemUpdateRequest:
+      type: object
+      additionalProperties: false
+      required: [channel, release_tag, version]
+      description: >
+        Exact selection from a fresh update check. A stale channel, tag or
+        version is refused before starting the helper. Older versions are
+        explicitly refused; no automatic downgrade or unsigned fallback.
+      properties:
+        channel:
+          type: string
+          enum: [stable, alpha]
+        release_tag:
+          type: string
+        version:
+          type: string
+
     SystemUpdateStatus:
       description: >
         Local update state plus the release comparison. Every release field is
@@ -5032,6 +5229,24 @@ components:
             - cached
             - check_error
           properties:
+            channel:
+              type: string
+              description: Selected channel; empty if the setting is invalid.
+            installed_channel:
+              type: string
+              description: Package-owned channel, independent of the preference.
+            release_tag:
+              type: string
+              description: Immutable tag to confirm when starting an update.
+            source:
+              type: string
+            channel_change:
+              type: boolean
+            installable:
+              type: boolean
+              description: >
+                Known release, no check error, not older than the current
+                package, and either newer or an explicit channel switch.
             current:
               type: string
               description: Version this daemon reports, as `v<version>-<build timestamp>`.
@@ -7510,13 +7725,40 @@ components:
             Explicit opt-in to one HTTPS HEAD request for this IP after fresh
             routing evaluation. The server derives mark and interface; the IP
             must still occur in that evaluation. Absent means no HTTP request.
+        http_probe:
+          $ref: "#/components/schemas/RoutingProbeOptions"
+
+    RoutingProbeOptions:
+      type: object
+      additionalProperties: false
+      required: [url, family, path]
+      description: >
+        Explicit single comparison probe, mutually exclusive with http_probe_ip.
+        Resolve with the existing router resolver first, then HEAD the first
+        returned address of the selected family. Never changes config or health.
+      properties:
+        url:
+          type: string
+          maxLength: 2048
+          description: Same-target HTTPS URL on port 443, including resource path/query; no credentials or fragment.
+        family:
+          type: string
+          enum: [ipv4, ipv6]
+        path:
+          type: string
+          enum: [policy, direct, outbound]
+          description: policy follows captured rules; direct queries unmarked router routing (not a guarantee of WAN); outbound pins an applied interface outbound.
+        outbound:
+          type: string
+          maxLength: 24
+          description: Required only for path outbound. Applied interface outbound tag, not an arbitrary device or mark. Groups/table-only paths are not supported here.
 
     RoutingTestHttpProbe:
       type: object
       required: [status, reason, ip, url, method, scope, interface, attempted_at]
       description: >
         One explicitly requested router-originated HTTPS HEAD probe to port 443
-        and path /. Uses the freshly evaluated IP, full mark and interface,
+        and the explicitly selected resource (default /). Uses a fresh IP, full mark and interface,
         preserves hostname TLS verification, and does not follow redirects.
         Any HTTP response is evidence of a response, not site usability or
         client PREROUTING/nfqws coverage. No retries or configuration changes.
@@ -7532,7 +7774,11 @@ components:
           description: Requested destination; a changed DNS answer does not silently select a different address.
         url:
           type: string
-          description: HTTPS root URL used, or empty when the target was not usable.
+          description: HTTPS resource URL used, or empty when the target was not usable.
+        timeout_ms:
+          type: integer
+          format: int64
+          description: Actual transfer budget, at most 5000 ms; absent when no transfer started.
         method:
           type: string
           enum: [HEAD]
@@ -7730,8 +7976,10 @@ components:
       required: [family, table, chain, position, action, set_name, packets, bytes]
       description: >
         Absolute counters of one physical PREROUTING classifier associated with
-        the captured realized rule. These count all traffic matching that rule,
-        not this site or diagnostic request. Recreating rules resets counters.
+        the captured realized rule. Only packets reaching that physical row
+        are counted; conntrack fast paths and hardware acceleration may bypass
+        it. This is not complete traffic for a rule, site or diagnostic request.
+        Recreating rules resets counters; the last reset time is unknown.
         Adjacent CONNMARK, dispatcher and terminal helper rows are not summed.
       properties:
         family:
@@ -7803,6 +8051,55 @@ components:
           maxItems: 32
           items:
             $ref: "#/components/schemas/RoutingTestFirewallCounter"
+
+    RuleCounterEntry:
+      type: object
+      required: [rule_index, name, outbound, outbound_name, enabled, ipv4, ipv6]
+      properties:
+        rule_index:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Zero-based index in the captured applied config, not the current editor.
+        name:
+          type: string
+          description: Applied display name, empty for an unnamed rule.
+        outbound:
+          type: string
+          description: Configured outbound tag, not proof of a packet's chosen path.
+        outbound_name:
+          type: string
+          description: Applied outbound display name, falling back to its tag.
+        enabled:
+          type: boolean
+        ipv4:
+          $ref: "#/components/schemas/RoutingTestFirewallCounters"
+        ipv6:
+          $ref: "#/components/schemas/RoutingTestFirewallCounters"
+
+    RuleCountersResponse:
+      type: object
+      required: [captured_at, unapplied_draft, total, truncated, rules]
+      properties:
+        captured_at:
+          type: integer
+          format: int64
+          description: Report preparation time in Unix seconds, not the counters' reset time.
+        unapplied_draft:
+          type: boolean
+        total:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Number of logical rules in the captured applied config.
+        truncated:
+          type: boolean
+          description: Only the first 128 logical rules are included when true.
+        rules:
+          type: array
+          maxItems: 128
+          items:
+            $ref: "#/components/schemas/RuleCounterEntry"
 
     RoutingTestEntry:
       type: object
@@ -10515,6 +10812,90 @@ components:
         revision:
           type: string
           description: The same visible configuration revision returned by GET /api/config.
+
+    ListHint:
+      title: ListHint
+      type: object
+      required: [code, list]
+      properties:
+        code:
+          type: string
+          description: "Known codes: unused, wide_cidr, domain_overlap. Informational only."
+        list:
+          type: string
+          description: Stable list ID; for overlap this belongs to the earlier rule.
+        other_list:
+          type: string
+        entry:
+          type: string
+          maxLength: 253
+        other_entry:
+          type: string
+          maxLength: 253
+        rule_index:
+          type: integer
+          minimum: 0
+          description: Zero-based position in the analyzed configuration, not a mutable action target.
+        other_rule_index:
+          type: integer
+          minimum: 0
+        outbound:
+          type: string
+        other_outbound:
+          type: string
+
+    ListHintSourceIssue:
+      title: ListHintSourceIssue
+      type: object
+      required: [list, reason]
+      properties:
+        list:
+          type: string
+        reason:
+          type: string
+          description: "Known reasons: unavailable, source_changed, size_limit, invalid_source. No paths, source URLs or exception text."
+
+    ListHintsResponse:
+      title: ListHintsResponse
+      type: object
+      required: [revision, is_draft, items, source_issues, source_issues_limited, hints_limited, scan_limited, scanned_lists, total_lists, scanned_entries, conditional_rules, elapsed_ms]
+      properties:
+        revision:
+          type: string
+        is_draft:
+          type: boolean
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/ListHint"
+        source_issues:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/ListHintSourceIssue"
+        source_issues_limited:
+          type: boolean
+        hints_limited:
+          type: boolean
+        scan_limited:
+          type: boolean
+        scanned_lists:
+          type: integer
+          minimum: 0
+        total_lists:
+          type: integer
+          minimum: 0
+        scanned_entries:
+          type: integer
+          minimum: 0
+        conditional_rules:
+          type: integer
+          minimum: 0
+          description: Enabled rules with additional conditions; different condition groups are not compared.
+        elapsed_ms:
+          type: integer
+          minimum: 0
 
     ListRefreshRequest:
       type: object

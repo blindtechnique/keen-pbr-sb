@@ -11,7 +11,7 @@ import type { RoutingTestHttpProbeScope } from './routingTestHttpProbeScope';
 import type { RoutingTestHttpProbeStatus } from './routingTestHttpProbeStatus';
 
 /**
- * One explicitly requested router-originated HTTPS HEAD probe to port 443 and path /. Uses the freshly evaluated IP, full mark and interface, preserves hostname TLS verification, and does not follow redirects. Any HTTP response is evidence of a response, not site usability or client PREROUTING/nfqws coverage. No retries or configuration changes.
+ * One explicitly requested router-originated HTTPS HEAD probe to port 443 and the explicitly selected resource (default /). Uses a fresh IP, full mark and interface, preserves hostname TLS verification, and does not follow redirects. Any HTTP response is evidence of a response, not site usability or client PREROUTING/nfqws coverage. No retries or configuration changes.
 
  */
 export interface RoutingTestHttpProbe {
@@ -19,8 +19,10 @@ export interface RoutingTestHttpProbe {
   reason: RoutingTestHttpProbeReason;
   /** Requested destination; a changed DNS answer does not silently select a different address. */
   ip: string;
-  /** HTTPS root URL used, or empty when the target was not usable. */
+  /** HTTPS resource URL used, or empty when the target was not usable. */
   url: string;
+  /** Actual transfer budget, at most 5000 ms; absent when no transfer started. */
+  timeout_ms?: number;
   method: RoutingTestHttpProbeMethod;
   scope: RoutingTestHttpProbeScope;
   /** Fresh FIB interface requested for socket binding; empty when unavailable. */

@@ -214,6 +214,57 @@ TEST_CASE("register_test_routing_handler: exposes active scope and honest per-IP
     CHECK(row.at("evaluation") == "insufficient_context");
 }
 
+TEST_CASE("manual routing comparison validates before calling the read-only callback") {
+    SseBroadcaster broadcaster;
+    ApiConfig api_config;
+    api_config.listen = std::string(kApiListen);
+    ApiServer server(api_config);
+    auto ctx = make_test_api_context(broadcaster);
+    int calls = 0;
+    const auto base = ctx.compute_test_routing_fn;
+    ctx.compute_test_routing_with_probe_fn = [&](const std::string& target, const RoutingProbeOptions& options) {
+        ++calls;
+        CHECK(target == "example.com");
+        CHECK(options.url == "https://example.com/style.css");
+        CHECK(options.family == "ipv6");
+        auto result = base(target);
+        RoutingHttpProbe probe;
+        probe.url = options.url;
+        probe.timeout_ms = 4321;
+        result.http_probe = probe;
+        return result;
+    };
+    register_test_routing_handler(server, ctx);
+    server.start();
+    httplib::Client client("127.0.0.1", 18190);
+    const nlohmann::json valid = {{"target", "example.com"}, {"http_probe", {
+        {"url", "https://example.com/style.css"}, {"family", "ipv6"}, {"path", "policy"}}}};
+    auto response = client.Post("/api/routing/test", valid.dump(), "application/json");
+    REQUIRE(response);
+    CHECK(response->status == 200);
+    CHECK(nlohmann::json::parse(response->body).at("http_probe").at("timeout_ms") == 4321);
+    for (int case_id = 0; case_id < 8; ++case_id) {
+        auto bad = valid;
+        if (case_id == 0) bad["http_probe_ip"] = "203.0.113.8";
+        if (case_id == 1) bad["http_probe"]["url"] = "https://other.example/";
+        if (case_id == 2) bad["http_probe"]["fwmark"] = 1;
+        if (case_id == 3) bad["http_probe"]["family"] = "auto";
+        if (case_id == 4) bad["http_probe"]["path"] = "all";
+        if (case_id == 5) bad["http_probe"]["outbound"] = "vpn";
+        if (case_id == 6) bad["http_probe"] = nullptr;
+        if (case_id == 7) bad["http_probe"].erase("family");
+        response = client.Post("/api/routing/test", bad.dump(), "application/json");
+        REQUIRE(response);
+        CHECK(response->status == 400);
+    }
+    CHECK(calls == 1);
+    ctx.compute_test_routing_with_probe_fn = {};
+    response = client.Post("/api/routing/test", valid.dump(), "application/json");
+    REQUIRE(response);
+    CHECK(response->status == 501);
+    server.stop();
+}
+
 TEST_CASE("routing HTTP is an additive explicit callback and serializes optional evidence") {
     SseBroadcaster broadcaster;
     ApiConfig api_config;

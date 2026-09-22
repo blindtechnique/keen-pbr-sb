@@ -1,0 +1,56 @@
+name: Transport manager parser fuzzing
+
+on:
+  pull_request:
+    paths:
+      - 'extensions/transport-manager/**'
+      - 'build_scripts/fuzz-transport-manager.sh'
+      - 'build_scripts/tests/test_go_fuzz_runner.py'
+      - 'Makefile'
+      - '.github/workflows/transport-manager-fuzz.yml'
+  push:
+    branches: [main, alpha]
+    paths:
+      - 'extensions/transport-manager/**'
+      - 'build_scripts/fuzz-transport-manager.sh'
+      - 'build_scripts/tests/test_go_fuzz_runner.py'
+      - 'Makefile'
+      - '.github/workflows/transport-manager-fuzz.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  parser-fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GOMAXPROCS: '2'
+      GOMEMLIMIT: 256MiB
+      GO_FUZZ_TIME: 30s
+      GO_FUZZ_PARALLEL: '2'
+      GO_FUZZ_TIMEOUT: 3m
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.22'
+          cache: false
+      - name: Replay synthetic seeds and regression tests
+        run: make transport-manager-test
+      - name: Check runner budgets and failure propagation
+        run: python3 -m unittest build_scripts.tests.test_go_fuzz_runner -v
+      - name: Mutate parser inputs within the budget
+        run: make transport-manager-fuzz
+      - name: Keep minimized synthetic failures for review
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: transport-parser-fuzz-failures
+          path: extensions/transport-manager/internal/**/testdata/fuzz/**
+          if-no-files-found: ignore
+          retention-days: 7

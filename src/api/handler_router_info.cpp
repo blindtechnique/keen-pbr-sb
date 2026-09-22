@@ -75,6 +75,8 @@ bool invalidate_router_info(const InterfaceMonitor::Event& event) {
 void register_router_info_handler(ApiServer& server, ApiContext& /*ctx*/) {
     server.get("/api/system/router",
                []() -> std::string { return router_info().dump(); });
+    server.get("/api/system/devices",
+               []() -> std::string { return router_metadata().devices().dump(); });
     server.get("/api/system/metrics",
                []() -> std::string { return local_router_metrics().dump(); });
 }

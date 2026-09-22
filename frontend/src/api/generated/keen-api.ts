@@ -60,6 +60,7 @@ import type {
   ListContentImportResponse,
   ListDeleteStageRequest,
   ListDeleteStageResponse,
+  ListHintsResponse,
   ListPage,
   ListQueryRequest,
   ListRefreshRequest,
@@ -94,12 +95,14 @@ import type {
   RemoteAccessRequest,
   RemoteAccessResult,
   RemoteAccessState,
+  RouterDevices,
   RouterInfo,
   RouterMetrics,
   RoutingHealthErrorResponse,
   RoutingHealthResponse,
   RoutingTestRequest,
   RoutingTestResponse,
+  RuleCountersResponse,
   RuntimeInterfaceInventoryResponse,
   RuntimeInventoryResponse,
   RuntimeOutboundsResponse,
@@ -116,6 +119,7 @@ import type {
   SubscriptionSettingsRequest,
   SubscriptionSourceRequest,
   SystemUpdateLocalStatus,
+  SystemUpdateRequest,
   SystemUpdateStatus,
   TransportActionRequest,
   TransportActionResponse,
@@ -135,6 +139,7 @@ import type {
   TunnelProbeHostRequest,
   TunnelProbeHostsResponse,
   TunnelProbeStateResponse,
+  UpdateChannelPreference,
   UpdateStartedResponse
 } from './model';
 
@@ -684,6 +689,97 @@ export const useQueryLists = <TError = ErrorResponse,
         TContext
       > => {
       return useMutation(getQueryListsMutationOptions(options), queryClient);
+    }
+
+/**
+ * Reads one visible configuration and existing local/cached list sources. Never downloads, resolves DNS, creates a draft, changes routing, or publishes notifications. URL bodies must match the configured source; missing or unreadable sources are reported as partial coverage. Domain examples compare enabled routing rules with identical additional conditions and different outbounds. Original rule order is retained; examples are not proof of runtime traffic or erroneous configuration. References from disabled rules, DNS, reconnect policy and tunnel probe count as usage. Wide CIDRs mean IPv4 prefix <=16 or IPv6 prefix <=32. The report is bounded to 100 hints, 100 source issues, 100000 entries and index owners, 8 MiB aggregate input, 2 MiB per file, and a cooperative two-second analysis budget. Cache verification and file I/O may extend elapsed wall time. Limits affect only this optional diagnostic.
+
+ * @summary Inspect optional list hints without changing configuration
+ */
+export type postListHintsResponse200 = {
+  data: ListHintsResponse
+  status: 200
+}
+
+export type postListHintsResponse503 = {
+  data: ErrorResponse
+  status: 503
+}
+
+export type postListHintsResponseSuccess = (postListHintsResponse200) & {
+  headers: Headers;
+};
+export type postListHintsResponseError = (postListHintsResponse503) & {
+  headers: Headers;
+};
+
+export type postListHintsResponse = (postListHintsResponseSuccess | postListHintsResponseError)
+
+export const getPostListHintsUrl = () => {
+
+
+
+
+  return `/api/lists/hints`
+}
+
+export const postListHints = async ( options?: RequestInit): Promise<postListHintsResponse> => {
+
+  return apiFetch<postListHintsResponse>(getPostListHintsUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+export const getPostListHintsMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postListHints>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postListHints>>, TError,void, TContext> => {
+
+const mutationKey = ['postListHints'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postListHints>>, void> = () => {
+
+
+          return  postListHints(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostListHintsMutationResult = NonNullable<Awaited<ReturnType<typeof postListHints>>>
+
+    export type PostListHintsMutationError = ErrorResponse
+
+    /**
+ * @summary Inspect optional list hints without changing configuration
+ */
+export const usePostListHints = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postListHints>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postListHints>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getPostListHintsMutationOptions(options), queryClient);
     }
 
 /**
@@ -1666,6 +1762,136 @@ export const usePostConfigDiscard = <TError = ErrorResponse,
       > => {
       return useMutation(getPostConfigDiscardMutationOptions(options), queryClient);
     }
+
+/**
+ * On-demand, read-only PREROUTING classifier observations. Labels and indices come from one captured applied configuration, never an editor draft. Reads existing kernel counters through the bounded diagnostics executor; no probes, polling, counter reset, health update or firewall writes. IPv4 and IPv6 reads are not atomic with each other or rule replacement. No rates or deltas are calculated: physical positions are not persistent identities and the last reset time is unknown. These are NOT complete per-site, per-rule or per-outbound traffic totals.
+
+ * @summary Read a partial snapshot of applied routing rule counters
+ */
+export type getRoutingCountersResponse200 = {
+  data: RuleCountersResponse
+  status: 200
+}
+
+export type getRoutingCountersResponse401 = {
+  data: ErrorResponse
+  status: 401
+}
+
+export type getRoutingCountersResponse503 = {
+  data: ErrorResponse
+  status: 503
+}
+
+export type getRoutingCountersResponse504 = {
+  data: ErrorResponse
+  status: 504
+}
+
+export type getRoutingCountersResponseSuccess = (getRoutingCountersResponse200) & {
+  headers: Headers;
+};
+export type getRoutingCountersResponseError = (getRoutingCountersResponse401 | getRoutingCountersResponse503 | getRoutingCountersResponse504) & {
+  headers: Headers;
+};
+
+export type getRoutingCountersResponse = (getRoutingCountersResponseSuccess | getRoutingCountersResponseError)
+
+export const getGetRoutingCountersUrl = () => {
+
+
+
+
+  return `/api/routing/counters`
+}
+
+export const getRoutingCounters = async ( options?: RequestInit): Promise<getRoutingCountersResponse> => {
+
+  return apiFetch<getRoutingCountersResponse>(getGetRoutingCountersUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetRoutingCountersQueryKey = () => {
+    return [
+    `/api/routing/counters`
+    ] as const;
+    }
+
+
+export const getGetRoutingCountersQueryOptions = <TData = Awaited<ReturnType<typeof getRoutingCounters>>, TError = ErrorResponse>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getRoutingCounters>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetRoutingCountersQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getRoutingCounters>>> = ({ signal }) => getRoutingCounters({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getRoutingCounters>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetRoutingCountersQueryResult = NonNullable<Awaited<ReturnType<typeof getRoutingCounters>>>
+export type GetRoutingCountersQueryError = ErrorResponse
+
+
+export function useGetRoutingCounters<TData = Awaited<ReturnType<typeof getRoutingCounters>>, TError = ErrorResponse>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getRoutingCounters>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getRoutingCounters>>,
+          TError,
+          Awaited<ReturnType<typeof getRoutingCounters>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetRoutingCounters<TData = Awaited<ReturnType<typeof getRoutingCounters>>, TError = ErrorResponse>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getRoutingCounters>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getRoutingCounters>>,
+          TError,
+          Awaited<ReturnType<typeof getRoutingCounters>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetRoutingCounters<TData = Awaited<ReturnType<typeof getRoutingCounters>>, TError = ErrorResponse>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getRoutingCounters>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Read a partial snapshot of applied routing rule counters
+ */
+
+export function useGetRoutingCounters<TData = Awaited<ReturnType<typeof getRoutingCounters>>, TError = ErrorResponse>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getRoutingCounters>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetRoutingCountersQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
 
 /**
  * Resolves the target (if a domain name), scans configured route rules against cached list data to determine the expected outbound, and queries the live kernel firewall sets to determine the actual outbound. Useful for diagnosing routing mismatches without restarting the daemon.
@@ -3417,7 +3643,7 @@ export function useGetNdmsVpnServerServices<TData = Awaited<ReturnType<typeof ge
 
 
 /**
- * Answers two different questions in one payload: what this router is running right now, and what the fork's latest release is. The release half is served from a local cache while it is fresh, so opening the panel does not contact GitHub on every render; `cached` says which of the two you got and `check_error` says why a fresh check failed while still returning the cached answer. An empty `latest` means no release is known at all - it is not a claim that the router is up to date.
+ * Answers two different questions in one payload: what this router is running right now, and the latest release in the selected channel. The release half is served from a local cache while it is fresh, so opening the panel does not contact GitHub on every render; `cached` says which of the two you got and `check_error` says why a fresh check failed while still returning the cached answer. An empty `latest` means no release is known at all - it is not a claim that the router is up to date.
 
  * @summary Installed version, the latest release, and update progress
  */
@@ -3530,9 +3756,11 @@ export function useGetSystemUpdate<TData = Awaited<ReturnType<typeof getSystemUp
 
 
 /**
- * Starts the self-update helper in the background and returns as soon as the helper has actually started, not when the update finishes - poll `/api/system/update/status` for progress. A full rollback backup is captured before the helper runs.
+ * Starts the self-update helper in the background and returns as soon as the helper has actually started, not when the update finishes - poll `/api/system/update/status` for progress. A full rollback backup is captured locally before the helper runs; no backup credentials are returned to the caller. The existing authenticated session is enough: this operation does not require step-up reauthentication. The installed helper verifies the signed release before replacing software; the caller cannot provide an installer or package URL. Explicit backup export and package rollback still require step-up reauthentication.
 
-Refused rather than attempted when the helper is not installed, when an update or rollback is already running, or when package recovery is pending or in an unknown state, because a second concurrent update is how a router ends up with a half-replaced package. Requires step-up reauthentication.
+The request must match the freshly checked channel, tag and full package version. The signed manifest is checked against that version before running the installer. A channel switch may install an equal version but never an older one.
+
+Refused rather than attempted when the helper is not installed, when an update or rollback is already running, or when package recovery is pending or in an unknown state, because a second concurrent update is how a router ends up with a half-replaced package.
 
  * @summary Start the keen-pbr-sb self-update
  */
@@ -3568,14 +3796,15 @@ export const getPostSystemUpdateUrl = () => {
   return `/api/system/update`
 }
 
-export const postSystemUpdate = async ( options?: RequestInit): Promise<postSystemUpdateResponse> => {
+export const postSystemUpdate = async (systemUpdateRequest: SystemUpdateRequest, options?: RequestInit): Promise<postSystemUpdateResponse> => {
 
   return apiFetch<postSystemUpdateResponse>(getPostSystemUpdateUrl(),
   {
     ...options,
-    method: 'POST'
-
-
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      systemUpdateRequest,)
   }
 );}
 
@@ -3583,8 +3812,8 @@ export const postSystemUpdate = async ( options?: RequestInit): Promise<postSyst
 
 
 export const getPostSystemUpdateMutationOptions = <TError = ErrorResponse,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSystemUpdate>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
-): UseMutationOptions<Awaited<ReturnType<typeof postSystemUpdate>>, TError,void, TContext> => {
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSystemUpdate>>, TError,{data: SystemUpdateRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postSystemUpdate>>, TError,{data: SystemUpdateRequest}, TContext> => {
 
 const mutationKey = ['postSystemUpdate'];
 const {mutation: mutationOptions, request: requestOptions} = options ?
@@ -3596,10 +3825,10 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
 
 
-      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postSystemUpdate>>, void> = () => {
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postSystemUpdate>>, {data: SystemUpdateRequest}> = (props) => {
+          const {data} = props ?? {};
 
-
-          return  postSystemUpdate(requestOptions)
+          return  postSystemUpdate(data,requestOptions)
         }
 
 
@@ -3610,21 +3839,118 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
   return  { mutationFn, ...mutationOptions }}
 
     export type PostSystemUpdateMutationResult = NonNullable<Awaited<ReturnType<typeof postSystemUpdate>>>
-
+    export type PostSystemUpdateMutationBody = SystemUpdateRequest
     export type PostSystemUpdateMutationError = ErrorResponse
 
     /**
  * @summary Start the keen-pbr-sb self-update
  */
 export const usePostSystemUpdate = <TError = ErrorResponse,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSystemUpdate>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSystemUpdate>>, TError,{data: SystemUpdateRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
  , queryClient?: QueryClient): UseMutationResult<
         Awaited<ReturnType<typeof postSystemUpdate>>,
         TError,
-        void,
+        {data: SystemUpdateRequest},
         TContext
       > => {
       return useMutation(getPostSystemUpdateMutationOptions(options), queryClient);
+    }
+
+/**
+ * Persists only the update preference. Does not apply routing config, restart services, or contact GitHub. Stable is the normal default; an existing Alpha installation inherits Alpha until explicitly changed. Invalid preferences fail closed. The installed package channel remains separate. Refused while updating, rolling back or recovering.
+
+ * @summary Save the preferred update channel without installing
+ */
+export type postSystemUpdateChannelResponse200 = {
+  data: UpdateChannelPreference
+  status: 200
+}
+
+export type postSystemUpdateChannelResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postSystemUpdateChannelResponse409 = {
+  data: ErrorResponse
+  status: 409
+}
+
+export type postSystemUpdateChannelResponseSuccess = (postSystemUpdateChannelResponse200) & {
+  headers: Headers;
+};
+export type postSystemUpdateChannelResponseError = (postSystemUpdateChannelResponse400 | postSystemUpdateChannelResponse409) & {
+  headers: Headers;
+};
+
+export type postSystemUpdateChannelResponse = (postSystemUpdateChannelResponseSuccess | postSystemUpdateChannelResponseError)
+
+export const getPostSystemUpdateChannelUrl = () => {
+
+
+
+
+  return `/api/system/update/channel`
+}
+
+export const postSystemUpdateChannel = async (updateChannelPreference: UpdateChannelPreference, options?: RequestInit): Promise<postSystemUpdateChannelResponse> => {
+
+  return apiFetch<postSystemUpdateChannelResponse>(getPostSystemUpdateChannelUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      updateChannelPreference,)
+  }
+);}
+
+
+
+
+export const getPostSystemUpdateChannelMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSystemUpdateChannel>>, TError,{data: UpdateChannelPreference}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postSystemUpdateChannel>>, TError,{data: UpdateChannelPreference}, TContext> => {
+
+const mutationKey = ['postSystemUpdateChannel'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postSystemUpdateChannel>>, {data: UpdateChannelPreference}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postSystemUpdateChannel(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostSystemUpdateChannelMutationResult = NonNullable<Awaited<ReturnType<typeof postSystemUpdateChannel>>>
+    export type PostSystemUpdateChannelMutationBody = UpdateChannelPreference
+    export type PostSystemUpdateChannelMutationError = ErrorResponse
+
+    /**
+ * @summary Save the preferred update channel without installing
+ */
+export const usePostSystemUpdateChannel = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSystemUpdateChannel>>, TError,{data: UpdateChannelPreference}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postSystemUpdateChannel>>,
+        TError,
+        {data: UpdateChannelPreference},
+        TContext
+      > => {
+      return useMutation(getPostSystemUpdateChannelMutationOptions(options), queryClient);
     }
 
 /**
@@ -5853,6 +6179,119 @@ export function useGetSystemMetrics<TData = Awaited<ReturnType<typeof getSystemM
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getGetSystemMetricsQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
+ * Reuses the router client-inventory cache; no permanent poll, DHCP mutation or network scan. These are suggestions, not proof of a reserved address. Last-good entries may be returned with available=false.
+
+ * @summary Read known IPv4 devices for a routing-rule picker
+ */
+export type getSystemDevicesResponse200 = {
+  data: RouterDevices
+  status: 200
+}
+
+export type getSystemDevicesResponseSuccess = (getSystemDevicesResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getSystemDevicesResponse = (getSystemDevicesResponseSuccess)
+
+export const getGetSystemDevicesUrl = () => {
+
+
+
+
+  return `/api/system/devices`
+}
+
+export const getSystemDevices = async ( options?: RequestInit): Promise<getSystemDevicesResponse> => {
+
+  return apiFetch<getSystemDevicesResponse>(getGetSystemDevicesUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetSystemDevicesQueryKey = () => {
+    return [
+    `/api/system/devices`
+    ] as const;
+    }
+
+
+export const getGetSystemDevicesQueryOptions = <TData = Awaited<ReturnType<typeof getSystemDevices>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemDevices>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetSystemDevicesQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getSystemDevices>>> = ({ signal }) => getSystemDevices({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getSystemDevices>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetSystemDevicesQueryResult = NonNullable<Awaited<ReturnType<typeof getSystemDevices>>>
+export type GetSystemDevicesQueryError = unknown
+
+
+export function useGetSystemDevices<TData = Awaited<ReturnType<typeof getSystemDevices>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemDevices>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getSystemDevices>>,
+          TError,
+          Awaited<ReturnType<typeof getSystemDevices>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetSystemDevices<TData = Awaited<ReturnType<typeof getSystemDevices>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemDevices>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getSystemDevices>>,
+          TError,
+          Awaited<ReturnType<typeof getSystemDevices>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetSystemDevices<TData = Awaited<ReturnType<typeof getSystemDevices>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemDevices>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Read known IPv4 devices for a routing-rule picker
+ */
+
+export function useGetSystemDevices<TData = Awaited<ReturnType<typeof getSystemDevices>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemDevices>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetSystemDevicesQueryOptions(options)
 
   const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
 

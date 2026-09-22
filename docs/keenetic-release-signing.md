@@ -37,8 +37,9 @@ separate temporary test-only keys; they never require the production secret.
 
 ## Verification and first adoption
 
-1. Installed `self-update.sh` resolves one stable tag and downloads its manifest,
-   signature and installer assets.
+1. Installed `self-update.sh` reads the package-owned `update-channel` marker,
+   resolves one tag in that channel and downloads its manifest, signature and
+   installer assets. A missing marker or unavailable Alpha is not Stable.
 2. The already installed verifier/key authenticate that installer before shell
    execution. A public key downloaded alongside an update is never trusted.
 3. The authenticated installer keeps the same release tag and verifies the
@@ -63,14 +64,25 @@ verifies the new IPK; subsequent updates verify the installer with the installed
 key as well. Old unsigned releases do not satisfy the new signed updater. There
 is no silent unsigned fallback. See [stable11 upgrade](upgrading-stable11.md).
 
-Automatic update discovery remains Latest-only, and `main` is the source branch.
+Stable update discovery uses Latest, and `main` is its source branch.
 Beta is the visible release label, not a Git branch. For updater compatibility,
 its wire manifest channel is `stable`. Initial publication is a GitHub Pre-release
 invisible to stable11's Latest-only discovery. After acceptance, promotion only
 changes the GitHub Pre-release/Latest flags, not the signed files or tag.
-Alpha/next artifacts and historical Beta prereleases are not added to automatic
-discovery. Before manually installing an artifact, verify its IPK using the
-matching signed manifest/channel/release context.
+Alpha discovery selects the highest numeric run/attempt from public
+`alpha-<run_id>-<attempt>` tags and stays in signed channel `alpha`. Cached
+metadata must match the installed channel, including on network failure. The
+updater pins the selected tag and passes `--alpha --update` to its authenticated
+installer. Switching channels remains an explicit CLI action, not an automatic
+fallback. Older panels without the channel marker need one explicit Alpha SSH
+update before using the channel-aware WebUI updater.
+
+Retired `beta`/`next` channels have no publisher or branch triggers. New manifests
+may only be signed as `stable` or `alpha`. Historical signed manifests retain
+their verification format and exact channel binding for compatibility; they
+are not candidates for automatic stable/alpha discovery. Before manually
+installing an artifact, verify its IPK using the matching signed
+manifest/channel/release context.
 Direct `opkg install` does not invoke our updater: this change does not claim
 that opkg or third-party feeds independently verify this fork's manifest.
 
@@ -105,7 +117,17 @@ Actions secret: `KEENETIC_RELEASE_SIGNING_KEY`, PKCS#8 PEM inside GitHub Secrets
 Provisioning passes private material through stdin, never command-line arguments
 or console output.
 
-Only trusted stable/alpha/beta/next jobs in this fork sign artifacts. PR builds/tests
+Alpha push/manual builds use all three profiles too. The publication gate requires
+exactly one full IPK per profile, one common package version, the package-owned
+`alpha` channel marker and validation against the same frozen source commit
+before creating checksums or signing. A missing,
+duplicate, mixed-version or invalid package stops the bundle. Alpha is published
+as an immutable Pre-release, never Latest; the tag includes the workflow run and
+attempt. PR builds remain single-profile unsigned checks of the tested merge SHA.
+A configured build matrix is not proof that an IPK has been built or accepted on
+each router architecture; inspect the assets and results of the exact release.
+
+Only trusted stable/alpha jobs in this fork sign artifacts. PR builds/tests
 do not receive or require the secret. The key is scoped to the signing step;
 its restricted runner temporary file is removed on success and failure. Missing
 or mismatched keys stop publication before any existing release asset changes.
@@ -141,7 +163,24 @@ replacement public key fetched with a failed update.
 
 ## Acceptance boundary
 
-80 focused offline checks cover real BusyBox verification/update ordering,
+The WebUI channel preference is separate from the package-owned channel marker.
+`/opt/etc/keen-pbr/update-channel` is an atomically written private configuration
+file, not a shipped package file. Missing preferences inherit the installed
+channel (Stable for the normal install, Alpha for an existing Alpha install);
+invalid preferences never fall back. The preference is deliberately outside the
+exact rescue inventory: old deployed snapshots remain valid and a package
+rollback does not reset the user's channel selection.
+Saving it neither applies routing configuration nor installs software.
+
+The install POST confirms channel, release tag and full package version against
+the fresh channel-scoped discovery cache. It refuses older versions even for a
+channel switch. The helper fetches that exact tag and verifies the signed
+manifest's package versions against the confirmation before executing the
+authenticated installer. The installer still verifies the selected architecture
+and ABI; discovery metadata never substitutes for signatures. Offline package
+rollback is a separate operation using its matching configuration snapshot.
+
+Focused offline checks cover real BusyBox verification/update ordering,
 package contents and
 workflow signing-step failures/key cleanup without production secrets or release
 publication. They are not a real GitHub signing run or on-router proof.

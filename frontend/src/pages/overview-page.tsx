@@ -29,6 +29,7 @@ import { RouteTrafficShareCard } from "@/components/overview/route-traffic-share
 import { ServicesStatusCard } from "@/components/overview/services-status-card"
 import { RouterInfoPanel } from "@/components/overview/router-info-card"
 import { DiagnosticsDownloadDialog } from "@/components/overview/diagnostics-download-dialog"
+import { AdvancedRoutingDiagnostics } from "@/components/overview/advanced-routing-diagnostics"
 import { RoutingTestPanel } from "@/components/overview/routing-test-panel"
 import { FirstRunCard } from "@/components/overview/first-run-card"
 import { RuntimeEventsFeed } from "@/components/overview/runtime-events-feed"
@@ -372,6 +373,7 @@ export function OverviewPage() {
             routingHealth.policy_rules.length > 0) ? (
             <RoutingHealthCard routingHealth={routingHealth} />
           ) : null}
+          <AdvancedRoutingDiagnostics />
         </SectionCard>
       </div>
 

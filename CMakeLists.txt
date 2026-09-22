@@ -665,6 +665,8 @@ if(WITH_API)
     src/api/handler_reload.cpp
     src/api/handler_lists_refresh.cpp
     src/api/handler_lists_query.cpp
+    src/api/handler_list_hints.cpp
+    src/lists/list_hints.cpp
     src/api/handler_list_preview.cpp
     src/api/handler_config.cpp
     src/api/handler_dependency_analysis.cpp
@@ -681,6 +683,7 @@ if(WITH_API)
     src/api/transport_manager_endpoint.cpp
     src/api/handler_registry_check.cpp
     src/api/handler_test_routing.cpp
+    src/api/handler_rule_counters.cpp
     src/api/handler_dns_test.cpp
     src/api/handler_connections.cpp
     src/api/handler_nfqws.cpp
@@ -798,5 +801,6 @@ install(FILES ${CMAKE_SOURCE_DIR}/packages/common/local.lst
 # Unit tests (optional, requires doctest submodule)
 option(BUILD_TESTS "Build unit tests" OFF)
 if(BUILD_TESTS)
+  enable_testing()
   add_subdirectory(tests)
 endif()

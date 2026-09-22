@@ -6,6 +6,7 @@
 
 #include "../src/api/auth_runtime.hpp"
 #include "../src/api/handler_remote_access.hpp"
+#include "../src/api/handler_rule_counters.hpp"
 #include "../src/api/keenetic_auth.hpp"
 #include "../src/api/local_password_hash.hpp"
 #include "../src/api/server.hpp"
@@ -516,6 +517,47 @@ TEST_CASE("missing auth file keeps the bootstrap API open") {
     CHECK_FALSE(status.contains("keenetic_endpoint"));
     REQUIRE(protected_response != nullptr);
     CHECK(protected_response->status == 200);
+}
+
+TEST_CASE("rule counter reads use the existing session without additional credentials") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    write_text(auth_path,
+        R"({"enabled":true,"provider":"local","username":"admin","password":"secret"})");
+    EnvironmentVariableGuard auth_file("KEEN_PBR_AUTH_FILE", auth_path.string());
+    SseBroadcaster broadcaster;
+    ApiContext context{(directory.path / "unused-config.json").string(), broadcaster};
+    std::atomic<unsigned int> reads{0U};
+    context.get_rule_counters_fn = [&]() {
+        ++reads;
+        return build_rule_counters_response(Config{}, false, {});
+    };
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    register_rule_counters_handler(server, context);
+    server.start();
+    httplib::Client client("127.0.0.1", configured_port(config));
+
+    const auto anonymous = client.Get("/api/routing/counters");
+    REQUIRE(anonymous != nullptr);
+    CHECK(anonymous->status == 401);
+    CHECK(anonymous->get_header_value("Cache-Control") == "no-store");
+    CHECK(reads.load(std::memory_order_relaxed) == 0U);
+
+    const auto login = client.Post("/api/auth/login",
+        R"({"username":"admin","password":"secret"})", "application/json");
+    REQUIRE(login != nullptr);
+    REQUIRE(login->status == 200);
+    const httplib::Headers session{{"Cookie", session_cookie(*login)}};
+    // No step-up request and no grant: both reads use just the panel session.
+    for (unsigned int expected = 1U; expected <= 2U; ++expected) {
+        const auto response = client.Get("/api/routing/counters", session);
+        REQUIRE(response != nullptr);
+        CHECK(response->status == 200);
+        CHECK(response->get_header_value("Cache-Control") == "no-store");
+        CHECK(reads.load(std::memory_order_relaxed) == expected);
+        CHECK(nlohmann::json::parse(response->body).at("rules").empty());
+    }
 }
 
 TEST_CASE("present invalid auth file fails closed as auth_misconfigured") {
@@ -2584,6 +2626,97 @@ TEST_CASE("Keenetic step-up rejects stale local proof before forwarding credenti
           "protected_secret_transport_unavailable");
     CHECK(evaluations.load(std::memory_order_relaxed) == 2U);
     CHECK(forwarded_credentials.load(std::memory_order_relaxed) == 1U);
+}
+
+TEST_CASE("signed self-update admits a session without granting backup or rollback authority") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    write_text(
+        auth_path,
+        R"({"enabled":true,"provider":"local","username":"admin","password":"secret"})");
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    std::atomic<unsigned int> updates{0U};
+    std::atomic<unsigned int> protected_operations{0U};
+    // Only exercise middleware admission. No helper, package operation or
+    // real credential-bearing backup is invoked by this test.
+    server.post("/api/system/update", [&]() {
+        updates.fetch_add(1U, std::memory_order_relaxed);
+        return R"({"ok":true,"started":true})";
+    });
+    const std::vector<std::string> protected_paths{
+        "/api/backup", "/api/backup/restore", "/api/backup/rollback",
+        "/api/system/update/rollback"};
+    for (const auto& path : protected_paths) {
+        server.post(path, [&]() {
+            protected_operations.fetch_add(1U, std::memory_order_relaxed);
+            return std::string{"{}"};
+        });
+    }
+    server.start();
+    httplib::Client client("127.0.0.1", configured_port(config));
+
+    const auto anonymous = client.Post(
+        "/api/system/update", "", "application/json");
+    REQUIRE(anonymous != nullptr);
+    CHECK(anonymous->status == 401);
+    CHECK(anonymous->get_header_value("Cache-Control") == "no-store");
+    CHECK(updates.load(std::memory_order_relaxed) == 0U);
+
+    const auto login = client.Post(
+        "/api/auth/login",
+        R"({"username":"admin","password":"secret"})",
+        "application/json");
+    REQUIRE(login != nullptr);
+    REQUIRE(login->status == 200);
+    CHECK(login->get_header_value("Set-Cookie").find("; HttpOnly") !=
+          std::string::npos);
+    CHECK(login->get_header_value("Set-Cookie").find("; SameSite=Strict") !=
+          std::string::npos);
+    const httplib::Headers session{{"Cookie", session_cookie(*login)}};
+
+    // Preserve the existing browser boundary: a cross-site request does not
+    // carry a Strict cookie. This does not pretend that a general Origin
+    // middleware exists or model a non-browser client forging Cookie.
+    const httplib::Headers cross_site{
+        {"Origin", "https://unrelated.example"},
+        {"Sec-Fetch-Site", "cross-site"}};
+    const auto cross_site_request = client.Post(
+        "/api/system/update", cross_site, "", "application/json");
+    REQUIRE(cross_site_request != nullptr);
+    CHECK(cross_site_request->status == 401);
+    CHECK(updates.load(std::memory_order_relaxed) == 0U);
+
+    const auto accepted = client.Post(
+        "/api/system/update", session, "", "application/json");
+    REQUIRE(accepted != nullptr);
+    CHECK(accepted->status == 200);
+    CHECK(accepted->get_header_value("Cache-Control") == "no-store");
+    CHECK(updates.load(std::memory_order_relaxed) == 1U);
+
+    // The normal update neither needs nor creates a reusable step-up grant.
+    for (const auto& path : protected_paths) {
+        const auto denied = client.Post(path, session, "{}", "application/json");
+        REQUIRE(denied != nullptr);
+        CHECK(denied->status == 403);
+        CHECK(nlohmann::json::parse(denied->body).at("error") ==
+              "step_up_required");
+        CHECK(denied->get_header_value("Cache-Control") == "no-store");
+    }
+    CHECK(protected_operations.load(std::memory_order_relaxed) == 0U);
+
+    grant_local_step_up(client, session, "admin", "secret");
+    for (const auto& path : protected_paths) {
+        const auto accepted_protected = client.Post(
+            path, session, "{}", "application/json");
+        REQUIRE(accepted_protected != nullptr);
+        CHECK(accepted_protected->status == 200);
+    }
+    CHECK(protected_operations.load(std::memory_order_relaxed) ==
+          protected_paths.size());
 }
 
 TEST_CASE("nfqws action step-up runs after body read and before its handler") {

@@ -33,6 +33,7 @@ api::RoutingTestHttpProbe to_api_http_probe(const RoutingHttpProbe& observation)
     result.url = observation.url;
     result.interface = observation.interface;
     result.attempted_at = observation.attempted_at;
+    if (observation.timeout_ms > 0) result.timeout_ms = observation.timeout_ms;
     result.method = api::Method::HEAD;
     result.scope = api::RoutingTestHttpProbeScope::ROUTER;
     switch (observation.status) {
@@ -697,7 +698,26 @@ void register_test_routing_handler(ApiServer& server, ApiContext& ctx) {
             throw ApiError("Field 'target' must not be empty", 400, payload.dump());
         }
 
-        auto result = ctx.compute_test_routing(req.target, req.http_probe_ip);
+        std::optional<RoutingProbeOptions> options;
+        if (j.contains("http_probe")) {
+            try {
+                const auto& item = j.at("http_probe");
+                if (!item.is_object() || req.http_probe_ip) throw std::invalid_argument("probe");
+                for (auto it = item.begin(); it != item.end(); ++it) {
+                    if (it.key() != "url" && it.key() != "family" && it.key() != "path" && it.key() != "outbound")
+                        throw std::invalid_argument("probe field");
+                }
+                options = RoutingProbeOptions{item.at("url").get<std::string>(),
+                    item.at("family").get<std::string>(), item.at("path").get<std::string>(),
+                    item.value("outbound", std::string{})};
+                if (!valid_routing_probe_options(req.target, *options)) throw std::invalid_argument("probe options");
+            } catch (const std::exception&) {
+                throw ApiError("Invalid http_probe options", 400);
+            }
+            if (!ctx.compute_test_routing_with_probe_fn) throw ApiError("Comparison probes unavailable", 501);
+        }
+        auto result = options ? ctx.compute_test_routing_with_probe_fn(req.target, *options)
+                              : ctx.compute_test_routing(req.target, req.http_probe_ip);
 
         api::RoutingTestResponse resp;
         resp.target       = result.target;
@@ -823,7 +843,7 @@ void register_test_routing_handler(ApiServer& server, ApiContext& ctx) {
         } else {
             auto& http = out.at("http_probe");
             for (const auto* key : {"fwmark", "table", "http_status", "elapsed_ms",
-                                   "connect_ms", "tls_ms", "connected_ip"}) {
+                                   "connect_ms", "tls_ms", "connected_ip", "timeout_ms"}) {
                 if (http.at(key).is_null()) http.erase(key);
             }
         }

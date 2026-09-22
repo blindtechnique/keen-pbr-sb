@@ -17,6 +17,7 @@ METADATA_HELPER="$RESCUE_DIR/portable-stat.sh"
 LOCK_DIR="/opt/var/run/keen-pbr-update.lock"
 UPDATE_ONLY=0
 AUTH_SETUP_ONLY=0
+RELEASE_CHANNEL=stable
 REQUESTED_RELEASE_TAG=${KEEN_PBR_UPDATE_RELEASE_TAG:-}
 # This one-shot handoff must not leak through opkg/postinst into new services.
 unset KEEN_PBR_UPDATE_RELEASE_TAG
@@ -38,6 +39,7 @@ for argument in "$@"; do
     case "$argument" in
         --update) UPDATE_ONLY=1 ;;
         --configure-auth) AUTH_SETUP_ONLY=1 ;;
+        --alpha) RELEASE_CHANNEL=alpha ;;
         *) printf '%s\n' "ОШИБКА / ERROR: неизвестный параметр / unknown argument: $argument" >&2; exit 2 ;;
     esac
 done
@@ -50,7 +52,8 @@ fi
 # stable11 downloads this source through its release tag but passes only
 # --update. Keep that legacy handoff on this release even if Latest changes;
 # modern signed updaters already pass the exact verified tag explicitly.
-if [ "$UPDATE_ONLY" = "1" ] && [ -z "$REQUESTED_RELEASE_TAG" ]; then
+if [ "$UPDATE_ONLY" = "1" ] && [ "$RELEASE_CHANNEL" = stable ] &&
+   [ -z "$REQUESTED_RELEASE_TAG" ]; then
     REQUESTED_RELEASE_TAG=$STABLE_RELEASE_TAG
 fi
 
@@ -657,12 +660,25 @@ ensure_release_verifier() {
     prepare_release_verifier
 }
 
+select_alpha_release() {
+    # Only public, immutable workflow alpha tags. Never fall back to Latest.
+    # GitHub returns recent releases first; an absent alpha is an explicit error.
+    fetch "$GITHUB_API/$PROJECT_REPOSITORY/releases?per_page=100" "$TMP_DIR/releases.json"
+    REQUESTED_RELEASE_TAG=$(tr ',' '\n' < "$TMP_DIR/releases.json" \
+        | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\(alpha-[0-9][0-9]*-[0-9][0-9]*\)".*/\1/p' \
+        | sort -t - -k2,2n -k3,3n | tail -n 1)
+    [ -n "$REQUESTED_RELEASE_TAG" ] ||
+        die "Подписанный Alpha-выпуск не найден среди последних 100 выпусков. Stable вместо него установлен не будет." "No signed Alpha release was found among the latest 100 releases. Stable will not be installed instead."
+}
 
 download_package() {
     [ "$PROJECT_REPOSITORY" = "$TRUSTED_RELEASE_REPOSITORY" ] ||
         die "Этот установщик проверяет только выпуски blindtechnique/keen-pbr-sb. Для другого проекта нужен его доверенный установщик." "This installer verifies releases from blindtechnique/keen-pbr-sb only. Use the trusted installer for any other project."
     release_json="$TMP_DIR/release.json"
     release_url="$GITHUB_API/$PROJECT_REPOSITORY/releases/latest"
+    if [ "${RELEASE_CHANNEL:-stable}" = alpha ] && [ -z "$REQUESTED_RELEASE_TAG" ]; then
+        select_alpha_release
+    fi
     if [ -n "$REQUESTED_RELEASE_TAG" ]; then
         case "$REQUESTED_RELEASE_TAG" in
             *[!A-Za-z0-9._-]*) die "Получен некорректный тег обновления. Пакет не загружен; повторите проверку обновлений." "Invalid update tag. The package was not downloaded; check for updates again." ;;
@@ -701,7 +717,7 @@ download_package() {
     fetch "$release_base/release-manifest.sig" "$TMP_DIR/release-manifest.sig"
     /bin/sh "$RELEASE_VERIFIER" "$TMP_DIR/release-manifest.tsv" \
         "$TMP_DIR/release-manifest.sig" "$RELEASE_PUBLIC_KEY" \
-        "$TRUSTED_RELEASE_REPOSITORY" stable "$RELEASE_TAG" \
+        "$TRUSTED_RELEASE_REPOSITORY" "${RELEASE_CHANNEL:-stable}" "$RELEASE_TAG" \
         package "$KEEN_ARCH" "$KEEN_ABI" "$(basename "$PACKAGE_FILE")" "$PACKAGE_FILE" ||
         die "Подпись пакета не подтверждена. Установка не началась; попробуйте загрузить выпуск позднее." "Package signature verification failed. Installation has not started; try downloading the release later."
 }

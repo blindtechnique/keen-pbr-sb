@@ -46,8 +46,10 @@
 #include "../health/runtime_outbound_state.hpp"
 #include "../api/handler_runtime_inventory.hpp"
 #include "../api/handler_diagnostic_tasks.hpp"
+#include "../api/handler_rule_counters.hpp"
 #include "../api/routing_firewall_evidence_view.hpp"
 #include "../lists/list_streamer.hpp"
+#include "../lists/list_hints.hpp"
 #include "../log/logger.hpp"
 #include "../util/system_info.hpp"
 #include "../util/time_utils.hpp"
@@ -1666,8 +1668,59 @@ ListRefreshOperationResult Daemon::refresh_lists_via_api(const api::ListRefreshR
     }
 }
 
+api::RuleCountersResponse Daemon::run_api_rule_counters() {
+    if (!event_loop_active_.load(std::memory_order_acquire)) {
+        throw ApiError("Rule counters are unavailable until the control loop is running", 503);
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+    auto admitted = routing_test_admission_.try_acquire();
+    if (!admitted) throw ApiError("Routing diagnostics are busy", 503);
+
+    auto snapshot_promise = std::make_shared<std::promise<RoutingTestSnapshot>>();
+    auto snapshot_future = snapshot_promise->get_future();
+    if (!post_control_task([this, snapshot_promise]() {
+            try {
+                snapshot_promise->set_value(capture_routing_test_snapshot());
+            } catch (...) {
+                snapshot_promise->set_exception(std::current_exception());
+            }
+        }, "api-rule-counters-snapshot")) {
+        throw ApiError("Rule counter snapshot queue is unavailable", 503);
+    }
+    if (snapshot_future.wait_until(deadline) != std::future_status::ready) {
+        throw ApiError("Rule counter snapshot deadline exceeded", 504);
+    }
+    auto snapshot = std::make_shared<RoutingTestSnapshot>(snapshot_future.get());
+    auto promise = std::make_shared<std::promise<api::RuleCountersResponse>>();
+    auto future = promise->get_future();
+    if (!routing_test_executor_.try_post("api-rule-counters",
+        [snapshot, promise, deadline, lease = std::move(*admitted)]() mutable {
+            // The worker retains admission even if the HTTP caller times out.
+            (void)lease;
+            try {
+                promise->set_value(build_rule_counters_response(
+                    snapshot->config, snapshot->unapplied_draft,
+                    [&](const std::vector<FirewallClassifierQuery>& queries) {
+                        return collect_firewall_counter_evidence(
+                            snapshot->firewall_backend, snapshot->raw_prerouting,
+                            snapshot->realized_rules, queries,
+                            snapshot->firewall_mark_mask, deadline);
+                    }));
+            } catch (...) {
+                promise->set_exception(std::current_exception());
+            }
+        })) {
+        throw ApiError("Routing diagnostics queue is full", 503);
+    }
+    if (future.wait_until(deadline) != std::future_status::ready) {
+        throw ApiError("Rule counter read deadline exceeded", 504);
+    }
+    return future.get();
+}
+
 TestRoutingResult Daemon::run_api_routing_test(
-    const std::string& target, std::optional<std::string> http_probe_ip) {
+    const std::string& target, std::optional<std::string> http_probe_ip,
+    std::optional<RoutingProbeOptions> probe_options) {
     if (!event_loop_active_.load(std::memory_order_acquire)) {
         throw ApiError(
             "Routing diagnostics are unavailable until the control loop is running",
@@ -1737,7 +1790,8 @@ TestRoutingResult Daemon::run_api_routing_test(
             [this,
              snapshot,
              target,
-             http_probe_ip,
+              http_probe_ip,
+              probe_options,
              promise,
              operation_deadline,
              lease = std::move(*admitted)]() mutable {
@@ -1755,6 +1809,12 @@ TestRoutingResult Daemon::run_api_routing_test(
                         result.http_probe = probe_routing_http(
                             result, snapshot->realized_rules, *http_probe_ip,
                             operation_deadline, *default_http_transport());
+                    }
+                    if (probe_options) {
+                        result.http_probe = probe_routing_http_path(
+                            result, snapshot->realized_rules, snapshot->config,
+                            snapshot->outbound_marks, *probe_options, operation_deadline,
+                            *default_http_transport(), system_fib_lookup);
                     }
                     attach_routing_firewall_evidence(
                         result.entries, snapshot->realized_rules,
@@ -2024,6 +2084,14 @@ void Daemon::setup_api() {
         [this](const std::string& target, const std::string& ip) {
             return run_api_routing_test(target, ip);
         };
+    api_ctx_->compute_test_routing_with_probe_fn =
+        [this](const std::string& target, const RoutingProbeOptions& options) {
+            return run_api_routing_test(target, std::nullopt, options);
+        };
+    api_ctx_->get_rule_counters_fn = [this]() { return run_api_rule_counters(); };
+    api_ctx_->get_list_hints_fn = [this](const Config& config) {
+        return build_list_hints(config, &list_service_.cache_manager());
+    };
     api_ctx_->get_diagnostic_tasks_fn = [this]() {
         // Read existing timer state only. Do not inspect control-loop task IDs
         // or infer deadlines from metrics: a queued worker may have no timer.

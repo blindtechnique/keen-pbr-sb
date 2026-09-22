@@ -29,7 +29,7 @@ CLANG_FEATURE_CMAKE_FLAGS := -DWITH_API=ON -DUSE_KEENETIC_API=ON
 .PHONY: all build clean distclean setup \
         frontend-build \
         frontend-api-generate \
-        transport-manager-test transport-manager-build \
+        transport-manager-test transport-manager-fuzz transport-manager-build \
         test test-api-operation-errors test-package-dns \
         firewall-it-images firewall-it \
         clang-build clang-check-production clang-check clang-tidy clang-tidy-curated \
@@ -65,6 +65,9 @@ frontend-api-generate: ## Regenerate frontend API client using the Orval version
 transport-manager-test: ## Test the transport manager companion
 	cd $(TRANSPORT_MANAGER_DIR) && go test ./...
 	cd $(TRANSPORT_MANAGER_DIR) && go vet ./...
+
+transport-manager-fuzz: ## Run bounded Go parser fuzzing (separate from the C++ fuzz target)
+	bash build_scripts/fuzz-transport-manager.sh
 
 transport-manager-build: transport-manager-test ## Cross-compile transport manager for supported Keenetic architectures
 	mkdir -p $(TRANSPORT_MANAGER_DIST_DIR)
@@ -183,6 +186,7 @@ NARROW_TEST_TARGETS := \
 	keen-pbr-runtime-resolver-generation-tests \
 	keen-pbr-ipc-control-service-tests \
 	keen-pbr-urltest-manager-tests \
+	keen-pbr-interface-probe-tests \
 	keen-pbr-runtime-routing-exact-tests \
 	keen-pbr-route-failure-policy-tests \
 	keen-pbr-runtime-cold-boot-terminal-policy-tests \
@@ -201,21 +205,21 @@ test: ## Build and run unit tests (doctest)
 	sh -n install.sh
 	python3 -m unittest build_scripts.tests.test_build_identity -v
 	python3 -m unittest build_scripts.tests.test_test_target_coverage -v
+	python3 -m unittest build_scripts.tests.test_ctest_discovery -v
 	python3 -m unittest build_scripts.tests.test_pinned_versions -v
 	python3 -m unittest build_scripts.tests.test_netlink_uapi_compat -v
 	python3 -m unittest build_scripts.tests.test_interface_event_dispatch -v
+	python3 -m unittest build_scripts.tests.test_interface_probe_execution -v
 	$(MAKE) test-package-dns
 	cmake -S . -B $(GCC_BUILD_DIR) $(GCC_CMAKE_FLAGS) -DBUILD_TESTS=ON \
 		-DWITH_API=ON -DUSE_KEENETIC_API=ON $(TEST_CMAKE_FLAGS)
 	cmake --build $(GCC_BUILD_DIR) --parallel $(BUILD_JOBS) --target keen-pbr keen-pbr-tests crash-diagnostics-smoke $(NARROW_TEST_TARGETS)
 	@test "$$($(GCC_BUILD_DIR)/keen-pbr --version)" = \
 	  "keen-pbr $(KEEN_PBR_VERSION) (build $(KEEN_PBR_RELEASE), commit $(KEEN_PBR_COMMIT))"
-	$(GCC_BUILD_DIR)/tests/keen-pbr-tests
-	$(GCC_BUILD_DIR)/tests/crash-diagnostics-smoke
-	@for target in $(NARROW_TEST_TARGETS); do \
-		echo "== $$target =="; \
-		$(GCC_BUILD_DIR)/tests/$$target || exit 1; \
-	done
+	python3 build_scripts/check-ctest-discovery.py --build-dir $(GCC_BUILD_DIR) \
+		keen-pbr-tests crash-diagnostics-smoke $(NARROW_TEST_TARGETS)
+	ctest --test-dir $(GCC_BUILD_DIR) --output-on-failure --no-tests=error \
+		-L '^(native|package-lifecycle)$$'
 
 test-package-dns: ## Run isolated Keenetic DNS and uninstall regressions without compiling
 	python3 -m unittest build_scripts.tests.test_debian_postinst_dns -v
@@ -226,6 +230,17 @@ test-package-dns: ## Run isolated Keenetic DNS and uninstall regressions without
 	$(BUSYBOX) sh tests/package_it/run-dnsmasq-direct-fallback.sh packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/dnsmasq.sh
 	$(BUSYBOX) sh tests/package_it/run-installer-dns-rollback.sh install.sh
 	$(BUSYBOX) sh tests/package_it/run-uninstall-cleanup.sh "$(CURDIR)"
+	$(BUSYBOX) sh tests/package_it/run-keenetic-fastnat-lifecycle.sh packages/keenetic/keen-pbr/files/opt/etc/init.d/S80keen-pbr packages/keenetic/keen-pbr/files/prerm
+	$(BUSYBOX) sh tests/package_it/run-dnsmasq-helper-lkg.sh \
+		packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/dnsmasq.sh \
+		packages/openwrt/keen-pbr/files/usr/lib/keen-pbr/dnsmasq.sh \
+		packages/debian/files/usr/lib/keen-pbr/dnsmasq.sh
+	@for helper in \
+		packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/dnsmasq.sh \
+		packages/openwrt/keen-pbr/files/usr/lib/keen-pbr/dnsmasq.sh \
+		packages/debian/files/usr/lib/keen-pbr/dnsmasq.sh; do \
+		$(BUSYBOX) sh tests/test_dnsmasq_attempt_receipt.sh "$$helper" || exit 1; \
+	done
 
 test-api-operation-errors: ## Check additive API error codes without rebuilding the daemon
 	cmake -S . -B $(GCC_BUILD_DIR) $(GCC_CMAKE_FLAGS) -DBUILD_TESTS=ON -DWITH_API=ON

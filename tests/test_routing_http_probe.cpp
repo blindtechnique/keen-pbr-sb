@@ -280,4 +280,105 @@ TEST_CASE("routing HTTP treats redirects and HEAD refusal as answers not body fe
         CHECK(transport.request.head_only);
     }
 }
+TEST_CASE("manual comparison validates same-host resources and pins only one family") {
+    RoutingProbeOptions options{"https://example.com/assets/style.css?v=2", "ipv4", "policy", ""};
+    CHECK(valid_routing_probe_options("example.com", options));
+    for (const auto& url : {"http://example.com/", "https://other.example/", "https://example.com:8443/",
+             "https://user:pass@example.com/", "https://example.com/#x", "https://example.com/\r\nx:y",
+             "https://example.com\\@other.example/", "https://example.com.evil/"}) {
+        auto invalid = options;
+        invalid.url = url;
+        CHECK_FALSE(valid_routing_probe_options("example.com", invalid));
+    }
+    auto invalid = options;
+    invalid.url = std::string(2049, 'x');
+    CHECK_FALSE(valid_routing_probe_options("example.com", invalid));
+    invalid = options; invalid.family = "any";
+    CHECK_FALSE(valid_routing_probe_options("example.com", invalid));
+    invalid = options; invalid.path = "all";
+    CHECK_FALSE(valid_routing_probe_options("example.com", invalid));
+    invalid = options; invalid.outbound = "vpn";
+    CHECK_FALSE(valid_routing_probe_options("example.com", invalid));
+    invalid = options; invalid.path = "outbound";
+    CHECK_FALSE(valid_routing_probe_options("example.com", invalid));
+
+    RoutingProbeTransport transport;
+    const auto result = probe_result();
+    auto observed = probe_routing_http_path(result, probe_rules(), Config{}, {}, options,
+        probe_deadline(), transport, {});
+    CHECK(transport.calls == 1);
+    CHECK(transport.request.url == options.url);
+    CHECK(transport.request.head_only);
+    CHECK_FALSE(transport.request.follow_redirects);
+    CHECK(observed.timeout_ms == 5000);
+    CHECK(observed.ip == "203.0.113.8");
+    CHECK(result.entries.front().actual_outbound == "vpn");
+    options.family = "ipv6";
+    observed = probe_routing_http_path(result, probe_rules(), Config{}, {}, options,
+        probe_deadline(), transport, {});
+    CHECK(transport.calls == 1);
+    CHECK(observed.ip.empty());
+    CHECK(observed.attempted_at == 0);
+}
+
+TEST_CASE("manual comparison selected interface never falls back to WAN or modifies original routing") {
+    RoutingProbeOptions options{"https://example.com/image.jpg", "ipv4", "outbound", "other_vpn"};
+    Config config;
+    Outbound outbound{};
+    outbound.type = OutboundType::INTERFACE;
+    outbound.tag = "other_vpn";
+    outbound.interface = "nwg2";
+    config.outbounds = std::vector<Outbound>{outbound};
+    OutboundMarkMap marks{{"other_vpn", 0x80001}};
+    const auto result = probe_result();
+    RoutingProbeTransport transport;
+    int fib_calls = 0;
+    FibAnswer answer{FibVerdict::resolved, "nwg2", 152, ""};
+    auto lookup = [&](const FibQuery& query) {
+        ++fib_calls;
+        CHECK(query.fwmark == 0x80001);
+        CHECK(query.destination == "203.0.113.8");
+        return answer;
+    };
+    bool expected = true;
+    SUBCASE("bound request is independent from the target's current rule") {}
+    SUBCASE("stopped tunnel fell through to main") { answer.interface = "ppp0"; expected = false; }
+    SUBCASE("no FIB answer") { answer.verdict = FibVerdict::unavailable; expected = false; }
+    SUBCASE("unknown tag") { options.outbound = "missing"; expected = false; }
+    SUBCASE("tag without applied mark") { marks.clear(); expected = false; }
+    SUBCASE("zero mark is not a VPN mark") { marks.begin()->second = 0; expected = false; }
+    SUBCASE("group is not an arbitrary interface") { config.outbounds->front().type = OutboundType::URLTEST; expected = false; }
+    SUBCASE("no device") { config.outbounds->front().interface.reset(); expected = false; }
+    auto observed = probe_routing_http_path(result, probe_rules(), config, marks, options,
+        probe_deadline(), transport, lookup);
+    CHECK(transport.calls == (expected ? 1 : 0));
+    CHECK(result.entries.front().fib.interface == "nwg1");
+    CHECK(result.entries.front().actual_outbound == "vpn");
+    if (expected) {
+        CHECK(fib_calls == 1);
+        CHECK(transport.request.fwmark == 0x80001);
+        CHECK(transport.request.bind_interface == "nwg2");
+        CHECK(observed.interface == "nwg2");
+    } else {
+        CHECK(observed.reason == RoutingHttpProbeReason::NoRoute);
+        CHECK(observed.attempted_at == 0);
+    }
+}
+
+TEST_CASE("manual comparison unmarked IPv6 is explicit and remains bound") {
+    RoutingProbeOptions options{"https://example.com/script.js", "ipv6", "direct", ""};
+    const auto result = probe_result("2001:db8::8");
+    RoutingProbeTransport transport;
+    const auto observed = probe_routing_http_path(result, probe_rules(), Config{}, {}, options,
+        probe_deadline(), transport, [](const FibQuery& query) {
+            CHECK(query.fwmark == 0);
+            CHECK(query.destination == "2001:db8::8");
+            return FibAnswer{FibVerdict::resolved, "ppp0", 254, ""};
+        });
+    CHECK(transport.calls == 1);
+    CHECK(transport.request.resolve_entries == std::vector<std::string>{"example.com:443:[2001:db8::8]"});
+    CHECK(transport.request.bind_interface == "ppp0");
+    CHECK(observed.fwmark == 0);
+    CHECK(result.entries.front().actual_outbound == "vpn");
+}
 } // namespace keen_pbr3

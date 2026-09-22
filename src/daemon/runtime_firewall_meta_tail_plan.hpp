@@ -20,6 +20,7 @@ struct RuntimeFirewallMetaTailFacts final {
 
     bool worker_commit_ambiguous{false};
     bool publication_epoch_changed{false};
+    bool meta_policy_active{false};
     const MetaUdp443ActivationPlan* previous_plan{nullptr};
     std::uint64_t previous_runtime_generation{0U};
     std::uint64_t current_runtime_generation{0U};

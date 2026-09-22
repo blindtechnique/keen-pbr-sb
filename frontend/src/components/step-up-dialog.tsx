@@ -17,13 +17,11 @@ import {
   useRevokeTrustedLocalConnection,
   useTrustedAuthStatus,
 } from "@/lib/auth-status-context"
-import {
-  authCredentialsMayBeCollected,
-  refreshCredentialTransportStatus,
-} from "@/lib/auth-status"
+import { refreshCredentialTransportStatus } from "@/lib/auth-status"
 import {
   setProtectedTransportUnavailableHandler,
   setStepUpPrompt,
+  stepUpAuthorityKey,
   type StepUpCredentials,
 } from "@/lib/step-up"
 
@@ -43,6 +41,7 @@ type PendingPrompt = {
 export function StepUpDialog() {
   const { t } = useTranslation()
   const authStatus = useTrustedAuthStatus()
+  const authorityKey = stepUpAuthorityKey(authStatus)
   const revokeTrustedLocalConnection = useRevokeTrustedLocalConnection()
   const [pending, setPending] = useState<PendingPrompt | null>(null)
   const [username, setUsername] = useState("")
@@ -57,12 +56,7 @@ export function StepUpDialog() {
   // the subscription teardown, not derived render state.
   /* eslint-disable react-hooks/set-state-in-effect -- revoking the external prompt authority must synchronously settle and wipe any pending secret */
   useEffect(() => {
-    pendingRef.current = pending
-  }, [pending])
-
-  useEffect(() => {
-    const canPrompt = authCredentialsMayBeCollected(authStatus)
-    if (!canPrompt) {
+    if (authorityKey === null) {
       setStepUpPrompt(null)
       setProtectedTransportUnavailableHandler(null)
       const current = pendingRef.current
@@ -80,7 +74,9 @@ export function StepUpDialog() {
           setUsername("")
           setPassword("")
           setSubmitting(false)
-          setPending({ resolve })
+          const next = { resolve }
+          pendingRef.current = next
+          setPending(next)
         })
     )
     setProtectedTransportUnavailableHandler(() => {
@@ -97,13 +93,20 @@ export function StepUpDialog() {
     return () => {
       setStepUpPrompt(null)
       setProtectedTransportUnavailableHandler(null)
-      pendingRef.current?.resolve(null)
+      const current = pendingRef.current
+      pendingRef.current = null
+      setPending(null)
+      setUsername("")
+      setPassword("")
+      setSubmitting(false)
+      current?.resolve(null)
     }
-  }, [authStatus, revokeTrustedLocalConnection])
+  }, [authorityKey, revokeTrustedLocalConnection])
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const settle = useCallback((credentials: StepUpCredentials | null) => {
     const current = pendingRef.current
+    pendingRef.current = null
     setPending(null)
     // The password is not kept after the prompt closes. It is forwarded once
     // and never held for a possible retry.

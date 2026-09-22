@@ -12,6 +12,17 @@ import type { SystemUpdateLocalStatus } from './systemUpdateLocalStatus';
 
  */
 export type SystemUpdateStatus = SystemUpdateLocalStatus & {
+  /** Selected channel; empty if the setting is invalid. */
+  channel?: string;
+  /** Package-owned channel, independent of the preference. */
+  installed_channel?: string;
+  /** Immutable tag to confirm when starting an update. */
+  release_tag?: string;
+  source?: string;
+  channel_change?: boolean;
+  /** Known release, no check error, not older than the current package, and either newer or an explicit channel switch.
+   */
+  installable?: boolean;
   /** Version this daemon reports, as `v<version>-<build timestamp>`. */
   current: string;
   /** Latest release tag, or empty when none is known. */

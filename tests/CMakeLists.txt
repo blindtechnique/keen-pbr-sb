@@ -140,6 +140,7 @@ add_executable(keen-pbr-tests
   test_srs_decoder.cpp
   test_http_client.cpp
   test_interface_probe.cpp
+  test_interface_probe_execution.cpp
   test_config_validation.cpp
   test_config_validation_complete_metadata.cpp
   test_config_passthrough.cpp
@@ -207,6 +208,7 @@ add_executable(keen-pbr-tests
   test_openapi_runtime_contracts.cpp
   test_update_version.cpp
   test_api_test_routing.cpp
+  test_api_rule_counters.cpp
   test_api_auth.cpp
   test_api_config.cpp
   test_backup_restore.cpp
@@ -1003,7 +1005,8 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_L
   target_link_libraries(keen-pbr-component-recovery-tests PRIVATE stdc++fs)
 endif()
 keen_pbr_apply_project_options(keen-pbr-component-recovery-tests)
-add_test(NAME keen-pbr-component-recovery-tests COMMAND keen-pbr-component-recovery-tests)
+# Manual EXCLUDE_FROM_ALL aggregate; its cases also run in keen-pbr-tests.
+# Like the routing-list and list-query aggregates, build/run it explicitly.
 
 # Keep the asynchronous Keenetic DNS coordinator independently buildable.
 # This exercises its concurrency and generation-fence contract without
@@ -1047,7 +1050,7 @@ add_test(
 
 # Pull-only task diagnostics: exercise actual timerfd and registry/API projection
 # without linking the daemon or the unrelated HTTP/authentication stack.
-add_executable(keen-pbr-background-task-diagnostics-tests EXCLUDE_FROM_ALL
+add_executable(keen-pbr-background-task-diagnostics-tests
   test_main.cpp
   test_periodic_task_metrics.cpp
   test_scheduler.cpp
@@ -1089,9 +1092,8 @@ target_compile_options(keen-pbr-background-task-diagnostics-tests PRIVATE
 target_link_options(keen-pbr-background-task-diagnostics-tests PRIVATE
   -Wl,--gc-sections -Wl,--no-export-dynamic)
 keen_pbr_apply_project_options(keen-pbr-background-task-diagnostics-tests)
-# This optional focused executable is run explicitly after building its target.
-# Do not register an EXCLUDE_FROM_ALL binary in default CTest: the same source
-# tests already belong to keen-pbr-tests, and CI must not expect an unbuilt file.
+add_test(NAME keen-pbr-background-task-diagnostics-tests
+  COMMAND keen-pbr-background-task-diagnostics-tests)
 
 # Keep the router overview's RCI cache independently buildable. These tests
 # exercise cold-load single-flight, event invalidation and failure retry.
@@ -1728,6 +1730,42 @@ add_test(
   COMMAND keen-pbr-urltest-manager-tests
 )
 
+# Probe queue saturation and real freshness/publication without a router.
+add_executable(keen-pbr-interface-probe-tests
+  test_main.cpp
+  test_interface_probe.cpp
+  test_interface_probe_execution.cpp
+  test_targeted_probe_admission.cpp
+  ../src/health/interface_probe.cpp
+  ../src/health/runtime_outbound_state.cpp
+  ../src/health/url_tester.cpp
+  ../src/http/http_transport.cpp
+  ../src/log/logger.cpp
+  ../src/log/trace.cpp
+  ../src/util/blocking_executor.cpp
+  ../src/util/traced_mutex.cpp
+)
+set_target_properties(keen-pbr-interface-probe-tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+target_include_directories(keen-pbr-interface-probe-tests PRIVATE
+  ${KEEN_PBR_GENERATED_INCLUDE_DIR}
+  ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/third_party/doctest)
+target_compile_definitions(keen-pbr-interface-probe-tests PRIVATE KEEN_PBR3_TESTING)
+if(WITH_API)
+  target_compile_definitions(keen-pbr-interface-probe-tests PRIVATE WITH_API)
+endif()
+target_link_libraries(keen-pbr-interface-probe-tests PRIVATE
+  nlohmann_json::nlohmann_json fmt::fmt-header-only
+  ${KEEN_PBR_CURL_TARGET} PkgConfig::LIBNL PkgConfig::LIBNL_ROUTE Threads::Threads)
+target_compile_options(keen-pbr-interface-probe-tests PRIVATE -ffunction-sections -fdata-sections)
+# Do not let the production -rdynamic retain unused full runtime/netlink
+# builders; this executable uses their pure probe-evidence classification.
+target_link_options(keen-pbr-interface-probe-tests PRIVATE
+  -Wl,--gc-sections -Wl,--no-export-dynamic)
+keen_pbr_apply_project_options(keen-pbr-interface-probe-tests)
+add_test(NAME keen-pbr-interface-probe-tests COMMAND keen-pbr-interface-probe-tests)
+
 # Keep the allocation-free runtime firewall core publication checkpoint
 # independently buildable. No Daemon, backend, Netlink or scheduler belongs
 # in this target.
@@ -2133,7 +2171,7 @@ if(WITH_API)
   target_link_options(keen-pbr-connections-history-tests PRIVATE
     -Wl,--gc-sections -Wl,--no-export-dynamic)
   add_test(NAME keen-pbr-connections-history-tests COMMAND
-    keen-pbr-connections-history-tests "--test-case-exclude=*[network]*")
+    keen-pbr-connections-history-tests)
 
   # Manual focused aggregate: each test is also in the normal keen-pbr-tests
   # gate. Keep list pagination and the shared connection case-fold contract
@@ -2602,6 +2640,35 @@ target_link_libraries(crash-diagnostics-smoke PRIVATE
   keen_pbr_libunwind
 )
 keen_pbr_apply_project_options(crash-diagnostics-smoke)
+add_test(NAME keen-pbr-tests COMMAND keen-pbr-tests)
+add_test(NAME crash-diagnostics-smoke COMMAND crash-diagnostics-smoke)
+
+# Existing fixtures use loopback ports and some process-global paths. CTest
+# must run them from the same directory as `make test`, even with `ctest -j`.
+# Keep manual aggregates, fuzzers and the privileged netns harness separate.
+get_property(_keen_pbr_tests DIRECTORY PROPERTY TESTS)
+foreach(_test IN LISTS _keen_pbr_tests)
+  set_tests_properties(${_test} PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    RUN_SERIAL TRUE
+    TIMEOUT 1800)
+  if(TARGET ${_test})
+    set_tests_properties(${_test} PROPERTIES LABELS "native")
+  else()
+    set_tests_properties(${_test} PROPERTIES LABELS "package-dns" TIMEOUT 180)
+  endif()
+endforeach()
+set_tests_properties(
+  keen-pbr-netfilter-hook-signals
+  keen-pbr-service-start-environment
+  keen-pbr-keenetic-iptables-wait
+  keen-pbr-keenetic-startup-dependencies
+  keen-pbr-keenetic-meta-udp443-cleanup
+  PROPERTIES LABELS "package-lifecycle")
+# This fixture exercises root-owned metadata checks in the real shell helper.
+# A non-root host skips it explicitly; release CI also runs it as root in its
+# existing BusyBox container step. It does not need a privileged container.
+set_tests_properties(keen-pbr-netfilter-hook-signals PROPERTIES SKIP_RETURN_CODE 77)
 
 if(LIBATOMIC)
   target_link_libraries(keen-pbr-tests PRIVATE ${LIBATOMIC})
@@ -2620,6 +2687,7 @@ if(WITH_API)
     test_api_reload.cpp
     test_api_lists_refresh.cpp
     test_list_query.cpp
+    test_list_hints.cpp
     test_api_notifications.cpp
     test_list_refresh_request.cpp
     test_api_catalog_setup.cpp
@@ -2647,6 +2715,8 @@ if(WITH_API)
     ../src/api/handler_reload.cpp
     ../src/api/handler_lists_refresh.cpp
     ../src/api/handler_lists_query.cpp
+    ../src/api/handler_list_hints.cpp
+    ../src/lists/list_hints.cpp
     ../src/api/handler_list_preview.cpp
     test_api_list_preview.cpp
     ../src/api/handler_logs.cpp
@@ -2670,6 +2740,7 @@ if(WITH_API)
     ../src/api/transport_manager_endpoint.cpp
     ../src/api/handler_registry_check.cpp
     ../src/api/handler_test_routing.cpp
+    ../src/api/handler_rule_counters.cpp
     ../src/firewall/rule_counter_evidence.cpp
     ../src/routing/policy_rule_evidence.cpp
     ../src/api/handler_dns_test.cpp

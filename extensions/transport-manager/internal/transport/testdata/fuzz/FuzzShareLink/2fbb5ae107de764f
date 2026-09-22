@@ -1,0 +1,2 @@
+go test fuzz v1
+string("tuiC://0:0@\xec:1")

@@ -99,25 +99,40 @@ describe("software update error presentation", () => {
     expect(html).not.toContain(ruTranslation.operationErrors.rolled_back)
   })
 
-  test("update polling and controls keep their existing request behavior", async () => {
+  test("the card wires resumable polling and keeps backup separate from installing", async () => {
     const source = await Bun.file(
       new URL(
         "../src/components/settings/maintenance-cards.tsx",
         import.meta.url
       )
     ).text()
-    expect(source).toContain("if (!status?.running) return")
+    // Stateful response/admission/timer behavior is exercised by the session,
+    // polling and step-up lifecycle suites. This checks the actual card uses it.
+    expect(source).toContain("startUpdatePolling({")
+    expect(source).toContain("observeUpdateProgress(")
+    expect(source).toContain("loadUpdateAttempt(browserUpdateStorage())")
+    expect(source).toContain("fetchWithStepUp(")
+    expect(source).toContain("fetchUpdateCommand(input, init)")
+    expect(source).not.toContain("setInterval(")
+    expect(source).not.toContain("downloadBackupBeforeUpdate")
+    const operation = source
+      .split("const startOperation =")[1]
+      .split("const exportBackup =")[0]
+    expect(operation).not.toContain("createBackup(")
+    expect(operation).toContain("setBackupError(null)")
+    const backup = source.split("const exportBackup =")[1]
+    expect(backup).toContain("createBackup(createDefaultBackupSelection())")
+    expect(source).toContain("StepUpNotAdmittedError")
+    const oldTerminalReset = source
+      .split("if (terminalFile)")[1]
+      .split("setOpen(true)")[0]
+    expect(oldTerminalReset).toContain("message: undefined")
+    expect(oldTerminalReset).toContain('log: ""')
     expect(source).toContain(
-      "window.setInterval(() => void refreshProgress(), 3000)"
+      't("pages.settings.softwareUpdate.stopMonitoring")'
     )
-    expect(source).toContain(
-      "window.setTimeout(() => void refreshProgress(), 1200)"
-    )
-    expect(source).toContain(
-      "if (!nextOpen && (status?.running || starting)) return"
-    )
-    expect(source).toContain('fetch("/api/system/update", { method: "POST" })')
-    expect(source).toContain('fetch("/api/system/update/rollback", {')
+    expect(source).toContain("if (body.running && observeRunning)")
+    expect(source).toContain("void refresh(false, false)")
     expect(source).toContain(
       "throw softwareUpdateResponseError(response.status, body)"
     )
@@ -126,6 +141,28 @@ describe("software update error presentation", () => {
       "open={status?.success !== false || status?.running === true}"
     )
     expect(source).toContain("if (status?.check_error) return null")
+  })
+
+  test("closing the update dialog leaves the admitted operation monitored in the background", async () => {
+    const source = await Bun.file(
+      new URL(
+        "../src/components/settings/maintenance-cards.tsx",
+        import.meta.url
+      )
+    ).text()
+    const dialog = source
+      .split("onOpenChange={(nextOpen) => {")[1]
+      .split("<DialogHeader>")[0]
+    const closeHandler = dialog.split("open={open}")[0]
+    expect(closeHandler).toContain("setOpen(nextOpen)")
+    expect(closeHandler).not.toContain("return")
+    expect(closeHandler).not.toContain("rememberAttempt(null)")
+    expect(closeHandler).not.toContain("abort(")
+    expect(dialog).not.toContain("showCloseButton={")
+    // Admission stays guarded even when the progress dialog is closed.
+    expect(source).toContain(
+      "if (attemptRef.current || starting || backupPending || savingChannel) return"
+    )
   })
 
   test("nfqws update and backup failures opt in without changing unrelated operations", async () => {

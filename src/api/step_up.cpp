@@ -27,7 +27,6 @@ const std::vector<StepUpProtectedRoute>& step_up_protected_routes() {
     // Package operations, because they install or replace software on the
     // router and their failure mode is a device that no longer boots into a
     // working state:
-    //   POST /api/system/update           - applies a component update
     //   POST /api/system/update/rollback  - replaces the running component set
     //   POST /api/system/naive-component  - installs a component
     //   POST /api/nfqws action=install   - action-scoped below because this
@@ -48,17 +47,21 @@ const std::vector<StepUpProtectedRoute>& step_up_protected_routes() {
     //   selects which groups to export; guarding the GET it looks like it
     //   ought to be would have protected a route that does not exist.
     //
-    // Installing the pinned sing-box release uses the authenticated session:
+    // The normal self-update needs the existing authenticated session, not a
+    // second password. It only invokes the installed helper, which verifies
+    // the signed release. The API captures a local rollback backup without
+    // exporting it or accepting caller-selected software. Explicit backup
+    // export and package rollback remain protected below.
+    // Installing the pinned sing-box release also uses the existing session:
     // the client cannot select an arbitrary download URL, and the installer
-    // verifies the archive and staged binary before replacement.
+    // still verifies the archive and staged binary before replacement.
     //
-    // Deliberately absent: /api/system/update/check and
+    // Also deliberately absent: /api/system/update/check and
     // /api/system/update/status report what is available and what happened.
     // Asking for a password to read them would train the operator to type it
     // without reading the prompt, which is how a step-up stops being a
     // control.
     static const std::vector<StepUpProtectedRoute> routes = {
-        {"POST", "/api/system/update"},
         {"POST", "/api/system/update/rollback"},
         {"POST", "/api/system/naive-component"},
         {"POST", "/api/backup/restore"},

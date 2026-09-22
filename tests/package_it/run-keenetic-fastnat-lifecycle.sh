@@ -64,6 +64,11 @@ log() { :; }
 log_error() { :; }
 . "$work/functions.sh"
 
+# A standalone BusyBox ash may prefer its sysctl applet over PATH. Explicitly
+# bind the fixture so this test never accesses the container/host sysctls.
+FASTNAT_TEST_SYSCTL="$work/bin/sysctl"
+sysctl() { "$FASTNAT_TEST_SYSCTL" "$@"; }
+
 # The FastNAT contract exercises lifecycle ordering, not the separate
 # PID/startticks lease implementation. Model a uniquely owned stop admission
 # without adding entries to the expected FastNAT action log.
@@ -340,6 +345,10 @@ restore_hwnat_if_safe() { printf '%s\n' restore >> "$order"; }
 cleanup_stale_tcp_rst_firewall() {
     printf '%s\n' cleanup-tcp-rst >> "$order"
 }
+cleanup_stale_native_forward_firewall() {
+    printf '%s\n' cleanup-native-forward >> "$order"
+    return "${NATIVE_FORWARD_CLEANUP_STATUS:-0}"
+}
 cleanup_stale_ppe_deoffload_firewall() {
     printf '%s\n' cleanup-ppe-deoffload >> "$order"
     return "${PPE_CLEANUP_STATUS:-0}"
@@ -400,6 +409,7 @@ stop_service_for_action stop no
 [ "$(cat "$order")" = "prepare
 stop:stop
 cleanup-tcp-rst
+cleanup-native-forward
 cleanup-ppe-deoffload
 cleanup-meta-udp443" ]
 
@@ -408,9 +418,27 @@ stop_service_for_action stop yes
 [ "$(cat "$order")" = "prepare
 stop:stop
 cleanup-tcp-rst
+cleanup-native-forward
 cleanup-ppe-deoffload
 cleanup-meta-udp443
 restore" ]
+
+# The native VPN cleanup is an existing independent lifecycle step. A failed
+# cleanup must not reach FastNAT restoration; the upgrade uses the same stop
+# sequence without restoring FastNAT between package versions.
+for final_stop in no yes; do
+    : > "$order"
+    NATIVE_FORWARD_CLEANUP_STATUS=1
+    if stop_service_for_action stop "$final_stop"; then
+        echo "stop succeeded after native VPN cleanup failure" >&2
+        exit 1
+    fi
+    unset NATIVE_FORWARD_CLEANUP_STATUS
+    [ "$(cat "$order")" = "prepare
+stop:stop
+cleanup-tcp-rst
+cleanup-native-forward" ]
+done
 
 # PPE cleanup is part of the fail-closed stop boundary.  An unverified graph
 # must prevent later Meta cleanup and FastNAT restoration from making the
@@ -425,6 +453,7 @@ unset PPE_CLEANUP_STATUS
 [ "$(cat "$order")" = "prepare
 stop:stop
 cleanup-tcp-rst
+cleanup-native-forward
 cleanup-ppe-deoffload" ]
 
 # Dispatcher authority is created after acquisition for both ordinary start
@@ -468,9 +497,9 @@ fi
 grep -Fq 'reapply_netfilter_runtime SIGUSR1' "$init_script"
 grep -Fq 'reapply_netfilter_runtime SIGUSR2' "$init_script"
 
-# prerm may continue after cleanup failed only when the daemon is proven dead.
-# This prevents an old lifecycle bug from stranding a half-removed package,
-# while still refusing to replace a binary which is actually executing.
+# prerm must retain the package on a failed stop, even if the process is gone:
+# its scripts are still needed to finish cleanup. Do not stop the manager or
+# replace a binary after an unsuccessful lifecycle result.
 prerm_root="$work/prerm"
 mkdir -p "$prerm_root/init.d" "$prerm_root/bin"
 sed "s#/opt/etc/init.d#$prerm_root/init.d#g; s#/opt/usr/lib/keen-pbr#$prerm_root/lib#g" "$prerm_script" > \

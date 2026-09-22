@@ -53,6 +53,13 @@ void RouterInfoCache::invalidate() {
     dirty_ = true;
 }
 
+RouterInfoCache::Snapshot RouterInfoCache::get_snapshot() {
+    (void)get();
+    std::lock_guard<std::mutex> lock(mutex_);
+    return {response_locked(), last_good_.has_value() &&
+        !last_failed_.has_value() && !dirty_ && !refreshing_ && now_() < refresh_after_};
+}
+
 nlohmann::json RouterInfoCache::response_locked() const {
     if (last_good_.has_value()) {
         return *last_good_;

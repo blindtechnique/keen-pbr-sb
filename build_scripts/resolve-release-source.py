@@ -46,9 +46,11 @@ def tag_ref(repository: Path, name: str) -> str:
         raise ResolutionError("release_tag must be a short tag name, not a refs/ path")
     if name.startswith(("alpha-", "beta-", "next-")):
         channel = name.split("-", 1)[0]
+        action = ("rerun the original alpha workflow instead" if channel == "alpha" else
+                  "use main or alpha without release_tag for a new build")
         raise ResolutionError(
             f"{channel} prerelease tags cannot be published as stable; "
-            f"rerun the original {channel} workflow instead"
+            f"{action}"
         )
     reference = f"refs/tags/{name}"
     try:
@@ -134,11 +136,11 @@ def resolve_source(
             channel = "stable"
             candidate = True
             release_tag = timestamp_release_tag(repository, source_sha)
-        elif ref in ("refs/heads/alpha", "refs/heads/next"):
-            channel = ref.removeprefix("refs/heads/")
-    single_architecture = not is_release and (
-        ref in ("refs/heads/alpha", "refs/heads/next") or event_name == "pull_request"
-    )
+        elif ref == "refs/heads/alpha":
+            channel = "alpha"
+    # Published Alpha bundles need the same complete target set as main.
+    # PRs remain unsigned single-profile checks of their immutable merge SHA.
+    single_architecture = event_name == "pull_request"
     return {
         "source_sha": source_sha,
         "release_tag": release_tag,

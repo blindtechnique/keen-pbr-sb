@@ -2774,7 +2774,9 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
             req.path == "/api/auth/settings" ||
             req.path == "/api/auth/settings/step-up-preflight" ||
             req.path == "/api/auth/logout" ||
+            (req.method == "POST" && req.path == "/api/system/update") ||
             req.path == "/api/system/ndms/interfaces" ||
+            req.path == "/api/routing/counters" ||
             req.path == "/api/routing/registry-consent";
         if (no_store_sensitive_path ||
             requires_step_up(req.method, req.path)) {

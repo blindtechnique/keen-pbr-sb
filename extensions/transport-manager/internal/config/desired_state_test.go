@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/infaprim/mykeenpbr/internal/transport"
@@ -12,6 +13,85 @@ import (
 type desiredStateTransport struct {
 	tag     string
 	downErr error
+}
+
+type lifecycleCountedTransport struct {
+	desiredStateTransport
+	upCalls, downCalls int
+}
+
+func (f *lifecycleCountedTransport) Up(context.Context) error {
+	f.upCalls++
+	return nil
+}
+
+func (f *lifecycleCountedTransport) Down(context.Context) error {
+	f.downCalls++
+	return nil
+}
+
+func TestSubscriptionUpdateAndSequentialDeletesPreserveDisabledNodeOnReload(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "transports.json")
+	cfg := Config{APIKey: "test-secret", SingBoxBinary: "sing-box", RuntimeDir: t.TempDir()}
+	for i, tag := range []string{"disabled", "healthy", "unused_one", "unused_two"} {
+		cfg.Transports = append(cfg.Transports, transport.TransportSpec{
+			Tag: tag, Type: "sing-box", Interface: "pbr" + string(rune('1'+i)),
+			Link: "trojan://test@example.invalid:443", AutoStart: tag == "healthy",
+		})
+	}
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	manager := transport.NewManager()
+	supervisor := transport.NewSupervisor(manager)
+	fakes := map[string]*lifecycleCountedTransport{}
+	for _, spec := range cfg.Transports {
+		fake := &lifecycleCountedTransport{desiredStateTransport: desiredStateTransport{tag: spec.Tag}}
+		fakes[spec.Tag] = fake
+		if err := manager.Add(fake); err != nil {
+			t.Fatal(err)
+		}
+		supervisor.Register(spec)
+	}
+	if err := supervisor.Up(ctx, "healthy"); err != nil {
+		t.Fatal(err)
+	}
+	admin := NewAdmin(path, cfg, manager, supervisor)
+	updated := cfg.Transports[0]
+	updated.Link = "trojan://new-credential@updated.example.invalid:8443"
+	if err := admin.Update(ctx, "disabled", updated); err != nil {
+		t.Fatal(err)
+	}
+	for _, tag := range []string{"unused_one", "unused_two"} {
+		if err := admin.Delete(ctx, tag); err != nil {
+			t.Fatal(err)
+		}
+		status, err := supervisor.Status(ctx, "disabled")
+		if err != nil || status.DesiredUp || status.State != transport.StateDown {
+			t.Fatalf("unrelated deletion enabled the subscription node: %#v, %v", status, err)
+		}
+	}
+	if fakes["healthy"].upCalls != 1 || fakes["healthy"].downCalls != 0 {
+		t.Fatalf("unrelated changes restarted the healthy sibling: %#v", fakes["healthy"])
+	}
+	stored, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(stored.Transports, []transport.TransportSpec{updated, cfg.Transports[1]}) {
+		t.Fatalf("persisted inventory changed unrelated preferences: %#v", stored.Transports)
+	}
+	// Start with a fresh supervisor and reload from disk: no old in-memory
+	// desired state is available to accidentally make this assertion pass.
+	reloaded := transport.NewSupervisor(transport.NewManager())
+	for _, spec := range stored.Transports {
+		reloaded.Register(spec)
+	}
+	desired, exists := reloaded.Forget("disabled")
+	if !exists || desired {
+		t.Fatal("configuration reload restored a disabled subscription as enabled")
+	}
 }
 
 func (f *desiredStateTransport) Tag() string                { return f.tag }

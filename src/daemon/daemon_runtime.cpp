@@ -2279,10 +2279,12 @@ void Daemon::start_interface_probe_round_impl(
         periodic_task_metrics_.begin("interface-probe"));
     auto publication_failed =
         std::make_shared<std::atomic<bool>>(false);
-    // Probing blocks on the network, so it must not run on the event loop.
+    // Reserve progress for regular health even when both bulk I/O workers
+    // are occupied. Manual per-target probes remain on the bulk executor.
+    // Result publication still uses the same generation-fenced control loop.
     bool enqueued = false;
     try {
-        enqueued = blocking_executor_.try_post(
+        enqueued = interface_probe_executor_.try_post(
             "interface-probe",
             [this,
              targets,

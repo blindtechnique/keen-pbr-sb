@@ -29,6 +29,32 @@ std::optional<std::string> canonical_ip(const std::string& value) {
     return std::string(text.data());
 }
 
+std::optional<std::string> probe_host(const std::string& target) {
+    if (auto ip = canonical_ip(target)) {
+        return ip->find(':') == std::string::npos ? *ip : "[" + *ip + "]";
+    }
+    if (target.find('*') != std::string::npos || target.find('\0') != std::string::npos)
+        return std::nullopt;
+    auto domain = ListParser::normalize_domain(target);
+    if (!domain) return std::nullopt;
+    for (char& ch : *domain) if (ch >= 'A' && ch <= 'Z') ch += 'a' - 'A';
+    return domain;
+}
+
+bool valid_probe_url(const std::string& target, const std::string& url) {
+    const auto host = probe_host(target);
+    if (!host || url.size() > 2048) return false;
+    if (url.empty()) return true;
+    // Only a same-host HTTPS resource on 443; no credentials, fragments,
+    // alternate ports, backslash authority ambiguities or control characters.
+    for (const unsigned char ch : url) if (ch <= 32 || ch == 127 || ch == '\\') return false;
+    if (url.rfind("https://", 0) != 0 || url.find('#') != std::string::npos) return false;
+    const auto end = url.find_first_of("/?", 8);
+    auto authority = url.substr(8, end == std::string::npos ? end : end - 8);
+    for (char& ch : authority) if (ch >= 'A' && ch <= 'Z') ch += 'a' - 'A';
+    return authority == *host;
+}
+
 RoutingHttpProbeReason error_reason(HttpTransportError::Reason reason) {
     switch (reason) {
         case HttpTransportError::Reason::timeout: return RoutingHttpProbeReason::Timeout;
@@ -43,9 +69,18 @@ RoutingHttpProbeReason error_reason(HttpTransportError::Reason reason) {
 }
 } // namespace
 
+bool valid_routing_probe_options(const std::string& target, const RoutingProbeOptions& options) {
+    return !options.url.empty() && valid_probe_url(target, options.url) &&
+        (options.family == "ipv4" || options.family == "ipv6") &&
+        (options.path == "policy" || options.path == "direct" || options.path == "outbound") &&
+        (options.path == "outbound" ? !options.outbound.empty() && options.outbound.size() <= 24
+                                    : options.outbound.empty());
+}
+
 RoutingHttpProbe probe_routing_http(
     const TestRoutingResult& result, const std::vector<RuleState>& realized,
-    const std::string& requested_ip, Clock::time_point deadline, HttpTransport& transport) {
+    const std::string& requested_ip, Clock::time_point deadline, HttpTransport& transport,
+    const std::string& url) {
     RoutingHttpProbe observation;
     observation.ip = requested_ip;
     const auto address = canonical_ip(requested_ip);
@@ -85,7 +120,12 @@ RoutingHttpProbe probe_routing_http(
             if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
         }
     }
-    observation.url = "https://" + host + "/";
+    if (!valid_probe_url(result.target, url)) {
+        observation.status = RoutingHttpProbeStatus::NotApplicable;
+        observation.reason = RoutingHttpProbeReason::UnsupportedTarget;
+        return observation;
+    }
+    observation.url = url.empty() ? "https://" + host + "/" : url;
     if (entry->evaluation == RoutingMatchEvaluation::InsufficientContext ||
         entry->actual_outbound.empty() || entry->actual_outbound == "(unknown)") {
         observation.status = RoutingHttpProbeStatus::NotApplicable;
@@ -139,6 +179,7 @@ RoutingHttpProbe probe_routing_http(
     request.fwmark = mark;
     request.bind_interface = observation.interface;
     request.timeout_ms = static_cast<long>(std::min<std::int64_t>(5000, remaining.count()));
+    observation.timeout_ms = request.timeout_ms;
     request.user_agent = "keen-pbr-sb routing diagnostic";
     request.head_only = true;
     request.follow_redirects = false;
@@ -185,6 +226,83 @@ RoutingHttpProbe probe_routing_http(
         observation.elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - started).count();
     }
     return observation;
+}
+
+RoutingHttpProbe probe_routing_http_path(
+    const TestRoutingResult& result, const std::vector<RuleState>& realized,
+    const Config& config, const OutboundMarkMap& marks, const RoutingProbeOptions& options,
+    Clock::time_point deadline, HttpTransport& transport,
+    const std::function<FibAnswer(const FibQuery&)>& fib_lookup) {
+    RoutingHttpProbe unavailable;
+    unavailable.url = options.url;
+    if (!valid_routing_probe_options(result.target, options)) {
+        unavailable.reason = RoutingHttpProbeReason::UnsupportedTarget;
+        return unavailable;
+    }
+    const auto entry = std::find_if(result.entries.begin(), result.entries.end(), [&](const auto& item) {
+        const auto address = canonical_ip(item.ip);
+        return address && (address->find(':') != std::string::npos) == (options.family == "ipv6");
+    });
+    if (entry == result.entries.end()) {
+        unavailable.reason = RoutingHttpProbeReason::DestinationChanged;
+        return unavailable; // DNS error/no address of this family stays in result.
+    }
+    if (options.path == "policy") {
+        return probe_routing_http(result, realized, entry->ip, deadline, transport, options.url);
+    }
+    unavailable.ip = entry->ip;
+    // A selected egress is a separate experiment, not a rewrite of the rule
+    // evaluation and not evidence that client traffic used this path.
+    std::uint32_t mark = 0;
+    std::string device;
+    if (options.path == "outbound") {
+        if (!config.outbounds) {
+            unavailable.reason = RoutingHttpProbeReason::NoRoute;
+            return unavailable;
+        }
+        const auto outbound = std::find_if(config.outbounds->begin(), config.outbounds->end(),
+            [&](const auto& item) { return item.tag == options.outbound; });
+        const auto assigned = marks.find(options.outbound);
+        if (outbound == config.outbounds->end() || outbound->type != OutboundType::INTERFACE ||
+            !outbound->interface || outbound->interface->empty() || assigned == marks.end() ||
+            assigned->second == 0) {
+            unavailable.reason = RoutingHttpProbeReason::NoRoute;
+            return unavailable;
+        }
+        mark = assigned->second;
+        device = *outbound->interface;
+    }
+    if (Clock::now() >= deadline || !fib_lookup) {
+        unavailable.reason = RoutingHttpProbeReason::BudgetExhausted;
+        return unavailable;
+    }
+    const auto answer = fib_lookup(FibQuery{entry->ip, mark});
+    if (answer.verdict != FibVerdict::resolved || answer.interface.empty() ||
+        (!device.empty() && answer.interface != device)) {
+        unavailable.reason = RoutingHttpProbeReason::NoRoute;
+        return unavailable; // Never turn a missing VPN route into a WAN success.
+    }
+    TestRoutingResult selected;
+    selected.target = result.target;
+    TestRoutingEntry row{};
+    row.ip = entry->ip;
+    row.actual_outbound = mark == 0 ? "(default)" : options.outbound;
+    row.evaluation = RoutingMatchEvaluation::Matched;
+    row.fib.verdict = RoutingFibVerdict::Resolved;
+    row.fib.fwmark = mark;
+    row.fib.table = answer.table;
+    row.fib.interface = answer.interface;
+    std::vector<RuleState> selection;
+    if (mark != 0) {
+        RuleState rule{};
+        rule.rule_index = 0;
+        rule.action_type = RuleActionType::Mark;
+        rule.fwmark = mark;
+        row.actual_rule_index = 0;
+        selection.push_back(rule);
+    }
+    selected.entries.push_back(std::move(row));
+    return probe_routing_http(selected, selection, entry->ip, deadline, transport, options.url);
 }
 
 } // namespace keen_pbr3

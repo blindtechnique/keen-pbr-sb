@@ -43,6 +43,7 @@ REQUIRED_EXECUTABLES = {
     "opt/usr/lib/keen-pbr/portable-stat.sh",
 }
 REQUIRED_FILES = REQUIRED_EXECUTABLES | {
+    "opt/usr/lib/keen-pbr/update-channel",
     "opt/usr/lib/keen-pbr/libkeen-pbr-connndmmark.so",
     "opt/usr/lib/keen-pbr/nfqws-tcp-window.awk",
     "opt/etc/keen-pbr/keys/release-public.pem",
@@ -348,11 +349,14 @@ def validate_elf(member: tarfile.TarInfo, content: bytes, arch: str) -> None:
         )
 
 
-def validate(path: Path, arch: str, expected_commit: str | None = None) -> None:
+def validate(path: Path, arch: str, expected_commit: str | None = None,
+             expected_channel: str | None = None) -> None:
     if expected_commit is not None and re.fullmatch(
         r"(?:unknown|[0-9a-f]{12,64}(?:-dirty)?)", expected_commit
     ) is None:
         raise ValidationError("invalid expected build commit identity")
+    if expected_channel not in (None, "alpha", "stable"):
+        raise ValidationError("invalid expected update channel")
 
     members = read_ipk(path)
     if set(members) != EXPECTED_OUTER_MEMBERS:
@@ -370,6 +374,15 @@ def validate(path: Path, arch: str, expected_commit: str | None = None) -> None:
         missing = sorted(REQUIRED_FILES - entries.keys())
         if missing:
             raise ValidationError("missing package files: " + ", ".join(missing))
+        channel_entry = entries["opt/usr/lib/keen-pbr/update-channel"]
+        if not channel_entry.isfile():
+            raise ValidationError("update channel marker must be a regular file")
+        channel_stream = data_tar.extractfile(channel_entry)
+        channel = channel_stream.read(8) if channel_stream is not None else b""
+        if channel not in (b"alpha\n", b"stable\n"):
+            raise ValidationError("invalid package update channel marker")
+        if expected_channel is not None and channel != (expected_channel + "\n").encode("ascii"):
+            raise ValidationError("package update channel does not match the expected release channel")
         for name in REQUIRED_EXECUTABLES:
             if not entries[name].isfile() or not entries[name].mode & stat.S_IXUSR:
                 raise ValidationError(f"{name} is not executable")
@@ -568,9 +581,10 @@ def main() -> int:
     parser.add_argument("ipk", type=Path)
     parser.add_argument("--arch", choices=sorted(ELF_MACHINES), required=True)
     parser.add_argument("--expected-commit")
+    parser.add_argument("--expected-channel", choices=("stable", "alpha"))
     args = parser.parse_args()
     try:
-        validate(args.ipk, args.arch, args.expected_commit)
+        validate(args.ipk, args.arch, args.expected_commit, args.expected_channel)
     except (OSError, ValueError, ValidationError) as error:
         print(f"IPK validation failed: {error}", file=sys.stderr)
         return 1

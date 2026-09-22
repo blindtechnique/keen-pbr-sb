@@ -1,4 +1,155 @@
 export const enTranslation = {
+  deviceVpn: {
+    ingressRestriction:
+      "Global settings restrict ingress interfaces. The device's network must be included; this assignment does not extend that allowlist.",
+    blockScopeWarning:
+      "This rule matches all IPv4 traffic from the device. Blocking on VPN failure may also block access to the router or other local networks. Keep management access from another device.",
+    lowerPriority:
+      "Other rules above may match first. Saving this assignment moves it to the top.",
+    title: "VPN for devices",
+    description:
+      "Send a device's sites and apps through a VPN or group using its reserved IPv4 address.",
+    add: "Assign VPN to a device",
+    edit: "Device VPN",
+    editNamed: "Edit VPN for {{name}}",
+    allRules: "All routing rules",
+    device: "Choose device",
+    chooseDevice: "Choose a device or enter its IPv4 below",
+    address: "Device IPv4 address",
+    name: "Device name — optional",
+    outbound: "VPN or group",
+    enabled: "Use this assignment",
+    disabled: "Disabled",
+    addressHint:
+      "Reserve this IPv4 for the device in Keenetic/Netcraze. If it changes or is assigned to another device, the rule follows the address. DHCP is not changed automatically.",
+    formDescription:
+      "Choose the device and VPN. All of its IPv4 connections match this rule, regardless of website lists.",
+    inventoryHint:
+      "Devices known to the router. Being listed does not prove that their IPv4 is reserved.",
+    inventoryEmpty:
+      "The router lists no IPv4 devices. You can enter a reserved address manually.",
+    inventoryUnavailable:
+      "A fresh device list is unavailable. Refresh it or enter a known reserved IPv4 manually.",
+    inventoryTruncated:
+      "Only part of the device list is shown. Enter the reserved IPv4 manually if your device is missing.",
+    refreshDevices: "Refresh device list",
+    conflict: "Address shared by several devices",
+    noOutbounds:
+      "First create a VPN with a route or a group under VPNs, proxies, groups.",
+    ipv6Warning:
+      "IPv4 only. This assignment does not route IPv6 through the VPN. If the device uses IPv6, some connections may take a different path.",
+    priorityHint:
+      "Saving puts this rule first, above website rules. Existing connections may keep their old path — reconnect the app after applying.",
+    rulesHint:
+      "This view shows simple single-IPv4 assignments, also accessible in routing rules. Removing an assignment restores the other rules, not necessarily direct access.",
+    advanced: "When the VPN is unavailable and other conditions",
+    scopeHint:
+      "Global routing and ingress-interface settings still apply. Traffic to other local networks also matches: place any required exceptions above this assignment in routing rules. This assignment does not redirect the router's own DNS queries. A saved rule does not prove that the VPN works.",
+    emptyTitle: "No device VPN assignments yet",
+    emptyDescription:
+      "Choose Assign VPN to a device, then its reserved IPv4 and a VPN or group.",
+    save: "Save assignment",
+    saved: "Assignment saved to the draft. Apply the changes in the panel.",
+    remove: "Remove assignment",
+    removeTitle: "Remove this device's VPN assignment?",
+    removeDescription:
+      "After applying, the device follows the remaining routing rules. The VPN, its settings and DHCP are unchanged.",
+    errors: {
+      address:
+        "Enter one ordinary device IPv4, such as 192.168.1.50. Networks, IPv6 and address lists are not accepted here.",
+      name: "Use at most 80 characters, without control characters.",
+      outbound:
+        "Choose an existing routed VPN or group. The outgoing path may have been removed — refresh the rules.",
+      duplicate:
+        "A simple rule already exists for this IPv4, possibly disabled. Edit it in VPN for devices or in routing rules instead of adding a duplicate.",
+      changed:
+        "The rule changed, was removed or has extra conditions. Close the form and reopen it from the current rule list.",
+      fallback:
+        "Choose a different existing VPN or group as the fallback path.",
+    },
+  },
+  ruleCounters: {
+    ipv4: "IPv4",
+    ipv6: "IPv6",
+    title: "Rule counters — partial accounting",
+    description:
+      "An on-demand snapshot of packets and bytes counted by firewall rules. Not complete site or VPN traffic, and not a connectivity test.",
+    read: "Read counters",
+    pending: "Reading counters. Routing and settings are unchanged…",
+    failed:
+      "Could not get a snapshot. Try again later. This does not mean routing has failed.",
+    done: "Snapshot received. Rules: {{count}}.",
+    limitsTitle: "What is counted",
+    units:
+      "Packets and IP-packet bytes at PREROUTING, before route selection, when a particular firewall row matches. Not connection counts or downloaded file sizes; server replies may not pass this row.",
+    fastPath:
+      "Conntrack and Keenetic hardware acceleration can bypass these rules for later packets. Even a zero counter does not prove there was no traffic or a failure.",
+    overlap:
+      "Several domains can share one IP. List overlap and rule order affect which row matches. Counters cannot be split by site or added as independent traffic totals.",
+    reset:
+      "Values accumulate since the last creation or reset of each physical firewall row. The reset time is unknown. Applying settings or restarting can recreate rows. IPv4 and IPv6 snapshots are not simultaneous.",
+    noTotals:
+      "Interface RX/TX is a separate measure of the entire interface. This report has no per-VPN totals, rates, differences between snapshots or disk history. The button reads counters; it does not reset them.",
+    snapshot:
+      "Applied-rule snapshot: {{time}}. Showing {{count}} of {{total}}. Values update only when requested.",
+    draft:
+      "There is an unapplied draft. Names, order and outbounds below come from the applied configuration.",
+    localChanges:
+      "The editor has unsaved changes. This snapshot does not include them: it describes applied rules.",
+    truncated:
+      "Only the first 128 rules are shown. This is not the full configuration snapshot.",
+    empty: "The applied configuration has no routing rules.",
+    unnamed: "Unnamed",
+    outbound: "Configured outbound: {{name}}",
+    disabled: "Disabled in settings",
+    physicalRows:
+      "Firewall rows: {{count}} of {{total}} — expand to see counters",
+    unavailable: "No readings",
+    ambiguous: "Ambiguous association",
+    notApplicable: "Not applicable",
+  },
+  listHints: {
+    title: "List hints",
+    description:
+      "Check on demand for broad networks, matching domains and lists with no settings references. Reads current settings, local files and cached lists without downloading anything or changing rules.",
+    check: "Check lists",
+    loading: "Checking lists. Settings and routing remain unchanged…",
+    failed:
+      "Could not get list hints. Try again later. No settings were changed.",
+    stale:
+      "Settings changed during the check. Check again to get current hints.",
+    done: "Check complete. Hints: {{count}}.",
+    scope:
+      "These are examples to review, not errors. Matching domains do not prove a conflict or the actual traffic path. Results describe the time of this check; it is fine to leave the settings as they are.",
+    draft:
+      "Checked the current settings draft, which has not been applied to routing yet.",
+    stats:
+      "Lists inspected: {{lists}} of {{total}}; entries and lines: {{entries}}.",
+    partial:
+      "This check is incomplete: some sources are unavailable or the analysis reached its size or time budget. This does not affect the lists themselves.",
+    samples:
+      "Only representative examples are shown, not every possible overlap.",
+    conditions:
+      "Rules with extra conditions: {{count}}. Only rules with identical protocol, addresses, ports and DSCP are compared; overlaps between different conditions are not checked here.",
+    empty: "No hints in the inspected portion of the lists.",
+    unused:
+      "No references in the service settings: routing, DNS or automated actions. This list may be kept for later; you do not have to delete it.",
+    wide: "Network {{entry}} covers many addresses. Check whether the whole range is intended. This check highlights IPv4 /16 or broader and IPv6 /32 or broader; these ranges are valid in themselves.",
+    overlap:
+      "Domains “{{entry}}” and “{{otherEntry}}” match or include one another. Rule #{{earlier}} → “{{outbound}}” comes before rule #{{later}} → “{{otherOutbound}}”. Check whether this order is intended; both rules have identical extra conditions.",
+    unknown:
+      "This list has a new hint type whose details are not supported by this panel yet.",
+    sources: {
+      title: "Sources not fully inspected",
+      changed:
+        "The source changed or the file was updated while being read. Check again after the list has finished loading.",
+      large:
+        "Source omitted: it exceeds the remaining size budget of this optional check.",
+      invalid: "Some content could not be parsed in the selected format.",
+      unavailable:
+        "The local file or a matching cached list is currently unavailable.",
+    },
+  },
   backgroundTasks: {
     title: "Background tasks",
     description:
@@ -1269,6 +1420,8 @@ export const enTranslation = {
         "Some conditions in list “{{name}}” could not be imported from SRS. Check source-format compatibility; omitted conditions are listed in the details.",
       metaPolicyUnverified:
         "Meta/WhatsApp traffic rules could not be confirmed. Check the current routing state on the dashboard.",
+      firewallRefreshUnverified:
+        "The routing-rule update could not be verified. A recheck is scheduled. Check the current state on the dashboard.",
       accelerationRulesUnverified:
         "Traffic-visibility rules for hardware acceleration could not be reconciled. Check this item in dashboard diagnostics.",
       tunnelProbeRouted:
@@ -2655,6 +2808,9 @@ export const enTranslation = {
         unknown: "Unknown route type",
       },
       technicalDetails: "Technical details",
+      advancedTitle: "Advanced diagnostics",
+      advancedDescription:
+        "Technical data for troubleshooting or requesting help. Not needed for everyday setup. Opening this section does not run checks or change settings.",
       details: {
         disabledByConfiguration: "Disabled by configuration",
         ruleNotFound:
@@ -2927,6 +3083,60 @@ export const enTranslation = {
       registryCdn: "Addresses belong to CDNs: {{providers}}",
       registrySource: "Source: {{service}}",
     },
+    batch: {
+      title: "Compare several addresses and paths",
+      description:
+        "Enter one domain or HTTPS URL per line. Test the page, CSS, scripts, images and video host as separate addresses. Up to 12 address, path and IP-family combinations, one at a time without retries.",
+      influence:
+        "Probes generate traffic and may affect nfqws2 auto-learning. Do not run them while capturing a failing connection. This check does not change settings, lists or tunnel health.",
+      targets: "Addresses to check",
+      placeholder: "example.com\nhttps://static.example.com/style.css",
+      paths: "Check through",
+      policy: "Current routing rules",
+      direct: "Without a keen-pbr mark",
+      pathHelp:
+        "Unmarked traffic follows the router's route, which is not necessarily outside a VPN. Only interface outbounds can be selected separately; groups follow current rules. Stopped VPNs are not started.",
+      family: "IP family",
+      method: "Method: HEAD",
+      invalidSize: "A series must contain between 1 and 12 probes.",
+      invalidResponse:
+        "The service returned an incomplete or incompatible check result.",
+      start: "Start comparison",
+      stop: "Stop series",
+      stopping:
+        "No more probes will start. Waiting for the current request, up to 60 seconds.",
+      progress: "Finished: {{count}} of {{total}}",
+      count: "Probes in series: {{count}} of 12",
+      invalidTargets:
+        "Enter a domain, IP or HTTPS URL on port 443. Remove credentials, the # fragment and spaces from the address.",
+      selectPaths: "Select at least one path and IP family.",
+      limit:
+        "A series can contain at most 12 probes. Select fewer addresses, paths or IP families.",
+      queued: "Waiting to start",
+      running: "Checking DNS, routing and the server response…",
+      cancelled: "Not started — series stopped",
+      apiFailed:
+        "The service did not return a check result. The series stopped; website availability is unknown. Check the panel connection and service version.",
+      dnsFailed: "DNS returned no address. HTTP was not checked.",
+      noAddress: "No address for this IP family. HTTP was not checked.",
+      answered: "Server responded: HTTP {{code}}",
+      httpError:
+        "Server responded: HTTP {{code}}. This is an HTTP error, not a missing connection.",
+      connectionFailed: "No HTTP response received",
+      unavailable: "Path was not checked",
+      details: "Check details",
+      dns: "DNS before HTTP: source, server and addresses",
+      actual: "Selected IP / connected IP / interface",
+      timing: "Time, ms",
+      timingValues:
+        "Total: {{elapsed}}; until TCP: {{connect}}; until TLS: {{tls}}; HTTP budget: {{timeout}}",
+      when: "Request start / finish",
+      interpretation:
+        "DNS uses the current router resolver before probing the selected path. HEAD checks only the response headers, without downloading content or following redirects. This is router-originated traffic, not a browser, video playback, Discord voice or client nfqws2-path test. TCP/TLS times are cumulative from request start; the result does not prove the presence or absence of DPI.",
+      export: "Download JSON report",
+      exportPrivacy:
+        "The report contains entered URLs, query parameters, IPs and selected outbound names. Review it before sharing. It is not automatically saved in settings or on the server.",
+    },
     routingTest: {
       retry: "Check again",
       guidance: {
@@ -2994,7 +3204,7 @@ export const enTranslation = {
         mark: "3. Firewall mark",
         counterTitle: "PREROUTING rule counters",
         counterScope:
-          "Cumulative totals for the whole rule, not this site or check. Recreating the rule may reset its counters. Zero does not mean a failure.",
+          "Counts packets reaching this physical firewall row, not all site or VPN traffic. Conntrack and hardware acceleration may bypass it. Values accumulate; recreating a row may reset them. Zero does not mean a failure.",
         counterMissing: "The service did not provide rule counters.",
         counterUnavailable: "The rule counters could not be read.",
         counterAmbiguous:
@@ -3763,6 +3973,22 @@ export const enTranslation = {
           "URL lists currently inheriting this chain: {{count}}.",
       },
       softwareUpdate: {
+        channel: "Update channel",
+        stableChannel: "Stable (main)",
+        alphaChannel: "Alpha",
+        saveChannel: "Save channel",
+        switchAvailable: "Channel switch available",
+        channelHint:
+          "Choosing a channel does not install an update or change VPN or DNS settings.",
+        alphaWarning:
+          "Alpha contains test builds and may have bugs. Save a backup before installing.",
+        channelSaveFailed:
+          "Could not save the channel. Check its current value before trying again.",
+        source: "Source",
+        channelSwitchPending:
+          "Channel saved. The installed package has not changed. Install the selected channel's release separately to switch.",
+        downgradeBlocked:
+          "The selected channel offers an older version. The panel does not downgrade: wait for a newer release or use a verified rollback with its matching configuration.",
         cancel: "Cancel",
         rollbackConfirmTitle: "Restore the previous keen-pbr-sb version?",
         rollbackConfirmHint:
@@ -3788,12 +4014,23 @@ export const enTranslation = {
           "The operation could not be completed. Check the current version before trying again.",
         progressUnavailable:
           "Update progress is unavailable. The panel will keep checking automatically.",
-        downloadBackupBefore: "Download a backup before installing",
+        downloadBackup: "Download backup",
+        backupFailed:
+          "Could not download the backup. The update was not started.",
+        reconnecting:
+          "Reconnecting to the panel to check update progress. Do not start the update again.",
+        admissionUnknown:
+          "Checking whether the update started. Do not start it again.",
+        resultUnknown:
+          "The update result could not be confirmed yet. Check its status again or reopen the panel later. Do not start the installation again.",
+        checkProgress: "Check status",
+        stopMonitoring: "Stop monitoring",
+        stopMonitoringHint: "This does not stop the update on the router.",
         progressLabel: "Update progress",
         inProgress: "Update in progress",
         title: "keen-pbr-sb update",
         description:
-          "Checks the latest published Release, verifies SHA256SUMS, and installs the IPK while preserving configuration, tunnel and proxy interfaces, and the web account.",
+          "Checks the latest release in the selected channel, its signature and checksums. Updates the IPK while preserving settings, VPNs, proxies, and the panel account.",
         current: "Installed",
         latest: "Latest release",
         check: "Check for updates",
@@ -3801,7 +4038,7 @@ export const enTranslation = {
         availableToast: "Update {{version}} is available.",
         install: "Install update",
         running:
-          "The update is running. The web UI may be unavailable for a few seconds and will reconnect automatically.",
+          "During the update, the panel, routing and DNS may be temporarily unavailable. The panel will reconnect automatically.",
         upToDate: "The latest published version is installed.",
         newerThanPublished:
           "The installed version is newer than the latest published release. A downgrade will not be offered.",

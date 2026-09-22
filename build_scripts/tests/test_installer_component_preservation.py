@@ -15,9 +15,9 @@ ROOT = Path(__file__).resolve().parents[2]
 SOURCE = Path(os.environ.get("KPBR_TEST_INSTALLER", ROOT / "install.sh")).read_text()
 
 
-def function(name):
-    start = SOURCE.index(name + "() {\n")
-    return SOURCE[start:SOURCE.index("\n}\n", start) + 3]
+def function(name, source=SOURCE):
+    start = source.index(name + "() {\n")
+    return source[start:source.index("\n}\n", start) + 3]
 
 
 @unittest.skipUnless(shutil.which("busybox"), "BusyBox shell required")
@@ -79,6 +79,50 @@ die() {{ printf '%s\\n' "$*" >&2; exit 1; }}
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout.strip(), "old-working-version")
         self.assertEqual(list((self.opt / "bin").glob(".keen-pbr-sing-box.*")), [])
+
+    def test_download_curl_hides_progress_but_preserves_errors_and_exit_status(self):
+        updater = (ROOT / "packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/self-update.sh").read_text()
+        url = "https://example.invalid/release.ipk?fixture=1&version=2"
+        destination = str(self.root / "download with spaces.ipk")
+        captured_args = self.root / "curl-arguments"
+        for source, name, max_time, arguments in (
+            (SOURCE, "fetch", "180", f"'{url}' '{destination}'"),
+            (updater, "fetch_url", "90", f"'{destination}' '{url}'"),
+        ):
+            for branch in ("path", "opt"):
+                for exit_code in (0, 22, 7):
+                    with self.subTest(function=name, branch=branch, exit_code=exit_code):
+                        fake_curl = self.root / "fake-curl"
+                        self.executable(fake_curl, f'''printf '%s\\n' "$@" > '{captured_args}'
+if [ {exit_code} -ne 0 ]; then
+    printf 'curl: ({exit_code}) fixture download failure\\n' >&2
+fi
+exit {exit_code}''')
+                        opt_curl = self.opt / "bin/curl"
+                        opt_curl.unlink(missing_ok=True)
+                        if branch == "opt":
+                            shutil.copy2(fake_curl, opt_curl)
+                        body = function(name, source).replace("/opt/", str(self.opt) + "/")
+                        # Control both discovery branches; the real host's
+                        # curl/wget and network must never be used by this test.
+                        script = f'''set -eu
+command() {{ [ "$1" = -v ] && [ "$2" = curl ] && [ '{branch}' = path ]; }}
+curl() {{ '{fake_curl}' "$@"; }}
+die() {{ printf '%s\\n' "$*" >&2; exit 99; }}
+{body}
+{name} {arguments}
+printf 'continued\\n'
+'''
+                        result = subprocess.run(
+                            [shutil.which("busybox"), "sh", "-c", script],
+                            capture_output=True, text=True, timeout=10)
+                        self.assertEqual(result.returncode, exit_code, result.stderr)
+                        self.assertEqual(captured_args.read_text().splitlines(), [
+                            "-fsSL", "--connect-timeout", "15", "--max-time", max_time,
+                            "--retry", "3", "-o", destination, url])
+                        self.assertEqual(result.stdout, "continued\n" if exit_code == 0 else "")
+                        self.assertEqual(result.stderr, "" if exit_code == 0 else
+                                         f"curl: ({exit_code}) fixture download failure\n")
 
     def test_bad_candidate_preserves_working_binary_and_wrapper(self):
         self.old_pair()
@@ -430,7 +474,7 @@ prepare_release_verifier() {{ printf 'prepare verifier\\n' >> '{effects}'; }}'''
     def test_signed_self_updater_still_requires_preinstalled_openssl(self):
         source = (ROOT / "packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/self-update.sh").read_text()
         start = source.index('if [ ! -r "$RELEASE_VERIFIER" ]')
-        end = source.index('\nfetch_url "$RELEASE_JSON" "$RELEASE_API"', start)
+        end = source.index('\n# The package marker identifies what is installed.', start)
         verifier = self.root / "verifier"
         key = self.root / "key"
         verifier.write_text("fixture")
