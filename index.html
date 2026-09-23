@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>keen-pbr-sb — нужные сайты через VPN, остальное напрямую | Keenetic и Netcraze</title>
-<meta name="description" content="Нужные сайты через VPN, остальное напрямую. Keenetic и Netcraze: импорт WireGuard и AmneziaWG, подписки sing-box, резервные группы, управление nfqws2, DNS и проверка сайтов в одной панели.">
+<title>keen-pbr-sb — VPN для сайтов и устройств | Keenetic и Netcraze</title>
+<meta name="description" content="Направляйте через VPN выбранные сайты или IPv4-трафик отдельного устройства. Keenetic и Netcraze: WG/AWG, sing-box, резервные группы, nfqws2 и пошаговая установка.">
 <meta name="theme-color" content="#0086cb">
 <link rel="icon" href="assets/favicon.ico" sizes="any">
 <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
 <meta property="og:type" content="website">
-<meta property="og:title" content="keen-pbr-sb — нужные сайты через VPN, остальное напрямую">
-<meta property="og:description" content="Отмечаете YouTube, ChatGPT или соцсети — роутер сам отправляет их через VPN. Банки и госуслуги остаются на обычном канале. Для Keenetic и Netcraze.">
+<meta property="og:title" content="keen-pbr-sb — VPN для сайтов и устройств">
+<meta property="og:description" content="Выбранные сайты или отдельное устройство по IPv4 — через ваш VPN. Настройка в одной панели Keenetic и Netcraze.">
 <meta property="og:image" content="assets/img/dashboard-notifications.webp">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="preload" as="font" type="font/woff2" href="assets/fonts/roboto-cyrillic-400-normal.woff2" crossorigin>
-<link rel="stylesheet" href="assets/style.css?v=20260910-2">
+<link rel="stylesheet" href="assets/style.css?v=20260923">
 </head>
 <body>
 
@@ -27,9 +27,9 @@
     <nav class="nav" id="nav">
       <a href="#why">Зачем это</a>
       <a href="#features">Что умеет</a>
-      <a href="#how">Как работает</a>
+      <a href="#device-vpn">VPN для клиента</a>
       <a href="#shots">Как выглядит</a>
-      <a href="#install">Установка</a>
+      <a href="install.html">Установка</a>
     </nav>
     <div class="hdr__act">
       <button class="iconbtn burger" id="burger" aria-label="Меню" aria-expanded="false">
@@ -54,18 +54,19 @@
       <div>
         <div class="badges" style="margin-bottom:20px">
           <span class="badge badge--ok">Проект живой, обновляется</span>
-          <a class="badge badge--brand" href="https://github.com/blindtechnique/keen-pbr-sb/releases">v3.3.2-sb.12</a>
+          <a class="badge badge--brand" href="https://github.com/blindtechnique/keen-pbr-sb/releases/latest">Latest main · 3.3.2</a>
           <span class="badge badge--warn">Beta</span>
           <span class="badge">Бесплатно, открытый код</span>
         </div>
         <h1>Через VPN — только то, что нужно. Остальное напрямую</h1>
         <p class="hero__lead">
           Отмечаете галочками YouTube, ChatGPT, соцсети — роутер сам отправляет их через ваш VPN.
-          Остальные сайты продолжают открываться обычным путём — без отправки всего домашнего интернета в туннель.
+          Или назначаете VPN отдельному устройству: его IPv4-трафик идёт через один туннель либо группу с резервом.
+          Остальная сеть продолжает следовать вашим правилам.
           После установки повседневная настройка выполняется в браузере, в том числе с телефона.
         </p>
         <div class="hero__cta">
-          <a class="btn btn--primary" href="#install">
+          <a class="btn btn--primary" href="install.html">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v13m0 0 5-5m-5 5-5-5M4 21h16"/></svg>
             Как установить
           </a>
@@ -74,6 +75,7 @@
         <div class="badges">
           <span class="badge">Keenetic и Netcraze</span>
           <span class="badge">Нужен Entware</span>
+          <a class="badge" href="#device-vpn">VPN для устройства</a>
           <span class="badge">Обход блокировок без VPN</span>
           <span class="badge">Русский и английский</span>
           <span class="badge">Светлая и тёмная темы</span>
@@ -351,6 +353,33 @@
   </div>
 </section>
 
+<!-- ─── VPN ДЛЯ УСТРОЙСТВА ─────────────────────────── -->
+<section class="section" id="device-vpn">
+  <div class="wrap">
+    <div class="section__head">
+      <div class="eyebrow">VPN для клиента</div>
+      <h2>Один VPN — всем приложениям выбранного устройства</h2>
+      <p>Телевизор — через отдельный туннель, ноутбук — через группу с резервом. Не нужно перечислять сайты: правило охватывает IPv4-трафик клиента и по умолчанию действует раньше правил сайтов. Остальные устройства продолжают следовать своим настройкам.</p>
+    </div>
+    <div class="cards">
+      <article class="card">
+        <h3>Закрепите адрес</h3>
+        <p>В самом Keenetic/Netcraze закрепите IPv4 за устройством. Это нужно сделать заранее: выбор клиента в нашей панели не меняет DHCP.</p>
+      </article>
+      <article class="card">
+        <h3>Выберите устройство и VPN</h3>
+        <p>В «Правила трафика → VPN для устройств» нажмите «Назначить VPN устройству». Выберите клиента или введите его IPv4, затем укажите готовый VPN либо группу.</p>
+      </article>
+      <article class="card">
+        <h3>Сохраните и проверьте</h3>
+        <p>Примените изменения панели и заново откройте приложение на клиенте. Старые соединения не сбрасываются. Удаление привязки возвращает устройство к остальным правилам.</p>
+      </article>
+    </div>
+    <p style="margin-top:24px"><b>Важно: только закреплённый IPv4.</b> Привязка не следует за MAC при смене адреса, не охватывает IPv6 и не меняет DNS. При отказе VPN действует настроенная политика маршрута; автоматической блокировки прямого доступа эта форма не добавляет.</p>
+    <a class="btn btn--ghost" href="install.html#device-vpn">Настройка и ограничения — по шагам</a>
+  </div>
+</section>
+
 <!-- ─── КАК РАБОТАЕТ ──────────────────────────────── -->
 <section class="section section--alt" id="how">
   <div class="wrap">
@@ -545,79 +574,31 @@
   <div class="wrap">
     <div class="section__head">
       <div class="eyebrow">Установка</div>
-      <h2>Одна команда — и панель открывается в браузере</h2>
-      <p>Установщик сам определит модель роутера, скачает нужную версию, проверит её и спросит, что ещё поставить. Если позже запустить ту же команду ещё раз — она обновит панель, не тронув ваши настройки.</p>
+      <h2>Подготовьте роутер, затем настройте панель</h2>
+      <p>Одной команды недостаточно: сначала нужны Entware, нужные компоненты прошивки и загрузчик с HTTPS. Полная инструкция проведёт от первого SSH-подключения до проверки VPN.</p>
     </div>
-
-    <div class="cards" style="margin-bottom:32px">
-      <article class="card card--wide">
-        <h3>Сначала — компоненты KeeneticOS и Entware</h3>
-        <p style="margin-bottom:14px">В настройках роутера откройте <b>«Управление → Настройки системы → Изменить набор компонентов»</b> и в группе <b>«Пакеты OPKG»</b> установите все три компонента:</p>
-        <ul style="padding-left:22px;line-height:1.7">
-          <li><b>Поддержка открытых пакетов</b>;</li>
-          <li><b>Модули ядра подсистемы Netfilter</b>;</li>
-          <li><b>Пакет расширений Xtables-addons для Netfilter</b>.</li>
-        </ul>
-        <p style="margin-bottom:14px">Они нужны для установки дополнительных программ и работы правил обработки трафика. Даже если Entware уже установлен, проверьте наличие всех трёх. Названия разделов зависят от версии прошивки.</p>
-        <p style="margin-bottom:14px">
-          keen-pbr-sb — это программа для роутера, а роутеру нужно место, куда её ставить. Такое место
-          даёт Entware: небольшая система дополнительных пакетов для Keenetic. Ставится один раз,
-          занимает пару минут и делается через веб-интерфейс роутера. Если Entware у вас уже есть —
-          этот шаг можно пропустить.
-        </p>
-        <div class="more" style="margin-top:0;grid-template-columns:1fr">
-          <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg><span><b>Если у роутера есть свободная встроенная память:</b> <a href="https://help.keenetic.com/hc/ru/articles/360021888880-%D0%A3%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-OPKG-Entware-%D0%BD%D0%B0-%D0%B2%D1%81%D1%82%D1%80%D0%BE%D0%B5%D0%BD%D0%BD%D1%83%D1%8E-%D0%BF%D0%B0%D0%BC%D1%8F%D1%82%D1%8C-%D1%80%D0%BE%D1%83%D1%82%D0%B5%D1%80%D0%B0" rel="noopener nofollow">инструкция Keenetic про установку во встроенную память</a>.</span></div>
-          <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg><span><b>Если памяти мало — понадобится флешка:</b> <a href="https://help.keenetic.com/hc/en-us/articles/360021214160-Installing-the-Entware-repository-package-system-on-a-USB-drive" rel="noopener nofollow">инструкция про установку на USB-накопитель</a>.</span></div>
-          <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg><span><b>Что такое OPKG и зачем он нужен</b> — <a href="https://help.keenetic.com/hc/en-us/articles/360000948719-OPKG" rel="noopener nofollow">общая статья Keenetic</a>. Компонент «Система → OPKG» включается в самом роутере, в разделе обновлений.</span></div>
-          <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg><span><b>Понадобится доступ по SSH</b> — он включается там же, в настройках роутера, вместе с OPKG. Подключаться можно любой программой с поддержкой SSH; в Windows подойдёт встроенная командная строка.</span></div>
-        </div>
-        <p style="margin-top:16px;font-size:15px;color:var(--fg-muted)">
-          Ссылки ведут в базу знаний Keenetic. Проверьте применимость инструкции к своей модели роутера.
-        </p>
-      </article>
-      <article class="card card--wide">
-        <h3>Установите компоненты нужных VPN в KeeneticOS</h3>
-        <p>Перед добавлением WireGuard/AmneziaWG, OpenVPN (<code>.ovpn</code>) или другого штатного туннеля в прошивке должен быть установлен компонент этого протокола. Откройте настройки самого роутера: <b>«Управление → Настройки системы → Обновления и компоненты → Изменить набор компонентов»</b>. Отметьте <b>WireGuard VPN</b>, <b>OpenVPN</b> или другой нужный компонент и примените изменения. Названия разделов могут отличаться в разных версиях прошивки.</p>
-        <p style="margin-top:14px">keen-pbr-sb не устанавливает компоненты прошивки за вас. WG/AWG можно импортировать прямо из нашей панели; OpenVPN и остальные штатные VPN сначала настраиваются в KeeneticOS. Для AmneziaWG 2.0 нужна KeeneticOS 5.1 с поддержкой AWG 2.0 (начиная с 5.1 Alpha 3) или более новая версия.</p>
-        <p style="margin-top:14px"><a href="https://support.keenetic.ru/eaeu/titan/kn-1810/ru/16937-wireguard-vpn.html" rel="noopener">Как установить компонент WireGuard</a> · <a href="https://docs.amnezia.org/documentation/instructions/keenetic-os-awg/" rel="noopener">Совместимость AmneziaWG</a></p>
-      </article>
-    </div>
-
-    <div class="term">
-      <div class="term__bar">
-        <span class="term__dot" style="background:#ff5f57"></span>
-        <span class="term__dot" style="background:#febc2e"></span>
-        <span class="term__dot" style="background:#28c840"></span>
-        <span class="term__ttl">подключитесь к роутеру по SSH и вставьте эту строку</span>
-        <button class="term__copy" id="copy" data-cmd='sh -c "$(wget -qO- https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/main/install.sh)"'>Скопировать</button>
-      </div>
-<pre><span class="p">#</span> sh -c "$(wget -qO- https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/main/install.sh)"</pre>
-    </div>
-
-    <div class="cards" style="margin-top:32px">
+    <div class="cards">
       <article class="card">
-        <h3>Первый запуск — через мастер настройки</h3>
-        <div class="steps" style="margin-top:16px">
-          <div class="step"><p><b>Откройте панель.</b> Установщик покажет адрес — обычно это адрес роутера с номером порта. Логин и пароль можно взять от самого роутера.</p></div>
-          <div class="step"><p><b>Запустите мастер на дашборде.</b> Он проведёт через подключение VPN, выбор сервисов и проверку результата. Позже его можно открыть кнопкой «Мастер настройки» в разделе «VPN, прокси, группы».</p></div>
-          <div class="step"><p><b>Выберите подключение.</b> Вставьте ссылку провайдера и задайте имя либо выберите существующий маршрут. Для WG/AWG, файла или подписки воспользуйтесь кнопкой «Импортировать другой VPN или подписку», затем вернитесь в мастер.</p></div>
-          <div class="step"><p><b>Отметьте нужные сайты.</b> Мастер создаст списки и правила, подберёт или добавит DNS и применит настройки. Не нужно отдельно связывать всё вручную.</p></div>
-          <div class="step"><p><b>Проверьте результат.</b> Введите сайт в карточке «Куда пойдёт этот трафик?» и откройте его на своём устройстве. Другие сервисы позже можно добавить из каталога.</p></div>
-        </div>
+        <h3>1. Подготовка</h3>
+        <p>Проверьте компоненты KeeneticOS, установите Entware и войдите в его SSH от root. Подготовьте curl или wget с сертификатами и проверьте свободное место.</p>
       </article>
-
       <article class="card">
-        <h3>Что ещё предложит установщик</h3>
-        <p style="margin-bottom:14px">Оба компонента — по желанию, панель работает и без них.</p>
-        <div class="more" style="margin-top:0;grid-template-columns:1fr">
-          <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg><span><b>sing-box</b> — нужен для прокси-подключений: VLESS, VMess, Trojan, Shadowsocks, Hysteria2, TUIC, AnyTLS, SOCKS и HTTP(S). Если пользуетесь только VPN из прошивки — не нужен.</span></div>
-          <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg><span><b>nfqws2</b> — обход блокировок без туннеля. Ставится из официального репозитория и только с вашего согласия.</span></div>
-        </div>
-        <p style="margin-top:16px;font-size:15px;color:var(--fg-muted)">Удалить всё можно так же одной командой — роутер вернётся к исходному состоянию.</p>
+        <h3>2. Установка</h3>
+        <p>Скачайте установщик из Latest. Выберите язык, DNS, нужные дополнительные компоненты и вход с паролем роутера или отдельным паролем.</p>
+      </article>
+      <article class="card">
+        <h3>3. Настройка в браузере</h3>
+        <p>Откройте панель, добавьте свой VPN и выберите сайты или устройство. Примените изменения, проверьте доступ с клиента и скачайте резервную копию.</p>
       </article>
     </div>
+    <div class="hero__cta" style="justify-content:flex-start">
+      <a class="btn btn--primary" href="install.html">Открыть пошаговую инструкцию</a>
+      <a class="btn btn--ghost" href="install.html#update">Панель уже установлена: обновление</a>
+    </div>
+    <p>Последний основной выпуск: <a href="https://github.com/blindtechnique/keen-pbr-sb/releases/latest"><b>3.3.2-20260922161337 · Latest main</b></a>. Тестовый канал устанавливается по <a href="https://github.com/blindtechnique/keen-pbr-sb/blob/alpha/README.md#установка-alpha">отдельной инструкции Alpha</a>.</p>
   </div>
 </section>
+
 
 <!-- ─── ЧЕСТНО ────────────────────────────────────── -->
 <section class="section" id="honest">
@@ -680,7 +661,10 @@
         <h4>Проект</h4>
         <ul>
           <li><a href="https://github.com/blindtechnique/keen-pbr-sb" rel="noopener">Исходный код</a></li>
-          <li><a href="https://github.com/blindtechnique/keen-pbr-sb/releases" rel="noopener">Версии и загрузки</a></li>
+          <li><a href="install.html">Пошаговая установка</a></li>
+          <li><a href="install.html#device-vpn">VPN для устройства</a></li>
+          <li><a href="https://github.com/blindtechnique/keen-pbr-sb/releases/latest" rel="noopener">Latest main</a></li>
+          <li><a href="https://github.com/blindtechnique/keen-pbr-sb/blob/alpha/README.md#установка-alpha" rel="noopener">Установка Alpha</a></li>
           <li><a href="https://github.com/blindtechnique/keen-pbr-sb/blob/main/CHANGELOG.md" rel="noopener">Что менялось</a></li>
           <li><a href="https://github.com/blindtechnique/keen-pbr-sb/issues" rel="noopener">Вопросы и проблемы</a></li>
         </ul>
@@ -706,6 +690,6 @@
   <img id="lbimg" src="" alt="">
 </div>
 
-<script src="assets/app.js?v=20260910-2" defer></script>
+<script src="assets/app.js?v=20260923" defer></script>
 </body>
 </html>

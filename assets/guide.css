@@ -1,0 +1,50 @@
+/* Пошаговая инструкция — та же тема, одна читаемая колонка. */
+.guide{max-width:900px;padding-top:50px;padding-bottom:52px}
+.guide__intro{margin-bottom:32px}
+.guide__intro>.eyebrow{display:block;margin-top:24px}
+.guide h1{font-size:clamp(32px,5vw,50px);max-width:22ch;margin-bottom:20px}
+.guide__lead{font-size:21px;color:var(--fg-muted)}
+.guide h2{font-size:clamp(25px,3.6vw,34px)}
+.guide__toc{padding:26px 30px;border:1px solid var(--line);border-radius:var(--radius);background:var(--bg-alt)}
+.guide__toc h2{font-size:22px}
+.guide__toc ol{columns:2;column-gap:36px}
+.guide__toc li{break-inside:avoid}
+.guide__section{padding:42px 0 20px;border-top:1px solid var(--line);margin-top:42px}
+.guide li{padding-left:3px;margin-bottom:12px}
+.guide ol,.guide ul{padding-left:25px}
+.guide p,.guide li,.guide dd{overflow-wrap:break-word}
+.guide-note{padding:18px 22px;margin:22px 0;border-left:4px solid var(--brand);background:var(--brand-lt);border-radius:0 10px 10px 0}
+.guide-note--warning{border-color:var(--warn);background:var(--warn-bg)}
+.guide .term{margin:20px 0;min-width:0}
+.guide .term__bar{flex-wrap:wrap}
+.guide .term__ttl{margin-left:0;color:#b3c7d7;flex:1 1 180px}
+.guide .term__copy{color:#d7e6f2;min-height:36px}
+.guide .term pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:normal}
+.guide pre code{font-size:inherit}
+.guide-choices{margin:22px 0}
+.guide-choices>div{display:grid;grid-template-columns:170px 1fr;gap:22px;padding:20px 0;border-bottom:1px solid var(--line)}
+.guide-choices dt{font-weight:700}
+.guide-choices dd{margin:0}
+.guide-details{border:1px solid var(--line);border-radius:10px;margin:14px 0;padding:0 20px}
+.guide-details summary{cursor:pointer;padding:18px 0;font-weight:500;line-height:1.45}
+.guide-details[open] summary{margin-bottom:4px}
+.guide__help{margin-top:26px}
+.guide-page .ftr p{max-width:none}
+.skip-link{position:absolute;left:16px;top:-90px;padding:10px 18px;background:var(--bg-card);border:2px solid var(--brand);z-index:101}
+.skip-link:focus{top:12px}
+.guide-page :focus-visible{outline:3px solid var(--brand);outline-offset:4px}
+@media(max-width:960px){
+  .guide-page .hdr__in{gap:12px}
+  .guide-page .nav{gap:14px;font-size:14px}
+}
+@media(max-width:760px){
+  .guide{padding-top:30px}
+  .guide__lead{font-size:19px}
+  .guide__toc{padding:22px}
+  .guide__toc ol{columns:1}
+  .guide__section{padding-top:32px;margin-top:32px}
+  .guide-choices>div{grid-template-columns:1fr;gap:8px}
+  .guide-note{padding:16px}
+  .guide-details{padding:0 16px}
+  .guide .term pre{font-size:13px;padding:16px}
+}

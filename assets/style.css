@@ -122,7 +122,7 @@ code,kbd{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-s
 }
 
 /* ── карточки возможностей ─────────────────────────── */
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(316px,1fr));gap:20px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,316px),1fr));gap:20px}
 .card{
   background:var(--bg-card);border:1px solid var(--line);border-radius:var(--radius);
   padding:26px;transition:.18s

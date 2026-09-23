@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="ru" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Установка keen-pbr-sb на Keenetic и Netcraze — пошаговая инструкция</title>
+<meta name="description" content="От подготовки Entware до первого VPN: SSH, HTTPS, ответы установщику, пароль панели, DNS, VPN для устройства и безопасное обновление.">
+<meta name="theme-color" content="#0086cb">
+<link rel="canonical" href="https://blindtechnique.github.io/keen-pbr-sb/install.html">
+<link rel="icon" href="assets/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Установка keen-pbr-sb — шаг за шагом">
+<meta property="og:description" content="Подготовьте роутер, установите панель и выберите VPN для сайтов или устройства.">
+<link rel="preload" as="font" type="font/woff2" href="assets/fonts/roboto-cyrillic-400-normal.woff2" crossorigin>
+<link rel="stylesheet" href="assets/style.css?v=20260923">
+<link rel="stylesheet" href="assets/guide.css?v=20260923">
+</head>
+<body class="guide-page">
+<a class="skip-link" href="#content">К инструкции</a>
+<header class="hdr">
+  <div class="hdr__in">
+    <a class="brand" href="./"><img src="assets/logo.png" alt="" width="32" height="32"><span>KEEN-PBR<b>-SB</b></span></a>
+    <nav class="nav" id="nav" aria-label="Навигация по сайту">
+      <a href="./#features">Возможности</a>
+      <a href="#device-vpn">VPN для устройства</a>
+      <a href="#update">Обновление</a>
+      <a href="#troubleshooting">Если не получилось</a>
+    </nav>
+    <div class="hdr__act">
+      <button class="iconbtn burger" id="burger" type="button" aria-label="Меню" aria-expanded="false" aria-controls="nav">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+      </button>
+      <button class="iconbtn" id="theme" type="button" aria-label="Сменить тему">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+      </button>
+    </div>
+  </div>
+</header>
+
+<main id="content" class="guide wrap">
+  <header class="guide__intro">
+    <a href="./">← О проекте</a>
+    <div class="eyebrow">Keenetic / Netcraze · канал Stable (main)</div>
+    <h1>От подготовки роутера до первого VPN</h1>
+    <p class="guide__lead">Установка состоит из двух частей: сначала подготовим Entware и запустим установщик по SSH, затем настроим VPN в браузере. Команда загрузки — только один из шагов.</p>
+    <p>Для выхода через VPN понадобится ваш профиль, ссылка или подписка. Сам keen-pbr-sb не предоставляет VPN-сервер. Если программа уже установлена, переходите к <a href="#update">обновлению</a>, а не начинайте с нуля.</p>
+    <div class="guide-note"><b>Работайте из домашней сети.</b> Перед началом сохраните настройки Keenetic/Netcraze на компьютер. Если keen-pbr-sb уже есть, скачайте и его резервную копию. Не открывайте SSH и порт панели в интернет ради установки.</div>
+  </header>
+
+  <nav class="guide__toc" aria-label="Шаги инструкции">
+    <h2>Что будем делать</h2>
+    <ol>
+      <li><a href="#prepare">Подготовить Keenetic и Entware</a></li>
+      <li><a href="#ssh">Войти по SSH именно в Entware</a></li>
+      <li><a href="#https">Подготовить загрузку по HTTPS</a></li>
+      <li><a href="#install">Скачать и запустить установщик</a></li>
+      <li><a href="#choices">Ответить на вопросы</a></li>
+      <li><a href="#first-login">Открыть панель и добавить VPN</a></li>
+      <li><a href="#device-vpn">Назначить VPN устройству — по желанию</a></li>
+      <li><a href="#verify">Проверить результат и сохранить копию</a></li>
+    </ol>
+  </nav>
+
+  <section class="guide__section" id="prepare" aria-labelledby="prepare-title">
+    <span class="eyebrow">Шаг 1</span>
+    <h2 id="prepare-title">Подготовьте роутер и Entware</h2>
+    <p><b>Entware</b> — система дополнительных программ, которая размещается на внутренней памяти роутера или USB-накопителе. keen-pbr-sb устанавливается в неё, а не вместо прошивки. Если Entware уже работает, переустанавливать его не нужно.</p>
+    <ol>
+      <li>В веб-интерфейсе самого роутера откройте <b>«Управление → Настройки системы → Изменить набор компонентов»</b>. Названия разделов зависят от версии прошивки.</li>
+      <li>Проверьте компоненты <b>«Поддержка открытых пакетов»</b>, <b>«Модули ядра подсистемы Netfilter»</b> и <b>«Пакет расширений Xtables-addons для Netfilter»</b> в группе OPKG.</li>
+      <li>Установите Entware по инструкции для вашей модели: <a href="https://support.keenetic.com/titan/kn-1811/en/18482-installing-opkg-entware-in-the-router-s-internal-memory.html">во внутреннюю память</a> или <a href="https://support.keenetic.com/titan/kn-1811/en/20980.html">на USB-накопитель</a>. Это официальные инструкции Keenetic; проверьте список поддерживаемых моделей и выбранное устройство в базе знаний.</li>
+      <li>Если будете использовать штатный WireGuard/AmneziaWG или OpenVPN, установите компонент соответствующего VPN в KeeneticOS. Для VLESS и других прокси нужен sing-box — его предложит наш установщик.</li>
+    </ol>
+    <p>Для AmneziaWG 2.0 нужна прошивка с его поддержкой: KeeneticOS 5.1 начиная с Alpha 3 или более новая совместимая версия. Наша панель не добавляет поддержку нового протокола в старую прошивку. <a href="https://docs.amnezia.org/documentation/instructions/keenetic-os-awg/">Проверить совместимость у Amnezia</a>.</p>
+    <div class="guide-note"><b>Проверьте место.</b> Во внутренней памяти его может не хватить для панели, sing-box и резервного IPK. Не форматируйте накопитель с нужными файлами и не удаляйте Entware ради повторной установки. Пакеты выпускаются для AArch64, MIPS и MIPSEL; аппаратные проверки на AArch64 не означают проверку всех моделей.</div>
+  </section>
+
+  <section class="guide__section" id="ssh" aria-labelledby="ssh-title">
+    <span class="eyebrow">Шаг 2</span>
+    <h2 id="ssh-title">Подключитесь к Entware по SSH</h2>
+    <p>На Windows откройте PowerShell или Терминал, на macOS/Linux — Терминал. Пример для роутера с адресом <code>192.168.1.1</code> и SSH Entware на порту <code>222</code>:</p>
+    <div class="term">
+      <div class="term__bar"><span class="term__ttl">На компьютере · замените адрес и порт на свои</span><button class="term__copy" type="button" data-copy-target="cmd-ssh" aria-label="Скопировать пример подключения по SSH">Скопировать</button></div>
+      <pre><code id="cmd-ssh">ssh -p 222 root@192.168.1.1</code></pre>
+    </div>
+    <p>Порт указан в настройке вашего Entware. Обычно это <code>222</code>, когда порт <code>22</code> занят SSH самой прошивки; в другой конфигурации Entware может использовать <code>22</code>. Не путайте их. Введите пароль <b>root Entware</b>, заданный при его установке. Символы пароля при вводе не отображаются — это нормально. Если остался начальный пароль Entware, смените его командой <code>passwd</code>.</p>
+    <p>При первом подключении проверьте адрес и SSH-ключ роутера перед подтверждением. Если программа предупреждает, что ранее сохранённый ключ изменился, не удаляйте его вслепую — сначала выясните причину.</p>
+    <p>В открытой SSH-сессии выполните проверку:</p>
+    <div class="term">
+      <div class="term__bar"><span class="term__ttl">На роутере · только чтение</span><button class="term__copy" type="button" data-copy-target="cmd-check" aria-label="Скопировать проверку Entware">Скопировать</button></div>
+      <pre><code id="cmd-check">id -u
+command -v opkg
+df -h /opt /tmp</code></pre>
+    </div>
+    <p>Ожидается пользователь <code>0</code> и путь к <code>opkg</code> внутри <code>/opt</code>. Если <code>opkg</code> не найден или вместо командной строки Linux открылась консоль Keenetic, вернитесь к настройке Entware. Все следующие команды выполняются <b>на роутере в этой SSH-сессии</b>, не в локальной консоли компьютера.</p>
+  </section>
+
+  <section class="guide__section" id="https" aria-labelledby="https-title">
+    <span class="eyebrow">Шаг 3</span>
+    <h2 id="https-title">Подготовьте HTTPS</h2>
+    <p>Установите загрузчик curl и сертификаты. Символы <code>&amp;&amp;</code> означают: следующая команда выполнится только после успешной предыдущей.</p>
+    <div class="term">
+      <div class="term__bar"><span class="term__ttl">На роутере · подготовка curl</span><button class="term__copy" type="button" data-copy-target="cmd-curl" aria-label="Скопировать установку curl и сертификатов">Скопировать</button></div>
+      <pre><code id="cmd-curl">opkg update &amp;&amp; opkg install curl ca-certificates</code></pre>
+    </div>
+    <p>Если пакетный менеджер завершился ошибкой, не переходите дальше: сохраните сообщение и проверьте доступ в интернет, время роутера и свободное место. Отключать проверку сертификатов не нужно.</p>
+    <details class="guide-details">
+      <summary>Хочу использовать wget вместо curl</summary>
+      <p>Выберите один загрузчик; оба устанавливать не требуется. Для wget нужна версия с HTTPS. Сначала выполните:</p>
+      <div class="term">
+        <div class="term__bar"><span class="term__ttl">На роутере · подготовка wget</span><button class="term__copy" type="button" data-copy-target="cmd-wget" aria-label="Скопировать установку wget с HTTPS">Скопировать</button></div>
+        <pre><code id="cmd-wget">opkg update &amp;&amp; opkg install ca-certificates wget-ssl</code></pre>
+      </div>
+      <p>Только после успешной установки <code>wget-ssl</code> удалите старый вариант командой <code>opkg remove wget-nossl</code>. Если его нет, удалять нечего. Если всё ещё запускается системный wget без HTTPS, проверьте <code>command -v wget</code> и используйте установленный загрузчик из <code>/opt/bin</code>. <a href="https://github.com/Entware/Entware/wiki/Using-HTTPS-with-opkg">Пояснение Entware</a>.</p>
+    </details>
+  </section>
+
+  <section class="guide__section" id="install" aria-labelledby="install-title">
+    <span class="eyebrow">Шаг 4</span>
+    <h2 id="install-title">Запустите установщик последней Stable</h2>
+    <p>Эта команда скачивает установщик из <a href="https://github.com/blindtechnique/keen-pbr-sb/releases/latest">Latest основного канала main</a> и запускает его только при успешной загрузке. Временные файлы размещаются в <code>/tmp</code>, а не в ограниченном разделе <code>/opt</code>.</p>
+    <div class="term">
+      <div class="term__bar"><span class="term__ttl">На роутере · первая установка через curl</span><button class="term__copy" type="button" data-copy-target="cmd-install" aria-label="Скопировать первую установку Stable через curl">Скопировать</button></div>
+      <pre><code id="cmd-install">curl -fL --connect-timeout 15 --max-time 120 --retry 2 -o /tmp/keen-pbr-install.sh https://github.com/blindtechnique/keen-pbr-sb/releases/latest/download/install.sh &amp;&amp; TMPDIR=/tmp KEEN_PBR_UPDATE_RELEASE_TAG= sh /tmp/keen-pbr-install.sh</code></pre>
+    </div>
+    <details class="guide-details">
+      <summary>Та же первая установка через wget</summary>
+      <p>Подходит после подготовки wget с HTTPS на предыдущем шаге.</p>
+      <div class="term">
+        <div class="term__bar"><span class="term__ttl">На роутере · вариант с wget</span><button class="term__copy" type="button" data-copy-target="cmd-install-wget" aria-label="Скопировать первую установку Stable через wget">Скопировать</button></div>
+        <pre><code id="cmd-install-wget">wget -O /tmp/keen-pbr-install.sh -T 30 -t 2 https://github.com/blindtechnique/keen-pbr-sb/releases/latest/download/install.sh &amp;&amp; TMPDIR=/tmp KEEN_PBR_UPDATE_RELEASE_TAG= sh /tmp/keen-pbr-install.sh</code></pre>
+      </div>
+    </details>
+    <p>Установщик определит архитектуру, проверит подпись и контрольную сумму пакета. При ошибке проверки не устанавливайте IPK напрямую через opkg. Для тестового канала используйте <a href="https://github.com/blindtechnique/keen-pbr-sb/blob/alpha/README.md#установка-alpha">отдельную инструкцию Alpha</a>: Latest относится только к main.</p>
+  </section>
+
+  <section class="guide__section" id="choices" aria-labelledby="choices-title">
+    <span class="eyebrow">Шаг 5</span>
+    <h2 id="choices-title">Ответьте на вопросы установщика</h2>
+    <p>Часть вопросов зависит от того, что уже установлено. Читайте название варианта: номера пунктов для нового и уже установленного sing-box отличаются.</p>
+    <dl class="guide-choices">
+      <div><dt>Язык</dt><dd>Выберите <b>1 — Русский</b> или <b>2 — English</b>. Язык панели позже можно изменить отдельно.</dd></div>
+      <div><dt>DNS Override и dnsmasq</dt><dd>Для обычной первой установки выберите <b>Y</b>. Это настраивает DNS роутера для правил по именам сайтов. Выбирайте <b>N</b>, только если уже настроили совместимый dnsmasq вручную. Без работающего dnsmasq первый запуск не продолжится. Если используете AdGuard Home или другую собственную DNS-схему, сначала согласуйте её с <a href="https://github.com/blindtechnique/keen-pbr-sb/blob/main/docs/advanced-use.ru.md#dns-и-списки-сайтов">требованиями проекта</a>, не заменяйте её вслепую.</dd></div>
+      <div><dt>nfqws2</dt><dd>Нужен для попытки обхода блокировок без VPN. Ставится по вашему согласию из официального репозитория; для работы только через VPN можно ответить <b>N</b>. Его можно установить позже из панели.</dd></div>
+      <div><dt>sing-box</dt><dd>Для VLESS, VMess, Trojan, Shadowsocks и других прокси выберите установку предложенной совместимой версии. Уже проверенный установленный sing-box можно оставить. Если используете только штатный WireGuard/AmneziaWG, выберите <b>«Продолжить без sing-box»</b>.</dd></div>
+      <div><dt>Способ входа</dt><dd>Вариант <b>1</b> — вход с логином и паролем администратора Keenetic/Netcraze. Вариант <b>2</b> — отдельные логин и пароль только для keen-pbr-sb. Пароль обязателен; отдельная учётная запись не меняет пароль роутера или SSH.</dd></div>
+    </dl>
+    <div class="guide-note"><b>Дождитесь «Установка завершена».</b> Не закрывайте SSH и не запускайте второй установщик параллельно. При изменении DNS доступ в сеть может кратковременно прерваться. Если появилась ошибка, сохраните её текст и перейдите к <a href="#troubleshooting">подсказкам ниже</a>.</div>
+  </section>
+
+  <section class="guide__section" id="first-login" aria-labelledby="first-login-title">
+    <span class="eyebrow">Шаг 6</span>
+    <h2 id="first-login-title">Откройте панель и добавьте VPN</h2>
+    <ol>
+      <li>На устройстве в домашней сети введите в адресную строку <code>http://192.168.1.1:12121</code>. Замените IP на адрес своего Keenetic/Netcraze. Это отдельная панель, не обычный веб-конфигуратор роутера.</li>
+      <li>Войдите способом, выбранным в установщике. Для входа через Keenetic нужен администратор роутера, не <code>root</code> Entware; для отдельной учётной записи — заданные вами логин и пароль.</li>
+      <li>Откройте мастер на дашборде. Вставьте ссылку VPN, загрузите файл WireGuard/AmneziaWG или выберите уже настроенный маршрут. Подписку можно импортировать в разделе <b>«VPN, прокси, группы»</b>, затем выбрать нужное подключение. Импорт WG/AWG добавит туннель и в панель самого Keenetic/Netcraze.</li>
+      <li>Для <b>отдельных сайтов</b> выберите сервисы в мастере и завершите применение. Мастер создаст списки, правила и необходимые DNS-настройки. Остальные сервисы можно добавить позже из каталога.</li>
+    </ol>
+    <p>Если VPN нужен <b>всему устройству по IPv4</b>, после создания подключения перейдите к следующему шагу. Выбирать все каталоги сайтов не нужно. Если используете только nfqws2, настройте его раздел отдельно — создавать фиктивный VPN не требуется.</p>
+  </section>
+
+  <section class="guide__section" id="device-vpn" aria-labelledby="device-vpn-title">
+    <span class="eyebrow">Шаг 7 · по желанию</span>
+    <h2 id="device-vpn-title">Назначьте VPN конкретному устройству</h2>
+    <p>Телевизор — через один VPN, ноутбук — через группу с резервом. Правило применяется к IPv4-трафику выбранного клиента, независимо от списка сайтов, и по умолчанию имеет приоритет над правилами сайтов. Остальные устройства сохраняют свою маршрутизацию.</p>
+    <ol>
+      <li>В списке клиентов <b>самого Keenetic/Netcraze</b> закрепите за нужным устройством IPv4-адрес — тот, который роутер будет выдавать ему постоянно. Выбор клиента в keen-pbr-sb не делает этого автоматически.</li>
+      <li>В нашей панели откройте <b>«Правила трафика → VPN для устройств»</b> и нажмите <b>«Назначить VPN устройству»</b>.</li>
+      <li>Выберите устройство из списка или введите его закреплённый IPv4. Затем выберите существующий VPN или группу с маршрутом.</li>
+      <li>Сохраните привязку и примените изменения кнопкой панели. Закройте и снова откройте приложение на этом устройстве, чтобы оно создало новые соединения.</li>
+    </ol>
+    <div class="guide-note guide-note--warning"><b>Это не привязка по MAC и не защита IPv6.</b> Если IP изменится, правило не последует за устройством; если этот адрес получит другой клиент, правило начнёт действовать для него. IPv6 остаётся вне этой привязки и может идти другим путём. DHCP и DNS форма не меняет.</div>
+    <p>При отказе VPN действует уже выбранная политика маршрута или группы: прямой резерв не блокируется автоматически. Проверьте её до использования. Правило может затрагивать доступ к другим локальным сетям; нужные исключения настраиваются в общих правилах. Управлять такими изменениями безопаснее с другого устройства.</p>
+    <p>Чтобы отменить настройку, выберите <b>«Убрать привязку»</b> и примените изменения. Клиент вернётся к остальным правилам — не обязательно к прямому выходу. <a href="https://github.com/blindtechnique/keen-pbr-sb/blob/main/docs/DEVICE_VPN.ru.md">Все ограничения и детали проверки</a>.</p>
+  </section>
+
+  <section class="guide__section" id="verify" aria-labelledby="verify-title">
+    <span class="eyebrow">Шаг 8</span>
+    <h2 id="verify-title">Проверьте работу с нужного устройства</h2>
+    <ul>
+      <li>На дашборде убедитесь, что маршрутизация включена, а в <b>«VPN, прокси, группы»</b> нужное подключение доступно. Измеренная задержка и запущенный процесс сами по себе не доказывают путь конкретного сайта.</li>
+      <li>Для правил по сайтам введите адрес в <b>«Куда пойдёт этот трафик?»</b>: посмотрите совпавший список и назначенный VPN или группу. Затем откройте сайт на клиентском устройстве.</li>
+      <li>Для VPN устройства проверьте IPv4-адрес выхода в браузере <b>этого устройства</b> и работу его приложений. При включённом IPv6 отдельно проверьте и его путь. Запрос с самого роутера не подтверждает действие правила по адресу клиента.</li>
+      <li>Проверьте доступ к панели роутера и нужным локальным устройствам. DNS для правил сайтов должен проходить через роутер; собственный Secure DNS браузера или VPN на телефоне может менять результат. Форма VPN для устройства не перенаправляет DNS-запросы самого роутера.</li>
+      <li>Скачайте копию из <b>«Настройки → Обслуживание → Резервное копирование»</b> и храните её на компьютере. В ней могут быть пароли и ключи — не публикуйте файл.</li>
+    </ul>
+    <p>Тайм-аут отдельной пробы на роутере не доказывает, что сайт недоступен с устройства. И успешное открытие сайта не доказывает, что он прошёл через нужный VPN: проверяйте и доступность, и маршрут.</p>
+  </section>
+
+  <section class="guide__section" id="update" aria-labelledby="update-title">
+    <span class="eyebrow">Для уже установленной панели</span>
+    <h2 id="update-title">Как обновляться дальше</h2>
+    <p>Сначала скачайте резервную копию. Откройте <b>«Настройки → Обслуживание»</b>, выберите <b>Stable (main)</b>, сохраните канал, проверьте обновления и подтвердите нужный выпуск. Смена канала не устанавливает пакет сама. Если установленная Alpha новее Stable, панель не делает понижение версии.</p>
+    <p>Для обновления по SSH до текущего выпуска main <b>3.3.2-20260922161337</b> после подготовки HTTPS:</p>
+    <div class="term">
+      <div class="term__bar"><span class="term__ttl">На роутере · обновление до указанного выпуска</span><button class="term__copy" type="button" data-copy-target="cmd-update" aria-label="Скопировать обновление до версии 3.3.2-20260922161337">Скопировать</button></div>
+      <pre><code id="cmd-update">curl -fL --connect-timeout 15 --max-time 120 --retry 2 -o /tmp/keen-pbr-main-20260922161337.sh https://github.com/blindtechnique/keen-pbr-sb/releases/download/v3.3.2-20260922161337/install.sh &amp;&amp; TMPDIR=/tmp KEEN_PBR_INSTALL_LANGUAGE=ru KEEN_PBR_UPDATE_RELEASE_TAG=v3.3.2-20260922161337 sh /tmp/keen-pbr-main-20260922161337.sh --update</code></pre>
+    </div>
+    <p>Это команда для точной версии, не автоматический выбор будущего Latest. Для следующих выпусков используйте проверку обновлений в панели или команду из их описания. <code>--update</code> сохраняет настройки и не повторяет вопросы первой установки. Самостоятельно sing-box и nfqws2 она не обновляет.</p>
+    <div class="guide-note"><b>Связь с панелью может временно пропасть.</b> Не запускайте повторное обновление, пока первое не завершилось. Установщик проверяет диск и RAM до замены пакета. Если места не хватает, он сообщает нужный и доступный объёмы; не обходите эту проверку и не удаляйте текущую резервную копию вручную.</div>
+    <p>Для Alpha используйте <a href="https://github.com/blindtechnique/keen-pbr-sb/blob/alpha/README.md#установка-alpha">актуальные команды ветки Alpha</a>. Оба канала проверяют подписи; недоступность Alpha не означает автоматического перехода на main.</p>
+  </section>
+
+  <section class="guide__section" id="troubleshooting" aria-labelledby="troubleshooting-title">
+    <span class="eyebrow">Если что-то не получилось</span>
+    <h2 id="troubleshooting-title">Остановитесь на первом сообщении об ошибке</h2>
+    <details class="guide-details">
+      <summary>SSH не подключается или opkg не найден</summary>
+      <p>Проверьте, что вы подключены к домашней сети нужного роутера, Entware запущен, а адрес и порт относятся к его SSH. Используйте учётную запись root Entware. Не вводите команды установщика в консоль KeeneticOS.</p>
+    </details>
+    <details class="guide-details">
+      <summary>wget сообщает «not an http or ftp url»</summary>
+      <p>Запущен wget без поддержки HTTPS. Вернитесь к шагу 3: установите wget-ssl и сертификаты либо используйте curl. Если команда всё ещё вызывает системный wget, используйте установленный вариант из /opt/bin. Не заменяйте HTTPS на HTTP.</p>
+    </details>
+    <details class="guide-details">
+      <summary>GitHub не отвечает, загрузка оборвалась или не проходит подпись</summary>
+      <p>Проверьте дату и время роутера, его DNS и доступ к GitHub. Доступность сайта на компьютере ещё не означает доступность с роутера. Сохраните полный текст ошибки: установщик обращается также к API GitHub и серверу файлов релизов. Не закрепляйте случайный IP в hosts и не отключайте TLS или проверку подписи. Повторяйте загрузку после устранения причины, а не устанавливайте неполный файл.</p>
+    </details>
+    <details class="guide-details">
+      <summary>Недостаточно места или оперативной памяти</summary>
+      <p>Сохраните вывод <code>df -h /opt /tmp</code> и <code>free</code>. /opt — место для пакетов, /tmp на таких роутерах обычно использует RAM: свободный диск не заменяет свободную память. Удаляйте только известные вам ненужные файлы; не стирайте каталоги rescue/recovery, настройки и текущий IPK отката. Если непонятно, что занимает место, приложите вывод к обращению за помощью.</p>
+    </details>
+    <details class="guide-details">
+      <summary>После установки панель не открывается или пароль не подходит</summary>
+      <p>Дождитесь завершения установщика и откройте именно <code>http://адрес-роутера:12121</code>, не HTTPS и не адрес другого шлюза. Если порт меняли, используйте свой. Проверьте выбранный способ входа: пароль администратора роутера и пароль root Entware — разные. При неудаче сохраните последние строки установщика; не сбрасывайте Keenetic и не удаляйте Entware.</p>
+    </details>
+    <details class="guide-details">
+      <summary>Сайт открывается, но нужный VPN не используется</summary>
+      <p>Убедитесь, что изменения применены. Проверьте порядок правил, закреплённый IPv4 клиента и выбранный VPN/группу, затем создайте новые соединения в приложении. Привязка устройства не покрывает IPv6; для правил сайтов проверьте DNS роутера и Secure DNS браузера. Диагностика с роутера и доступ с клиентского устройства — разные проверки.</p>
+    </details>
+    <p class="guide__help">Нужна помощь? <a href="https://github.com/blindtechnique/keen-pbr-sb/issues">Создайте обращение</a>: укажите модель, версию KeeneticOS и полный номер сборки keen-pbr-sb, что делали и точную ошибку. Не прикладывайте пароли, VPN-ключи, ссылки подписок или резервную копию целиком.</p>
+  </section>
+</main>
+<footer class="ftr">
+  <div class="wrap">
+    <p><a href="./">О проекте</a> · <a href="https://github.com/blindtechnique/keen-pbr-sb/releases/latest">Latest main</a> · <a href="https://github.com/blindtechnique/keen-pbr-sb/blob/main/CHANGELOG.md">Что нового</a> · <a href="https://github.com/blindtechnique/keen-pbr-sb/blob/alpha/README.md#установка-alpha">Установка Alpha</a></p>
+    <p>keen-pbr-sb — независимый проект для Keenetic и Netcraze. Автор — <a href="https://github.com/blindtechnique">blindtechnique</a>. Открытый код, GPL-3.0.</p>
+  </div>
+</footer>
+<script src="assets/app.js?v=20260923"></script>
+</body>
+</html>

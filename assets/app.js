@@ -64,30 +64,45 @@
     lbimg.src = '';
     document.body.style.overflow = '';
   };
-  lb.addEventListener('click', closeLb);
+  lb?.addEventListener('click', closeLb);
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && !lb.hidden) closeLb();
+    if (e.key === 'Escape' && lb && !lb.hidden) closeLb();
   });
 
   /* ── копирование команды ──────────────────────── */
-  const copy = document.getElementById('copy');
-  copy.addEventListener('click', async () => {
-    const text = copy.dataset.cmd;
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      const ta = document.createElement('textarea');
-      ta.value = text;
-      ta.style.position = 'fixed';
-      ta.style.opacity = '0';
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand('copy');
-      ta.remove();
-    }
-    const was = copy.textContent;
-    copy.textContent = 'Скопировано';
-    setTimeout(() => (copy.textContent = was), 1800);
+  document.querySelectorAll('[data-copy-target], [data-cmd]').forEach((copy) => {
+    copy.setAttribute('aria-live', 'polite');
+    copy.addEventListener('click', async () => {
+      const source = document.getElementById(copy.dataset.copyTarget);
+      const text = source?.textContent ?? copy.dataset.cmd;
+      if (!text || copy.disabled) return;
+      const was = copy.textContent;
+      copy.disabled = true;
+      let copied = false;
+      try {
+        await navigator.clipboard.writeText(text);
+        copied = true;
+      } catch {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+          copied = document.execCommand('copy');
+        } catch {
+          copied = false;
+        } finally {
+          ta.remove();
+        }
+      }
+      copy.textContent = copied ? 'Скопировано' : 'Выделите команду вручную';
+      setTimeout(() => {
+        copy.textContent = was;
+        copy.disabled = false;
+      }, 1800);
+    });
   });
 
 })();
