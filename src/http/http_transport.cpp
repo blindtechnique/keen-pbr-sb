@@ -55,6 +55,7 @@ struct TransferContext {
     int mark_errno{0};
     int bind_errno{0};
     size_t header_bytes{0};
+    size_t body_bytes{0};
     bool response_limit_exceeded{false};
     // The address the destination filter refused, kept so the failure says
     // which one it was. Without it curl reports a plain connection failure and
@@ -103,12 +104,17 @@ size_t write_callback(char* data, size_t size, size_t count,
     }
     const size_t total = size * count;
     if (context->request->discard_body) return total;
-    if (total > context->request->max_response_size - context->response->body.size()) {
+    if (total > context->request->max_response_size - context->body_bytes) {
         context->response_limit_exceeded = true;
         return 0;
     }
     try {
-        context->response->body.append(data, total);
+        if (context->request->body_sink) {
+            context->request->body_sink(data, total);
+        } else {
+            context->response->body.append(data, total);
+        }
+        context->body_bytes += total;
         return total;
     } catch (...) {
         context->callback_failure =
@@ -218,13 +224,14 @@ curl_socket_t opensocket_callback(void* opaque, curlsocktype,
     }
     return ::socket(address->family, address->socktype, address->protocol);
 }
-void restrict_protocols(CURL* curl) {
+void restrict_protocols(CURL* curl, bool https_only) {
 #if LIBCURL_VERSION_NUM >= 0x075500
-    setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https");
-    setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
+    setopt(curl, CURLOPT_PROTOCOLS_STR, https_only ? "https" : "http,https");
+    setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, https_only ? "https" : "http,https");
 #else
-    setopt(curl, CURLOPT_PROTOCOLS, static_cast<long>(CURLPROTO_HTTP | CURLPROTO_HTTPS));
-    setopt(curl, CURLOPT_REDIR_PROTOCOLS, static_cast<long>(CURLPROTO_HTTP | CURLPROTO_HTTPS));
+    const long protocols = https_only ? CURLPROTO_HTTPS : CURLPROTO_HTTP | CURLPROTO_HTTPS;
+    setopt(curl, CURLOPT_PROTOCOLS, protocols);
+    setopt(curl, CURLOPT_REDIR_PROTOCOLS, protocols);
 #endif
 }
 
@@ -279,7 +286,7 @@ HttpTransportResponse LibcurlHttpTransport::perform(const HttpTransportRequest& 
         setopt(curl.get(), CURLOPT_XFERINFODATA, &context);
     }
     if (!request.discard_body && !request.head_only) setopt(curl.get(), CURLOPT_MAXFILESIZE_LARGE, static_cast<curl_off_t>(request.max_response_size));
-    restrict_protocols(curl.get());
+    restrict_protocols(curl.get(), request.https_only);
     HeaderList headers;
     for (const auto& header : request.headers) {
         curl_slist* appended = curl_slist_append(headers.get(), header.c_str());

@@ -1514,6 +1514,50 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/system/update/transport:
+    get:
+      summary: Read update download path and applied VPN/group choices
+      operationId: getSystemUpdateTransport
+      responses:
+        "200":
+          description: Download preference, independent of routing drafts
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpdateTransportOptions"
+    post:
+      summary: Save update download path without applying routing or installing
+      description: >
+        An empty outbound uses the ordinary router path. A selected interface
+        or group must exist in the applied configuration. Downloads fail closed
+        if that path is unavailable. DNS resolution still uses the router DNS.
+      operationId: postSystemUpdateTransport
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateTransportPreference"
+      responses:
+        "200":
+          description: Saved download preference
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpdateTransportPreference"
+        "400":
+          description: Invalid outbound tag
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Update/recovery in progress or outbound no longer applied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/system/update/channel:
     post:
       summary: Save the preferred update channel without installing
@@ -4188,7 +4232,7 @@ components:
         command:
           type: string
           description: Required by `service`. Anything else is a 400.
-          enum: [start, stop, restart, reload]
+          enum: [start, stop, restart]
         force:
           type: boolean
           default: false
@@ -5182,6 +5226,38 @@ components:
             - never_captured
             - package_unverified
             - snapshot_unverified
+
+    UpdateTransportPreference:
+      type: object
+      additionalProperties: false
+      required: [outbound]
+      properties:
+        outbound:
+          type: string
+          maxLength: 24
+          description: Applied outbound tag; empty means ordinary router path
+
+    UpdateTransportOptions:
+      type: object
+      required: [outbound, options, options_available]
+      properties:
+        outbound:
+          type: string
+        options_available:
+          type: boolean
+          description: >
+            False when active VPN/group discovery is unavailable. The saved
+            outbound is still returned and never reset to the ordinary path.
+        options:
+          type: array
+          items:
+            type: object
+            required: [tag, name]
+            properties:
+              tag:
+                type: string
+              name:
+                type: string
 
     UpdateChannelPreference:
       type: object

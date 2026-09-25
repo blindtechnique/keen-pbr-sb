@@ -162,22 +162,26 @@ esac
         self.assertFalse((self.rescue / "candidate.ipk").exists())
         self.assert_unchanged()
 
-    def test_channel_preference_survives_update_and_old_snapshot_restore(self):
+    def test_update_preferences_survive_update_and_old_snapshot_restore(self):
         # PREVIOUS_CONFIG was captured before the preference existed. Adding a
         # required inventory record would make those deployed snapshots invalid.
-        preference = self.config / "update-channel"
-        preference.write_text("alpha\n")
+        preferences = {"update-channel": "alpha\n", "update-outbound": "group\n"}
+        for name, value in preferences.items():
+            (self.config / name).write_text(value)
         result = self.run_rescue('restore_config "$PREVIOUS_CONFIG"')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(preference.read_text(), "alpha\n")
+        for name, value in preferences.items():
+            self.assertEqual((self.config / name).read_text(), value)
         result = self.stage()
         self.assertEqual(result.returncode, 0, result.stderr)
         result = self.run_rescue("promote_candidate")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(preference.read_text(), "alpha\n")
+        for name, value in preferences.items():
+            self.assertEqual((self.config / name).read_text(), value)
         result = self.run_rescue('restore_config "$PREVIOUS_CONFIG"')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(preference.read_text(), "alpha\n")
+        for name, value in preferences.items():
+            self.assertEqual((self.config / name).read_text(), value)
 
     def test_low_temporary_space_and_low_ram_are_distinguished(self):
         for extra, kind in (({"SPACE_TMP_FREE": "512"}, "temporary"), ({}, "memory")):

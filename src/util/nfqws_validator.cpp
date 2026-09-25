@@ -5,6 +5,7 @@
 #include <charconv>
 #include <cctype>
 #include <map>
+#include <set>
 #include <sstream>
 #include <string_view>
 
@@ -461,10 +462,19 @@ std::optional<PathReference> input_path_reference(const std::string& token) {
                              std::string(lua)};
     }
     if (token.rfind("--blob=", 0) == 0) {
-        const auto separator = token.find(":@");
+        const auto separator = token.find(':');
         if (separator != std::string::npos) {
-            return PathReference{"--blob", token.substr(separator + 2),
-                                 token.substr(0, separator + 2)};
+            const auto source = token.substr(separator + 1);
+            if (source.rfind("0x", 0) == 0) return std::nullopt;
+            auto file = separator + 1;
+            if (!source.empty() && source.front() == '+') {
+                const auto at = token.find('@', file);
+                if (at == std::string::npos) return std::nullopt;
+                file = at + 1;
+            } else if (!source.empty() && source.front() == '@') {
+                ++file;
+            }
+            return PathReference{"--blob", token.substr(file), token.substr(0, file)};
         }
     }
     return std::nullopt;
@@ -802,6 +812,21 @@ bool range_set_contains(const std::vector<NfqwsPpePortRange>& ranges,
     });
 }
 
+bool range_set_covers(const std::vector<NfqwsPpePortRange>& declared,
+                      const std::vector<NfqwsPpePortRange>& active) {
+    // Both inputs are sorted and merged, including adjacent ranges. Prove
+    // containment without enumerating ports or bridging a hole in TCP_PORTS.
+    auto covering = declared.begin();
+    for (const auto& range : active) {
+        while (covering != declared.end() && covering->last < range.first)
+            ++covering;
+        if (covering == declared.end() || covering->first > range.first ||
+            covering->last < range.last)
+            return false;
+    }
+    return true;
+}
+
 NfqwsPpePortContract unavailable_ppe_contract(std::string reason,
                                                int queue_number = 300) {
     NfqwsPpePortContract result;
@@ -861,7 +886,48 @@ void append_tokens(std::vector<std::string>& output,
 std::vector<ConfigValidationIssue> validate_nfqws_candidate(
     const std::string& content,
     const NfqwsPathResolver& resolve_path) {
-    return validate_parsed_candidate(parse_candidate(content), resolve_path);
+    auto issues = validate_parsed_candidate(parse_candidate(content), resolve_path);
+    if (!issues.empty()) return issues;
+    // Inspect the actual expanded invocation. For example NFQWS_EXTRA_ARGS
+    // appears in both TCP and QUIC profiles: a blob there is declared twice.
+    // Blobs are global in nfqws2; a --new boundary does NOT reset this registry.
+    std::set<std::string> blobs{"fake_default_http", "fake_default_tls", "fake_default_quic"};
+    for (const auto& token : build_nfqws_dry_run_args(content, 300, resolve_path)) {
+        if (token.rfind("--lua-desync=", 0) == 0 || token.rfind("--dpi-desync=", 0) == 0) {
+            const auto value = token.substr(token.find('=') + 1);
+            if (value.empty() || value.front() == ':')
+                issues.push_back({"NFQWS_ARGS", "desync action name is empty", "nfqws.action.empty", {}});
+        }
+        if (token.rfind("--blob=", 0) != 0) continue;
+        const auto separator = token.find(':', 7);
+        const auto name = token.substr(7, separator == std::string::npos ? separator : separator - 7);
+        const auto source = separator == std::string::npos ? std::string{} : token.substr(separator + 1);
+        const auto identifier = [](const std::string& value) {
+            return !value.empty() && (std::isalpha(static_cast<unsigned char>(value.front())) || value.front() == '_') &&
+                std::all_of(value.begin(), value.end(), [](unsigned char ch) { return std::isalnum(ch) || ch == '_'; });
+        };
+        bool source_valid = false;
+        if (source.rfind("0x", 0) == 0) {
+            source_valid = source.size() > 2 && source.size() % 2 == 0 &&
+                std::all_of(source.begin() + 2, source.end(), [](unsigned char ch) { return std::isxdigit(ch) != 0; });
+        } else {
+            const auto at = source.find('@');
+            source_valid = !source.empty() && ((source.front() != '+' && source.front() != '@') ||
+                (at != std::string::npos && at + 1 < source.size() &&
+                (at == 0 || (source.front() == '+' && at > 1 &&
+                 std::all_of(source.begin() + 1, source.begin() + static_cast<std::ptrdiff_t>(at),
+                     [](unsigned char ch) { return std::isdigit(ch) != 0; })))));
+        }
+        if (!identifier(name) || !source_valid) {
+            issues.push_back({"NFQWS_BASE_ARGS/--blob", "invalid blob declaration: " + name, "nfqws.blob.invalid", {{"name", name}}});
+        } else if (!blobs.insert(name).second) {
+            issues.push_back({"NFQWS_BASE_ARGS/--blob", "duplicate blob in expanded command: " + name, "nfqws.blob.duplicate", {{"name", name}}});
+        }
+    }
+    // Do not infer all available Lua functions/blobs from regexes: Lua can
+    // define them dynamically, and compressed/custom libraries are valid.
+    // The installed engine's existing dry-run remains a separate check.
+    return issues;
 }
 
 std::string nfqws_config_without_version_metadata(const std::string& content) {
@@ -1070,11 +1136,13 @@ NfqwsPpePortContract extract_nfqws_ppe_port_contract(
         return unavailable_ppe_contract(
             "TCP_PORTS is missing or invalid", queue_number);
     }
-    if (active_tcp != *declared_tcp) {
+    if (!range_set_covers(*declared_tcp, active_tcp)) {
         return unavailable_ppe_contract(
-            "active TCP filters do not exactly match TCP_PORTS", queue_number);
+            "TCP_PORTS does not cover every active TCP filter", queue_number);
     }
 
+    // Stock nfqws2 queues additional ports without an action-bearing profile.
+    // They are not part of our PPE selector: retain only the active subset.
     const auto chunks = chunk_ppe_tcp_ranges(active_tcp);
     if (!chunks.has_value()) {
         return unavailable_ppe_contract(

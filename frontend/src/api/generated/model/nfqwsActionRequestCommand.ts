@@ -16,5 +16,4 @@ export const NfqwsActionRequestCommand = {
   start: 'start',
   stop: 'stop',
   restart: 'restart',
-  reload: 'reload',
 } as const;

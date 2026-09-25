@@ -6,7 +6,6 @@ import {
   DownloadIcon,
   EraserIcon,
   ExternalLinkIcon,
-  FileCogIcon,
   FilePlusIcon,
   LoaderCircleIcon,
   PlayIcon,
@@ -851,23 +850,6 @@ export function NfqwsPage() {
                 </Tooltip>
                 <NfqwsMaintenanceMenu
                   items={[
-                    {
-                      key: "reload",
-                      icon: FileCogIcon,
-                      label: t("nfqws.reload"),
-                      hint: t("nfqws.serviceHelp.reload"),
-                      disabled: operation.pending,
-                      onSelect: () =>
-                        void runOperation(
-                          t("nfqws.reload"),
-                          () =>
-                            nfqwsAction({
-                              action: "service",
-                              command: "reload",
-                            }),
-                          t("nfqws.operationCompleted")
-                        ),
-                    },
                     {
                       key: "captureRestorePoint",
                       icon: BookmarkIcon,

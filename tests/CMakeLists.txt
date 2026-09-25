@@ -222,6 +222,7 @@ add_executable(keen-pbr-tests
   test_rescue_update.cpp
   test_ssh_boot_guard.cpp
   test_rescue_integrity.cpp
+  test_update_download_transport.cpp
   test_api_static.cpp
   test_resolver_health.cpp
   test_runtime_resolver_generation_snapshot.cpp
@@ -397,6 +398,7 @@ add_executable(keen-pbr-tests
   ../src/http/http_client.cpp
   ../src/api/update_version.cpp
   ../src/http/http_transport.cpp
+  ../src/update/download_transport.cpp
   ../src/http/curl_runtime.cpp
   ../src/keenetic/ndms_rci_json_resource.cpp
   ../src/keenetic/ndms_interface_resource.cpp

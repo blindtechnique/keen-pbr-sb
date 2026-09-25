@@ -1393,7 +1393,7 @@ namespace api {
 
     enum class NfqwsActionRequestCategory : int { CONFIG, LIST, LOG, LUA };
 
-    enum class Command : int { RELOAD, RESTART, START, STOP };
+    enum class Command : int { RESTART, START, STOP };
 
     enum class NfqwsFileEntryCategory : int { LIST, LUA };
 
@@ -2547,6 +2547,21 @@ namespace api {
         bool started = false;
     };
 
+    struct Option {
+        std::string name;
+        std::string tag;
+    };
+
+    struct UpdateTransportOptions {
+        std::vector<Option> options;
+        bool options_available = false;
+        std::string outbound;
+    };
+
+    struct UpdateTransportPreference {
+        std::string outbound;
+    };
+
     struct ApiTypes {
         std::optional<ApiConfig> api_config;
         std::optional<AuthCredentials> auth_credentials;
@@ -2844,6 +2859,8 @@ namespace api {
         std::optional<UiPreferences> ui_preferences_config;
         std::optional<UpdateChannelPreference> update_channel_preference;
         std::optional<UpdateStartedResponse> update_started_response;
+        std::optional<UpdateTransportOptions> update_transport_options;
+        std::optional<UpdateTransportPreference> update_transport_preference;
         std::optional<ValidationErrorElement> validation_error;
         std::optional<Vless> vless_reality_spec;
     };
@@ -3562,6 +3579,15 @@ void to_json(json & j, const UpdateChannelPreference & x);
 
 void from_json(const json & j, UpdateStartedResponse & x);
 void to_json(json & j, const UpdateStartedResponse & x);
+
+void from_json(const json & j, Option & x);
+void to_json(json & j, const Option & x);
+
+void from_json(const json & j, UpdateTransportOptions & x);
+void to_json(json & j, const UpdateTransportOptions & x);
+
+void from_json(const json & j, UpdateTransportPreference & x);
+void to_json(json & j, const UpdateTransportPreference & x);
 
 void from_json(const json & j, ApiTypes & x);
 void to_json(json & j, const ApiTypes & x);
@@ -8675,6 +8701,39 @@ namespace api {
         j["started"] = x.started;
     }
 
+    inline void from_json(const json & j, Option& x) {
+        x.name = j.at("name").get<std::string>();
+        x.tag = j.at("tag").get<std::string>();
+    }
+
+    inline void to_json(json & j, const Option & x) {
+        j = json::object();
+        j["name"] = x.name;
+        j["tag"] = x.tag;
+    }
+
+    inline void from_json(const json & j, UpdateTransportOptions& x) {
+        x.options = j.at("options").get<std::vector<Option>>();
+        x.options_available = j.at("options_available").get<bool>();
+        x.outbound = j.at("outbound").get<std::string>();
+    }
+
+    inline void to_json(json & j, const UpdateTransportOptions & x) {
+        j = json::object();
+        j["options"] = x.options;
+        j["options_available"] = x.options_available;
+        j["outbound"] = x.outbound;
+    }
+
+    inline void from_json(const json & j, UpdateTransportPreference& x) {
+        x.outbound = j.at("outbound").get<std::string>();
+    }
+
+    inline void to_json(json & j, const UpdateTransportPreference & x) {
+        j = json::object();
+        j["outbound"] = x.outbound;
+    }
+
     inline void from_json(const json & j, ApiTypes& x) {
         x.api_config = get_stack_optional<ApiConfig>(j, "ApiConfig");
         x.auth_credentials = get_stack_optional<AuthCredentials>(j, "AuthCredentials");
@@ -8972,6 +9031,8 @@ namespace api {
         x.ui_preferences_config = get_stack_optional<UiPreferences>(j, "UiPreferencesConfig");
         x.update_channel_preference = get_stack_optional<UpdateChannelPreference>(j, "UpdateChannelPreference");
         x.update_started_response = get_stack_optional<UpdateStartedResponse>(j, "UpdateStartedResponse");
+        x.update_transport_options = get_stack_optional<UpdateTransportOptions>(j, "UpdateTransportOptions");
+        x.update_transport_preference = get_stack_optional<UpdateTransportPreference>(j, "UpdateTransportPreference");
         x.validation_error = get_stack_optional<ValidationErrorElement>(j, "ValidationError");
         x.vless_reality_spec = get_stack_optional<Vless>(j, "VlessRealitySpec");
     }
@@ -9274,6 +9335,8 @@ namespace api {
         j["UiPreferencesConfig"] = x.ui_preferences_config;
         j["UpdateChannelPreference"] = x.update_channel_preference;
         j["UpdateStartedResponse"] = x.update_started_response;
+        j["UpdateTransportOptions"] = x.update_transport_options;
+        j["UpdateTransportPreference"] = x.update_transport_preference;
         j["ValidationError"] = x.validation_error;
         j["VlessRealitySpec"] = x.vless_reality_spec;
     }
@@ -11047,8 +11110,7 @@ namespace api {
     }
 
     inline void from_json(const json & j, Command & x) {
-        if (j == "reload") x = Command::RELOAD;
-        else if (j == "restart") x = Command::RESTART;
+        if (j == "restart") x = Command::RESTART;
         else if (j == "start") x = Command::START;
         else if (j == "stop") x = Command::STOP;
         else { throw std::runtime_error("Cannot deserialize to enumeration \"Command\""); }
@@ -11056,7 +11118,6 @@ namespace api {
 
     inline void to_json(json & j, const Command & x) {
         switch (x) {
-            case Command::RELOAD: j = "reload"; break;
             case Command::RESTART: j = "restart"; break;
             case Command::START: j = "start"; break;
             case Command::STOP: j = "stop"; break;

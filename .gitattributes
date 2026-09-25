@@ -13,6 +13,7 @@ Makefile text eol=lf
 
 # The zapret2 semantic fixture is hash-pinned to exact upstream LF bytes.
 /tests/fixtures/zapret2-v1.0.3/** text eol=lf
+/tests/fixtures/zapret2-v1.0.5.2/** text eol=lf
 
 /packages/**/files/** text eol=lf
 # nfqws packet captures are opaque binary protocol fixtures.  The broader

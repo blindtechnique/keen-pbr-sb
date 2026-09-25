@@ -1917,6 +1917,11 @@ std::string run_nfqws_init_script(const std::string& action, int& status) {
 }
 
 std::string run_nfqws_service_command(const std::string& command, int& status) {
+    // nfqws2-keenetic 1.3.1 removed reload: an unknown init action may print
+    // usage and still exit zero. Reject it before touching hooks or processes.
+    if (command != "start" && command != "stop" && command != "restart")
+        throw ApiError("unsupported nfqws service command", 400);
+
     // Optional extension of the vendor's TCP observation window. Remove our
     // late reply hooks before vendor stop/start can recreate its early hook;
     // rebuild after every service action, including update/rollback, without making
@@ -1940,11 +1945,6 @@ std::string run_nfqws_service_command(const std::string& command, int& status) {
             }
         }
     } tcp_window_refresh;
-
-    if (command == "reload") {
-        repair_nfqws_pidfile();
-        return run_nfqws_init_script("reload", status);
-    }
 
     if (command == "start") {
         auto output = run_nfqws_init_script("start", status);
@@ -3473,7 +3473,7 @@ void register_nfqws_handler_impl(
         }
         if (action == "service") {
             const auto command = request.value("command", std::string{});
-            if (command != "start" && command != "stop" && command != "restart" && command != "reload")
+            if (command != "start" && command != "stop" && command != "restart")
                 throw ApiError("unsupported nfqws service command", 400);
             if (!fs::exists(kInit)) throw ApiError("nfqws2 is not installed", 409);
             const std::lock_guard lock(nfqws_operation_mutex());

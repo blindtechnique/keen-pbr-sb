@@ -140,7 +140,9 @@ import type {
   TunnelProbeHostsResponse,
   TunnelProbeStateResponse,
   UpdateChannelPreference,
-  UpdateStartedResponse
+  UpdateStartedResponse,
+  UpdateTransportOptions,
+  UpdateTransportPreference
 } from './model';
 
 import { apiFetch } from '../client';
@@ -3854,6 +3856,214 @@ export const usePostSystemUpdate = <TError = ErrorResponse,
         TContext
       > => {
       return useMutation(getPostSystemUpdateMutationOptions(options), queryClient);
+    }
+
+/**
+ * @summary Read update download path and applied VPN/group choices
+ */
+export type getSystemUpdateTransportResponse200 = {
+  data: UpdateTransportOptions
+  status: 200
+}
+
+export type getSystemUpdateTransportResponseSuccess = (getSystemUpdateTransportResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getSystemUpdateTransportResponse = (getSystemUpdateTransportResponseSuccess)
+
+export const getGetSystemUpdateTransportUrl = () => {
+
+
+
+
+  return `/api/system/update/transport`
+}
+
+export const getSystemUpdateTransport = async ( options?: RequestInit): Promise<getSystemUpdateTransportResponse> => {
+
+  return apiFetch<getSystemUpdateTransportResponse>(getGetSystemUpdateTransportUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetSystemUpdateTransportQueryKey = () => {
+    return [
+    `/api/system/update/transport`
+    ] as const;
+    }
+
+
+export const getGetSystemUpdateTransportQueryOptions = <TData = Awaited<ReturnType<typeof getSystemUpdateTransport>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemUpdateTransport>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetSystemUpdateTransportQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getSystemUpdateTransport>>> = ({ signal }) => getSystemUpdateTransport({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getSystemUpdateTransport>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetSystemUpdateTransportQueryResult = NonNullable<Awaited<ReturnType<typeof getSystemUpdateTransport>>>
+export type GetSystemUpdateTransportQueryError = unknown
+
+
+export function useGetSystemUpdateTransport<TData = Awaited<ReturnType<typeof getSystemUpdateTransport>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemUpdateTransport>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getSystemUpdateTransport>>,
+          TError,
+          Awaited<ReturnType<typeof getSystemUpdateTransport>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetSystemUpdateTransport<TData = Awaited<ReturnType<typeof getSystemUpdateTransport>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemUpdateTransport>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getSystemUpdateTransport>>,
+          TError,
+          Awaited<ReturnType<typeof getSystemUpdateTransport>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetSystemUpdateTransport<TData = Awaited<ReturnType<typeof getSystemUpdateTransport>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemUpdateTransport>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Read update download path and applied VPN/group choices
+ */
+
+export function useGetSystemUpdateTransport<TData = Awaited<ReturnType<typeof getSystemUpdateTransport>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemUpdateTransport>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetSystemUpdateTransportQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
+ * An empty outbound uses the ordinary router path. A selected interface or group must exist in the applied configuration. Downloads fail closed if that path is unavailable. DNS resolution still uses the router DNS.
+
+ * @summary Save update download path without applying routing or installing
+ */
+export type postSystemUpdateTransportResponse200 = {
+  data: UpdateTransportPreference
+  status: 200
+}
+
+export type postSystemUpdateTransportResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postSystemUpdateTransportResponse409 = {
+  data: ErrorResponse
+  status: 409
+}
+
+export type postSystemUpdateTransportResponseSuccess = (postSystemUpdateTransportResponse200) & {
+  headers: Headers;
+};
+export type postSystemUpdateTransportResponseError = (postSystemUpdateTransportResponse400 | postSystemUpdateTransportResponse409) & {
+  headers: Headers;
+};
+
+export type postSystemUpdateTransportResponse = (postSystemUpdateTransportResponseSuccess | postSystemUpdateTransportResponseError)
+
+export const getPostSystemUpdateTransportUrl = () => {
+
+
+
+
+  return `/api/system/update/transport`
+}
+
+export const postSystemUpdateTransport = async (updateTransportPreference: UpdateTransportPreference, options?: RequestInit): Promise<postSystemUpdateTransportResponse> => {
+
+  return apiFetch<postSystemUpdateTransportResponse>(getPostSystemUpdateTransportUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      updateTransportPreference,)
+  }
+);}
+
+
+
+
+export const getPostSystemUpdateTransportMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSystemUpdateTransport>>, TError,{data: UpdateTransportPreference}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postSystemUpdateTransport>>, TError,{data: UpdateTransportPreference}, TContext> => {
+
+const mutationKey = ['postSystemUpdateTransport'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postSystemUpdateTransport>>, {data: UpdateTransportPreference}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postSystemUpdateTransport(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostSystemUpdateTransportMutationResult = NonNullable<Awaited<ReturnType<typeof postSystemUpdateTransport>>>
+    export type PostSystemUpdateTransportMutationBody = UpdateTransportPreference
+    export type PostSystemUpdateTransportMutationError = ErrorResponse
+
+    /**
+ * @summary Save update download path without applying routing or installing
+ */
+export const usePostSystemUpdateTransport = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSystemUpdateTransport>>, TError,{data: UpdateTransportPreference}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postSystemUpdateTransport>>,
+        TError,
+        {data: UpdateTransportPreference},
+        TContext
+      > => {
+      return useMutation(getPostSystemUpdateTransportMutationOptions(options), queryClient);
     }
 
 /**

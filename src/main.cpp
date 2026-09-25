@@ -31,6 +31,7 @@
 #include "daemon/daemon.hpp"
 #include "log/logger.hpp"
 #include "http/curl_runtime.hpp"
+#include "update/download_transport.hpp"
 #include "ipc/control_client.hpp"
 #include "ipc/resolver_fallback.hpp"
 #include "util/daemon_signals.hpp"
@@ -128,6 +129,9 @@ struct CliOptions {
     bool run_test_routing{false};
     std::string test_routing_target;
     bool recover_persistent_state{false};
+    bool fetch_update{false};
+    std::string update_url;
+    std::string update_output;
     bool recovery_incompatible_option{false};
     bool show_help{false};
     bool show_version{false};
@@ -145,7 +149,7 @@ struct CliOptions {
         return download_lists || generate_resolver_config ||
                resolver_config_hash || run_service || run_status ||
                run_test_routing || run_scan_tunnel_candidates ||
-               recover_persistent_state;
+               recover_persistent_state || fetch_update;
     }
 };
 
@@ -165,6 +169,7 @@ void print_usage(const char* argv0) {
               << "  --help             Show this help and exit\n"
               << "\n"
               << "Commands:\n"
+              << "  fetch-update <https-url> <file>    Download an update through the selected VPN/group\n"
               << "  service                            Start the routing service (foreground)\n"
               << "  status                             Show routing/firewall status and exit\n"
               << "  download                           Download all configured lists to cache and exit\n"
@@ -227,6 +232,12 @@ CliOptions parse_args(int argc, char* argv[]) {
             opts.show_help = true;
         } else if (std::strcmp(argv[i], "--version") == 0 || std::strcmp(argv[i], "-v") == 0) {
             opts.show_version = true;
+        } else if (std::strcmp(argv[i], "fetch-update") == 0) {
+            if (i + 2 >= argc || opts.fetch_update)
+                throw std::invalid_argument("fetch-update requires one HTTPS URL and output file");
+            opts.fetch_update = true;
+            opts.update_url = argv[++i];
+            opts.update_output = argv[++i];
         } else if (std::strcmp(argv[i], "service") == 0) {
             opts.run_service = true;
         } else if (std::strcmp(argv[i], "status") == 0) {
@@ -347,6 +358,21 @@ int main(int argc, char* argv[]) {
 
         if (opts.show_help) {
             print_usage(argv[0]);
+            return 0;
+        }
+
+        if (opts.fetch_update) {
+            keen_pbr3::CurlRuntime curl_runtime;
+            if (opts.run_service || opts.run_status || opts.download_lists ||
+                opts.generate_resolver_config || opts.resolver_config_hash ||
+                opts.run_test_routing || opts.run_scan_tunnel_candidates ||
+                opts.recover_persistent_state || opts.recovery_incompatible_option ||
+                opts.has_config_path_override)
+                throw std::invalid_argument("fetch-update does not accept another command or service options");
+            const auto binding = keen_pbr3::request_update_download_binding(
+                keen_pbr3::selected_update_download_outbound());
+            keen_pbr3::download_update_to_file(opts.update_url, opts.update_output,
+                binding, *keen_pbr3::default_http_transport());
             return 0;
         }
 

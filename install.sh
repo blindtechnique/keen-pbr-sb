@@ -2,6 +2,11 @@
 
 set -eu
 umask 077
+KEEN_PBR_UPDATE_TRANSPORT_VERSION=1
+# A one-shot download override must not become the environment of new services.
+UPDATE_DOWNLOAD_OVERRIDE_PRESENT=${KEEN_PBR_UPDATE_OUTBOUND+x}
+UPDATE_DOWNLOAD_OVERRIDE=${KEEN_PBR_UPDATE_OUTBOUND-}
+unset KEEN_PBR_UPDATE_OUTBOUND
 
 PROJECT_REPOSITORY="${MYKEENPBR_REPOSITORY:-blindtechnique/keen-pbr-sb}"
 TRUSTED_RELEASE_REPOSITORY="blindtechnique/keen-pbr-sb"
@@ -470,6 +475,16 @@ ask_secret() {
 fetch() {
     url="$1"
     output="$2"
+    if [ "${UPDATE_DOWNLOAD_OVERRIDE_PRESENT:-}" = x ]; then
+        KEEN_PBR_UPDATE_OUTBOUND="$UPDATE_DOWNLOAD_OVERRIDE" /opt/usr/bin/keen-pbr fetch-update "$url" "$output"
+        return $?
+    fi
+    if [ -e /opt/etc/keen-pbr/update-outbound ] || [ -L /opt/etc/keen-pbr/update-outbound ]; then
+        # The installed binary resolves applied group membership and binds both
+        # mark and interface. Failure must never fall back to unbound curl.
+        /opt/usr/bin/keen-pbr fetch-update "$url" "$output"
+        return $?
+    fi
     if command -v curl >/dev/null 2>&1; then
         curl -fsSL --connect-timeout 15 --max-time 180 \
             --retry 3 -o "$output" "$url"

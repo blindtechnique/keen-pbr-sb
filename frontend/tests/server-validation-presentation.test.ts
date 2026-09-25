@@ -284,6 +284,9 @@ describe("structured nfqws validation codes", () => {
     ["nfqws.writable.owned_only", "nfqwsWritableOwnedOnly"],
     ["nfqws.writable.duplicate", "nfqwsWritableDuplicate"],
     ["nfqws.path.empty", "nfqwsPathRequired"],
+    ["nfqws.action.empty", "nfqwsActionEmpty"],
+    ["nfqws.blob.invalid", "nfqwsBlobInvalid"],
+    ["nfqws.blob.duplicate", "nfqwsBlobDuplicate"],
     ["nfqws.path.missing", "nfqwsPathMissing"],
     ["nfqws.profile.new_forbidden", "nfqwsProfileNewForbidden"],
     ["nfqws.profile.empty_boundary", "nfqwsProfileEmptyBoundary"],
@@ -302,8 +305,8 @@ describe("structured nfqws validation codes", () => {
   ]
 
   test("covers the complete finite nfqws catalog", () => {
-    expect(cases).toHaveLength(34)
-    expect(new Set(cases.map(([code]) => code)).size).toBe(34)
+    expect(cases).toHaveLength(37)
+    expect(new Set(cases.map(([code]) => code)).size).toBe(37)
   })
 
   test.each(cases)(

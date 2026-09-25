@@ -34,9 +34,10 @@ public:
     }
 
     void write_config(int queue = 411, bool quic = true,
-                      const std::string& tcp = "443") const {
+                      const std::string& tcp = "443",
+                      const std::string& declared_tcp = {}) const {
         std::ofstream output(paths.active_config, std::ios::binary);
-        output << "TCP_PORTS=" << tcp << "\n"
+        output << "TCP_PORTS=" << (declared_tcp.empty() ? tcp : declared_tcp) << "\n"
                << "UDP_PORTS=443,49152:65535\n"
                << "NFQWS_ARGS=\"--filter-tcp=" << tcp
                << " --lua-desync=fake\"\n";
@@ -50,7 +51,8 @@ public:
     void add_process(const std::string& pid,
                      int queue = 411,
                      const std::string& tcp = "443",
-                     bool quic = true) const {
+                     bool quic = true,
+                     const std::string& fastpath = {}) const {
         const auto process = root / "proc" / pid;
         fs::create_directories(process);
         {
@@ -61,6 +63,8 @@ public:
         std::vector<std::string> argv{
             "/opt/usr/bin/nfqws2", "--qnum=" + std::to_string(queue),
             "--filter-tcp=" + tcp, "--lua-desync=fake"};
+        if (!fastpath.empty())
+            argv.insert(argv.begin() + 2, "--fastpath-workaround=" + fastpath);
         if (quic) {
             argv.insert(argv.end(),
                         {"--new", "--filter-udp=443", "--filter-l7=quic",
@@ -108,6 +112,28 @@ TEST_CASE("nfqws runtime PPE contract requires one matching process and queue") 
     CHECK(observed.contract.tcp_ranges ==
           std::vector<NfqwsPpePortRange>{{443, 443}});
     CHECK(observed.contract.quic_udp_443);
+}
+
+TEST_CASE("nfqws runtime PPE contract matches active ports with a queued superset and fastpath auto") {
+    RuntimeContractFixture fixture;
+    fixture.write_config(411, true, "80,443", "80,443,8443");
+    // The official 1.3.1 init adds auto even when an older saved config has
+    // no explicit flag. That default does not change the traffic selector.
+    fixture.add_process("123", 411, "80,443", true, "auto");
+    fixture.bind_queue(411);
+
+    auto observed = observe_nfqws_ppe_runtime_contract(fixture.paths);
+    REQUIRE(observed.available);
+    CHECK(observed.config_runtime_match);
+    CHECK(observed.contract.tcp_ranges ==
+          std::vector<NfqwsPpePortRange>{{80, 80}, {443, 443}});
+
+    // A port merely listed in TCP_PORTS cannot justify an extra live action.
+    fixture.add_process("123", 411, "80,443,8443", true, "auto");
+    observed = observe_nfqws_ppe_runtime_contract(fixture.paths);
+    CHECK_FALSE(observed.available);
+    CHECK_FALSE(observed.config_runtime_match);
+    CHECK(observed.diagnostic.find("config_runtime_mismatch") != std::string::npos);
 }
 
 TEST_CASE("nfqws runtime PPE contract reports an absent process") {

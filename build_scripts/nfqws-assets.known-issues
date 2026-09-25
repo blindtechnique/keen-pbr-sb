@@ -34,3 +34,9 @@ ipv6-exception|default|value=1|baseline=0
 # Source: tests/fixtures/nfqws2-keenetic-1.2.8/SOURCE.md.
 shallow-pool|default (nfqws2 1.2.8)|quic|present=1|sha256=bbfd8a3e63516763132900afab2f226997bc50b8364339ef5399334aec7353ca|circular=0|ids=0|bodies=0
 ipv6-exception|default (nfqws2 1.2.8)|value=1|baseline=0
+
+# The separately hash-pinned stock 1.3.1 reference retains the same upstream
+# QUIC action and postinst IPv6 toggle. No waiver is added to our own presets.
+# Source: tests/fixtures/nfqws2-keenetic-1.3.1/SOURCE.md.
+shallow-pool|default (nfqws2 1.3.1)|quic|present=1|sha256=bbfd8a3e63516763132900afab2f226997bc50b8364339ef5399334aec7353ca|circular=0|ids=0|bodies=0
+ipv6-exception|default (nfqws2 1.3.1)|value=1|baseline=0

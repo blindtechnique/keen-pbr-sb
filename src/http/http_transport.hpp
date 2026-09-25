@@ -69,6 +69,10 @@ struct HttpTransportRequest {
     // Total wire header bytes, including status/interim/redirect blocks.
     // Zero preserves the existing unrestricted-header download behavior.
     size_t max_header_size{0};
+    // Optional streaming sink. The response body stays empty; the same byte
+    // limit still applies. Throwing aborts the transfer, never crosses curl.
+    std::function<void(const char*, size_t)> body_sink;
+    bool https_only{false};
 };
 
 struct HttpTransportResponse {

@@ -46,6 +46,23 @@ TEST_CASE("stock nfqws2 1.2.8 recognizes the untouched Giga configuration") {
     CHECK_FALSE(keen_pbr3::nfqws_config_matches_packaged_strategy(giga, stock, stock));
 }
 
+TEST_CASE("stock nfqws2 1.3.1 recognizes postinst adaptations but retains fastpath identity") {
+    const auto stock = read_generated_strategy("default (nfqws2 1.3.1)");
+    keen_pbr3::Sha256 hash;
+    hash.update(stock);
+    CHECK(hash.hex_digest() == "b994f88b865d9a42275f8201f9ec55f2b22b16d8ac3942d0c71f677de4d1b7c5");
+    const auto prepared = keen_pbr3::nfqws_config_with_isp_interfaces(stock, {"ppp0"});
+    auto installed = prepared;
+    replace_once(installed, "IPV6_ENABLED=1", "IPV6_ENABLED=0");
+    CHECK(keen_pbr3::nfqws_config_matches_packaged_strategy(installed, stock, prepared));
+    auto changed = installed;
+    replace_once(changed, "--fastpath-workaround=auto", "--fastpath-workaround=1");
+    CHECK_FALSE(keen_pbr3::nfqws_config_matches_packaged_strategy(changed, stock, prepared));
+    changed = installed;
+    replace_once(changed, "NFQWS_EXTRA_ARGS=\"$MODE_AUTO\"", "NFQWS_EXTRA_ARGS=\"$MODE_LIST\"");
+    CHECK_FALSE(keen_pbr3::nfqws_config_matches_packaged_strategy(changed, stock, prepared));
+}
+
 TEST_CASE("nfqws comparison ignores only IPV6_ENABLED assignment") {
     const std::string base =
         "ISP_INTERFACE=\"eth3\"\nIPV6_ENABLED=0\nNFQUEUE_NUM=300\n";

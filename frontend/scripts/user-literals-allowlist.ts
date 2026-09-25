@@ -64,6 +64,10 @@ export const allowedLiterals: readonly string[] = [
   // контекстом, а исходный текст — только внутри закрытых «Подробностей».
   "Invalid log response",
   "Invalid log response: lines must be an array of strings",
+  // UpdateTransportControl перехватывает ошибки разбора GET и подтверждения
+  // POST. Основной текст берётся из downloadPathFailed; эта внутренняя причина
+  // остаётся только в закрытых Details OperationErrorMessage (есть RU/EN тест).
+  "Invalid update transport response",
   // createBackgroundTaskRequest перехватывает эту внутреннюю причину и
   // публикует только статус failed, без error.message. BackgroundTasksDetails
   // показывает существующий перевод backgroundTasks.failed в обеих локалях.

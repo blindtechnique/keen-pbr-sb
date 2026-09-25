@@ -88,9 +88,9 @@ std::string nfqws_config_without_runtime_ipv6(const std::string& content);
 
 // Parses and validates once, then derives a bounded, canonical PPE selector
 // from the same parsed candidate.  TCP filters from action-bearing active
-// profiles must exactly match TCP_PORTS.  Empty, malformed, ambiguous or
-// over-complex candidates are returned as unavailable instead of being
-// guessed at.
+// profiles must be covered by TCP_PORTS; queued-only ports never widen the
+// returned selector. Empty, malformed, ambiguous or over-complex candidates
+// are returned as unavailable instead of being guessed at.
 NfqwsPpePortContract extract_nfqws_ppe_port_contract(
     const std::string& content,
     const NfqwsPathResolver& resolve_path = {});

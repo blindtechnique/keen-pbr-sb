@@ -136,6 +136,9 @@ const codeKeys = new Map<string, string>([
   ["nfqws.writable.owned_only", "serverValidation.nfqwsWritableOwnedOnly"],
   ["nfqws.writable.duplicate", "serverValidation.nfqwsWritableDuplicate"],
   ["nfqws.path.empty", "serverValidation.nfqwsPathRequired"],
+  ["nfqws.action.empty", "serverValidation.nfqwsActionEmpty"],
+  ["nfqws.blob.invalid", "serverValidation.nfqwsBlobInvalid"],
+  ["nfqws.blob.duplicate", "serverValidation.nfqwsBlobDuplicate"],
   ["nfqws.path.missing", "serverValidation.nfqwsPathMissing"],
   ["nfqws.profile.new_forbidden", "serverValidation.nfqwsProfileNewForbidden"],
   [

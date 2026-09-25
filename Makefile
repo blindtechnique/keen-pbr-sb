@@ -222,6 +222,7 @@ test: ## Build and run unit tests (doctest)
 		-L '^(native|package-lifecycle)$$'
 
 test-package-dns: ## Run isolated Keenetic DNS and uninstall regressions without compiling
+	python3 -m unittest build_scripts.tests.test_update_download_transport -v
 	python3 -m unittest build_scripts.tests.test_debian_postinst_dns -v
 	python3 -m unittest build_scripts.tests.test_installer_component_preservation -v
 	python3 -m unittest build_scripts.tests.test_installer_first_run build_scripts.tests.test_installer_web_auth build_scripts.tests.test_installer_runtime_readiness build_scripts.tests.test_installer_language -v

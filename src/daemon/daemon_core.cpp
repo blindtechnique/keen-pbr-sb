@@ -1,4 +1,5 @@
 #include "daemon.hpp"
+#include "../update/download_transport.hpp"
 #include "api_runtime_lifecycle.hpp"
 #include "keenetic_dns_firewall_lifecycle_policy.hpp"
 #include "netfilter_refresh_mutation_policy.hpp"
@@ -1187,6 +1188,7 @@ void Daemon::handle_ipc_control_requests() {
             const bool resolver_hook_inflight =
                 resolver_stream_attempt_owner_.ipc_gate_in_flight();
             const bool resolver_read_only_operation =
+                operation == "update-download-plan" ||
                 operation == "status" ||
                 operation == "resolver-config-hash";
             const bool root_peer = accepted->peer_uid == 0;
@@ -1204,6 +1206,7 @@ void Daemon::handle_ipc_control_requests() {
             }
 
             const bool supported =
+                operation == "update-download-plan" ||
                 operation == "status" ||
                 operation == "resolver-config-hash" ||
                 operation == "download" ||
@@ -1225,6 +1228,23 @@ void Daemon::handle_ipc_control_requests() {
                     "busy",
                     "mutating control operations are unavailable during "
                     "resolver reload");
+            } else if (operation == "update-download-plan") {
+                // Only an immutable, applied generation is authoritative. No
+                // network I/O or firewall work belongs in this control handler.
+                const auto active = config_store_.pin_active_snapshot();
+                nlohmann::json result;
+                if (request.contains("outbound")) {
+                    const auto binding = plan_update_download_binding(
+                        request.at("outbound").get<std::string>(), active->config,
+                        active->outbound_marks, runtime_state_store_.snapshot());
+                    result = {{"selected_outbound", binding.selected_outbound},
+                              {"interface", binding.interface}, {"fwmark", binding.fwmark}};
+                } else {
+                    result = {{"options", update_download_options(active->config)}};
+                }
+                response = {{"protocol_version", ipc::kControlProtocolVersion},
+                            {"request_id", request.at("request_id")},
+                            {"ok", true}, {"result", std::move(result)}};
             } else if (operation == "test-routing") {
                 const std::string target =
                     request.value("target", "");
