@@ -25,6 +25,8 @@ Alpha предназначена для проверки изменений и �
 - Добавлена совместимость с nfqws2-keenetic 1.3.1: распознаётся его стандартная конфигурация, исправлена проверка TCP-портов PPE, удалена неподдерживаемая команда `reload`. Safe/Balanced/Max не изменены; штатный запуск nfqws2 1.3.1 добавляет `--fastpath-workaround=auto`, если режим не задан явно. [Подробности и границы проверки](docs/NFQWS_1_3_COMPATIBILITY.ru.md).
 - Для скачивания обновлений keen-pbr-sb можно выбрать обычный маршрут, VPN или группу. Настройка действует в панели и штатном консольном установщике; недоступный выбранный VPN не подменяется прямым подключением. Первоначальная загрузка установщика внешним `wget`/`curl` и загрузка зависимостей `opkg` этой настройкой не управляются. [Описание и приёмка](docs/UPDATE-DOWNLOAD-VPN.ru.md).
 - Проверка конфигурации nfqws находит пустые действия, некорректные и повторные объявления blob в собранной команде; ошибки показываются с понятными пояснениями и указанием поля.
+- Добавлен раздел **«VPN для устройств»**: интернет-трафик выбранного клиента по закреплённому IPv4 можно направить через один VPN или группу, с приоритетом над правилами сайтов. [Как настроить и что учитывать](#vpn-для-устройства).
+- В настройках обновления сохраняется выбор **Stable (main)** или **Alpha**. Смена канала сама по себе ничего не устанавливает; пакет, VPN и DNS не меняются.
 - Регулярные проверки туннелей выполняются в отдельной ограниченной очереди: ручной замер недоступного выхода и длительные фоновые задачи больше не занимают её работников. Это исправление воспроизводимого голодания очереди; отсутствие повторения исторического инцидента проверяется на точном IPK.
 - В Balanced/Max расширено наблюдение за поздними TCP-отказами до включения домена в автосписок nfqws2. Картинки и видео, зависающие после первых килобайт ответа, теперь попадают в более длинное окно штатного детектора. Safe не изменён этой доработкой.
 - На дашборде добавлено ручное сравнение нескольких сайтов/ресурсов через выбранные пути и IPv4/IPv6. Серия ограничена 12 пробами, не запускает выключенные VPN и не меняет их опубликованное состояние. [Методика и ограничения](docs/SITE_COMPARISON.ru.md).
@@ -94,6 +96,17 @@ DNS-запрос клиента → dnsmasq → IP-набор соответст
 Кроме доменов и IP/CIDR назначения, расширенный редактор позволяет задавать условия по источнику и портам. Поэтому можно, например, использовать IPv4-адрес конкретного телевизора как условие правила. Это не автоматическая политика по имени устройства: адрес нужно закрепить в DHCP, а IPv6 рассматривать отдельно.
 
 Порядок правил важен. Человеческое имя не используется вместо устойчивого технического идентификатора в связях конфигурации. В интерфейсе видны зависимости: где подключение, группа, список или DNS-сервер используются другими объектами.
+
+### VPN для устройства
+
+Чтобы направить через VPN все сайты и приложения одного клиента, используйте **«Правила трафика → VPN для устройств»**. Например, телевизор может работать через отдельный VPN, а ноутбук — через группу с резервом; другие устройства сохраняют свои правила.
+
+1. Заранее закрепите IPv4 клиента в настройках Keenetic/Netcraze.
+2. Нажмите **«Назначить VPN устройству»**, выберите клиента из списка или введите закреплённый адрес.
+3. Выберите существующий VPN с маршрутом либо группу, сохраните привязку и примените изменения панели.
+4. Переподключите приложение на клиенте и проверьте новый путь: старые соединения автоматически не сбрасываются.
+
+Новое правило по умолчанию размещается выше правил сайтов. Это привязка **только по IPv4**, не по MAC: смена адреса не отслеживается, IPv6 не покрывается, DHCP и DNS не изменяются. При отказе VPN действует политика выбранного маршрута, а не автоматически добавленный запрет прямого доступа. Доступ к другим локальным сетям и IPv6 проверяются отдельно. [Полная инструкция и ограничения](docs/DEVICE_VPN.ru.md).
 
 ### Два способа выбора резерва
 
@@ -354,7 +367,7 @@ sing-box и nfqws2 опциональны. Базовый сценарий со 
 
 ## Установка Alpha
 
-**Alpha — тестовый канал. Workflow собирает три полных IPK: `aarch64-3.10`, `mips-3.4` и `mipsel-3.4`.** Перед установкой выполните требования выше, сохраните резервную копию keen-pbr-sb и экспорт KeeneticOS. Команды запускаются от `root` по SSH в Entware, не в командной строке KeeneticOS.
+**Alpha — тестовый канал. Workflow собирает три полных IPK: `aarch64-3.10`, `mips-3.4` и `mipsel-3.4`.** Перед установкой выполните требования выше, сохраните резервную копию keen-pbr-sb и экспорт KeeneticOS. Команды запускаются от `root` по SSH в Entware, не в командной строке KeeneticOS. Если начинаете с нуля, пройдите [подготовку роутера на сайте](https://blindtechnique.github.io/keen-pbr-sb/install.html#prepare), затем используйте команды Alpha ниже вместо Stable.
 
 Новый Alpha-выпуск публикуется только после успешных проверок и сборки всех трёх пакетов: одна версия, один исходный коммит и отдельная проверка каждого пакета до подписи. Старые выпуски могли содержать только AArch64; их состав не меняется. Наличие IPK не подтверждает аппаратную приёмку на каждой модели. При отсутствии нужной архитектуры установщик не подменяет её другой архитектурой или каналом. Новые выпуски `next` больше не создаются, старые подписанные пакеты сохраняют свой формат проверки.
 
@@ -392,13 +405,13 @@ opkg install curl ca-certificates
 Через **wget**:
 
 ```sh
-wget -O /tmp/keen-pbr-alpha-install.sh -T 30 https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/alpha/install.sh && TMPDIR=/tmp KEEN_PBR_INSTALL_LANGUAGE=ru KEEN_PBR_UPDATE_RELEASE_TAG= sh /tmp/keen-pbr-alpha-install.sh --alpha
+wget -O /tmp/keen-pbr-alpha-install.sh -T 30 -t 2 https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/alpha/install.sh && TMPDIR=/tmp KEEN_PBR_INSTALL_LANGUAGE=ru KEEN_PBR_UPDATE_RELEASE_TAG= sh /tmp/keen-pbr-alpha-install.sh --alpha
 ```
 
 Или через **curl**:
 
 ```sh
-curl -fL --connect-timeout 30 -o /tmp/keen-pbr-alpha-install.sh https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/alpha/install.sh && TMPDIR=/tmp KEEN_PBR_INSTALL_LANGUAGE=ru KEEN_PBR_UPDATE_RELEASE_TAG= sh /tmp/keen-pbr-alpha-install.sh --alpha
+curl -fL --connect-timeout 15 --max-time 120 --retry 2 -o /tmp/keen-pbr-alpha-install.sh https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/alpha/install.sh && TMPDIR=/tmp KEEN_PBR_INSTALL_LANGUAGE=ru KEEN_PBR_UPDATE_RELEASE_TAG= sh /tmp/keen-pbr-alpha-install.sh --alpha
 ```
 
 ### Обновление
@@ -406,13 +419,13 @@ curl -fL --connect-timeout 30 -o /tmp/keen-pbr-alpha-install.sh https://raw.gith
 **Если keen-pbr-sb уже установлен**, включая переход со Stable, добавьте `--update`. Если загрузчик ещё не подготовлен, сначала выполните подготовку HTTPS выше. Готовая команда через **wget**:
 
 ```sh
-wget -O /tmp/keen-pbr-alpha-install.sh -T 30 https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/alpha/install.sh && TMPDIR=/tmp KEEN_PBR_INSTALL_LANGUAGE=ru KEEN_PBR_UPDATE_RELEASE_TAG= sh /tmp/keen-pbr-alpha-install.sh --alpha --update
+wget -O /tmp/keen-pbr-alpha-install.sh -T 30 -t 2 https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/alpha/install.sh && TMPDIR=/tmp KEEN_PBR_INSTALL_LANGUAGE=ru KEEN_PBR_UPDATE_RELEASE_TAG= sh /tmp/keen-pbr-alpha-install.sh --alpha --update
 ```
 
 Или через **curl**:
 
 ```sh
-curl -fL --connect-timeout 30 -o /tmp/keen-pbr-alpha-install.sh https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/alpha/install.sh && TMPDIR=/tmp KEEN_PBR_INSTALL_LANGUAGE=ru KEEN_PBR_UPDATE_RELEASE_TAG= sh /tmp/keen-pbr-alpha-install.sh --alpha --update
+curl -fL --connect-timeout 15 --max-time 120 --retry 2 -o /tmp/keen-pbr-alpha-install.sh https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/alpha/install.sh && TMPDIR=/tmp KEEN_PBR_INSTALL_LANGUAGE=ru KEEN_PBR_UPDATE_RELEASE_TAG= sh /tmp/keen-pbr-alpha-install.sh --alpha --update
 ```
 
 Режим `--update` не запускает заново первичную настройку авторизации, DNS, sing-box и nfqws2. Во время установки панель и сетевые службы могут быть временно недоступны; не запускайте вторую установку, пока первая не завершилась.
