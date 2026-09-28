@@ -2,20 +2,24 @@ package transport
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
 	"sync"
 	"time"
 )
 
 type retryState struct {
-	opMu          sync.Mutex
-	desired       bool
-	attempts      int
-	next          time.Time
-	inFlight      bool
-	observedUp    bool
-	healthySince  time.Time
-	nextRuleCheck time.Time
+	opMu             sync.Mutex
+	desired          bool
+	attempts         int
+	next             time.Time
+	inFlight         bool
+	observedUp       bool
+	healthySince     time.Time
+	nextRuleCheck    time.Time
+	manualPending    int
+	backgroundCancel context.CancelFunc
 }
 
 type Supervisor struct {
@@ -29,17 +33,21 @@ type Supervisor struct {
 	maxBackoff          time.Duration
 	stablePeriod        time.Duration
 	runtimeRuleInterval time.Duration
+	serviceMu           sync.Mutex
+	serviceResume       map[string]bool
 }
 
 type groupRetryState struct {
-	opMu          sync.Mutex
-	runtime       supervisorGroup
-	attempts      int
-	next          time.Time
-	inFlight      bool
-	observedUp    bool
-	healthySince  time.Time
-	nextRuleCheck time.Time
+	opMu             sync.Mutex
+	runtime          supervisorGroup
+	attempts         int
+	next             time.Time
+	inFlight         bool
+	observedUp       bool
+	healthySince     time.Time
+	nextRuleCheck    time.Time
+	manualPending    int
+	backgroundCancel context.CancelFunc
 }
 
 // Implemented by transports that own firewall state which the firmware may
@@ -172,7 +180,7 @@ func (s *Supervisor) reconcile(ctx context.Context) {
 	}
 	var work []workItem
 	for tag, state := range s.states {
-		if state.desired && !state.inFlight && (state.next.IsZero() || !now.Before(state.next)) {
+		if state.manualPending == 0 && state.desired && !state.inFlight && (state.next.IsZero() || !now.Before(state.next)) {
 			state.inFlight = true
 			work = append(work, workItem{tag: tag, state: state})
 		}
@@ -183,7 +191,7 @@ func (s *Supervisor) reconcile(ctx context.Context) {
 	}
 	var groupWork []groupWorkItem
 	for key, state := range s.groupStates {
-		if state.runtime.HasDesired() && !state.inFlight &&
+		if state.manualPending == 0 && state.runtime.HasDesired() && !state.inFlight &&
 			(state.next.IsZero() || !now.Before(state.next)) {
 			state.inFlight = true
 			groupWork = append(groupWork, groupWorkItem{key: key, state: state})
@@ -206,19 +214,38 @@ func (s *Supervisor) reconcileGroup(ctx context.Context, key string, state *grou
 	defer state.opMu.Unlock()
 	s.mu.Lock()
 	current := s.groupStates[key]
-	active := current == state && state.runtime.HasDesired()
+	active := current == state && state.manualPending == 0 && state.runtime.HasDesired()
 	s.mu.Unlock()
 	if !active {
 		s.releaseGroup(key, state)
 		return
 	}
+	operationCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	s.mu.Lock()
+	if state.manualPending > 0 {
+		cancel()
+	}
+	state.backgroundCancel = cancel
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		state.backgroundCancel = nil
+		s.mu.Unlock()
+	}()
 	now := time.Now()
 	// Remote reachability belongs to each member's status, not to the shared
 	// process lifecycle. Restarting healthy siblings cannot repair a failed
 	// remote server. Recover only a lost process/TUN; repair rules in place.
 	if state.runtime.Healthy() {
 		if s.groupRuleCheckDue(key, state, now) {
-			if err := state.runtime.EnsureRuntimeRules(); err != nil {
+			var err error
+			if enforcer, ok := state.runtime.(interface{ EnsureRuntimeRulesContext(context.Context) error }); ok {
+				err = enforcer.EnsureRuntimeRulesContext(operationCtx)
+			} else {
+				err = state.runtime.EnsureRuntimeRules()
+			}
+			if err != nil {
 				log.Printf("transport group %s: restore forwarding rules: %v", key, err)
 			}
 		}
@@ -228,8 +255,6 @@ func (s *Supervisor) reconcileGroup(ctx context.Context, key string, state *grou
 	if s.recordGroupLoss(key, state) {
 		return
 	}
-	operationCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
 	err := state.runtime.Reconcile(operationCtx)
 	s.recordGroupAttempt(key, state, err)
 }
@@ -327,7 +352,20 @@ func (s *Supervisor) reconcileOne(ctx context.Context, tag string, state *retryS
 		s.release(tag, state)
 		return
 	}
-	status, err := s.manager.Status(ctx, tag)
+	operationCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	s.mu.Lock()
+	if state.manualPending > 0 {
+		cancel()
+	}
+	state.backgroundCancel = cancel
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		state.backgroundCancel = nil
+		s.mu.Unlock()
+	}()
+	status, err := s.manager.Status(operationCtx, tag)
 	if err == nil && status.State == StateUp {
 		// Keenetic rebuilds its iptables ruleset on every network event and
 		// wipes rules it does not own, including the FORWARD accept that lets
@@ -338,7 +376,13 @@ func (s *Supervisor) reconcileOne(ctx context.Context, tag string, state *retryS
 		if s.runtimeRuleCheckDue(tag, state, time.Now()) {
 			if transport, ok := s.manager.Get(tag); ok {
 				if enforcer, ok := transport.(runtimeRuleEnforcer); ok {
-					if ruleErr := enforcer.EnsureRuntimeRules(); ruleErr != nil {
+					var ruleErr error
+					if cancellable, ok := enforcer.(interface{ EnsureRuntimeRulesContext(context.Context) error }); ok {
+						ruleErr = cancellable.EnsureRuntimeRulesContext(operationCtx)
+					} else {
+						ruleErr = enforcer.EnsureRuntimeRules()
+					}
+					if ruleErr != nil {
 						log.Printf("transport %s: restore forwarding rules: %v", tag, ruleErr)
 					}
 				}
@@ -350,8 +394,6 @@ func (s *Supervisor) reconcileOne(ctx context.Context, tag string, state *retryS
 	if s.recordLoss(tag, state) {
 		return
 	}
-	operationCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
 	if err == nil && status.State == StateDegraded {
 		err = s.manager.Down(operationCtx, tag)
 	}
@@ -387,7 +429,7 @@ func (s *Supervisor) release(tag string, expected *retryState) {
 func (s *Supervisor) isActive(tag string, state *retryState) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.states[tag] == state && state.desired
+	return s.states[tag] == state && state.manualPending == 0 && state.desired
 }
 
 func (s *Supervisor) recordHealthy(tag string, expected *retryState) {
@@ -466,6 +508,7 @@ func (s *Supervisor) Up(ctx context.Context, tag string) error {
 		return s.manager.Up(ctx, tag)
 	}
 	if group, state := s.groupStateForTag(tag); state != nil {
+		defer s.beginGroupManual(state)()
 		if err := lockMutexContext(ctx, &state.opMu); err != nil {
 			return err
 		}
@@ -475,6 +518,7 @@ func (s *Supervisor) Up(ctx context.Context, tag string) error {
 		return err
 	}
 	state := s.stateFor(tag)
+	defer s.beginManual(state)()
 	if err := lockMutexContext(ctx, &state.opMu); err != nil {
 		return err
 	}
@@ -486,6 +530,10 @@ func (s *Supervisor) Up(ctx context.Context, tag string) error {
 }
 
 func (s *Supervisor) Down(ctx context.Context, tag string) error {
+	return s.down(ctx, tag, false)
+}
+
+func (s *Supervisor) down(ctx context.Context, tag string, preserveResume bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -497,6 +545,7 @@ func (s *Supervisor) Down(ctx context.Context, tag string) error {
 		return s.manager.Down(ctx, tag)
 	}
 	if group, state := s.groupStateForTag(tag); state != nil {
+		defer s.beginGroupManual(state)()
 		if err := lockMutexContext(ctx, &state.opMu); err != nil {
 			return err
 		}
@@ -514,11 +563,12 @@ func (s *Supervisor) Down(ctx context.Context, tag string) error {
 		return err
 	}
 	state := s.stateFor(tag)
+	defer s.beginManual(state)()
 	if err := lockMutexContext(ctx, &state.opMu); err != nil {
 		return err
 	}
 	defer state.opMu.Unlock()
-	s.setDesired(tag, state, false)
+	s.setDesiredRuntime(tag, state, false, !preserveResume)
 	return s.manager.Down(ctx, tag)
 }
 
@@ -534,6 +584,7 @@ func (s *Supervisor) Restart(ctx context.Context, tag string) error {
 		return s.manager.Restart(ctx, tag)
 	}
 	if group, state := s.groupStateForTag(tag); state != nil {
+		defer s.beginGroupManual(state)()
 		if err := lockMutexContext(ctx, &state.opMu); err != nil {
 			return err
 		}
@@ -543,6 +594,7 @@ func (s *Supervisor) Restart(ctx context.Context, tag string) error {
 		return err
 	}
 	state := s.stateFor(tag)
+	defer s.beginManual(state)()
 	if err := lockMutexContext(ctx, &state.opMu); err != nil {
 		return err
 	}
@@ -551,6 +603,98 @@ func (s *Supervisor) Restart(ctx context.Context, tag string) error {
 	err = s.manager.Restart(ctx, tag)
 	s.recordAttempt(tag, state, err)
 	return err
+}
+
+func (s *Supervisor) beginManual(state *retryState) func() {
+	s.mu.Lock()
+	state.manualPending++
+	if state.backgroundCancel != nil {
+		state.backgroundCancel()
+	}
+	s.mu.Unlock()
+	return func() {
+		s.mu.Lock()
+		state.manualPending--
+		s.mu.Unlock()
+	}
+}
+
+func (s *Supervisor) beginGroupManual(state *groupRetryState) func() {
+	s.mu.Lock()
+	state.manualPending++
+	if state.backgroundCancel != nil {
+		state.backgroundCancel()
+	}
+	s.mu.Unlock()
+	return func() {
+		s.mu.Lock()
+		state.manualPending--
+		s.mu.Unlock()
+	}
+}
+
+// ServiceAction is a single operator command. Shared mode is restarted once;
+// legacy per-transport mode is serialized and only resumes previously wanted
+// members. Neither path edits AutoStart or the transport configuration.
+func (s *Supervisor) ServiceAction(ctx context.Context, action string) error {
+	if action != "up" && action != "down" && action != "restart" {
+		return fmt.Errorf("invalid sing-box service action %q", action)
+	}
+	if err := lockMutexContext(ctx, &s.serviceMu); err != nil {
+		return err
+	}
+	defer s.serviceMu.Unlock()
+	if group := s.manager.SharedGroup(); group != nil {
+		s.mu.Lock()
+		state := s.groupStates[group.Key()]
+		s.mu.Unlock()
+		if state != nil {
+			defer s.beginGroupManual(state)()
+			if err := lockMutexContext(ctx, &state.opMu); err != nil {
+				return err
+			}
+			defer state.opMu.Unlock()
+		}
+		return group.ServiceAction(ctx, action)
+	}
+	statuses := s.Statuses(ctx)
+	s.mu.Lock()
+	if action == "down" && s.serviceResume == nil {
+		s.serviceResume = make(map[string]bool)
+		for _, status := range statuses {
+			if status.Type != "native" {
+				s.serviceResume[status.Tag] = status.DesiredUp
+			}
+		}
+	}
+	s.mu.Unlock()
+	var result error
+	for _, status := range statuses {
+		if status.Type == "native" {
+			continue
+		}
+		wanted := status.DesiredUp
+		s.mu.Lock()
+		if s.serviceResume != nil {
+			wanted = s.serviceResume[status.Tag]
+		}
+		s.mu.Unlock()
+		if action == "down" {
+			result = errors.Join(result, s.down(ctx, status.Tag, true))
+		} else if wanted {
+			if action == "restart" {
+				result = errors.Join(result, s.Restart(ctx, status.Tag))
+			} else {
+				result = errors.Join(result, s.Up(ctx, status.Tag))
+			}
+		}
+	}
+	if action != "down" && result == nil {
+		s.mu.Lock()
+		s.serviceResume = nil
+		s.mu.Unlock()
+	}
+	return result
 }
 
 func (s *Supervisor) groupStateForTag(tag string) (string, *groupRetryState) {
@@ -572,6 +716,10 @@ func (s *Supervisor) stateFor(tag string) *retryState {
 }
 
 func (s *Supervisor) setDesired(tag string, expected *retryState, desired bool) {
+	s.setDesiredRuntime(tag, expected, desired, true)
+}
+
+func (s *Supervisor) setDesiredRuntime(tag string, expected *retryState, desired bool, remember bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	state, exists := s.states[tag]
@@ -579,6 +727,9 @@ func (s *Supervisor) setDesired(tag string, expected *retryState, desired bool) 
 		return
 	}
 	state.desired = desired
+	if remember && s.serviceResume != nil {
+		s.serviceResume[tag] = desired
+	}
 	state.attempts = 0
 	state.next = time.Time{}
 	state.observedUp = false

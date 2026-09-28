@@ -279,6 +279,11 @@ export function buildUpdatedConfigForListUpsert(
           enabled: true,
           list: [resolvedName],
           server: quickSetup.dnsServer,
+          ...(quickSetup.createRouteRule &&
+          quickSetup.routeOutbound &&
+          updated.route?.rules?.at(-1)?.id
+            ? { route_rule_ids: [updated.route.rules.at(-1)!.id!] }
+            : {}),
           allow_domain_rebinding: false,
         },
       ],

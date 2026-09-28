@@ -47,17 +47,14 @@ export function nativeInterfaceConnectionState(
   nativeInterface: Pick<NativeInterfaceModel, "live" | "connected" | "link">,
   boundRuntime: RuntimeOutboundState | undefined,
   hasBoundOutbound: boolean
-): "up" | "down" | "unavailable" | "unknown" {
+): "up" | "down" | "degraded" | "unavailable" | "unknown" {
   if (!nativeInterface.live) return "down"
   if (nativeInterface.connected === false || nativeInterface.link === false)
     return "unavailable"
   if (hasBoundOutbound) {
     if (boundRuntime?.status === "healthy") return "up"
-    if (
-      boundRuntime?.status === "degraded" ||
-      boundRuntime?.status === "unavailable"
-    )
-      return "unavailable"
+    if (boundRuntime?.status === "degraded") return "degraded"
+    if (boundRuntime?.status === "unavailable") return "unavailable"
     return "unknown"
   }
   return nativeInterface.connected === true ? "up" : "unknown"

@@ -15,6 +15,7 @@ export type DnsRuleDraft = ConfigUnknownFieldsDraft & {
   server: string
   lists: string[]
   allowDomainRebinding: boolean
+  routeRuleIds?: string[]
 }
 
 export type RuleErrors = {
@@ -47,6 +48,7 @@ export function getRuleDraft(rule?: DnsRule): DnsRuleDraft {
     server: rule?.server ?? "",
     lists: [...(rule?.list ?? [])],
     allowDomainRebinding: rule?.allow_domain_rebinding ?? false,
+    ...(rule?.route_rule_ids ? { routeRuleIds: [...rule.route_rule_ids] } : {}),
   }
 }
 
@@ -63,6 +65,9 @@ export function normalizeDnsRuleDraft(rule: DnsRuleDraft): DnsRule {
       new Set(rule.lists.map((list) => list.trim()).filter(Boolean))
     ).sort(),
     allow_domain_rebinding: rule.allowDomainRebinding,
+    ...(rule.routeRuleIds?.length
+      ? { route_rule_ids: [...rule.routeRuleIds] }
+      : {}),
   }
 }
 

@@ -430,6 +430,8 @@ TEST_CASE("url tester uses discard transport probes and retry policy") {
     const auto result = tester.test("https://example.test/health", 77, 456, retry);
     CHECK(result.success);
     CHECK(result.latency_ms == 12);
+    CHECK(result.measured_at != std::chrono::steady_clock::time_point{});
+    CHECK(result.measured_at <= std::chrono::steady_clock::now());
     CHECK(transport->request.discard_body);
     CHECK(transport->request.timeout_ms == 456);
     CHECK(transport->request.fwmark == 77);
@@ -453,6 +455,22 @@ TEST_CASE("url tester pins the probe socket to the requested device") {
     // usable default sends the probe out over the WAN instead.
     CHECK(transport->request.bind_interface == "nwg1");
     CHECK(transport->request.fwmark == 77);
+}
+
+TEST_CASE("url tester preserves the completion time of failed retry attempts") {
+    auto transport = std::make_shared<FakeTransport>();
+    transport->fail = true;
+    keen_pbr3::URLTester tester(transport);
+    keen_pbr3::RetryConfig retry;
+    retry.attempts = 2;
+    retry.interval_ms = 0;
+    const auto started = std::chrono::steady_clock::now();
+    const auto result = tester.test("https://example.test/health", 77, 456, retry, "nwg1");
+    CHECK_FALSE(result.success);
+    CHECK(result.error == "transport unavailable");
+    CHECK(transport->calls == 2);
+    CHECK(result.measured_at >= started);
+    CHECK(result.measured_at <= std::chrono::steady_clock::now());
 }
 
 TEST_CASE("manual HTTP transport pins DNS while retaining Host and sends only HEAD") {

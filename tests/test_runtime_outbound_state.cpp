@@ -158,6 +158,19 @@ TEST_CASE("probe classification refuses to call unattributable evidence health")
               ProbeVerdict::Unverifiable);
     }
 
+    SUBCASE("unstamped evidence is not fresh during early uptime") {
+        CHECK(runtime_outbound_detail::classify_interface_probe(
+                  probe_result(true, true, {}),
+                  std::chrono::steady_clock::time_point{} + std::chrono::seconds{5}) ==
+              ProbeVerdict::Unverifiable);
+    }
+
+    SUBCASE("a future timestamp is not evidence for this snapshot") {
+        CHECK(runtime_outbound_detail::classify_interface_probe(
+                  probe_result(true, true, now + std::chrono::seconds{1}), now) ==
+              ProbeVerdict::Unverifiable);
+    }
+
     SUBCASE("an unpinned success only proves the router has internet") {
         CHECK(runtime_outbound_detail::classify_interface_probe(
                   probe_result(true, /*attributed=*/false, now), now) ==
@@ -463,8 +476,11 @@ TEST_CASE(
 
     auto build_with = [&](std::optional<URLTestResult> latest_result) {
         UrltestState manager_state;
+        manager_state.config = urltest;
+        manager_state.direct_child_interfaces.emplace("member", "nwg5");
         manager_state.selected_outbound = "member";
         if (latest_result.has_value()) {
+            latest_result->measured_at = now;
             manager_state.last_results.emplace("member", *latest_result);
         }
 
@@ -529,6 +545,186 @@ TEST_CASE(
               api::RuntimeInterfaceStatusEnum::ACTIVE);
         CHECK(group_state.interfaces.front().latency_ms ==
               std::optional<int64_t>{91});
+    }
+}
+
+TEST_CASE("standalone and group diagnostic rows share the newest bound evidence") {
+    const auto now = std::chrono::steady_clock::time_point{} + std::chrono::hours{9};
+    Outbound child;
+    child.tag = "member";
+    child.type = OutboundType::INTERFACE;
+    child.interface = "nwg5";
+    Outbound group;
+    group.tag = "group";
+    group.type = OutboundType::URLTEST;
+    OutboundGroup members;
+    members.outbounds = {"member"};
+    group.outbound_groups = std::vector<OutboundGroup>{members};
+    Config config;
+    config.outbounds = std::vector<Outbound>{child, group};
+    ModelledRoutes routes({default_route_via(150, "nwg5"),
+                           default_route_via(151, "nwg5"),
+                           default_route_via(254, "nwg5")});
+    UrltestState state;
+    state.config = group;
+    state.direct_child_interfaces.emplace("member", "nwg5");
+    state.selected_outbound = "member";
+    URLTestResult group_result;
+    group_result.success = true;
+    group_result.latency_ms = 91;
+    group_result.measured_at = now - std::chrono::seconds{10};
+    state.last_results.emplace("member", group_result);
+    std::optional<InterfaceProbeResult> standalone = probe_result(false, true, now);
+    auto expected = api::ResolverLiveStatus::DEGRADED;
+    auto expected_member = api::RuntimeInterfaceStatusEnum::DEGRADED;
+    std::optional<int64_t> expected_latency;
+
+    SUBCASE("newer standalone failure replaces old group green and latency") {}
+    SUBCASE("newer group success replaces older standalone failure") {
+        standalone->measured_at = now - std::chrono::seconds{20};
+        expected = api::ResolverLiveStatus::HEALTHY;
+        expected_member = api::RuntimeInterfaceStatusEnum::ACTIVE;
+        expected_latency = 91;
+    }
+    SUBCASE("newer group failure replaces old standalone green") {
+        standalone = probe_result(true, true, now - std::chrono::seconds{20});
+        state.last_results.at("member").success = false;
+        state.last_results.at("member").error = "group probe timed out";
+    }
+    SUBCASE("newer standalone success replaces old group failure") {
+        standalone = probe_result(true, true, now);
+        state.last_results.at("member").success = false;
+        expected = api::ResolverLiveStatus::HEALTHY;
+        expected_member = api::RuntimeInterfaceStatusEnum::ACTIVE;
+        expected_latency = 163;
+    }
+    SUBCASE("equal-time conflict does not prefer green") {
+        state.last_results.at("member").measured_at = now;
+    }
+    SUBCASE("unattributed standalone evidence cannot overrule a bound group test") {
+        standalone->attributed = false;
+        expected = api::ResolverLiveStatus::HEALTHY;
+        expected_member = api::RuntimeInterfaceStatusEnum::ACTIVE;
+        expected_latency = 91;
+    }
+    int standalone_reads = 0;
+    int group_reads = 0;
+    const auto response = build_runtime_outbounds_response(
+        config, routes,
+        [&](const std::string&) -> std::optional<UrltestState> {
+            ++group_reads;
+            return state;
+        },
+        [&](const std::string&) {
+            ++standalone_reads;
+            return standalone;
+        }, now);
+    CHECK(group_reads == 1);
+    CHECK(standalone_reads == 1);
+    REQUIRE(response.outbounds.size() == 2);
+    for (const auto& outbound : response.outbounds) {
+        CHECK(outbound.status == expected);
+        REQUIRE(outbound.interfaces.size() == 1);
+        CHECK(outbound.interfaces.front().status == expected_member);
+        CHECK(outbound.interfaces.front().latency_ms == expected_latency);
+    }
+    // Reading the API is not a selector commit.
+    CHECK(state.selected_outbound == "member");
+}
+
+TEST_CASE("reading fresh diagnostics does not reset group selection eligibility") {
+    const auto now = std::chrono::steady_clock::now();
+    Outbound child;
+    child.tag = "member";
+    child.type = OutboundType::INTERFACE;
+    child.interface = "nwg5";
+    Outbound group;
+    group.tag = "group";
+    group.type = OutboundType::URLTEST;
+    OutboundGroup members;
+    members.outbounds = {"member"};
+    group.outbound_groups = std::vector<OutboundGroup>{members};
+    Config config;
+    config.outbounds = std::vector<Outbound>{child, group};
+    ModelledRoutes routes({default_route_via(150, "nwg5"),
+                           default_route_via(151, "nwg5")});
+    UrltestState state;
+    state.config = group;
+    state.selected_outbound = "member";
+    state.direct_child_interfaces.emplace("member", "nwg5");
+    CircuitBreakerConfig breaker_config;
+    breaker_config.failure_threshold = 1;
+    state.circuit_breakers.emplace("member", CircuitBreaker{breaker_config});
+    state.circuit_breakers.at("member").record_failure("member");
+    REQUIRE(state.circuit_breakers.at("member").state("member") == CircuitState::open);
+
+    for (int read = 0; read < 2; ++read) {
+        const auto response = build_runtime_outbounds_response(
+            config, routes,
+            [&](const std::string&) -> std::optional<UrltestState> { return state; },
+            [&](const std::string&) { return probe_result(true, true, now); }, now);
+        REQUIRE(response.outbounds.size() == 2);
+        CHECK(response.outbounds.front().status == api::ResolverLiveStatus::HEALTHY);
+        const auto& group_state = response.outbounds.back();
+        CHECK(group_state.status == api::ResolverLiveStatus::UNAVAILABLE);
+        REQUIRE(group_state.interfaces.size() == 1);
+        const auto& member = group_state.interfaces.front();
+        CHECK(member.status == api::RuntimeInterfaceStatusEnum::UNAVAILABLE);
+        CHECK_FALSE(member.latency_ms.has_value());
+        REQUIRE(member.detail.has_value());
+        CHECK(member.detail->find("group circuit breaker") != std::string::npos);
+        CHECK(state.selected_outbound == "member");
+        CHECK(state.circuit_breakers.at("member").state("member") == CircuitState::open);
+        CHECK(state.circuit_breakers.at("member").failure_count("member") == 1);
+    }
+}
+
+TEST_CASE("diagnostic sharing rejects stale or mismatched group evidence") {
+    const auto now = std::chrono::steady_clock::time_point{} + std::chrono::hours{9};
+    Outbound child;
+    child.tag = "member";
+    child.type = OutboundType::INTERFACE;
+    child.interface = "nwg5";
+    Outbound group;
+    group.tag = "group";
+    group.type = OutboundType::URLTEST;
+    OutboundGroup members;
+    members.outbounds = {"member"};
+    group.outbound_groups = std::vector<OutboundGroup>{members};
+    Config config;
+    config.outbounds = std::vector<Outbound>{child, group};
+    ModelledRoutes routes({default_route_via(150, "nwg5"), default_route_via(151, "nwg5")});
+    UrltestState state;
+    state.config = group;
+    state.direct_child_interfaces.emplace("member", "nwg5");
+    URLTestResult result;
+    result.success = true;
+    result.latency_ms = 91;
+    result.measured_at = now;
+    state.last_results.emplace("member", result);
+    SUBCASE("expired result") {
+        state.last_results.at("member").measured_at = now - std::chrono::minutes{3};
+    }
+    SUBCASE("unmeasured result") { state.last_results.at("member").measured_at = {}; }
+    SUBCASE("future result") {
+        state.last_results.at("member").measured_at = now + std::chrono::seconds{1};
+    }
+    SUBCASE("unbound group test") { state.direct_child_interfaces.clear(); }
+    SUBCASE("tag reused for a different kernel device") {
+        state.direct_child_interfaces.at("member") = "nwg6";
+    }
+    SUBCASE("old group membership") { state.config.outbound_groups.reset(); }
+    SUBCASE("changed probe endpoint") { state.config.url = "https://old.example/"; }
+    const auto response = build_runtime_outbounds_response(
+        config, routes,
+        [&](const std::string&) -> std::optional<UrltestState> { return state; },
+        {}, now);
+    REQUIRE(response.outbounds.size() == 2);
+    for (const auto& outbound : response.outbounds) {
+        CHECK(outbound.status == api::ResolverLiveStatus::UNKNOWN);
+        REQUIRE(outbound.interfaces.size() == 1);
+        CHECK(outbound.interfaces.front().status == api::RuntimeInterfaceStatusEnum::UNKNOWN);
+        CHECK_FALSE(outbound.interfaces.front().latency_ms.has_value());
     }
 }
 

@@ -340,6 +340,8 @@ export * from './singBoxInstallResult';
 export * from './singBoxInstallResultInstallOutcome';
 export * from './singBoxInstallResultReleaseVerdict';
 export * from './singBoxProcessMode';
+export * from './singBoxServiceActionRequest';
+export * from './singBoxServiceActionRequestAction';
 export * from './sortOrder';
 export * from './statusEventConnections';
 export * from './statusEventConnectionsType';

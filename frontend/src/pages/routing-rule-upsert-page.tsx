@@ -625,6 +625,9 @@ function RoutingRuleForm({
                 <FieldContent>
                   <MultiSelectList
                     fullWidthAdd
+                    addLabel={t(
+                      "pages.routingRuleUpsert.fields.selectInstalledList"
+                    )}
                     error={error}
                     name={ROUTING_RULE_FIELD_NAMES.list}
                     onChange={field.handleChange}
@@ -650,6 +653,12 @@ function RoutingRuleForm({
                   <FieldHint
                     description={t("pages.routingRuleUpsert.fields.listsHint")}
                   />
+                  <a
+                    href="/lists"
+                    className="text-sm text-primary underline-offset-4 hover:underline"
+                  >
+                    {t("pages.routingRuleUpsert.fields.openLists")}
+                  </a>
                 </FieldContent>
               </Field>
             )

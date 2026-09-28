@@ -155,6 +155,58 @@ describe("explicit list source preview lifecycle", () => {
 })
 
 describe("list source preview presentation", () => {
+  test("binary SRS renders decoded entries rather than requesting text export", async () => {
+    const markup = await render(
+      <ListSourcePreviewResult
+        result={response({
+          source_format: "srs",
+          srs_version: 3,
+          invalid_entries: 0,
+          errors: [],
+        })}
+      />
+    )
+    expect(markup).toContain("Двоичный список SRS, версия 3")
+    expect(markup).toContain("Запись 3")
+    expect(markup).not.toContain("Строка 3")
+    expect(markup).not.toContain("текстовый экспорт")
+  })
+  test("unsupported SRS semantics and versions are explicit in both languages", async () => {
+    for (const language of ["ru", "en"]) {
+      const partial = await render(
+        <ListSourcePreviewResult
+          result={response({
+            source_format: "srs",
+            srs_version: 3,
+            complete: false,
+            limit_reason: "srs_partial",
+            unsupported_fields: 2,
+            skipped_rules: 1,
+          })}
+        />,
+        language
+      )
+      expect(partial).toContain(
+        language === "ru"
+          ? "Неподдерживаемых условий: 2"
+          : "Unsupported conditions: 2"
+      )
+      const unsupported = await render(
+        <ListSourcePreviewResult
+          result={response({
+            source_format: "srs",
+            srs_version: 6,
+            complete: false,
+            limit_reason: "srs_version",
+          })}
+        />,
+        language
+      )
+      expect(unsupported).toContain("6")
+      expect(unsupported).not.toContain("192.0.2.0/24")
+      expect(unsupported).not.toContain("listSourcePreview.")
+    }
+  })
   test("counts and canonical entries preserve physical source line numbers", async () => {
     const markup = await render(<ListSourcePreviewResult result={response()} />)
     expect(markup).toContain("Уникальных записей")

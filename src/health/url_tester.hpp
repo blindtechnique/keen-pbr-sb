@@ -4,6 +4,7 @@
 #include "../http/http_transport.hpp"
 
 #include <cstdint>
+#include <chrono>
 #include <string>
 #include <memory>
 
@@ -16,6 +17,9 @@ struct URLTestResult {
     bool success{false};
     uint32_t latency_ms{0};
     std::string error;
+    // Completion time, not the selector's next scheduled run. Runtime
+    // diagnostics must not prefer an old group result to a newer bound probe.
+    std::chrono::steady_clock::time_point measured_at{};
 };
 
 class URLTester {

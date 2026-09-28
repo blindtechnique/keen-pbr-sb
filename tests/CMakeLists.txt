@@ -135,6 +135,7 @@ add_executable(keen-pbr-tests
   test_resolver_fallback.cpp
   test_list_parser.cpp
   test_list_preview.cpp
+  test_route_rule_retirement.cpp
   test_list_source_decoder.cpp
   test_list_streamer.cpp
   test_srs_decoder.cpp
@@ -2183,6 +2184,9 @@ if(WITH_API)
     test_list_query.cpp
     test_connection_query.cpp
     test_list_preview.cpp
+    test_route_rule_retirement.cpp
+    test_srs_decoder.cpp
+    test_catalog_setup_planner.cpp
     test_list_source_decoder.cpp
     test_api_list_preview.cpp
     ../src/api/handler_lists_query.cpp
@@ -2190,9 +2194,20 @@ if(WITH_API)
     ../src/api/connection_query.cpp
     ../src/api/sse_broadcaster.cpp
     ../src/lists/list_preview.cpp
+    ../src/lists/srs_decoder.cpp
     ../src/lists/list_source_decoder.cpp
     ../src/config/list_parser.cpp
     ../src/config/config.cpp
+    ../src/setup/catalog_setup_planner.cpp
+    ../src/dns/dns_probe_server.cpp
+    ../src/dns/dns_server.cpp
+    ../src/firewall/port_spec_util.cpp
+    ../src/keenetic/ndms_rci_json_resource.cpp
+    ../src/keenetic/ndms_version_resource.cpp
+    ../src/keenetic/ndms_version_resource_production.cpp
+    ../src/keenetic/ndms_version_projection.cpp
+    ../src/keenetic/ndms_version_projection_production.cpp
+    ../src/util/system_info.cpp
     ../src/http/http_client.cpp
     ../src/http/http_transport.cpp
     ../src/http/curl_runtime.cpp
@@ -2214,7 +2229,7 @@ if(WITH_API)
   )
   target_link_libraries(keen-pbr-list-query-tests PRIVATE
     nlohmann_json::nlohmann_json fmt::fmt-header-only
-    httplib::httplib Threads::Threads ${KEEN_PBR_CURL_TARGET})
+    httplib::httplib Threads::Threads ${KEEN_PBR_CURL_TARGET} PkgConfig::ZLIB)
   if(HTTPLIB_ANL_LIB)
     target_link_libraries(keen-pbr-list-query-tests PRIVATE ${HTTPLIB_ANL_LIB})
   endif()

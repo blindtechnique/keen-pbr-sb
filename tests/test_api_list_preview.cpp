@@ -6,6 +6,7 @@
 #include "../src/api/server.hpp"
 
 #include <nlohmann/json.hpp>
+#include <zlib.h>
 
 #include <chrono>
 #include <functional>
@@ -321,6 +322,27 @@ TEST_CASE("Explicit structured URL preview accepts JSON MIME while text stays un
     CHECK(result.domains == 1);
     CHECK(result.ipv6 == 1);
     CHECK(preview_list_request(R"({"url":"https://example.org/list"})", {}, {}, transport).status == "unsupported_format");
+}
+
+TEST_CASE("List preview API detects binary SRS independently of URL and content type") {
+    auto transport = std::make_shared<PreviewMockTransport>();
+    unsigned char payload[]{0}; // valid empty SRS rule set
+    unsigned char compressed[32]{};
+    uLongf size = sizeof(compressed);
+    REQUIRE(compress2(compressed, &size, payload, sizeof(payload), Z_BEST_COMPRESSION) == Z_OK);
+    const auto body = std::string("SRS\2", 4) + std::string(reinterpret_cast<char*>(compressed), size);
+    transport->callback = [body](const auto&, auto) {
+        HttpTransportResponse response;
+        response.status_code = 200;
+        response.body = body;
+        response.headers["content-type"] = "application/json";
+        return response;
+    };
+    const auto result = preview_list_request(R"({"url":"https://example.org/download?id=music"})", {}, {}, transport);
+    CHECK(result.complete);
+    CHECK(result.source_format == "srs");
+    CHECK(result.srs_version == 2);
+    CHECK(nlohmann::json::parse(serialize_list_preview_result(result))["source_format"] == "srs");
 }
 
 } // namespace keen_pbr3

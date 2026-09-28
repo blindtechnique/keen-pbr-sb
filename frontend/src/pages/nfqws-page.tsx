@@ -1883,10 +1883,19 @@ export function StrategiesEditor({
   useEffect(() => {
     if (detailsRequest === 0) return
     detailsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })
+    detailsRef.current
+      ?.querySelector("textarea")
+      ?.focus({ preventScroll: true })
   }, [detailsRequest])
   const openDetails = (name: string) => {
     setSelected(name)
     setEditorViewChoice("breakdown")
+    setDetailsRequest((current) => current + 1)
+  }
+  const openEditor = (name: string) => {
+    setSelected(name)
+    setEditorViewChoice("raw")
+    // A repeated click on the already selected draft must still reveal it.
     setDetailsRequest((current) => current + 1)
   }
   const rawOnly = effectiveSelected.toLowerCase().endsWith(".list")
@@ -2123,7 +2132,7 @@ export function StrategiesEditor({
           <Button
             aria-label={t("nfqws.editStrategy")}
             className="keen-row-action size-8 rounded-[4px]"
-            onClick={() => setSelected(name)}
+            onClick={() => openEditor(name)}
             size="icon"
             title={t("nfqws.editStrategy")}
             variant="outline"
@@ -2362,8 +2371,8 @@ export function StrategiesEditor({
         label={t("nfqws.strategyName")}
         onOpenChange={setCreating}
         onSubmit={(name) => {
-          setSelected(name)
           setDraftContent((current) => ({ ...current, [name]: "" }))
+          openEditor(name)
         }}
         open={creating}
         placeholder="my-strategy"

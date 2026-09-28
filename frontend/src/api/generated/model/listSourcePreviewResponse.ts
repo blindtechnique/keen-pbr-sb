@@ -10,6 +10,12 @@ import type { ListSourcePreviewError } from './listSourcePreviewError';
 import type { ListSourcePreviewResponseStatus } from './listSourcePreviewResponseStatus';
 
 export interface ListSourcePreviewResponse {
+  /** Detected source format, including binary srs. */
+  source_format?: string;
+  srs_version?: number;
+  unsupported_fields?: number;
+  skipped_rules?: number;
+  inverted_rules?: number;
   status: ListSourcePreviewResponseStatus;
   complete: boolean;
   lines: number;

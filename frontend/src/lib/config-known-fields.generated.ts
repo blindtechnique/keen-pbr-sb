@@ -66,6 +66,7 @@ export const configKnownFields = {
     "enabled",
     "id",
     "list",
+    "route_rule_ids",
     "server"
   ],
   "DnsServer": [

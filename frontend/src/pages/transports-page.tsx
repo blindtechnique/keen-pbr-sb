@@ -1629,7 +1629,9 @@ export function TransportsPage({
         key="state"
         title={
           nativeInterface.runtime
-            ? boundRuntime?.detail
+            ? connectionState === "degraded"
+              ? t("transports.nativeInterface.probeFailedDescription")
+              : boundRuntime?.detail
             : t("transports.nativeInterface.liveUnavailable")
         }
         tone={connectionState === "up" ? "success" : "neutral"}
@@ -1641,7 +1643,9 @@ export function TransportsPage({
               ? t("transports.nativeInterface.disconnected")
               : connectionState === "unavailable"
                 ? t("transports.nativeInterface.notWorking")
-                : t("transports.operationalStates.verificationPending")
+                : connectionState === "degraded"
+                  ? t("transports.nativeInterface.probeFailed")
+                  : t("transports.operationalStates.verificationPending")
           : t("transports.nativeInterface.liveUnavailableShort")}
       </KeeneticStatus>,
       showLatency ? (

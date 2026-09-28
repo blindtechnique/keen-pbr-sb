@@ -132,19 +132,33 @@ export function ListSourcePreviewResult({
   result: ListSourcePreviewResponse
 }) {
   const { t } = useTranslation()
+  const binarySrs = result.source_format === "srs"
   const failure =
-    result.status === "download_failed"
-      ? t("listSourcePreview.downloadFailed")
-      : result.status === "too_large"
-        ? t("listSourcePreview.tooLarge")
-        : result.status === "unsupported_format"
-          ? t("listSourcePreview.unsupportedFormat")
-          : result.status === "route_unavailable"
-            ? t("listSourcePreview.routeUnavailable")
-            : null
+    result.limit_reason === "srs_version"
+      ? t("listSourcePreview.srsVersionUnsupported", {
+          version: result.srs_version,
+        })
+      : result.limit_reason === "srs_decode_failed"
+        ? t("listSourcePreview.srsDecodeFailed")
+        : result.status === "download_failed"
+          ? t("listSourcePreview.downloadFailed")
+          : result.status === "too_large"
+            ? t("listSourcePreview.tooLarge")
+            : result.status === "unsupported_format"
+              ? t("listSourcePreview.unsupportedFormat")
+              : result.status === "route_unavailable"
+                ? t("listSourcePreview.routeUnavailable")
+                : null
   if (failure) return <p className="text-sm">{failure}</p>
   const counts = [
-    [t("listSourcePreview.counts.lines"), result.lines],
+    [
+      t(
+        binarySrs
+          ? "listSourcePreview.srsEntriesChecked"
+          : "listSourcePreview.counts.lines"
+      ),
+      result.lines,
+    ],
     [t("listSourcePreview.counts.valid"), result.valid_entries],
     [t("listSourcePreview.counts.unique"), result.unique_entries],
     [t("listSourcePreview.counts.duplicates"), result.duplicates],
@@ -156,12 +170,23 @@ export function ListSourcePreviewResult({
   ] as const
   return (
     <div className="space-y-3">
+      {binarySrs ? (
+        <p className="text-sm">
+          {t("listSourcePreview.srsVersion", { version: result.srs_version })}
+        </p>
+      ) : null}
       {!result.complete ? (
         <p className="text-sm text-muted-foreground">
           {t(
             result.limit_reason === "line_too_long"
               ? "listSourcePreview.lineTooLongStop"
-              : "listSourcePreview.partial"
+              : result.limit_reason === "srs_partial"
+                ? "listSourcePreview.srsPartial"
+                : "listSourcePreview.partial",
+            {
+              fields: result.unsupported_fields ?? 0,
+              skipped: result.skipped_rules ?? 0,
+            }
           )}
         </p>
       ) : null}
@@ -184,7 +209,12 @@ export function ListSourcePreviewResult({
             {result.entries.slice(0, 50).map((entry) => (
               <li key={`${entry.line}:${entry.value}`} className="flex gap-2">
                 <span className="shrink-0 text-muted-foreground">
-                  {t("listSourcePreview.line", { line: entry.line })}
+                  {t(
+                    binarySrs
+                      ? "listSourcePreview.srsEntry"
+                      : "listSourcePreview.line",
+                    { line: entry.line }
+                  )}
                 </span>
                 <code className="min-w-0 break-all">{entry.value}</code>
               </li>

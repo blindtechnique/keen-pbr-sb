@@ -221,6 +221,9 @@ describe("list aliases", () => {
     )
 
     expect(updated.dns?.servers).toHaveLength(1)
+    expect(updated.dns?.rules?.[0].route_rule_ids).toEqual([
+      updated.route?.rules?.[0].id,
+    ])
     expect(updated.route?.rules).toEqual([
       expect.objectContaining({
         list: ["ai_services"],
@@ -251,6 +254,32 @@ describe("list aliases", () => {
       { value: "__none__", label: "Не выбрано" },
       { value: "cloudflare", label: "Cloudflare" },
     ])
+    expect(
+      createListDnsServerSelectItems(
+        [{ tag: "opendns_backup", display_name: "OpenDNS - резервный" }],
+        "Не выбрано"
+      )[1]
+    ).toEqual({ value: "opendns_backup", label: "OpenDNS - резервный" })
+  })
+
+  test("a DNS-only quick setup does not claim the last existing route", () => {
+    const updated = buildUpdatedConfigForListUpsert(
+      {
+        route: {
+          rules: [{ id: "unrelated", list: ["other"], outbound: "vpn" }],
+        },
+      },
+      "create",
+      baselineDraft,
+      undefined,
+      {
+        createRouteRule: true,
+        routeOutbound: "",
+        createDnsRule: true,
+        dnsServer: "dns",
+      }
+    )
+    expect(updated.dns?.rules?.[0].route_rule_ids).toBeUndefined()
   })
 
   test("derives a collision-safe technical ID from the readable name", () => {

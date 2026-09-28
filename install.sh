@@ -787,6 +787,9 @@ bootstrap_rescue_helpers() {
     [ ! -L "$RESCUE_DIR" ] &&
         { [ ! -e "$RESCUE_DIR" ] || [ -d "$RESCUE_DIR" ]; } ||
         die "каталог rescue имеет небезопасный тип" "the recovery path is not a regular directory"
+    # Shared Entware ancestors must remain traversable by unprivileged services.
+    # Keep the rescue tree itself private under the installer's umask 077.
+    (umask 022; mkdir -p /opt/var/lib)
     mkdir -p "$RESCUE_DIR"
     chmod 0700 "$RESCUE_DIR" || die "не удалось защитить каталог rescue" "could not set permissions on the recovery directory"
     for helper in portable-stat.sh rescue-update.sh update-lock.sh; do
@@ -1503,6 +1506,7 @@ install_package_transactionally() {
     [ ! -L "$RESCUE_DIR" ] &&
         { [ ! -e "$RESCUE_DIR" ] || [ -d "$RESCUE_DIR" ]; } ||
         die "каталог rescue имеет небезопасный тип" "the recovery path is not a regular directory"
+    (umask 022; mkdir -p /opt/var/lib)
     mkdir -p "$RESCUE_DIR"
     chmod 0700 "$RESCUE_DIR" ||
         die "не удалось защитить каталог rescue" "could not set permissions on the recovery directory"

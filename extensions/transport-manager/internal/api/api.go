@@ -54,6 +54,10 @@ type TransportEnabledAdmin interface {
 	SetEnabled(context.Context, string, bool) error
 }
 
+type SingBoxServiceRuntime interface {
+	ServiceAction(context.Context, string) error
+}
+
 type TransportConfigRevisionProvider interface {
 	Revision() string
 }
@@ -144,6 +148,7 @@ func NewWithContext(lifecycle context.Context, manager TransportRuntime, key str
 	mux.HandleFunc("GET /v1/transports/{tag}", a.status)
 	mux.HandleFunc("POST /v1/transports/{tag}/{action}", a.action)
 	mux.HandleFunc("POST /v1/transports/runtime-ready", a.runtimeReady)
+	mux.HandleFunc("POST /v1/sing-box/{action}", a.singBoxServiceAction)
 	mux.HandleFunc("GET /v1/config/transports", a.listConfig)
 	mux.HandleFunc("GET /v1/config/transports/state", a.configState)
 	mux.HandleFunc("GET /v1/config/transports/export", a.exportConfig)
@@ -728,6 +733,26 @@ func (a *API) decorateStatuses(statuses []transport.Status) {
 		statuses[index].DisplayName = displayNameByTag[statuses[index].Tag]
 	}
 }
+func (a *API) singBoxServiceAction(w http.ResponseWriter, r *http.Request) {
+	action := r.PathValue("action")
+	if action != "up" && action != "down" && action != "restart" {
+		write(w, http.StatusBadRequest, map[string]string{"error": "unknown sing-box service action"})
+		return
+	}
+	runtime, ok := a.manager.(SingBoxServiceRuntime)
+	if !ok {
+		write(w, http.StatusServiceUnavailable, map[string]string{"error": "sing-box service control unavailable"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(a.lifecycle, 90*time.Second)
+	defer cancel()
+	if err := runtime.ServiceAction(ctx, action); err != nil {
+		write(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	write(w, http.StatusAccepted, map[string]any{"status": "accepted", "at": time.Now().UTC()})
+}
+
 func (a *API) action(w http.ResponseWriter, r *http.Request) {
 	var err error
 	// Transport actions must not inherit the request context: bringing a

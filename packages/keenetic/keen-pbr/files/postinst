@@ -69,6 +69,18 @@ fi
     exit 1
 }
 mkdir -p /opt/var/lib/keen-pbr || exit 1
+# Older first installs created missing shared ancestors under umask 077.
+# nfqws opens this public Lua companion AFTER dropping to nobody: mode 0644
+# on the file and 0755 on keen-pbr are not enough with /opt/var/lib at 0700.
+# Add traversal only to these two shared directories, never recursively and
+# never to rescue/configuration files or other private subdirectories.
+for public_parent in /opt/var /opt/var/lib; do
+    [ -d "$public_parent" ] && [ ! -L "$public_parent" ] || {
+        echo "Unsafe nfqws reporter parent: $public_parent" >&2
+        exit 1
+    }
+    chmod a+x "$public_parent" || exit 1
+done
 runtime_data_owner="$(keen_pbr_stat_value '%u' /opt/var/lib/keen-pbr)" ||
     exit 1
 [ "$runtime_data_owner" = "$(id -u)" ] || {

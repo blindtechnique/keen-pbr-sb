@@ -1,4 +1,5 @@
 #include "daemon.hpp"
+#include "../routing/retired_rule_conntrack.hpp"
 #include "../update/download_transport.hpp"
 #include "api_runtime_lifecycle.hpp"
 #include "keenetic_dns_firewall_lifecycle_policy.hpp"
@@ -421,6 +422,7 @@ struct DaemonConfigGenerationTransaction final {
     ConntrackDestinationRetirementCoverage candidate_normal_retirement;
     ConntrackDestinationRetirementCoverage candidate_aggressive_retirement;
     std::vector<std::string> candidate_native_source_cleanup_cidrs;
+    std::vector<std::uint32_t> candidate_retired_rule_marks;
     ConntrackDestinationRetirementCoverage rollback_normal_retirement;
     ConntrackDestinationRetirementCoverage rollback_aggressive_retirement;
     std::vector<std::string> rollback_native_source_cleanup_cidrs;
@@ -7893,6 +7895,13 @@ bool Daemon::publish_prepared_runtime_firewall_config_candidate(
             std::move(cleanup.normal_retirement);
         transaction->candidate_aggressive_retirement =
             std::move(cleanup.aggressive_retirement);
+        if (transaction->previous_runtime_active) {
+            transaction->candidate_retired_rule_marks = retired_rule_conntrack_marks(
+                transaction->base_active_snapshot->config,
+                transaction->candidate.config,
+                firewall_state_.get_rules(),
+                transaction->base_active_snapshot->outbound_marks);
+        }
     } catch (...) {
         // No irreversible post-COMMIT cleanup may be improvised. Failure to
         // prepare its exact bounded scope keeps ConfigStore on the base
@@ -8063,6 +8072,30 @@ bool Daemon::publish_prepared_runtime_firewall_config_candidate(
                 "skipped by an unknown error; existing flows will converge "
                 "as they expire");
         } catch (...) {
+        }
+    }
+    // The new classifier is published before retiring old table marks. This
+    // applies to explicit rule removal regardless of optional list-refresh
+    // reconnect settings, and never runs for a rolled-back candidate.
+    if (transaction->previous_runtime_active &&
+        runtime_generation_.load(std::memory_order_acquire) == transaction->candidate_runtime_generation &&
+        !transaction->candidate_retired_rule_marks.empty()) {
+        OwnedConntrackCleanupSnapshot snapshot;
+        snapshot.runtime_generation = transaction->candidate_runtime_generation;
+        snapshot.owned_mask = fwmark_mask_value(transaction->base_active_snapshot->config.fwmark.value_or(FwmarkConfig{}));
+        snapshot.ipv6_enabled = resolve_ipv6_support(transaction->base_active_snapshot->config).enabled;
+        snapshot.marks.insert(transaction->candidate_retired_rule_marks.begin(), transaction->candidate_retired_rule_marks.end());
+        snapshot.priority_marks = snapshot.marks;
+        try {
+            const auto cleanup = conntrack_manager_.delete_marks_ordered(
+                transaction->candidate_retired_rule_marks, snapshot.owned_mask,
+                ConntrackCleanupOptions{snapshot.ipv6_enabled, std::chrono::seconds{4}});
+            if (cleanup.command_unavailable) warn_conntrack_unavailable_once();
+            if (!cleanup.remaining_marks.empty())
+                conntrack_cleanup_coordinator_.schedule(snapshot, cleanup.remaining_marks);
+        } catch (const std::exception& error) {
+            Logger::instance().warn("Removed routing rule: table-scoped conntrack cleanup needs retry: {}", error.what());
+            try { conntrack_cleanup_coordinator_.schedule(snapshot, transaction->candidate_retired_rule_marks); } catch (...) {}
         }
     }
     execute_committed_stale_flow_reconnect(

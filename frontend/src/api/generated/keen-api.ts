@@ -110,6 +110,7 @@ import type {
   SingBoxInstallCapability,
   SingBoxInstallRequest,
   SingBoxInstallResult,
+  SingBoxServiceActionRequest,
   SubscriptionApplyRequest,
   SubscriptionApplyResponse,
   SubscriptionIdRequest,
@@ -4897,6 +4898,96 @@ export const usePostTransportAction = <TError = ErrorResponse,
         TContext
       > => {
       return useMutation(getPostTransportActionMutationOptions(options), queryClient);
+    }
+
+/**
+ * @summary Control the sing-box service without changing individual tunnel preferences
+ */
+export type postSingBoxServiceActionResponse200 = {
+  data: TransportActionResponse
+  status: 200
+}
+
+export type postSingBoxServiceActionResponse503 = {
+  data: ErrorResponse
+  status: 503
+}
+
+export type postSingBoxServiceActionResponseSuccess = (postSingBoxServiceActionResponse200) & {
+  headers: Headers;
+};
+export type postSingBoxServiceActionResponseError = (postSingBoxServiceActionResponse503) & {
+  headers: Headers;
+};
+
+export type postSingBoxServiceActionResponse = (postSingBoxServiceActionResponseSuccess | postSingBoxServiceActionResponseError)
+
+export const getPostSingBoxServiceActionUrl = () => {
+
+
+
+
+  return `/api/transports/sing-box/service`
+}
+
+export const postSingBoxServiceAction = async (singBoxServiceActionRequest: SingBoxServiceActionRequest, options?: RequestInit): Promise<postSingBoxServiceActionResponse> => {
+
+  return apiFetch<postSingBoxServiceActionResponse>(getPostSingBoxServiceActionUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      singBoxServiceActionRequest,)
+  }
+);}
+
+
+
+
+export const getPostSingBoxServiceActionMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSingBoxServiceAction>>, TError,{data: SingBoxServiceActionRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postSingBoxServiceAction>>, TError,{data: SingBoxServiceActionRequest}, TContext> => {
+
+const mutationKey = ['postSingBoxServiceAction'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postSingBoxServiceAction>>, {data: SingBoxServiceActionRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postSingBoxServiceAction(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostSingBoxServiceActionMutationResult = NonNullable<Awaited<ReturnType<typeof postSingBoxServiceAction>>>
+    export type PostSingBoxServiceActionMutationBody = SingBoxServiceActionRequest
+    export type PostSingBoxServiceActionMutationError = ErrorResponse
+
+    /**
+ * @summary Control the sing-box service without changing individual tunnel preferences
+ */
+export const usePostSingBoxServiceAction = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSingBoxServiceAction>>, TError,{data: SingBoxServiceActionRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postSingBoxServiceAction>>,
+        TError,
+        {data: SingBoxServiceActionRequest},
+        TContext
+      > => {
+      return useMutation(getPostSingBoxServiceActionMutationOptions(options), queryClient);
     }
 
 /**

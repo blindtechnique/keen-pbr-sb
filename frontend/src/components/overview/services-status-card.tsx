@@ -5,19 +5,17 @@ import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
 import type { TransportStatus } from "@/api/generated/model"
-import { TransportActionRequestAction } from "@/api/generated/model"
 import {
   getHealthRouting,
   getHealthService,
   getTransports,
-  postTransportAction,
+  postSingBoxServiceAction,
   postServiceRestartProcesses,
   useGetHealthService,
   useGetTransports,
 } from "@/api/generated/keen-api"
 import {
   usePostServiceActionMutation,
-  usePostTransportActionMutation,
   useRoutingControlPendingState,
 } from "@/api/mutations"
 import { getDnsmasqBadgeState } from "@/components/overview/dnsmasq-status"
@@ -35,7 +33,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { waitForRuntimeReadiness } from "@/lib/runtime-readiness"
 import {
   parseServiceCommandResult,
   ServiceRestartFailure,
@@ -122,17 +119,18 @@ export function ServicesStatusCard() {
   const runningSingbox = singboxTransports.filter(
     (transport) => transport.state === "up"
   ).length
+  const singboxOn = singboxTransports.some(
+    (transport) => transport.desired_up || (transport.pid ?? 0) > 0
+  )
   const restartableSingboxTransports = singboxTransports.filter(
     (transport) => transport.desired_up || transport.state === "up"
   )
 
   const queryClient = useQueryClient()
   const serviceHealthQuery = useGetHealthService()
-  const serviceRestartMutation = usePostServiceActionMutation("restart")
   const serviceStartMutation = usePostServiceActionMutation("start")
   const serviceStopMutation = usePostServiceActionMutation("stop")
   const { anyPending: routingActionPending } = useRoutingControlPendingState()
-  const transportActionMutation = usePostTransportActionMutation()
   const runtimeReadinessProbe = {
     health: async () => {
       const response = await getHealthService({ cache: "no-store" })
@@ -211,8 +209,8 @@ export function ServicesStatusCard() {
     onSuccess: async (result) => {
       await queryClient.invalidateQueries({ queryKey: ["nfqws"] })
       // Not restartComplete: that string promises "routing and DNS are ready",
-      // which this path never checks. It belongs to the keen-pbr and sing-box
-      // restarts, which do await waitForRuntimeReadiness.
+      // which this path never checks. Only the full keen-pbr process restart
+      // waits for routing and DNS readiness.
       toast.success(
         t("overview.services.outcomeSucceeded", { service: "nfqws2" })
       )
@@ -249,52 +247,29 @@ export function ServicesStatusCard() {
     onError: () => toast.error(t("overview.services.switchFailed")),
   })
 
-  // There is no sing-box service to switch: sing-box exists only as the
-  // transports it runs, so the switch raises or drops all of them at once.
+  // Service power is separate from the individual tunnel and boot preferences.
   const setSingboxRunning = (running: boolean) => {
-    for (const transport of singboxTransports) {
-      transportActionMutation.mutate({
-        data: {
-          tag: transport.tag,
-          action: running
-            ? TransportActionRequestAction.up
-            : TransportActionRequestAction.down,
-        },
-      })
-    }
+    singboxServiceMutation.mutate(running ? "up" : "down")
   }
 
-  // Restart managed tunnels first, then rebuild keen-pbr routes/firewall and
-  // dnsmasq against the interfaces that actually came back. The previous
-  // fire-and-forget loop could display success while the routes still pointed
-  // at a TUN interface that had disappeared during restart.
-  const singboxRestartMutation = useMutation({
-    mutationFn: async () => {
-      // An intentionally stopped transport must stay stopped. Restart only
-      // transports whose desired runtime state is up (plus a live legacy
-      // status that does not yet expose desired_up correctly).
-      const tags = restartableSingboxTransports.map(
-        (transport) => transport.tag
-      )
-      await Promise.all(
-        tags.map((tag) =>
-          postTransportAction({
-            tag,
-            action: TransportActionRequestAction.restart,
-          })
-        )
-      )
-      await serviceRestartMutation.mutateAsync()
-      await waitForRuntimeReadiness(runtimeReadinessProbe, {
-        expectedTransportTags: tags,
-      })
+  // The manager owns one process lifecycle. Background route reconciliation
+  // follows the returned interfaces; do not restart keen-pbr or DNS here.
+  const singboxServiceMutation = useMutation({
+    mutationFn: async (action: "up" | "down" | "restart") => {
+      const response = await postSingBoxServiceAction({ action })
+      if (response.status !== 200)
+        throw new Error(t("overview.services.restartFailed"))
     },
-    onSuccess: async () => {
-      await Promise.all([
+    onSettled: async () => {
+      // A failed start can follow a successful stop. Always show actual state.
+      await Promise.allSettled([
         serviceHealthQuery.refetch(),
         transportsQuery.refetch(),
       ])
-      toast.success(t("overview.services.restartComplete"))
+    },
+    onSuccess: (_result, action) => {
+      if (action === "restart")
+        toast.success(t("overview.services.singboxRestartComplete"))
     },
     onError: (error) => toast.error(<ServiceRestartError error={error} />),
   })
@@ -376,29 +351,22 @@ export function ServicesStatusCard() {
               total: singboxTransports.length,
             }),
       state:
-        singboxTransports.length === 0
-          ? "absent"
-          : runningSingbox > 0
-            ? "up"
-            : "down",
+        singboxTransports.length === 0 ? "absent" : singboxOn ? "up" : "down",
       onRestart:
         restartableSingboxTransports.length > 0
-          ? () => singboxRestartMutation.mutate()
+          ? () => singboxServiceMutation.mutate("restart")
           : undefined,
       restarting:
-        singboxRestartMutation.isPending ||
-        transportActionMutation.isPending ||
-        processRestartMutation.isPending,
+        singboxServiceMutation.isPending || processRestartMutation.isPending,
       toggle: {
-        checked: runningSingbox > 0,
+        checked: singboxOn,
         disabled:
           singboxTransports.length === 0 ||
-          transportActionMutation.isPending ||
+          singboxServiceMutation.isPending ||
           processRestartMutation.isPending,
-        label:
-          runningSingbox > 0
-            ? t("overview.runtime.actions.stop")
-            : t("overview.runtime.actions.start"),
+        label: singboxOn
+          ? t("overview.runtime.actions.stop")
+          : t("overview.runtime.actions.start"),
         onChange: setSingboxRunning,
       },
     },

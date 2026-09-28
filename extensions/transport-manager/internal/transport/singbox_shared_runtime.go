@@ -166,17 +166,18 @@ type SharedSingBoxGroup struct {
 	healthEndpoint RoutingHealthEndpoint
 	hooks          sharedRuntimeHooks
 
-	specs         map[string]TransportSpec
-	desired       map[string]bool
-	activeTags    map[string]bool
-	activeData    []byte
-	process       sharedProcess
-	candidate     sharedProcess
-	state         State
-	lastErr       string
-	updated       time.Time
-	memberUpdated map[string]time.Time
-	generation    uint64
+	specs          map[string]TransportSpec
+	desired        map[string]bool
+	serviceStopped bool // service switch never rewrites individual intent or AutoStart
+	activeTags     map[string]bool
+	activeData     []byte
+	process        sharedProcess
+	candidate      sharedProcess
+	state          State
+	lastErr        string
+	updated        time.Time
+	memberUpdated  map[string]time.Time
+	generation     uint64
 }
 
 func NewSharedSingBoxGroup(
@@ -442,7 +443,19 @@ func (g *SharedSingBoxGroup) setPower(ctx context.Context, tag string, desired b
 		nextSpecs[tag] = spec
 	}
 	nextDesired[tag] = desired
-	return g.transitionLocked(ctx, nextSpecs, nextDesired, false)
+	g.mu.Lock()
+	wasStopped := g.serviceStopped
+	if desired {
+		g.serviceStopped = false
+	}
+	g.mu.Unlock()
+	err := g.transitionLocked(ctx, nextSpecs, nextDesired, false)
+	if err != nil {
+		g.mu.Lock()
+		g.serviceStopped = wasStopped
+		g.mu.Unlock()
+	}
+	return err
 }
 
 func (g *SharedSingBoxGroup) Restart(ctx context.Context) error {
@@ -457,6 +470,40 @@ func (g *SharedSingBoxGroup) Restart(ctx context.Context) error {
 	nextDesired := cloneBoolMap(g.desired)
 	g.mu.RUnlock()
 	return g.transitionLocked(ctx, nextSpecs, nextDesired, true)
+}
+
+// ServiceAction operates on the process once, preserving each member's saved
+// and runtime preferences. A service stop must not turn into N power toggles.
+func (g *SharedSingBoxGroup) ServiceAction(ctx context.Context, action string) error {
+	if action != "up" && action != "down" && action != "restart" {
+		return fmt.Errorf("invalid sing-box service action %q", action)
+	}
+	ctx, cancel := g.operationContext(ctx)
+	defer cancel()
+	if err := lockMutexContext(ctx, &g.opMu); err != nil {
+		return err
+	}
+	defer g.opMu.Unlock()
+	g.mu.Lock()
+	previous := g.serviceStopped
+	// An explicit restart first stops the process even if the next config is
+	// invalid. Validation failure must not veto the owner's stop request.
+	g.serviceStopped = action == "down" || action == "restart"
+	nextSpecs, nextDesired := cloneSpecMap(g.specs), cloneBoolMap(g.desired)
+	g.mu.Unlock()
+	if err := g.transitionLocked(ctx, nextSpecs, nextDesired, false); err != nil {
+		g.mu.Lock()
+		g.serviceStopped = previous
+		g.mu.Unlock()
+		return err
+	}
+	if action == "restart" {
+		g.mu.Lock()
+		g.serviceStopped = false
+		g.mu.Unlock()
+		return g.transitionLocked(ctx, nextSpecs, nextDesired, false)
+	}
+	return nil
 }
 
 func (g *SharedSingBoxGroup) RestartTag(ctx context.Context, tag string) error {
@@ -475,7 +522,17 @@ func (g *SharedSingBoxGroup) RestartTag(ctx context.Context, tag string) error {
 	nextDesired := cloneBoolMap(g.desired)
 	g.mu.RUnlock()
 	nextDesired[tag] = true
-	return g.transitionLocked(ctx, nextSpecs, nextDesired, true)
+	g.mu.Lock()
+	wasStopped := g.serviceStopped
+	g.serviceStopped = false
+	g.mu.Unlock()
+	err := g.transitionLocked(ctx, nextSpecs, nextDesired, true)
+	if err != nil {
+		g.mu.Lock()
+		g.serviceStopped = wasStopped
+		g.mu.Unlock()
+	}
+	return err
 }
 
 func (g *SharedSingBoxGroup) Reconcile(ctx context.Context) error {
@@ -533,6 +590,11 @@ func (g *SharedSingBoxGroup) transitionLocked(
 		return err
 	}
 	wanted := desiredSpecs(nextSpecs, nextDesired)
+	g.mu.RLock()
+	if g.serviceStopped {
+		wanted = nil
+	}
+	g.mu.RUnlock()
 	if len(wanted) == 0 {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -544,6 +606,7 @@ func (g *SharedSingBoxGroup) transitionLocked(
 		defer cancelLifecycle()
 		g.mu.Lock()
 		process := g.process
+		candidate := g.candidate
 		if process != nil {
 			g.process = nil
 			g.generation++
@@ -562,6 +625,14 @@ func (g *SharedSingBoxGroup) transitionLocked(
 				return fmt.Errorf("stop shared sing-box: %w", err)
 			}
 		}
+		if candidate != nil && candidate != process {
+			if err := candidate.Stop(lifecycleCtx); err != nil && candidate.Alive() {
+				return g.fail(fmt.Errorf("stop shared sing-box candidate: %w", err))
+			}
+		}
+		g.mu.Lock()
+		g.candidate = nil
+		g.mu.Unlock()
 		g.removeRulesForActive(lifecycleCtx)
 		g.commitState(nextSpecs, nextDesired, nil, nil, map[string]bool{}, StateDown, "")
 		return nil
@@ -863,7 +934,11 @@ func ensureForwardingRulesForSpecs(ctx context.Context, specs []TransportSpec) e
 }
 
 func (g *SharedSingBoxGroup) EnsureRuntimeRules() error {
-	if err := lockMutexContext(g.lifetime, &g.opMu); err != nil {
+	return g.EnsureRuntimeRulesContext(g.lifetime)
+}
+
+func (g *SharedSingBoxGroup) EnsureRuntimeRulesContext(ctx context.Context) error {
+	if err := lockMutexContext(ctx, &g.opMu); err != nil {
 		return err
 	}
 	defer g.opMu.Unlock()
@@ -874,7 +949,7 @@ func (g *SharedSingBoxGroup) EnsureRuntimeRules() error {
 	if process == nil || !process.Alive() {
 		return nil
 	}
-	if err := g.ensureRulesFor(g.lifetime, specs); err != nil {
+	if err := g.ensureRulesFor(ctx, specs); err != nil {
 		return err
 	}
 	truncateRuntimeLogFile(filepath.Join(g.runtimeDir, "shared.log"))
@@ -1067,6 +1142,9 @@ func (g *SharedSingBoxGroup) fail(err error) error {
 func (g *SharedSingBoxGroup) HasDesired() bool {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
+	if g.serviceStopped {
+		return false
+	}
 	for _, desired := range g.desired {
 		if desired {
 			return true
@@ -1086,6 +1164,9 @@ func (g *SharedSingBoxGroup) Healthy() bool {
 }
 
 func (g *SharedSingBoxGroup) HasDesiredLocked() bool {
+	if g.serviceStopped {
+		return false
+	}
 	for _, desired := range g.desired {
 		if desired {
 			return true
@@ -1199,7 +1280,7 @@ func (m *SharedSingBoxMember) SupervisorGroup() supervisorGroup {
 func (g *SharedSingBoxGroup) memberStatus(ctx context.Context, tag string) Status {
 	g.mu.RLock()
 	spec, exists := g.specs[tag]
-	desired := g.desired[tag]
+	desired := g.desired[tag] && !g.serviceStopped
 	process := g.process
 	state, lastErr, updated := g.state, g.lastErr, g.memberUpdated[tag]
 	if updated.IsZero() {

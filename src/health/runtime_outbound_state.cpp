@@ -48,11 +48,13 @@ ProbeVerdict classify_interface_probe(
     if (!probe->attributed) {
         return ProbeVerdict::Unverifiable;
     }
-    // Every stored result is stamped by InterfaceProbe::probe, so measured_at
-    // is only ever the default on a value nobody measured. Do not lean on the
+    // Both probe producers stamp completed observations, so measured_at is
+    // only ever the default on a value nobody measured. Do not lean on the
     // default reading as old: steady_clock's epoch is boot time on Linux, so
     // within the first minute of uptime it would read as current instead.
-    if (now - probe->measured_at > freshness_limit) {
+    if (probe->measured_at == std::chrono::steady_clock::time_point{} ||
+        probe->measured_at > now ||
+        now - probe->measured_at > freshness_limit) {
         return ProbeVerdict::Unverifiable;
     }
     return probe->success ? ProbeVerdict::Verified : ProbeVerdict::Failed;
@@ -176,7 +178,10 @@ api::RuntimeInterfaceStatusEnum map_urltest_child_status(
     const Outbound& child,
     bool reachable,
     bool is_active,
-    const std::optional<UrltestState>& urltest_state) {
+    const std::optional<UrltestState>& urltest_state,
+    const std::optional<InterfaceProbeResult>& probe,
+    std::chrono::steady_clock::time_point now,
+    std::chrono::steady_clock::duration freshness_limit) {
     if (!child.interface.has_value()) {
         return api::RuntimeInterfaceStatusEnum::UNKNOWN;
     }
@@ -189,27 +194,24 @@ api::RuntimeInterfaceStatusEnum map_urltest_child_status(
         return api::RuntimeInterfaceStatusEnum::UNAVAILABLE;
     }
 
-    if (!urltest_state.has_value()) {
-        return is_active
-            ? api::RuntimeInterfaceStatusEnum::UNKNOWN
-            : api::RuntimeInterfaceStatusEnum::BACKUP;
+    if (urltest_state.has_value()) {
+        const auto breaker_it = urltest_state->circuit_breakers.find(child.tag);
+        if (breaker_it != urltest_state->circuit_breakers.end() &&
+            breaker_it->second.state(child.tag) == CircuitState::open) {
+            return api::RuntimeInterfaceStatusEnum::UNAVAILABLE;
+        }
     }
 
-    const auto result_it = urltest_state->last_results.find(child.tag);
-    const auto breaker_it = urltest_state->circuit_breakers.find(child.tag);
-    const bool breaker_open =
-        breaker_it != urltest_state->circuit_breakers.end() &&
-        breaker_it->second.state(child.tag) == CircuitState::open;
-
-    if (breaker_open) {
-        return api::RuntimeInterfaceStatusEnum::UNAVAILABLE;
-    }
-
-    if (result_it == urltest_state->last_results.end()) {
+    // The interface row and every group containing it use the same current,
+    // device-bound observation. Selection eligibility still belongs to the
+    // manager above; diagnostics must never close its circuit breaker.
+    const auto verdict = runtime_outbound_detail::classify_interface_probe(
+        probe, now, freshness_limit);
+    if (verdict == runtime_outbound_detail::ProbeVerdict::Unverifiable) {
         return api::RuntimeInterfaceStatusEnum::UNKNOWN;
     }
 
-    if (result_it->second.success) {
+    if (verdict == runtime_outbound_detail::ProbeVerdict::Verified) {
         return is_active
             ? api::RuntimeInterfaceStatusEnum::ACTIVE
             : api::RuntimeInterfaceStatusEnum::BACKUP;
@@ -337,7 +339,8 @@ api::RuntimeOutboundStateElement build_interface_outbound_state(
 
     if (verdict == runtime_outbound_detail::ProbeVerdict::Verified) {
         interface_state.latency_ms = static_cast<int64_t>(probe->latency_ms);
-    } else if (probe.has_value() && probe->attributed && !probe->error.empty()) {
+    } else if (verdict == runtime_outbound_detail::ProbeVerdict::Failed &&
+               !probe->error.empty()) {
         interface_state.detail = probe->error;
     }
 
@@ -477,29 +480,25 @@ api::RuntimeOutboundStateElement build_urltest_outbound_state(const Config& conf
                       .any(!config.daemon || config.daemon->ipv6_enabled.value_or(true))
                 : false;
         const bool is_active = !live_active_child_tag.empty() && live_active_child_tag == child->tag;
-        interface_state.status = map_urltest_child_status(*child, reachable, is_active, urltest_state);
-
-        if (urltest_state.has_value()) {
-            const auto result_it = urltest_state->last_results.find(child->tag);
-            if (result_it != urltest_state->last_results.end()) {
-                interface_state.latency_ms =
-                    runtime_outbound_detail::latency_from_urltest_result(
-                        result_it->second);
-                if (!result_it->second.error.empty()) {
-                    interface_state.detail = result_it->second.error;
-                }
-            }
+        const auto probe = interface_probe_lookup(child->tag);
+        interface_state.status = map_urltest_child_status(
+            *child, reachable, is_active, urltest_state, probe, now,
+            freshness_limit);
+        const auto verdict = runtime_outbound_detail::classify_interface_probe(
+            probe, now, freshness_limit);
+        if (verdict == runtime_outbound_detail::ProbeVerdict::Verified &&
+            interface_state.status != api::RuntimeInterfaceStatusEnum::UNAVAILABLE) {
+            interface_state.latency_ms = static_cast<int64_t>(probe->latency_ms);
+        } else if (verdict == runtime_outbound_detail::ProbeVerdict::Failed &&
+                   !probe->error.empty()) {
+            interface_state.detail = probe->error;
         }
-
-        if (interface_state.latency_ms == std::nullopt && interface_probe_lookup) {
-            const auto probe = interface_probe_lookup(child->tag);
-            // Only an attributed, current measurement belongs to this child.
-            // An unpinned probe may have travelled the WAN, and publishing its
-            // latency here would make a dead member look fast.
-            if (runtime_outbound_detail::classify_interface_probe(
-                    probe, now, freshness_limit) ==
-                runtime_outbound_detail::ProbeVerdict::Verified) {
-                interface_state.latency_ms = static_cast<int64_t>(probe->latency_ms);
+        if (urltest_state.has_value()) {
+            const auto breaker = urltest_state->circuit_breakers.find(child->tag);
+            if (breaker != urltest_state->circuit_breakers.end() &&
+                breaker->second.state(child->tag) == CircuitState::open) {
+                interface_state.detail =
+                    "temporarily excluded by group circuit breaker; awaiting recovery checks";
             }
         }
 
@@ -556,6 +555,75 @@ api::RuntimeOutboundsResponse build_runtime_outbounds_response(
     const auto freshness_limit =
         runtime_outbound_detail::interface_probe_freshness_limit(
             interface_target_count);
+    // Read each producer once per response: otherwise even two rows in this
+    // one response can straddle the completion of a background probe.
+    std::map<std::string, UrltestState> group_snapshots;
+    std::map<std::string, InterfaceProbeResult> current_probes;
+    const auto record_probe = [&](const std::string& tag,
+                                  const std::optional<InterfaceProbeResult>& probe) {
+        if (runtime_outbound_detail::classify_interface_probe(
+                probe, now, freshness_limit) ==
+            runtime_outbound_detail::ProbeVerdict::Unverifiable) {
+            return;
+        }
+        const auto previous = current_probes.find(tag);
+        if (previous == current_probes.end() ||
+            probe->measured_at > previous->second.measured_at ||
+            (probe->measured_at == previous->second.measured_at &&
+             !probe->success && previous->second.success)) {
+            current_probes[tag] = *probe;
+        }
+    };
+    for (const auto& outbound : outbounds) {
+        if (outbound.type == OutboundType::INTERFACE && interface_probe_lookup) {
+            record_probe(outbound.tag, interface_probe_lookup(outbound.tag));
+        }
+        if (outbound.type != OutboundType::URLTEST || !urltest_state_lookup) {
+            continue;
+        }
+        auto group = urltest_state_lookup(outbound.tag);
+        if (!group || group->config.tag != outbound.tag ||
+            group->config.type != OutboundType::URLTEST ||
+            group->config.url != outbound.url) {
+            continue;
+        }
+        const auto measured_children = ordered_urltest_children(outbounds, group->config);
+        for (const Outbound* child : ordered_urltest_children(outbounds, outbound)) {
+            if (child->type != OutboundType::INTERFACE || !child->interface ||
+                child->interface->empty() ||
+                std::find(measured_children.begin(), measured_children.end(), child) ==
+                    measured_children.end()) {
+                continue;
+            }
+            const auto bound = group->direct_child_interfaces.find(child->tag);
+            const auto result = group->last_results.find(child->tag);
+            if (bound == group->direct_child_interfaces.end() ||
+                bound->second != *child->interface ||
+                result == group->last_results.end()) {
+                continue;
+            }
+            InterfaceProbeResult probe;
+            probe.success = result->second.success;
+            probe.latency_ms = result->second.latency_ms;
+            probe.error = result->second.error;
+            probe.attributed = true;
+            probe.measured_at = result->second.measured_at;
+            record_probe(child->tag, probe);
+        }
+        group_snapshots.emplace(outbound.tag, std::move(*group));
+    }
+    const UrltestStateLookupFn group_lookup = [&group_snapshots](const std::string& tag)
+        -> std::optional<UrltestState> {
+        const auto found = group_snapshots.find(tag);
+        return found == group_snapshots.end() ? std::nullopt
+                                             : std::optional<UrltestState>{found->second};
+    };
+    const InterfaceProbeLookupFn probe_lookup = [&current_probes](const std::string& tag)
+        -> std::optional<InterfaceProbeResult> {
+        const auto found = current_probes.find(tag);
+        return found == current_probes.end() ? std::nullopt
+                                            : std::optional<InterfaceProbeResult>{found->second};
+    };
     response.outbounds.reserve(outbounds.size());
 
     for (const auto& outbound : outbounds) {
@@ -563,7 +631,7 @@ api::RuntimeOutboundsResponse build_runtime_outbounds_response(
             case OutboundType::INTERFACE:
                 response.outbounds.push_back(build_interface_outbound_state(
                     config, outbound, all_routes, main_table_routes,
-                    interface_probe_lookup, now, freshness_limit));
+                    probe_lookup, now, freshness_limit));
                 break;
             case OutboundType::TABLE:
                 response.outbounds.push_back(
@@ -573,8 +641,8 @@ api::RuntimeOutboundsResponse build_runtime_outbounds_response(
                 response.outbounds.push_back(
                     build_urltest_outbound_state(config, outbound,
                                                  all_routes, main_table_routes,
-                                                 urltest_state_lookup,
-                                                 interface_probe_lookup, now,
+                                                 group_lookup,
+                                                 probe_lookup, now,
                                                  freshness_limit));
                 break;
             case OutboundType::BLACKHOLE:

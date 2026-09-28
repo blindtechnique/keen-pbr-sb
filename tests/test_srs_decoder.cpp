@@ -1,4 +1,5 @@
 #include "../src/lists/srs_decoder.hpp"
+#include "../src/lists/list_preview.hpp"
 
 #include <doctest/doctest.h>
 
@@ -211,6 +212,51 @@ TEST_CASE("SRS decoder supports versions 1 through 5") {
         CHECK(result.version == version);
         CHECK(result.domains == std::vector<std::string>{"version.example"});
     }
+}
+
+TEST_CASE("SRS preview decodes catalogue domains suffixes and IP networks") {
+    for (std::uint8_t version = 1; version <= 5; ++version) {
+        const auto bytes = srs_file(version, {
+            default_domain_rule({reverse_ascii("example.org")}),
+            default_ip_rule({{Address{192,0,2,0}, Address{192,0,2,255}}})});
+        const auto result = preview_list_srs(std::string(bytes.begin(), bytes.end()));
+        CHECK(result.status == "ok");
+        CHECK(result.complete);
+        CHECK(result.srs_version == version);
+        CHECK(result.domains == 1);
+        CHECK(result.ipv4 == 1);
+        CHECK(result.unique_entries == 2);
+    }
+    const auto bytes = srs_file(2, {default_domain_rule({reverse_ascii(std::string("\n") + "example.net")})});
+    const auto suffix = preview_list_srs(std::string(bytes.begin(), bytes.end()));
+    REQUIRE(suffix.entries.size() == 1U);
+    // Runtime ListParser canonicalizes wildcard/root-and-subdomain entries.
+    CHECK(suffix.entries.front().value == "example.net");
+}
+
+TEST_CASE("SRS preview excludes prefixed exact domains like the cache loader") {
+    const auto bytes = srs_file(2, {default_domain_rule({reverse_ascii(".bad.example"), reverse_ascii("good.example")})});
+    const auto result = preview_list_srs(std::string(bytes.begin(), bytes.end()));
+    CHECK(result.domains == 1);
+    CHECK(result.invalid_entries == 1);
+    CHECK(result.ignored_lines == 0);
+    REQUIRE(result.errors.size() == 1U);
+    CHECK(result.errors.front().code == "invalid_entry");
+}
+
+TEST_CASE("SRS preview reports unsupported semantics and invalid binary input") {
+    const auto bytes = srs_file(2, {
+        default_domain_rule({reverse_ascii("example.org")}),
+        default_domain_rule({reverse_ascii("excluded.org")}, true)});
+    const auto partial = preview_list_srs(std::string(bytes.begin(), bytes.end()));
+    CHECK_FALSE(partial.complete);
+    CHECK(partial.domains == 1);
+    CHECK(partial.skipped_rules == 1);
+    CHECK(partial.inverted_rules == 1);
+    CHECK(partial.limit_reason == "srs_partial");
+    CHECK(preview_list_srs("SRS").limit_reason == "srs_decode_failed");
+    CHECK(preview_list_srs(std::string("SRS\6", 4)).limit_reason == "srs_version");
+    CHECK(preview_list_srs("SRS" + std::string(kListPreviewMaxBytes, 'x')).status == "too_large");
 }
 
 TEST_CASE("SRS v1 legacy suffix pair is recovered without duplicate exact domain") {

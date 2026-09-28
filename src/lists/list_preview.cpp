@@ -2,9 +2,11 @@
 
 #include "../config/list_parser.hpp"
 #include "list_streamer.hpp"
+#include "srs_decoder.hpp"
 
 #include <algorithm>
 #include <set>
+#include <sstream>
 
 namespace keen_pbr3 {
 namespace {
@@ -145,6 +147,74 @@ ListPreviewResult preview_list_text(std::string_view text) {
                 result.errors.push_back({result.lines, invalid_code(value), error_value(value)});
             else result.errors_limited = true;
         }
+    }
+    return result;
+}
+
+ListPreviewResult preview_list_srs(const std::string& data) {
+    ListPreviewResult result;
+    result.source_format = "srs";
+    if (data.size() > kListPreviewMaxBytes) {
+        result.status = "too_large";
+        result.complete = false;
+        return result;
+    }
+    try {
+        SrsDecodeLimits limits;
+        limits.max_compressed_bytes = kListPreviewMaxBytes;
+        limits.max_decompressed_bytes = 8U * kListPreviewMaxBytes;
+        limits.max_output_entries = kListPreviewMaxLines;
+        limits.max_output_string_bytes = kListPreviewMaxBytes;
+        limits.max_values = kListPreviewMaxLines;
+        limits.max_total_string_bytes = kListPreviewMaxBytes;
+        limits.max_trie_nodes = 500001U;
+        limits.max_trie_labels = 500000U;
+        std::istringstream input(data);
+        const auto decoded = decode_srs(input, limits);
+        std::string text;
+        const auto append = [&](const std::string& value) {
+            if (text.size() + value.size() + 1U > kListPreviewMaxBytes)
+                throw SrsDecodeError("converted SRS exceeds preview limit");
+            text += value;
+            text += '\n';
+        };
+        // Use the cache loader's normalization, including rejection of
+        // already-prefixed domains; never preview entries runtime would skip.
+        std::vector<ListPreviewError> invalid;
+        std::int64_t invalid_count = 0;
+        std::int64_t record = 0;
+        const auto append_domain = [&](const std::string& value, bool suffix) {
+            ++record;
+            const auto normalized = ListParser::normalize_domain(value);
+            if (value.rfind("*.", 0) == 0 || (!value.empty() && value.front() == '.') || !normalized) {
+                ++invalid_count;
+                if (invalid.size() < kListPreviewSampleSize)
+                    invalid.push_back({record, "invalid_entry", error_value(value)});
+                append("");
+            } else append((suffix ? "*." : "") + *normalized);
+        };
+        for (const auto& domain : decoded.domains) append_domain(domain, false);
+        for (const auto& suffix : decoded.domain_suffixes) append_domain(suffix, true);
+        for (const auto& cidr : decoded.ip_cidrs) append(cidr);
+        result = preview_list_text(text);
+        result.invalid_entries += invalid_count;
+        result.ignored_lines -= invalid_count;
+        result.errors = std::move(invalid);
+        result.errors_limited = invalid_count > static_cast<std::int64_t>(kListPreviewSampleSize);
+        result.source_format = "srs";
+        result.srs_version = decoded.version;
+        result.unsupported_fields = static_cast<std::int64_t>(decoded.unsupported_fields);
+        result.skipped_rules = static_cast<std::int64_t>(decoded.skipped_rules);
+        result.inverted_rules = static_cast<std::int64_t>(decoded.inverted_rules);
+        if (decoded.unsupported_fields || decoded.skipped_rules || decoded.inverted_rules) {
+            result.complete = false;
+            result.limit_reason = "srs_partial";
+        }
+    } catch (const SrsDecodeError& error) {
+        result.complete = false;
+        result.srs_version = error.version();
+        result.limit_reason = error.kind() == SrsDecodeErrorKind::UnsupportedVersion
+            ? "srs_version" : "srs_decode_failed";
     }
     return result;
 }
