@@ -138,6 +138,11 @@ printf '[%s] Проверка обновления keen-pbr-sb\n' "$(date '+%Y-%
 fetch_url() {
     output=$1
     url=$2
+    if [ "${KEEN_PBR_UPDATE_OUTBOUND+x}" = x ] ||
+       [ -e /opt/etc/keen-pbr/update-outbound ] || [ -L /opt/etc/keen-pbr/update-outbound ]; then
+        /opt/usr/bin/keen-pbr fetch-update "$url" "$output"
+        return $?
+    fi
     if [ -x /opt/bin/curl ]; then
         /opt/bin/curl -fsSL --connect-timeout 15 --max-time 90 \
             --retry 3 -o "$output" "$url"
@@ -230,6 +235,14 @@ if ! /bin/sh "$RELEASE_VERIFIER" "$WORK_DIR/release-manifest.tsv" \
     "$WORK_DIR/release-manifest.sig" "$RELEASE_PUBLIC_KEY" \
     "$RELEASE_REPOSITORY" "$RELEASE_CHANNEL" "$release_tag" installer any any install.sh "$INSTALLER"; then
     echo "ОШИБКА: подпись установщика не подтверждена. Обновление не началось; установленная версия не изменена."
+    exit 1
+fi
+# An older, even correctly signed installer may not understand the selected
+# path. Refuse it before it can silently fetch the IPK through ordinary curl.
+if { [ -n "${KEEN_PBR_UPDATE_OUTBOUND:-}" ] ||
+     { [ "${KEEN_PBR_UPDATE_OUTBOUND+x}" != x ] && grep -q '[^[:space:]]' /opt/etc/keen-pbr/update-outbound 2>/dev/null; }; } &&
+   ! grep -q '^KEEN_PBR_UPDATE_TRANSPORT_VERSION=1$' "$INSTALLER"; then
+    echo "ОШИБКА: этот установщик не поддерживает загрузку через выбранный VPN. Пакет не изменён."
     exit 1
 fi
 if [ -n "${EXPECTED_VERSION:-}" ]; then

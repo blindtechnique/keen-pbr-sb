@@ -291,4 +291,4 @@ local reset_selected = run_event(reset_track, {
 assert_equal(reset_send_count, 1, "reset at retransmission threshold")
 assert_equal(reset_selected, 2, "fails=1 rotates after bounded reset")
 
-print("zapret2 v1.0.3 circular semantic test passed")
+print("zapret2 circular semantic test passed")

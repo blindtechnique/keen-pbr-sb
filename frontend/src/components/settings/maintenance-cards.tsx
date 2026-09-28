@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import type { SystemUpdateStatus } from "@/api/generated/model"
 import { UpdateChannelControl } from "./update-channel-control"
+import { UpdateTransportControl } from "./update-transport-control"
 import { softwareUpdateRequest } from "./software-update-channel"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
@@ -526,6 +527,24 @@ export function SoftwareUpdateCard() {
             версии сверху, кнопки под ними, ничего не растянуто на всю
             ширину карточки. */}
         <CardContent className="flex max-w-[480px] flex-col gap-3">
+          <UpdateTransportControl
+            disabled={
+              activeAttempt || !!status?.running || starting || checking
+            }
+            saving={savingChannel}
+            onSaving={setSavingChannel}
+            onSaved={() => {
+              refreshGeneration.current += 1
+              setConfirmInstall(false)
+              setStatus((previous) => ({
+                ...emptyUpdateStatus(),
+                current: previous?.current ?? __APP_VERSION__,
+                installed_channel: previous?.installed_channel,
+                channel: previous?.channel,
+              }))
+              void refresh(true)
+            }}
+          />
           <UpdateChannelControl
             channel={status?.channel}
             disabled={

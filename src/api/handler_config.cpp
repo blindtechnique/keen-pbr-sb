@@ -11,6 +11,7 @@
 #include "../config/config.hpp"
 #include "../config/config_writer.hpp"
 #include "../config/list_delete_planner.hpp"
+#include "../config/route_rule_retirement.hpp"
 #include "../crypto/sha256.hpp"
 #include "../log/logger.hpp"
 #include "../setup/catalog_setup_planner.hpp"
@@ -1259,7 +1260,9 @@ static void register_config_handler_impl(
         Config staged;
         try {
             staged = parse_config(body);
-            normalize_changed_list_ip_cidrs(staged, ctx.get_visible_config());
+            const auto previous = ctx.get_visible_config();
+            retire_route_dns_bindings(staged, previous);
+            normalize_changed_list_ip_cidrs(staged, previous);
             validate_config(staged);
         } catch (const ConfigValidationError& e) {
             throw ApiError(e.what(), 400, make_validation_error_json(e).dump());

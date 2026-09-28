@@ -61,6 +61,47 @@ TEST_CASE("nfqws validator: candidate accepts a structurally sound Keenetic prof
     CHECK(issues.empty());
 }
 
+TEST_CASE("nfqws semantic validation inspects the expanded command without guessing Lua inventory") {
+    std::string config = kValid;
+    SUBCASE("custom Lua function is not guessed missing") {
+        config += "NFQWS_ARGS='--filter-tcp=443 --lua-desync=my_dynamic_function'\n";
+        CHECK(validate_nfqws_candidate(config).empty());
+    }
+    SUBCASE("empty action") {
+        config += "NFQWS_ARGS='--filter-tcp=443 --lua-desync=:blob=tls'\n";
+        CHECK(has_issue(validate_nfqws_candidate(config), "NFQWS_ARGS", "empty"));
+    }
+    SUBCASE("duplicate injected by TCP and QUIC expansion") {
+        config += "NFQWS_EXTRA_ARGS='--blob=tls:0x1234'\n";
+        CHECK(has_issue(validate_nfqws_candidate(config), "--blob", "duplicate"));
+    }
+    SUBCASE("built-in blob cannot be redefined") {
+        config += "NFQWS_BASE_ARGS='--blob=fake_default_tls:0x1234'\n";
+        CHECK(has_issue(validate_nfqws_candidate(config), "--blob", "duplicate"));
+    }
+    SUBCASE("malformed bytes") {
+        config += "NFQWS_BASE_ARGS='--blob=tls:0x123'\n";
+        CHECK(has_issue(validate_nfqws_candidate(config), "--blob", "invalid"));
+    }
+    SUBCASE("file offset path is checked and remapped") {
+        config += "NFQWS_BASE_ARGS='--blob=tls:+12@/opt/blob.bin'\n";
+        CHECK(has_issue(validate_nfqws_candidate(config, allow_paths({})), "--blob", "does not exist"));
+        const NfqwsPathResolver staged = [](const std::string& path) -> std::optional<std::string> {
+            return path == "/opt/blob.bin" ? std::optional<std::string>("/staged/blob.bin") : std::nullopt;
+        };
+        CHECK(validate_nfqws_candidate(config, staged).empty());
+        CHECK(position_of(build_nfqws_dry_run_args(config, 300, staged), "--blob=tls:+12@/staged/blob.bin") != std::string::npos);
+    }
+    SUBCASE("global declaration after new is legal") {
+        config += "NFQWS_ARGS_CUSTOM='--filter-tcp=80 --lua-desync=fake --new --blob=custom:0x1234 --filter-tcp=443 --lua-desync=fake'\n";
+        CHECK(validate_nfqws_candidate(config).empty());
+    }
+    SUBCASE("legacy file path without at prefix is legal") {
+        config += "NFQWS_BASE_ARGS='--blob=tls:/opt/blob.bin'\n";
+        CHECK(validate_nfqws_candidate(config, allow_paths({"/opt/blob.bin"})).empty());
+    }
+}
+
 TEST_CASE("nfqws config migration preserves owned Lua and operator settings byte for byte") {
     const std::string previous =
         "# Operator-selected strategy; do not replace with the package preset.\n"
@@ -333,17 +374,69 @@ TEST_CASE("nfqws PPE contract fails closed for empty malformed and mismatched ca
     CHECK(contract.reason.find("validation failed") != std::string::npos);
 
     contract = extract_nfqws_ppe_port_contract(
-        "TCP_PORTS=80,443\n"
-        "NFQWS_ARGS=\"--filter-tcp=443 --lua-desync=fake\"\n"
+        "TCP_PORTS=80\n"
+        "NFQWS_ARGS=\"--filter-tcp=80,443 --lua-desync=fake\"\n"
         "NFQUEUE_NUM=300\n");
     CHECK_FALSE(contract.available);
-    CHECK(contract.reason.find("exactly match") != std::string::npos);
+    CHECK(contract.reason.find("does not cover") != std::string::npos);
 
     contract = extract_nfqws_ppe_port_contract(
         "TCP_PORTS=443\n"
         "NFQWS_ARGS=\"--filter-tcp=443 --lua-desync=fake\"\n");
     CHECK_FALSE(contract.available);
     CHECK(contract.reason.find("NFQUEUE_NUM is missing") != std::string::npos);
+}
+
+TEST_CASE("nfqws PPE contract accepts queued supersets without widening active ports") {
+    for (const auto& base_args : {std::string{},
+             std::string("--fastpath-workaround=0"),
+             std::string("--fastpath-workaround=1"),
+             std::string("--fastpath-workaround=auto")}) {
+        CAPTURE(base_args);
+        const auto contract = extract_nfqws_ppe_port_contract(
+            "NFQWS_BASE_ARGS=\"" + base_args + "\"\n"
+            "TCP_PORTS=80,443,1984,2053,2083,2087,2096,5222,8443\n"
+            "NFQWS_ARGS=\"--filter-tcp=443,80,1984 --lua-desync=fake\"\n"
+            "NFQWS_ARGS_CUSTOM=\"--filter-tcp=5222 --lua-desync=fake\"\n"
+            "NFQUEUE_NUM=300\n");
+        REQUIRE(contract.available);
+        CHECK(contract.tcp_ranges == std::vector<NfqwsPpePortRange>{
+            {80, 80}, {443, 443}, {1984, 1984}, {5222, 5222}});
+        REQUIRE(contract.tcp_chunks.size() == 1U);
+        CHECK(contract.tcp_chunks.front() == contract.tcp_ranges);
+        CHECK_FALSE(contract.quic_udp_443);
+    }
+}
+
+TEST_CASE("nfqws PPE range coverage handles adjacent declarations and boundary ports") {
+    for (const auto& declared : {"1:65535", "1,2:81,443,65534:65535",
+                                "65535,443,80:81,1,2:79,65534"}) {
+        CAPTURE(declared);
+        const auto contract = extract_nfqws_ppe_port_contract(
+            "TCP_PORTS=" + std::string(declared) + "\n"
+            "NFQWS_ARGS=\"--filter-tcp=1-81,443,65535 --lua-desync=fake\"\n"
+            "NFQUEUE_NUM=300\n");
+        REQUIRE(contract.available);
+        CHECK(contract.tcp_ranges == std::vector<NfqwsPpePortRange>{
+            {1, 81}, {443, 443}, {65535, 65535}});
+    }
+}
+
+TEST_CASE("nfqws PPE range coverage never bridges missing ports or malformed declarations") {
+    for (const auto& declared : {"1:79,81:65535", "1:80,443,65535",
+                                "2:81,443,65535", "1:81,443,65534",
+                                "1:81,444:65535", "81:1,443,65535",
+                                "1:81,443,65536", "0:81,443,65535"}) {
+        CAPTURE(declared);
+        const auto contract = extract_nfqws_ppe_port_contract(
+            "TCP_PORTS=" + std::string(declared) + "\n"
+            "NFQWS_ARGS=\"--filter-tcp=1-81,443,65535 --lua-desync=fake\"\n"
+            "NFQUEUE_NUM=300\n");
+        CHECK_FALSE(contract.available);
+        CHECK_FALSE(contract.reason.empty());
+        CHECK(contract.tcp_ranges.empty());
+        CHECK(contract.tcp_chunks.empty());
+    }
 }
 
 TEST_CASE("nfqws PPE contract never promotes general UDP or WebRTC to QUIC") {
@@ -426,6 +519,29 @@ TEST_CASE("nfqws PPE contract is available for every managed generated profile")
         REQUIRE(contract.available);
         CHECK(contract.queue_number == 300);
         CHECK(contract.tcp_ranges.size() == 9U);
+        CHECK(contract.quic_udp_443);
+    }
+}
+
+TEST_CASE("nfqws stock 1.2.8 and 1.3.1 PPE contracts exclude queued-only TCP ports") {
+    namespace fs = std::filesystem;
+    const auto root = fs::path(__FILE__).parent_path().parent_path() /
+                      "packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/"
+                      "nfqws-strategies";
+    for (const auto* profile : {"default (nfqws2 1.2.8)", "default (nfqws2 1.3.1)"}) {
+        CAPTURE(profile);
+        std::ifstream input(root / profile / "nfqws2.conf", std::ios::binary);
+        REQUIRE(input.good());
+        const std::string content{std::istreambuf_iterator<char>(input),
+                                 std::istreambuf_iterator<char>()};
+        const auto contract = extract_nfqws_ppe_port_contract(content);
+        INFO(contract.reason);
+        REQUIRE(contract.available);
+        CHECK(contract.queue_number == 300);
+        CHECK(contract.tcp_ranges == std::vector<NfqwsPpePortRange>{
+            {80, 80}, {443, 443}, {1984, 1984}, {5222, 5222}});
+        REQUIRE(contract.tcp_chunks.size() == 1U);
+        CHECK(contract.tcp_chunks.front() == contract.tcp_ranges);
         CHECK(contract.quic_udp_443);
     }
 }
@@ -578,7 +694,7 @@ TEST_CASE("nfqws validator: all packaged Keenetic strategies pass structural val
         CHECK(validate_nfqws_candidate(content).empty());
         ++checked;
     }
-    CHECK(checked == 17U);
+    CHECK(checked == 18U);
 }
 
 TEST_CASE("nfqws strategy comparison ignores only an independent runtime IPv6 toggle") {

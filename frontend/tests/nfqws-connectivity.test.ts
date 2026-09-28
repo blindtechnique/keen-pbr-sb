@@ -16,6 +16,21 @@ import {
 } from "../src/lib/nfqws-config"
 
 describe("nfqws settings dirty state", () => {
+  test.each(["0", "1", "auto"])(
+    "editing a setting preserves fastpath-workaround=%s",
+    (mode) => {
+      const source =
+        `NFQWS_BASE_ARGS="--fastpath-workaround=${mode}\n` +
+        '  --lua-init=@/opt/etc/nfqws2/lua/zapret-lib.lua"\n' +
+        'NFQWS_ARGS="--filter-tcp=443 --lua-desync=fake"\nLOG_LEVEL=0\n'
+      const form = parseNfqwsConfig(source)
+      expect(formatNfqwsConfig(source, form)).toBe(source)
+      expect(formatNfqwsConfig(source, { ...form, LOG_LEVEL: true })).toBe(
+        source.replace("LOG_LEVEL=0", "LOG_LEVEL=1")
+      )
+    }
+  )
+
   test("saving one setting does not reformat the strategy or add untouched defaults", () => {
     const source =
       '# Keep my strategy\nNFQWS_ARGS="--filter-tcp=443\n  --lua-desync=fake"\nLOG_LEVEL=0\n'

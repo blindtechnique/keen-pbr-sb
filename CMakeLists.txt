@@ -396,6 +396,7 @@ set(SOURCES
   src/log/trace.cpp
   src/http/http_client.cpp
   src/http/http_transport.cpp
+  src/update/download_transport.cpp
   src/http/curl_runtime.cpp
   src/keenetic/ndms_rci_json_resource.cpp
   src/keenetic/ndms_interface_resource.cpp

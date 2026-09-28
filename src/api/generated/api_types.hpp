@@ -409,6 +409,7 @@ namespace api {
         std::optional<bool> enabled;
         std::optional<std::string> id;
         std::vector<std::string> list;
+        std::optional<std::vector<std::string>> route_rule_ids;
         std::string server;
         // Opaque fields belonging to this object; not an API property.
         json _config_unknown_fields = nullptr;
@@ -1029,12 +1030,17 @@ namespace api {
         bool errors_limited = false;
         int64_t ignored_lines = 0;
         int64_t invalid_entries = 0;
+        std::optional<int64_t> inverted_rules;
         int64_t ipv4 = 0;
         int64_t ipv6 = 0;
         std::optional<std::string> limit_reason;
         int64_t lines = 0;
+        std::optional<int64_t> skipped_rules;
+        std::optional<std::string> source_format;
+        std::optional<int64_t> srs_version;
         ListSourcePreviewResponseStatus status;
         int64_t unique_entries = 0;
+        std::optional<int64_t> unsupported_fields;
         int64_t valid_entries = 0;
     };
 
@@ -1393,7 +1399,7 @@ namespace api {
 
     enum class NfqwsActionRequestCategory : int { CONFIG, LIST, LOG, LUA };
 
-    enum class Command : int { RELOAD, RESTART, START, STOP };
+    enum class Command : int { RESTART, START, STOP };
 
     enum class NfqwsFileEntryCategory : int { LIST, LUA };
 
@@ -2135,6 +2141,12 @@ namespace api {
 
     enum class SingBoxProcessMode : int { ISOLATED, SHARED };
 
+    enum class SingBoxServiceActionRequestAction : int { DOWN, RESTART, UP };
+
+    struct SingBoxServiceActionRequest {
+        SingBoxServiceActionRequestAction action;
+    };
+
     enum class StatusEventConnectionsType : int { CONNECTIONS };
 
     struct StatusEventConnections {
@@ -2311,10 +2323,8 @@ namespace api {
         std::optional<std::string> source;
     };
 
-    enum class TransportActionRequestAction : int { DOWN, RESTART, UP };
-
     struct TransportActionRequest {
-        TransportActionRequestAction action;
+        SingBoxServiceActionRequestAction action;
         std::string tag;
     };
 
@@ -2545,6 +2555,21 @@ namespace api {
     struct UpdateStartedResponse {
         bool ok = false;
         bool started = false;
+    };
+
+    struct Option {
+        std::string name;
+        std::string tag;
+    };
+
+    struct UpdateTransportOptions {
+        std::vector<Option> options;
+        bool options_available = false;
+        std::string outbound;
+    };
+
+    struct UpdateTransportPreference {
+        std::string outbound;
     };
 
     struct ApiTypes {
@@ -2793,6 +2818,7 @@ namespace api {
         std::optional<SingBoxInstallRequest> sing_box_install_request;
         std::optional<SingBoxInstallResult> sing_box_install_result;
         std::optional<SingBoxProcessMode> sing_box_process_mode;
+        std::optional<SingBoxServiceActionRequest> sing_box_service_action_request;
         std::optional<SortOrder> sort_order;
         std::optional<StatusEventConnections> status_event_connections;
         std::optional<StatusEventInterfaces> status_event_interfaces;
@@ -2844,6 +2870,8 @@ namespace api {
         std::optional<UiPreferences> ui_preferences_config;
         std::optional<UpdateChannelPreference> update_channel_preference;
         std::optional<UpdateStartedResponse> update_started_response;
+        std::optional<UpdateTransportOptions> update_transport_options;
+        std::optional<UpdateTransportPreference> update_transport_preference;
         std::optional<ValidationErrorElement> validation_error;
         std::optional<Vless> vless_reality_spec;
     };
@@ -3422,6 +3450,9 @@ void to_json(json & j, const SingBoxInstallRequest & x);
 void from_json(const json & j, SingBoxInstallResult & x);
 void to_json(json & j, const SingBoxInstallResult & x);
 
+void from_json(const json & j, SingBoxServiceActionRequest & x);
+void to_json(json & j, const SingBoxServiceActionRequest & x);
+
 void from_json(const json & j, StatusEventConnections & x);
 void to_json(json & j, const StatusEventConnections & x);
 
@@ -3562,6 +3593,15 @@ void to_json(json & j, const UpdateChannelPreference & x);
 
 void from_json(const json & j, UpdateStartedResponse & x);
 void to_json(json & j, const UpdateStartedResponse & x);
+
+void from_json(const json & j, Option & x);
+void to_json(json & j, const Option & x);
+
+void from_json(const json & j, UpdateTransportOptions & x);
+void to_json(json & j, const UpdateTransportOptions & x);
+
+void from_json(const json & j, UpdateTransportPreference & x);
+void to_json(json & j, const UpdateTransportPreference & x);
 
 void from_json(const json & j, ApiTypes & x);
 void to_json(json & j, const ApiTypes & x);
@@ -3911,6 +3951,9 @@ void to_json(json & j, const ReleaseVerdict & x);
 void from_json(const json & j, SingBoxProcessMode & x);
 void to_json(json & j, const SingBoxProcessMode & x);
 
+void from_json(const json & j, SingBoxServiceActionRequestAction & x);
+void to_json(json & j, const SingBoxServiceActionRequestAction & x);
+
 void from_json(const json & j, StatusEventConnectionsType & x);
 void to_json(json & j, const StatusEventConnectionsType & x);
 
@@ -3949,9 +3992,6 @@ void to_json(json & j, const PackageRollbackState & x);
 
 void from_json(const json & j, Channel & x);
 void to_json(json & j, const Channel & x);
-
-void from_json(const json & j, TransportActionRequestAction & x);
-void to_json(json & j, const TransportActionRequestAction & x);
 
 void from_json(const json & j, TransportActionResponseStatus & x);
 void to_json(json & j, const TransportActionResponseStatus & x);
@@ -4656,7 +4696,7 @@ namespace api {
         x._config_unknown_fields = nullptr;
         if (j.is_object()) {
             for (auto it = j.begin(); it != j.end(); ++it) {
-                if (it.key() == "allow_domain_rebinding" || it.key() == "display_name" || it.key() == "enabled" || it.key() == "id" || it.key() == "list" || it.key() == "server") continue;
+                if (it.key() == "allow_domain_rebinding" || it.key() == "display_name" || it.key() == "enabled" || it.key() == "id" || it.key() == "list" || it.key() == "route_rule_ids" || it.key() == "server") continue;
                 if (x._config_unknown_fields.is_null()) x._config_unknown_fields = json::object();
                 x._config_unknown_fields[it.key()] = it.value();
             }
@@ -4666,6 +4706,7 @@ namespace api {
         x.enabled = get_stack_optional<bool>(j, "enabled");
         x.id = get_stack_optional<std::string>(j, "id");
         x.list = j.at("list").get<std::vector<std::string>>();
+        x.route_rule_ids = get_stack_optional<std::vector<std::string>>(j, "route_rule_ids");
         x.server = j.at("server").get<std::string>();
     }
 
@@ -4676,6 +4717,7 @@ namespace api {
         j["enabled"] = x.enabled;
         j["id"] = x.id;
         j["list"] = x.list;
+        j["route_rule_ids"] = x.route_rule_ids;
         j["server"] = x.server;
     }
 
@@ -5938,12 +5980,17 @@ namespace api {
         x.errors_limited = j.at("errors_limited").get<bool>();
         x.ignored_lines = j.at("ignored_lines").get<int64_t>();
         x.invalid_entries = j.at("invalid_entries").get<int64_t>();
+        x.inverted_rules = get_stack_optional<int64_t>(j, "inverted_rules");
         x.ipv4 = j.at("ipv4").get<int64_t>();
         x.ipv6 = j.at("ipv6").get<int64_t>();
         x.limit_reason = get_stack_optional<std::string>(j, "limit_reason");
         x.lines = j.at("lines").get<int64_t>();
+        x.skipped_rules = get_stack_optional<int64_t>(j, "skipped_rules");
+        x.source_format = get_stack_optional<std::string>(j, "source_format");
+        x.srs_version = get_stack_optional<int64_t>(j, "srs_version");
         x.status = j.at("status").get<ListSourcePreviewResponseStatus>();
         x.unique_entries = j.at("unique_entries").get<int64_t>();
+        x.unsupported_fields = get_stack_optional<int64_t>(j, "unsupported_fields");
         x.valid_entries = j.at("valid_entries").get<int64_t>();
     }
 
@@ -5958,12 +6005,17 @@ namespace api {
         j["errors_limited"] = x.errors_limited;
         j["ignored_lines"] = x.ignored_lines;
         j["invalid_entries"] = x.invalid_entries;
+        j["inverted_rules"] = x.inverted_rules;
         j["ipv4"] = x.ipv4;
         j["ipv6"] = x.ipv6;
         j["limit_reason"] = x.limit_reason;
         j["lines"] = x.lines;
+        j["skipped_rules"] = x.skipped_rules;
+        j["source_format"] = x.source_format;
+        j["srs_version"] = x.srs_version;
         j["status"] = x.status;
         j["unique_entries"] = x.unique_entries;
+        j["unsupported_fields"] = x.unsupported_fields;
         j["valid_entries"] = x.valid_entries;
     }
 
@@ -7928,6 +7980,15 @@ namespace api {
         j["transports_left_down"] = x.transports_left_down;
     }
 
+    inline void from_json(const json & j, SingBoxServiceActionRequest& x) {
+        x.action = j.at("action").get<SingBoxServiceActionRequestAction>();
+    }
+
+    inline void to_json(json & j, const SingBoxServiceActionRequest & x) {
+        j = json::object();
+        j["action"] = x.action;
+    }
+
     inline void from_json(const json & j, StatusEventConnections& x) {
         x.data = j.at("data").get<ConnectionEventState>();
         x.type = j.at("type").get<StatusEventConnectionsType>();
@@ -8251,7 +8312,7 @@ namespace api {
     }
 
     inline void from_json(const json & j, TransportActionRequest& x) {
-        x.action = j.at("action").get<TransportActionRequestAction>();
+        x.action = j.at("action").get<SingBoxServiceActionRequestAction>();
         x.tag = j.at("tag").get<std::string>();
     }
 
@@ -8675,6 +8736,39 @@ namespace api {
         j["started"] = x.started;
     }
 
+    inline void from_json(const json & j, Option& x) {
+        x.name = j.at("name").get<std::string>();
+        x.tag = j.at("tag").get<std::string>();
+    }
+
+    inline void to_json(json & j, const Option & x) {
+        j = json::object();
+        j["name"] = x.name;
+        j["tag"] = x.tag;
+    }
+
+    inline void from_json(const json & j, UpdateTransportOptions& x) {
+        x.options = j.at("options").get<std::vector<Option>>();
+        x.options_available = j.at("options_available").get<bool>();
+        x.outbound = j.at("outbound").get<std::string>();
+    }
+
+    inline void to_json(json & j, const UpdateTransportOptions & x) {
+        j = json::object();
+        j["options"] = x.options;
+        j["options_available"] = x.options_available;
+        j["outbound"] = x.outbound;
+    }
+
+    inline void from_json(const json & j, UpdateTransportPreference& x) {
+        x.outbound = j.at("outbound").get<std::string>();
+    }
+
+    inline void to_json(json & j, const UpdateTransportPreference & x) {
+        j = json::object();
+        j["outbound"] = x.outbound;
+    }
+
     inline void from_json(const json & j, ApiTypes& x) {
         x.api_config = get_stack_optional<ApiConfig>(j, "ApiConfig");
         x.auth_credentials = get_stack_optional<AuthCredentials>(j, "AuthCredentials");
@@ -8921,6 +9015,7 @@ namespace api {
         x.sing_box_install_request = get_stack_optional<SingBoxInstallRequest>(j, "SingBoxInstallRequest");
         x.sing_box_install_result = get_stack_optional<SingBoxInstallResult>(j, "SingBoxInstallResult");
         x.sing_box_process_mode = get_stack_optional<SingBoxProcessMode>(j, "SingBoxProcessMode");
+        x.sing_box_service_action_request = get_stack_optional<SingBoxServiceActionRequest>(j, "SingBoxServiceActionRequest");
         x.sort_order = get_stack_optional<SortOrder>(j, "SortOrder");
         x.status_event_connections = get_stack_optional<StatusEventConnections>(j, "StatusEventConnections");
         x.status_event_interfaces = get_stack_optional<StatusEventInterfaces>(j, "StatusEventInterfaces");
@@ -8972,6 +9067,8 @@ namespace api {
         x.ui_preferences_config = get_stack_optional<UiPreferences>(j, "UiPreferencesConfig");
         x.update_channel_preference = get_stack_optional<UpdateChannelPreference>(j, "UpdateChannelPreference");
         x.update_started_response = get_stack_optional<UpdateStartedResponse>(j, "UpdateStartedResponse");
+        x.update_transport_options = get_stack_optional<UpdateTransportOptions>(j, "UpdateTransportOptions");
+        x.update_transport_preference = get_stack_optional<UpdateTransportPreference>(j, "UpdateTransportPreference");
         x.validation_error = get_stack_optional<ValidationErrorElement>(j, "ValidationError");
         x.vless_reality_spec = get_stack_optional<Vless>(j, "VlessRealitySpec");
     }
@@ -9223,6 +9320,7 @@ namespace api {
         j["SingBoxInstallRequest"] = x.sing_box_install_request;
         j["SingBoxInstallResult"] = x.sing_box_install_result;
         j["SingBoxProcessMode"] = x.sing_box_process_mode;
+        j["SingBoxServiceActionRequest"] = x.sing_box_service_action_request;
         j["SortOrder"] = x.sort_order;
         j["StatusEventConnections"] = x.status_event_connections;
         j["StatusEventInterfaces"] = x.status_event_interfaces;
@@ -9274,6 +9372,8 @@ namespace api {
         j["UiPreferencesConfig"] = x.ui_preferences_config;
         j["UpdateChannelPreference"] = x.update_channel_preference;
         j["UpdateStartedResponse"] = x.update_started_response;
+        j["UpdateTransportOptions"] = x.update_transport_options;
+        j["UpdateTransportPreference"] = x.update_transport_preference;
         j["ValidationError"] = x.validation_error;
         j["VlessRealitySpec"] = x.vless_reality_spec;
     }
@@ -11047,8 +11147,7 @@ namespace api {
     }
 
     inline void from_json(const json & j, Command & x) {
-        if (j == "reload") x = Command::RELOAD;
-        else if (j == "restart") x = Command::RESTART;
+        if (j == "restart") x = Command::RESTART;
         else if (j == "start") x = Command::START;
         else if (j == "stop") x = Command::STOP;
         else { throw std::runtime_error("Cannot deserialize to enumeration \"Command\""); }
@@ -11056,7 +11155,6 @@ namespace api {
 
     inline void to_json(json & j, const Command & x) {
         switch (x) {
-            case Command::RELOAD: j = "reload"; break;
             case Command::RESTART: j = "restart"; break;
             case Command::START: j = "start"; break;
             case Command::STOP: j = "stop"; break;
@@ -11698,6 +11796,22 @@ namespace api {
         }
     }
 
+    inline void from_json(const json & j, SingBoxServiceActionRequestAction & x) {
+        if (j == "down") x = SingBoxServiceActionRequestAction::DOWN;
+        else if (j == "restart") x = SingBoxServiceActionRequestAction::RESTART;
+        else if (j == "up") x = SingBoxServiceActionRequestAction::UP;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"SingBoxServiceActionRequestAction\""); }
+    }
+
+    inline void to_json(json & j, const SingBoxServiceActionRequestAction & x) {
+        switch (x) {
+            case SingBoxServiceActionRequestAction::DOWN: j = "down"; break;
+            case SingBoxServiceActionRequestAction::RESTART: j = "restart"; break;
+            case SingBoxServiceActionRequestAction::UP: j = "up"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"SingBoxServiceActionRequestAction\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
     inline void from_json(const json & j, StatusEventConnectionsType & x) {
         if (j == "connections") x = StatusEventConnectionsType::CONNECTIONS;
         else { throw std::runtime_error("Cannot deserialize to enumeration \"StatusEventConnectionsType\""); }
@@ -11889,22 +12003,6 @@ namespace api {
             case Channel::ALPHA: j = "alpha"; break;
             case Channel::STABLE: j = "stable"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"Channel\": " + std::to_string(static_cast<int>(x)));
-        }
-    }
-
-    inline void from_json(const json & j, TransportActionRequestAction & x) {
-        if (j == "down") x = TransportActionRequestAction::DOWN;
-        else if (j == "restart") x = TransportActionRequestAction::RESTART;
-        else if (j == "up") x = TransportActionRequestAction::UP;
-        else { throw std::runtime_error("Cannot deserialize to enumeration \"TransportActionRequestAction\""); }
-    }
-
-    inline void to_json(json & j, const TransportActionRequestAction & x) {
-        switch (x) {
-            case TransportActionRequestAction::DOWN: j = "down"; break;
-            case TransportActionRequestAction::RESTART: j = "restart"; break;
-            case TransportActionRequestAction::UP: j = "up"; break;
-            default: throw std::runtime_error("Unexpected value in enumeration \"TransportActionRequestAction\": " + std::to_string(static_cast<int>(x)));
         }
     }
 
@@ -12452,6 +12550,9 @@ namespace api {
         }
         if (auto it = j.find("list"); it != j.end()) {
             if (prune_config_json_for_persistence(*it, x.list)) j.erase(it);
+        }
+        if (auto it = j.find("route_rule_ids"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.route_rule_ids)) j.erase(it);
         }
         if (auto it = j.find("server"); it != j.end()) {
             if (prune_config_json_for_persistence(*it, x.server)) j.erase(it);

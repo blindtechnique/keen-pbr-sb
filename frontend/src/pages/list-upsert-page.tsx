@@ -1679,6 +1679,10 @@ function ListForm({
               {quickSetup.createDnsRule &&
               (!recommendedSetup || compatibleDnsServers.length > 0) ? (
                 <Select
+                  items={createListDnsServerSelectItems(
+                    recommendedSetup ? compatibleDnsServers : dnsServers,
+                    t("pages.listUpsert.dnsRule.none")
+                  )}
                   onValueChange={(value) =>
                     setQuickSetup((current) => ({
                       ...current,

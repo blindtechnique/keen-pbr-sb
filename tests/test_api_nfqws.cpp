@@ -54,6 +54,48 @@ public:
 
 } // namespace
 
+TEST_CASE("nfqws removed reload is rejected before service or firewall mutation") {
+    const int port = test_support::isolated_api_port(7);
+    test_support::EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", test_support::missing_auth_path(port));
+    NfqwsApiTemporaryFile live;
+    SseBroadcaster broadcaster;
+    auto context = test_support::make_minimal_api_context(
+        broadcaster, "/tmp/keen-pbr-nfqws-api-service-context.json");
+    std::size_t refresh_calls = 0;
+    context.request_netfilter_runtime_refresh_fn = [&]() {
+        ++refresh_calls;
+        return true;
+    };
+    std::size_t restart_calls = 0;
+    NfqwsApplyStrategyTestHooks hooks;
+    hooks.restart = [&](int& status) {
+        ++restart_calls;
+        status = 0;
+        return std::string{};
+    };
+    ApiConfig config;
+    config.listen = "127.0.0.1:" + std::to_string(port);
+    ApiServer server(config);
+    register_nfqws_handler_for_test(server, context, std::move(hooks));
+    server.start();
+    httplib::Client client("127.0.0.1", port);
+    for (const auto* command : {"reload", "", "unknown"}) {
+        const auto response = client.Post(
+            "/api/nfqws",
+            nlohmann::json{{"action", "service"}, {"command", command}}.dump(),
+            "application/json");
+        REQUIRE(response != nullptr);
+        CHECK(response->status == 400);
+        CHECK(response->body.find("unsupported nfqws service command") !=
+              std::string::npos);
+    }
+    server.stop();
+    CHECK(refresh_calls == 0U);
+    CHECK(restart_calls == 0U);
+    CHECK(live.read() == "original-live-bytes\n");
+}
+
 TEST_CASE("nfqws apply rejects an invalid candidate before every mutation") {
     const int port = test_support::isolated_api_port(7);
     test_support::EnvironmentVariableGuard auth_file(

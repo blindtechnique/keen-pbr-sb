@@ -77,6 +77,7 @@ describe("nfqws strategy table apply button", () => {
         .nfqws
       for (const strategy of [
         { name: "default (nfqws2 1.2.8)", builtin: true, overridden: false },
+        { name: "default (nfqws2 1.3.1)", builtin: true, overridden: false },
         { name: "ver1", builtin: true, overridden: true },
         { name: "My strategy", builtin: false, overridden: false },
       ]) {

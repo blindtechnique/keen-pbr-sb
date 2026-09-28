@@ -2319,6 +2319,23 @@ CatalogSetupPlan plan_catalog_setup(
             plan.summary.dns_rules.front();
     }
 
+    // Retain explicit ownership for bindings generated with routing rules.
+    if (candidate.dns && candidate.dns->rules && candidate.route && candidate.route->rules) {
+        for (auto& dns : *candidate.dns->rules) {
+            if (!dns.id || std::none_of(plan.summary.dns_rules.begin(), plan.summary.dns_rules.end(),
+                [&](const auto& summary) { return summary.technical_id == *dns.id; })) continue;
+            std::vector<std::string> owners;
+            for (const auto& route : *candidate.route->rules) {
+                if (!route.id || !route_outbound || route.outbound != *route_outbound) continue;
+                const auto& lists = route_rule_lists(route);
+                if (std::any_of(dns.list.begin(), dns.list.end(), [&](const std::string& id) {
+                    return std::find(lists.begin(), lists.end(), id) != lists.end();
+                })) owners.push_back(*route.id);
+            }
+            if (!owners.empty()) dns.route_rule_ids = std::move(owners);
+        }
+    }
+
     // This is deliberately the last planner step: the same authoritative
     // validator used by manual edits must approve the full candidate.
     validate_config(candidate);

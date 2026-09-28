@@ -8,6 +8,23 @@ import {
 } from "../src/pages/dns-rules-utils"
 
 describe("DNS rule semantic dirty state", () => {
+  test("editing or toggling DNS preserves the associated routing rules", () => {
+    const original = {
+      id: "dns_music",
+      server: "vpn_dns",
+      list: ["music"],
+      route_rule_ids: ["music_route"],
+    }
+    const draft = getRuleDraft(original)
+    const saved = normalizeDnsRuleDraft({
+      ...draft,
+      displayName: "Music DNS",
+      enabled: false,
+    })
+    expect(saved.route_rule_ids).toEqual(["music_route"])
+    expect(original.route_rule_ids).toEqual(["music_route"])
+    expect(draft.routeRuleIds).not.toBe(original.route_rule_ids)
+  })
   test("normalizes omitted defaults to the rule that is actually persisted", () => {
     const draft = getRuleDraft({
       server: "secure",

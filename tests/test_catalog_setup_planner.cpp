@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include "../src/setup/catalog_setup_planner.hpp"
+#include "../src/config/route_rule_retirement.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -387,6 +388,25 @@ TEST_CASE("catalog planner preserves URL and inline domains") {
     CHECK_NOTHROW(validate_config(plan.candidate));
     CHECK_NOTHROW(validate_recommended_list_setup(
         plan.candidate, "category_ai"));
+}
+
+TEST_CASE("catalog routing and DNS bindings retire together without deleting the installed list") {
+    const auto plan = plan_catalog_setup(
+        outbound_intent(), nlohmann::json::array({routing_preset()}), base_config());
+    REQUIRE(plan.candidate.route->rules->size() == 1U);
+    REQUIRE(plan.candidate.dns->rules->size() == 1U);
+    const auto& route = plan.candidate.route->rules->front();
+    REQUIRE(route.id.has_value());
+    CHECK(plan.candidate.dns->rules->front().route_rule_ids ==
+          std::optional<std::vector<std::string>>{{*route.id}});
+    auto removed = plan.candidate;
+    removed.route->rules->clear();
+    retire_route_dns_bindings(removed, plan.candidate);
+    CHECK(removed.dns->rules->empty());
+    CHECK(removed.lists->count("category_ai") == 1U);
+    CHECK(nlohmann::json(removed).at("dns").at("servers") ==
+          nlohmann::json(plan.candidate).at("dns").at("servers"));
+    CHECK_NOTHROW(validate_config(removed));
 }
 
 TEST_CASE("catalog summary reports the inherited global refresh route") {

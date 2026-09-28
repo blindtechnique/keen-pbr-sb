@@ -88,6 +88,10 @@ bool structured_response(const HttpTransportResponse& response) {
 }
 
 ListPreviewResult preview_source(const std::string& text, const std::string& format) {
+    // The catalogue uses binary SRS with the default source format. Detect
+    // the actual header, not a URL suffix (redirects and signed URLs vary).
+    if (format == "text" && text.compare(0, 3, "SRS") == 0)
+        return preview_list_srs(text);
     if (format == "text") return preview_list_text(text);
     const auto decoded = decode_list_source(text, format);
     ListPreviewResult result;
@@ -149,7 +153,7 @@ ListPreviewResult run_preview(const ListPreviewRequest& request, const Config& c
                 only_route_failure = false;
                 continue;
             }
-            if (request.format == "text" && structured_response(response)) return failed("unsupported_format");
+            if (request.format == "text" && response.body.compare(0, 3, "SRS") != 0 && structured_response(response)) return failed("unsupported_format");
             return preview_source(response.body, request.format);
         } catch (const HttpError&) {
             if (observed->reason == HttpTransportError::Reason::response_limit)
@@ -248,6 +252,13 @@ std::string serialize_list_preview_result(const ListPreviewResult& result) {
     for (const auto& error : result.errors)
         response["errors"].push_back({{"line", error.line}, {"code", error.code}, {"value", error.value}});
     if (!result.limit_reason.empty()) response["limit_reason"] = result.limit_reason;
+    if (!result.source_format.empty()) {
+        response["source_format"] = result.source_format;
+        response["srs_version"] = result.srs_version;
+        response["unsupported_fields"] = result.unsupported_fields;
+        response["skipped_rules"] = result.skipped_rules;
+        response["inverted_rules"] = result.inverted_rules;
+    }
     return response.dump();
 }
 

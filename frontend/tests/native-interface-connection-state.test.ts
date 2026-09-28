@@ -23,10 +23,12 @@ describe("native VPN connection state", () => {
     ).toBe("unavailable")
   })
   test("uses the dashboard routing verdict for a bound native tunnel", () => {
-    for (const status of ["degraded", "unavailable"] as const)
-      expect(
-        nativeInterfaceConnectionState(enabled, runtime(status), true)
-      ).toBe("unavailable")
+    expect(
+      nativeInterfaceConnectionState(enabled, runtime("degraded"), true)
+    ).toBe("degraded")
+    expect(
+      nativeInterfaceConnectionState(enabled, runtime("unavailable"), true)
+    ).toBe("unavailable")
     expect(
       nativeInterfaceConnectionState(enabled, runtime("healthy"), true)
     ).toBe("up")

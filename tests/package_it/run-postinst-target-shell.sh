@@ -44,6 +44,12 @@ mkdir -p \
     /opt/var/lib/keen-pbr/rescue \
     /opt/var/run
 chmod 0755 /opt/var/lib/keen-pbr/rescue
+if [ "$VARIANT" = full ]; then
+    # Reproduce first-install ancestors made private by install.sh's umask.
+    chmod 0700 /opt/var /opt/var/lib
+    mkdir -p /opt/var/lib/private-unrelated
+    chmod 0700 /opt/var/lib/private-unrelated
+fi
 
 # Upgrades retain the conffile selected by opkg. Postinst must not replace it
 # with the now-empty first-install seed, even when it contains old demo names.
@@ -113,6 +119,10 @@ case "$VARIANT" in
         [ "$(keen_pbr_stat_value '%a:%u' "$reporter_live")" = \
             "644:$(id -u)" ]
         cmp "$reporter_source" "$reporter_live"
+        [ "$(keen_pbr_stat_value '%a' /opt/var)" = 711 ]
+        [ "$(keen_pbr_stat_value '%a' /opt/var/lib)" = 711 ]
+        [ "$(keen_pbr_stat_value '%a' /opt/var/lib/private-unrelated)" = 700 ]
+        su -s /bin/sh nobody -c "test -r '$reporter_live'"
         learned_zero=/opt/var/lib/keen-pbr/nfqws-rotator-learned-v1.0
         learned_one=/opt/var/lib/keen-pbr/nfqws-rotator-learned-v1.1
         [ -f "$learned_zero" ]

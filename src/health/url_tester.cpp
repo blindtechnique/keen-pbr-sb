@@ -34,6 +34,7 @@ URLTestResult URLTester::test_once(const std::string& url, uint32_t fwmark, uint
     } catch (const HttpTransportError& error) {
         result.error = error.what();
     }
+    result.measured_at = std::chrono::steady_clock::now();
     return result;
 }
 
@@ -46,7 +47,7 @@ URLTestResult URLTester::test(const std::string& url, uint32_t fwmark, uint32_t 
         if (attempt) std::this_thread::sleep_for(std::chrono::milliseconds(retry.interval_ms.value_or(1000)));
         auto result = test_once(url, fwmark, timeout_ms, bind_interface);
         if (result.success) return result;
-        best.error = result.error;
+        best = std::move(result);
     }
     return best;
 }

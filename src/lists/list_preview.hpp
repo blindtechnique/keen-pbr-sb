@@ -23,6 +23,11 @@ struct ListPreviewError {
     std::string value;
 };
 struct ListPreviewResult {
+    std::string source_format;
+    std::int64_t srs_version{0};
+    std::int64_t unsupported_fields{0};
+    std::int64_t skipped_rules{0};
+    std::int64_t inverted_rules{0};
     std::string status{"ok"};
     bool complete{true};
     std::int64_t lines{0};
@@ -45,5 +50,6 @@ struct ListPreviewResult {
 // Syntax-only preview: no resolution, persistence, cache, or runtime changes.
 // Classification and IP/CIDR canonicalization belong to ListParser.
 ListPreviewResult preview_list_text(std::string_view text);
+ListPreviewResult preview_list_srs(const std::string& data);
 
 } // namespace keen_pbr3

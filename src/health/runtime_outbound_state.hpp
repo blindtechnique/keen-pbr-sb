@@ -55,7 +55,8 @@ ProbeVerdict classify_interface_probe(
 } // namespace runtime_outbound_detail
 
 using UrltestStateLookupFn = std::function<std::optional<UrltestState>(const std::string&)>;
-// Latency measured for a plain interface outbound, which urltest never covers.
+// Independent interface observations. The response builder reconciles these
+// with newer device-bound group observations before rendering either row.
 using InterfaceProbeLookupFn =
     std::function<std::optional<InterfaceProbeResult>(const std::string&)>;
 

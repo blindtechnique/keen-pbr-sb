@@ -430,6 +430,8 @@ TEST_CASE("url tester uses discard transport probes and retry policy") {
     const auto result = tester.test("https://example.test/health", 77, 456, retry);
     CHECK(result.success);
     CHECK(result.latency_ms == 12);
+    CHECK(result.measured_at != std::chrono::steady_clock::time_point{});
+    CHECK(result.measured_at <= std::chrono::steady_clock::now());
     CHECK(transport->request.discard_body);
     CHECK(transport->request.timeout_ms == 456);
     CHECK(transport->request.fwmark == 77);
@@ -453,6 +455,22 @@ TEST_CASE("url tester pins the probe socket to the requested device") {
     // usable default sends the probe out over the WAN instead.
     CHECK(transport->request.bind_interface == "nwg1");
     CHECK(transport->request.fwmark == 77);
+}
+
+TEST_CASE("url tester preserves the completion time of failed retry attempts") {
+    auto transport = std::make_shared<FakeTransport>();
+    transport->fail = true;
+    keen_pbr3::URLTester tester(transport);
+    keen_pbr3::RetryConfig retry;
+    retry.attempts = 2;
+    retry.interval_ms = 0;
+    const auto started = std::chrono::steady_clock::now();
+    const auto result = tester.test("https://example.test/health", 77, 456, retry, "nwg1");
+    CHECK_FALSE(result.success);
+    CHECK(result.error == "transport unavailable");
+    CHECK(transport->calls == 2);
+    CHECK(result.measured_at >= started);
+    CHECK(result.measured_at <= std::chrono::steady_clock::now());
 }
 
 TEST_CASE("manual HTTP transport pins DNS while retaining Host and sends only HEAD") {
@@ -593,4 +611,86 @@ TEST_CASE("HTTP transport keeps legacy error construction and typed cancellation
     request.cancellation = std::make_shared<std::atomic<bool>>(true);
     keen_pbr3::LibcurlHttpTransport transport;
     CHECK_THROWS_AS(transport.perform(request), keen_pbr3::HttpTransportCancelled);
+}
+
+TEST_CASE("HTTP transport streams only the final body and enforces streaming limits") {
+    keen_pbr3::CurlRuntime curl_runtime;
+    httplib::Server server;
+    server.Get("/", [](const httplib::Request&, httplib::Response& response) {
+        response.set_content("redirect body must not reach sink", "text/plain");
+        response.set_redirect("/file");
+    });
+    server.Get("/file", [](const httplib::Request&, httplib::Response& response) {
+        response.set_content(std::string(1024, 'x'), "application/octet-stream");
+    });
+    BoundHttpServer bound(server);
+    auto request = pinned_head_request(bound.port());
+    request.head_only = false;
+    request.follow_redirects = true;
+    request.max_response_size = 2048;
+    std::string streamed;
+    request.body_sink = [&](const char* data, size_t size) { streamed.append(data, size); };
+    keen_pbr3::LibcurlHttpTransport transport;
+    const auto response = transport.perform(request);
+    CHECK(response.body.empty());
+    CHECK(streamed == std::string(1024, 'x'));
+    request.max_response_size = 16;
+    CHECK_THROWS_AS(transport.perform(request), keen_pbr3::HttpTransportError);
+    request.max_response_size = 2048;
+    request.body_sink = [](const char*, size_t) { throw std::runtime_error("disk full"); };
+    CHECK_THROWS_AS(transport.perform(request), keen_pbr3::HttpTransportError);
+    request.https_only = true;
+    CHECK_THROWS_AS(transport.perform(request), keen_pbr3::HttpTransportError);
+}
+
+TEST_CASE("HTTP streaming bounds chunked responses without a Content-Length") {
+    keen_pbr3::CurlRuntime curl_runtime;
+    httplib::Server server;
+    server.Get("/", [](const httplib::Request&, httplib::Response& response) {
+        response.set_chunked_content_provider("application/octet-stream",
+            [](size_t offset, httplib::DataSink& sink) {
+                if (!sink.write("chunk", 5)) return false;
+                if (offset >= 10) sink.done();
+                return true;
+            });
+    });
+    BoundHttpServer bound(server);
+    auto request = pinned_head_request(bound.port());
+    request.head_only = false;
+    request.max_response_size = 8;
+    std::string streamed;
+    request.body_sink = [&](const char* data, size_t size) { streamed.append(data, size); };
+    keen_pbr3::LibcurlHttpTransport transport;
+    try {
+        (void)transport.perform(request);
+        FAIL("Expected chunked streaming limit");
+    } catch (const keen_pbr3::HttpTransportError& error) {
+        CHECK(error.reason() == keen_pbr3::HttpTransportError::Reason::response_limit);
+    }
+    CHECK(streamed.size() <= 8);
+    streamed.clear();
+    request.max_response_size = 15;
+    CHECK(transport.perform(request).body.empty());
+    CHECK(streamed == "chunkchunkchunk");
+}
+
+TEST_CASE("HTTP interface binding failure never reaches an otherwise reachable server") {
+    keen_pbr3::CurlRuntime curl_runtime;
+    httplib::Server server;
+    std::atomic<int> calls{0};
+    server.Get("/", [&](const httplib::Request&, httplib::Response& response) {
+        ++calls;
+        response.set_content("reachable", "text/plain");
+    });
+    BoundHttpServer bound(server);
+    auto request = pinned_head_request(bound.port());
+    request.head_only = false;
+    keen_pbr3::LibcurlHttpTransport transport;
+    CHECK(transport.perform(request).body == "reachable");
+    REQUIRE(calls.load() == 1);
+    // Slash cannot be part of a Linux device name. The loopback server remains
+    // reachable, so an accidental unbound retry would increment this counter.
+    request.bind_interface = "no/such/device";
+    CHECK_THROWS_AS(transport.perform(request), keen_pbr3::HttpTransportBindError);
+    CHECK(calls.load() == 1);
 }

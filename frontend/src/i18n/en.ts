@@ -249,14 +249,23 @@ export const enTranslation = {
     tooLarge:
       "This source exceeds the 2 MiB preview limit. Use a smaller file to check its contents. You can still save the list.",
     unsupportedFormat:
-      "The source cannot be checked in this format. Choose the matching Text, JSON array or YAML payload format; use a text export for binary .srs files. You can still save the list.",
+      "The source cannot be checked in this format. Choose the matching Text, JSON array or YAML payload format. Binary SRS lists are detected automatically. You can still save the list.",
+    srsVersion: "Binary SRS list, version {{version}}",
+    srsVersionUnsupported:
+      "SRS version {{version}} is not supported yet. Versions 1–5 can be read.",
+    srsDecodeFailed:
+      "Could not decode SRS: the file is damaged, truncated, or exceeds the preview decompression limit. You can still save the list.",
+    srsPartial:
+      "Showing the supported part of SRS. Unsupported conditions: {{fields}}; skipped rules: {{skipped}}. The runtime loader uses the same matching restrictions.",
+    srsEntriesChecked: "Entries checked",
+    srsEntry: "Entry {{line}}",
     routeUnavailable:
       "The selected download route is unavailable. Choose an available route and try again. You can still save the list.",
     partial:
       "Only part of the list was checked. Split the source into smaller files for a complete preview. You can still save the list.",
     lineTooLongStop:
       "Checking stopped because a source line exceeds 4,096 bytes. Shorten that line and try again. You can still save the list.",
-    empty: "No valid entries were found in the checked text.",
+    empty: "No valid entries were found in the checked source.",
     entries: "Preview entries ({{count}})",
     entriesLimited:
       "Only the first 50 unique entries are shown. Counts include all checked lines.",
@@ -470,6 +479,11 @@ export const enTranslation = {
     nfqwsWritableDuplicate:
       "Keep only one --writable argument in NFQWS_BASE_ARGS.",
     nfqwsPathRequired: "Enter the path to the referenced file.",
+    nfqwsActionEmpty: "Enter an action after --lua-desync= or --dpi-desync=.",
+    nfqwsBlobInvalid:
+      "Check the blob declaration: use name:@path for a file or name:0xHEX for bytes. The exact name is in the details.",
+    nfqwsBlobDuplicate:
+      "A blob name appears more than once in the startup command. Keep one declaration in NFQWS_BASE_ARGS and do not redefine built-in blobs. The exact name is in the details.",
     nfqwsPathMissing:
       "The referenced file was not found. Check the path in details and make sure the file exists on the router.",
     nfqwsProfileNewForbidden:
@@ -632,7 +646,6 @@ export const enTranslation = {
     start: "Start",
     stop: "Stop",
     restart: "Restart service",
-    reload: "Reload configuration",
     install: "Install nfqws2",
     installHint:
       "The nfqws2-keenetic package from the official nfqws repository, verified against the repository index (size and SHA-256). Takes a minute or two.",
@@ -696,8 +709,6 @@ export const enTranslation = {
         "Rare actions behind one button: restore points, backups, and re-reading the settings without stopping the service. What each one does is written in the menu itself.",
       restart:
         "Stops nfqws and starts it again with the current settings. Connections drop for a second, but everything you changed takes effect.",
-      reload:
-        "The service re-reads its settings on the fly, so connections survive. Enough when only lists and parameters changed.",
       upgrade:
         "Downloads and installs the newer nfqws2. It saves the current files first, so there is somewhere to go back to. Censorship circumvention pauses while it installs.",
       captureRestorePoint:
@@ -1664,6 +1675,9 @@ export const enTranslation = {
       connectedState: "Connection",
       connected: "Connected",
       notWorking: "Not working",
+      probeFailed: "Probe failed",
+      probeFailedDescription:
+        "The test request failed. This does not prove that all traffic through the VPN is unavailable. Expand the row for details.",
       disconnected: "Disconnected",
       linkState: "Link",
       linkUp: "Link up",
@@ -2627,6 +2641,8 @@ export const enTranslation = {
       outcomeNoExitCode: "No exit code reported",
       outcomeNoOutput: "The command produced no output.",
       restartFailed: "Restart failed",
+      singboxRestartComplete:
+        "sing-box restarted. Disabled VPNs and auto-start preferences were preserved.",
       readinessUnconfirmed:
         "Routing, DNS and VPN readiness could not be confirmed. Check the service state.",
       restartFailedDetail: "Restart failed: {{error}}",
@@ -3973,6 +3989,15 @@ export const enTranslation = {
           "URL lists currently inheriting this chain: {{count}}.",
       },
       softwareUpdate: {
+        downloadPath: "Download updates through",
+        routerPath: "Ordinary router path",
+        saveDownloadPath: "Save download path",
+        downloadPathHint:
+          "If the selected VPN or group is unavailable, the download will not start. There is no automatic fallback to the ordinary path. DNS queries still use the router DNS.",
+        downloadPathFailed:
+          "Could not read or save the download path. Check the service and try again. The installed package has not changed.",
+        downloadChoicesUnavailable:
+          "Could not load VPNs and groups. The download path has not changed. Try again, or select the ordinary router path and save your choice.",
         channel: "Update channel",
         stableChannel: "Stable (main)",
         alphaChannel: "Alpha",
@@ -4494,6 +4519,8 @@ export const enTranslation = {
           "Add one or more configured list names to match for this rule.",
         noListsSelected: "No lists selected",
         listsHint: "Choose which of your lists this rule applies to.",
+        selectInstalledList: "Select an installed list",
+        openLists: "Go to lists",
         proto: "Proto",
         any: "Any",
         anyLower: "any",

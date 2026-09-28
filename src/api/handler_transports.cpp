@@ -1967,6 +1967,39 @@ static void register_transports_handler_impl(
         return body.dump();
     });
 
+    server.post("/api/transports/sing-box/service", [&ctx](const std::string& request_body) -> std::string {
+        const auto request = nlohmann::json::parse(request_body, nullptr, false);
+        if (!request.is_object() || request.size() != 1U ||
+            !request.contains("action") || !request["action"].is_string())
+            throw ApiError("sing-box service action requires action", 400);
+        const auto action = request["action"].get<std::string>();
+        if (action != "up" && action != "down" && action != "restart")
+            throw ApiError("sing-box service action must be up, down, or restart", 400);
+        try {
+            // One service command owns the fence, not one competing command
+            // per member of the same process. Do not persist member power.
+            auto maintenance = ctx.acquire_maintenance_lease("sing-box-service-" + action);
+            const auto endpoint = load_endpoint(ctx.config_path);
+            httplib::Client client(endpoint.host, endpoint.port);
+            client.set_connection_timeout(1, 0);
+            client.set_read_timeout(95, 0); // manager operation deadline is 90s
+            maintenance->verify_held();
+            const auto response = client.Post("/v1/sing-box/" + action,
+                {{"Authorization", "Bearer " + endpoint.api_key}}, "", "application/json");
+            if (!response) throw ApiError("sing-box service result is unavailable; refresh its status before retrying", 503);
+            if (response->status < 200 || response->status >= 300)
+                throw ApiError("sing-box service action failed", 502, response->body);
+            const auto result = nlohmann::json::parse(response->body, nullptr, false);
+            if (!result.is_object() || result.value("status", "") != "accepted")
+                throw ApiError("transport manager returned malformed service result", 502);
+            maintenance->verify_held();
+            if (action != "down") ctx.request_netfilter_runtime_refresh();
+            return result.dump();
+        } catch (const MaintenanceLockError& error) {
+            throw_maintenance_api_error(error);
+        }
+    });
+
     server.post("/api/transports", [&ctx](const std::string& request_body) -> std::string {
         nlohmann::json request;
         try {
@@ -2030,7 +2063,7 @@ static void register_transports_handler_impl(
             const auto endpoint = load_endpoint(ctx.config_path);
             httplib::Client client(endpoint.host, endpoint.port);
             client.set_connection_timeout(1, 0);
-            client.set_read_timeout(15, 0);
+            client.set_read_timeout(95, 0);
             httplib::Headers headers{
                 {"Authorization", "Bearer " + endpoint.api_key},
             };

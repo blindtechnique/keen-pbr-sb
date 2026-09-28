@@ -88,7 +88,7 @@ describe("service operation explanations", () => {
       )
     }
   )
-  test("restart callers pass the original error while producer reasons and scheduling stay intact", () => {
+  test("restart callers preserve errors and distinguish process readiness from sing-box lifecycle", () => {
     const source = readFileSync(
       new URL(
         "../src/components/overview/services-status-card.tsx",
@@ -106,9 +106,9 @@ describe("service operation explanations", () => {
     expect(source).toContain(
       'throw new Error("transport manager is unavailable")'
     )
-    expect(source).toContain(
-      "await waitForRuntimeReadiness(runtimeReadinessProbe"
-    )
+    expect(source).toContain("await postSingBoxServiceAction({ action })")
+    expect(source).toContain('t("overview.services.singboxRestartComplete")')
+    expect(source).not.toContain("await waitForRuntimeReadiness(")
     expect(source).toContain("await waitForServiceProcessRestart(")
   })
   test("ordinary labels distinguish a failed probe from complete unavailability", () => {

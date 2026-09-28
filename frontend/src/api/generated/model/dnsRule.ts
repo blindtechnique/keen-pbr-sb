@@ -7,6 +7,8 @@
  */
 
 export interface DnsRule {
+  /** Routing rules that created this DNS binding. Their removal retires only unreferenced bound lists. */
+  route_rule_ids?: string[];
   /**
      * Optional stable technical identifier. New clients generate it automatically; legacy rules without an id remain valid.
 
