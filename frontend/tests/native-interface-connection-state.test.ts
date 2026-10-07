@@ -22,24 +22,46 @@ describe("native VPN connection state", () => {
       )
     ).toBe("unavailable")
   })
-  test("uses the dashboard routing verdict for a bound native tunnel", () => {
+  test("keeps connected peers distinct from an unsuccessful routing check", () => {
     expect(
       nativeInterfaceConnectionState(enabled, runtime("degraded"), true)
-    ).toBe("degraded")
+    ).toBe("connectedUnverified")
     expect(
       nativeInterfaceConnectionState(enabled, runtime("unavailable"), true)
-    ).toBe("unavailable")
+    ).toBe("connectedUnverified")
     expect(
       nativeInterfaceConnectionState(enabled, runtime("healthy"), true)
     ).toBe("up")
   })
   test("a missing probe is unknown, not failed, and does not need a latency value", () => {
     expect(nativeInterfaceConnectionState(enabled, undefined, true)).toBe(
-      "unknown"
+      "connectedPending"
     )
     expect(
       nativeInterfaceConnectionState(enabled, runtime("healthy"), true)
     ).toBe("up")
+  })
+  test("never manufactures a connected peer from missing NDMS data", () => {
+    expect(
+      nativeInterfaceConnectionState(
+        { live: true },
+        runtime("unavailable"),
+        true
+      )
+    ).toBe("unavailable")
+    expect(
+      nativeInterfaceConnectionState({ live: true }, runtime("degraded"), true)
+    ).toBe("degraded")
+    expect(
+      nativeInterfaceConnectionState({ live: true }, undefined, true)
+    ).toBe("unknown")
+    expect(
+      nativeInterfaceConnectionState(
+        { ...enabled, link: false },
+        runtime("healthy"),
+        true
+      )
+    ).toBe("unavailable")
   })
   test("keeps the administrative off state separate and respects disconnected unbound interfaces", () => {
     expect(

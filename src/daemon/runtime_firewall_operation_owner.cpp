@@ -916,8 +916,8 @@ bool RuntimeFirewallOperationOwner::defer_fresh(
                 ? callbacks_.active_mutation_label()
                 : std::string{"unknown"};
             Logger::instance().verbose(
-                "Runtime firewall reconciliation deferred behind runtime "
-                "mutation '{}' without consuming retry budget.",
+                "Runtime firewall same-attempt continuation scheduled; "
+                "active runtime mutation: '{}'.",
                 label);
             return true;
         } else if (carried_preowned_authority &&
@@ -1227,7 +1227,16 @@ bool RuntimeFirewallOperationOwner::retain_pending_successor(
         std::move(snat_recovery),
         std::move(prepared_catalog),
         schedule_catalog_refresh,
-        completed_context->domain_state,
+        // A background successor is a new observation/publication attempt,
+        // not a continuation of the completed terminal. Carrying its domain
+        // state also carries prepared core and finished publication-tail
+        // flags: the new worker runs, but its result and recovery release are
+        // skipped forever. Attached lifecycle/point operations still need
+        // their exact transaction state across transport handoffs.
+        !detach_foreground && completed_context->lifecycle_kind !=
+            RuntimeFirewallLifecycleKind::background
+            ? completed_context->domain_state
+            : DomainStatePtr{},
         detach_foreground
             ? MutationLeasePtr{}
             : std::move(completed_context->retained_mutation_lease),
@@ -1265,6 +1274,19 @@ bool RuntimeFirewallOperationOwner::launch_pending_successor() {
         return true;
     }
     if (shutdown_requested() || active_context_) return false;
+
+    if (!pending_successor_->domain_state) {
+        // Allocate the fresh background state beside the durable intent.
+        // On allocation failure the existing watchdog can retry without
+        // losing the catalog/recovery request or reusing a finished tail.
+        try {
+            auto fresh = callbacks_.create_domain_state();
+            if (!fresh) return false;
+            pending_successor_->domain_state = std::move(fresh);
+        } catch (...) {
+            return false;
+        }
+    }
 
     // Copying can allocate (the exact SNAT cleanup snapshot may own vectors),
     // so keep the durable slot untouched until the new coordinator/context

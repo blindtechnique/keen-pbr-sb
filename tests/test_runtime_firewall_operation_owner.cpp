@@ -1,6 +1,8 @@
 #include <doctest/doctest.h>
 
 #include "daemon/runtime_firewall_operation_owner.hpp"
+#include "daemon/runtime_firewall_core_publication.hpp"
+#include "daemon/runtime_firewall_publication_tail_progress.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -26,6 +28,8 @@ struct TestConfigTransactionProbe final {
 struct TestDomainState final : RuntimeFirewallOperationDomainState {
     std::shared_ptr<TestConfigTransactionProbe> config_transaction;
     ConfigTerminalOperationIdentity config_identity;
+    RuntimeFirewallCorePublication core_publication;
+    RuntimeFirewallPublicationTailProgress publication_tail;
 };
 
 struct NothrowPreownedContinuationProbe final {
@@ -3607,7 +3611,7 @@ TEST_CASE("runtime firewall operation owner watchdog survives throwing wake and 
     CHECK_FALSE(harness.owner->active_context());
 }
 
-TEST_CASE("runtime firewall operation owner keeps exact domain across merged schedule successor") {
+TEST_CASE("runtime firewall background successor starts a fresh publication after allocation retry") {
     OwnerHarness harness;
     harness.create_owner();
     harness.owner->schedule(0U, 77U, {}, {});
@@ -3615,6 +3619,11 @@ TEST_CASE("runtime firewall operation owner keeps exact domain across merged sch
     REQUIRE(completed);
     const auto exact_domain = completed->domain_state;
     REQUIRE(exact_domain);
+    auto& previous = *std::dynamic_pointer_cast<TestDomainState>(exact_domain);
+    previous.core_publication.prepared = true;
+    previous.core_publication.committed = true;
+    previous.publication_tail.mark_core_published();
+    previous.publication_tail.mark_runtime_incident_tail_finished();
     harness.coordinator.cancel([&](int id) {
         for (auto& timer : harness.timers) {
             if (timer.id == id) timer.cancelled = true;
@@ -3644,14 +3653,24 @@ TEST_CASE("runtime firewall operation owner keeps exact domain across merged sch
         /*runtime_generation=*/77U,
         std::move(newer_recovery),
         newer_catalog));
-    // The pending successor already owns an exact state object; the factory
-    // must not be consulted while the merged intent is launched.
-    CHECK(harness.throw_domain_state_once);
-    harness.throw_domain_state_once = false;
+    // Allocation failure must retain the recovery/catalog intent, not fall
+    // back to the completed terminal's prepared/finished flags.
+    CHECK_FALSE(harness.throw_domain_state_once);
+    CHECK(harness.owner->pending_successor());
+    CHECK_FALSE(harness.owner->active_context());
+    REQUIRE(harness.owner->launch_pending_successor());
     CHECK_FALSE(harness.owner->pending_successor());
     const auto launched = harness.owner->active_context();
     REQUIRE(launched);
-    CHECK(launched->domain_state == exact_domain);
+    CHECK(launched->domain_state != exact_domain);
+    const auto next = std::dynamic_pointer_cast<TestDomainState>(launched->domain_state);
+    REQUIRE(next);
+    CHECK_FALSE(next->core_publication.prepared);
+    CHECK_FALSE(next->core_publication.committed);
+    CHECK_FALSE(next->publication_tail.core_published());
+    CHECK_FALSE(next->publication_tail.runtime_incident_tail_finished());
+    CHECK(previous.core_publication.prepared);
+    CHECK(previous.publication_tail.runtime_incident_tail_finished());
     CHECK(launched->successor_runtime_generation == 77U);
     CHECK(launched->prepared_native_vpn_catalog == newer_catalog);
 
@@ -3697,14 +3716,63 @@ TEST_CASE("runtime firewall operation owner drops stale catalog for newer catalo
         /*runtime_generation=*/77U,
         {},
         /*prepared_catalog=*/{}));
-    CHECK(harness.throw_domain_state_once);
-    harness.throw_domain_state_once = false;
+    CHECK_FALSE(harness.throw_domain_state_once);
+    REQUIRE(harness.owner->pending_successor());
+    REQUIRE(harness.owner->launch_pending_successor());
     CHECK_FALSE(harness.owner->pending_successor());
     const auto launched = harness.owner->active_context();
     REQUIRE(launched);
-    CHECK(launched->domain_state == exact_domain);
+    CHECK(launched->domain_state != exact_domain);
     CHECK(launched->successor_runtime_generation == 77U);
     CHECK_FALSE(launched->prepared_native_vpn_catalog);
+}
+
+TEST_CASE("runtime firewall background retries never inherit completed publication flags") {
+    for (const auto mode : {
+             RuntimeFirewallOperationContext::SuccessorMode::defer_same_attempt,
+             RuntimeFirewallOperationContext::SuccessorMode::reschedule_retry}) {
+        OwnerHarness harness;
+        harness.create_owner();
+        auto previous = std::make_shared<TestDomainState>();
+        REQUIRE(harness.owner->start_immediate(
+                    0U, 77U, {}, {}, false, previous) ==
+                RuntimeFirewallImmediateDisposition::handed_off);
+        const auto completed = harness.owner->active_context();
+        previous->core_publication.prepared = true;
+        previous->publication_tail.mark_runtime_incident_tail_finished();
+        const auto terminal = harness.coordinator.terminate_operation_for_resnapshot(
+            harness.dispatched_claim, /*force_rerun=*/true);
+        REQUIRE(terminal.owned);
+        REQUIRE(harness.owner->retain_pending_successor(
+            completed, mode, 0U, 77U,
+            OwnedSnatRecovery{true, true}, {}, false));
+        harness.owner->cancel_completion_watchdog();
+        harness.owner->reset_if_active(completed);
+        REQUIRE(harness.owner->launch_pending_successor());
+        const auto next_context = harness.owner->active_context();
+        REQUIRE(next_context);
+        const auto next = std::dynamic_pointer_cast<TestDomainState>(
+            next_context->domain_state);
+        REQUIRE(next);
+        CHECK(next != previous);
+        CHECK_FALSE(next->core_publication.prepared);
+        CHECK_FALSE(next->publication_tail.runtime_incident_tail_finished());
+        auto callback = harness.timer_with_label(
+            mode == RuntimeFirewallOperationContext::SuccessorMode::defer_same_attempt
+                ? "runtime-firewall-admission-retry" : "runtime-firewall-retry").callback;
+        callback();
+        CHECK(harness.dispatch_calls == 2);
+        CHECK(harness.dispatched_recovery.requested);
+        CHECK(harness.dispatched_recovery.missing_observed);
+        // The new terminal can end without another successor. Its exact
+        // recovery inputs survived; the old publication remains untouched.
+        harness.owner->terminate_before_worker(
+            next_context, harness.dispatched_claim,
+            RuntimeFirewallOperationContext::SuccessorMode::none, false);
+        CHECK_FALSE(harness.coordinator.retry_pending());
+        CHECK_FALSE(harness.owner->active_context());
+        CHECK(previous->core_publication.prepared);
+    }
 }
 
 TEST_CASE("runtime firewall operation owner watchdog pumps a worker checkpoint") {

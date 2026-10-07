@@ -1676,6 +1676,10 @@ export const enTranslation = {
       connected: "Connected",
       notWorking: "Not working",
       probeFailed: "Probe failed",
+      connectedUnverified: "Connected · path unverified",
+      connectedPending: "Connected · awaiting check",
+      connectedUnverifiedDescription:
+        "Keenetic reports that the tunnel is connected. The service has not confirmed the route through it. These are separate checks; see the result details below.",
       probeFailedDescription:
         "The test request failed. This does not prove that all traffic through the VPN is unavailable. Expand the row for details.",
       disconnected: "Disconnected",
