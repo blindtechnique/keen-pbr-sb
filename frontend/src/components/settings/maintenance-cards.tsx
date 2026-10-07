@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import type { SystemUpdateStatus } from "@/api/generated/model"
 import { UpdateChannelControl } from "./update-channel-control"
 import { UpdateTransportControl } from "./update-transport-control"
+import { SoftwareUpdateActions } from "./software-update-actions"
 import { softwareUpdateRequest } from "./software-update-channel"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
@@ -9,7 +10,6 @@ import {
   DownloadIcon,
   ExternalLinkIcon,
   RefreshCwIcon,
-  RotateCcwIcon,
   UploadIcon,
 } from "lucide-react"
 
@@ -35,7 +35,6 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
-  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
@@ -198,6 +197,7 @@ export function SoftwareUpdateCard() {
   }, [])
   const rollbackUnavailableReason = useRollbackUnavailableReason(status)
   const logRef = useRef<HTMLPreElement>(null)
+  const updateContentRef = useRef<HTMLDivElement>(null)
   const dialogContent = getSoftwareUpdateDialogContent(status, showResult)
   const showUpdateLog = dialogContent === "update-log"
 
@@ -629,17 +629,43 @@ export function SoftwareUpdateCard() {
         }}
         open={open}
       >
-        <DialogContent className="overflow-hidden max-sm:top-auto max-sm:bottom-0 max-sm:left-0 max-sm:max-h-[calc(100dvh-0.75rem)] max-sm:max-w-none max-sm:translate-x-0 max-sm:translate-y-0 max-sm:rounded-b-none max-sm:border-x-0 max-sm:border-b-0 sm:max-w-[640px]">
-          <DialogHeader>
+        <DialogContent className="flex flex-col overscroll-contain max-sm:top-auto max-sm:bottom-0 max-sm:left-0 max-sm:max-h-[calc(100dvh-0.75rem)] max-sm:max-w-none max-sm:translate-x-0 max-sm:translate-y-0 max-sm:rounded-b-none max-sm:border-x-0 max-sm:border-b-0 sm:max-w-[640px]">
+          <DialogHeader className="shrink-0 pr-6">
             <DialogTitle>
               {t("pages.settings.softwareUpdate.title")}
             </DialogTitle>
+          </DialogHeader>
+
+          <div
+            className="min-h-20 flex-1 space-y-4 overflow-y-auto overscroll-contain pr-1"
+            ref={updateContentRef}
+          >
             <DialogDescription>
               {t("pages.settings.softwareUpdate.description")}
             </DialogDescription>
-          </DialogHeader>
-
-          <div className="min-h-0 space-y-4 overflow-y-auto pr-1">
+            {confirmInstall ? (
+              <p
+                className="rounded-md border border-primary/35 bg-primary/5 p-3 font-medium"
+                role="status"
+              >
+                {t("pages.settings.softwareUpdate.confirm", {
+                  version: status?.latest ?? "",
+                })}
+              </p>
+            ) : null}
+            {confirmRollback ? (
+              <div
+                className="rounded-md border border-destructive/40 bg-destructive/5 p-3"
+                role="status"
+              >
+                <p className="font-medium">
+                  {t("pages.settings.softwareUpdate.rollbackConfirmTitle")}
+                </p>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {t("pages.settings.softwareUpdate.rollbackConfirmHint")}
+                </p>
+              </div>
+            ) : null}
             <UpdateVersionSummary status={status} />
             {notice ? (
               <div
@@ -751,106 +777,44 @@ export function SoftwareUpdateCard() {
                 </pre>
               </details>
             ) : null}
-            {confirmInstall ? (
-              <div className="space-y-3 rounded-md border border-primary/35 bg-primary/5 p-4">
-                <p className="font-medium">
-                  {t("pages.settings.softwareUpdate.confirm", {
-                    version: status?.latest ?? "",
-                  })}
-                </p>
-                <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-                  <Button
-                    onClick={() => setConfirmInstall(false)}
-                    variant="outline"
-                  >
-                    {t("pages.settings.softwareUpdate.cancel")}
-                  </Button>
-                  <Button
-                    disabled={backupPending || starting || activeAttempt}
-                    onClick={() => void startOperation("update")}
-                  >
-                    {t("pages.settings.softwareUpdate.install")}
-                  </Button>
-                </div>
-              </div>
-            ) : null}
-            {confirmRollback ? (
-              <div className="space-y-3 rounded-md border border-destructive/40 bg-destructive/5 p-4">
-                <div>
-                  <p className="font-medium">
-                    {t("pages.settings.softwareUpdate.rollbackConfirmTitle")}
-                  </p>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    {t("pages.settings.softwareUpdate.rollbackConfirmHint")}
-                  </p>
-                </div>
-                <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-                  <Button
-                    onClick={() => setConfirmRollback(false)}
-                    variant="outline"
-                  >
-                    {t("pages.settings.softwareUpdate.cancel")}
-                  </Button>
-                  <Button
-                    disabled={backupPending || starting || activeAttempt}
-                    onClick={() => void startOperation("rollback")}
-                    variant="destructive"
-                  >
-                    {t("pages.settings.softwareUpdate.rollbackConfirmAction")}
-                  </Button>
-                </div>
-              </div>
-            ) : null}
           </div>
 
-          <DialogFooter className="max-sm:items-stretch">
-            <Button
-              disabled={
-                !status?.package_rollback_available ||
-                activeAttempt ||
-                backupPending ||
-                status?.running ||
-                starting ||
-                confirmRollback
+          <SoftwareUpdateActions
+            confirmation={
+              confirmRollback ? "rollback" : confirmInstall ? "update" : null
+            }
+            busy={
+              backupPending ||
+              starting ||
+              activeAttempt ||
+              status?.running === true
+            }
+            backupPending={backupPending}
+            updateDisabled={!softwareUpdateRequest(status) || savingChannel}
+            rollbackDisabled={!status?.package_rollback_available}
+            rollbackReason={rollbackUnavailableReason ?? undefined}
+            onBackup={() => void exportBackup()}
+            onCancel={() => {
+              setConfirmInstall(false)
+              setConfirmRollback(false)
+            }}
+            onUpdate={() => {
+              if (confirmInstall) void startOperation("update")
+              else {
+                setConfirmRollback(false)
+                setConfirmInstall(true)
+                updateContentRef.current?.scrollTo({ top: 0 })
               }
-              onClick={() => setConfirmRollback(true)}
-              title={rollbackUnavailableReason ?? undefined}
-              variant="destructive"
-            >
-              <RotateCcwIcon />
-              {t("pages.settings.softwareUpdate.rollbackButton")}
-            </Button>
-            <Button
-              variant="outline"
-              className="sm:mr-auto"
-              disabled={
-                backupPending || starting || activeAttempt || status?.running
+            }}
+            onRollback={() => {
+              if (confirmRollback) void startOperation("rollback")
+              else {
+                setConfirmInstall(false)
+                setConfirmRollback(true)
+                updateContentRef.current?.scrollTo({ top: 0 })
               }
-              onClick={() => void exportBackup()}
-            >
-              {backupPending ? (
-                <RefreshCwIcon className="animate-spin" />
-              ) : (
-                <DownloadIcon />
-              )}
-              {t("pages.settings.softwareUpdate.downloadBackup")}
-            </Button>
-            <Button
-              disabled={
-                !softwareUpdateRequest(status) ||
-                savingChannel ||
-                activeAttempt ||
-                backupPending ||
-                status?.running ||
-                starting ||
-                confirmInstall
-              }
-              onClick={() => setConfirmInstall(true)}
-            >
-              <DownloadIcon />
-              {t("pages.settings.softwareUpdate.install")}
-            </Button>
-          </DialogFooter>
+            }}
+          />
         </DialogContent>
       </Dialog>
     </>
