@@ -1,4 +1,80 @@
 export const enTranslation = {
+  learning: {
+    staleHint:
+      "Live updates are not connected. These are the last received readings; their current state is unconfirmed.",
+    title: "DNS and connection-name learning (experimental)",
+    dnsLabel: "Learn from DNS replies",
+    l7Label: "Learn from TLS / HTTP / QUIC",
+    dnsHint:
+      "Read plain DNS replies to add matching addresses to routing lists. Uses NFQUEUE with a bounded 30 ms hold; ordinary dnsmasq DNS continues to work if this mode is unavailable.",
+    l7Hint:
+      "Read visible host names from connections, including when the client uses encrypted DNS. Does not decrypt ECH.",
+    scopeHint:
+      "Off by default. Uses active rules' domain lists on selected incoming interfaces and for enabled native-VPN clients with verified ingress. Excluded VPN clients are skipped. IPv6 is covered only when enabled in the service. If a learned name changes the route, matching connections from that client may be cleared and need to reconnect. Save and Apply are required; DNS enforcement is separate.",
+    observationHint:
+      "This is the learner's state, not VPN availability. Viewing it sends no test traffic. It does not prove that a particular site is routed correctly.",
+    draftHint:
+      "Unapplied settings exist. The states below describe the runtime, not the draft.",
+    interfaces: "Capture interfaces: {{names}}",
+    countersHint:
+      "Counters belong to the current listener instance and reset when it is recreated. Zero alone is not a fault. Matches are not proof of successful routing.",
+    dnsPackets: "DNS packets",
+    dnsMatched: "DNS matches",
+    l7Packets: "L7 packets",
+    l7Matched: "L7 matches",
+    setErrors: "Address-set write errors",
+    timeouts: "DNS hold timeouts",
+    details: "Technical details",
+    overruns: "Lost packets: DNS {{dns}}, L7 {{l7}}",
+    settingsLink: "Open settings → Advanced",
+    diagnosticsLink: "View learner diagnostics",
+    states: {
+      unknown:
+        "No observation is available. This daemon may not report learner diagnostics yet.",
+      disabled: "Disabled in the applied settings.",
+      stopped:
+        "Stopped with the routing service. Start it explicitly to resume.",
+      applying: "Settings are being applied; capture is not yet confirmed.",
+      no_interfaces:
+        "No eligible incoming interfaces. Select them in Settings. Native-VPN clients require enabled processing and verified ingress; pooled VPN clients also require a verified address pool.",
+      no_lists:
+        "No active domain lists to learn. Add a domain list to an enabled routing rule.",
+      unavailable:
+        "The listener is unavailable. Check the technical details and journal; ordinary DNS is not disabled by this status.",
+      fail_open_unconfirmed:
+        "DNS capture is inactive: the kernel did not confirm queue-overflow bypass (FAIL_OPEN). dnsmasq continues to work.",
+      snapshot_unavailable:
+        "The applied list snapshot is unavailable. Check the last apply result; no learning writes are authorized.",
+      active:
+        "Capture is configured and the listener is active. This is not an end-to-end routing test.",
+    },
+  },
+  doh: {
+    bootstrapError:
+      "Choose up to eight installed plain DNS servers with external IPs for bootstrap, or set fixed DoH IPs. DoH and local DNS references cannot be used for bootstrap.",
+    limitError: "Up to 32 DoH servers are supported.",
+    caError:
+      "DoH requires trusted CA certificates. Install the ca-bundle package in Entware.",
+    type: "Connection method",
+    plain: "Plain DNS (UDP/TCP)",
+    https: "DNS-over-HTTPS (DoH)",
+    url: "DNS server HTTPS URL",
+    urlHint:
+      "DNS queries are encrypted and use the selected outbound. The server certificate is verified. A failed DNS query does not change VPN health.",
+    urlError: "Enter an HTTPS URL without credentials or a # fragment.",
+    ips: "Fixed DoH server IPs (optional)",
+    ipsHint:
+      "One IPv4 or IPv6 per line, without a port. Fixed IPs skip bootstrap lookup. The certificate is still verified against the URL hostname.",
+    ipsError: "Enter up to 16 IPv4 or IPv6 addresses without ports.",
+    bootstrap: "DNS for finding the DoH server address",
+    selectBootstrap: "Select an installed plain DNS server",
+    bootstrapHint:
+      "Shared by all DoH servers. These servers are queried in order through their own outbound. They resolve only DoH server addresses, not website queries as a fallback. Do not use the router's local DNS: it may loop back to the same DoH service. Set fixed IPs if no bootstrap is selected.",
+    invalidFields:
+      "Check the HTTPS URL, IPs and the remaining DNS server fields.",
+    bootstrapDelete:
+      "Selected DNS servers will be removed from bootstrap. DoH servers without fixed IPs still need at least one bootstrap server.",
+  },
   deviceVpn: {
     ingressRestriction:
       "Global settings restrict ingress interfaces. The device's network must be included; this assignment does not extend that allowlist.",
@@ -362,6 +438,8 @@ export const enTranslation = {
     dnsDifferent: "The primary and backup DNS addresses must differ.",
     dnsAddress: "Enter the DNS server's IPv4 or IPv6 address.",
     dnsPort: "Enter a whole DNS port number from 1 to 65535.",
+    dnsRuleServersConflict:
+      "The server and servers fields conflict. Keep only servers, or set server to the first entry in that list.",
     dnsIpv6Bracket: "Close the IPv6 address with a ] bracket.",
     dnsIpv6Separator:
       "Add a colon before the port after the closing IPv6 bracket.",
@@ -433,7 +511,7 @@ export const enTranslation = {
     keeneticDnsAddress:
       "Remove the Keenetic DNS address: the router supplies it automatically.",
     dnsType:
-      "Choose the DNS type: static for an explicit IP address or keenetic for the router's DNS.",
+      "Choose the DNS type: static for an IP address, doh for HTTPS, or keenetic for the router's DNS.",
     keeneticDnsLimit: "Keep only one DNS entry with type keenetic.",
     dnsProbeInvalid:
       "Check the test DNS server address and settings. See details for the cause.",
@@ -4212,6 +4290,8 @@ export const enTranslation = {
           serverPrefix: "DNS server",
           serverSuffix: "will be deleted.",
           dnsRule: "DNS rule “{{name}}” will be deleted.",
+          dnsRuleNarrowed:
+            "DNS rule “{{name}}” will keep its remaining servers.",
           domains:
             "Domain bindings to this server will be removed: {{domains}}.",
           fallback: "The DNS server list for general queries will change.",
@@ -4965,7 +5045,7 @@ export const enTranslation = {
         duplicateId: "DNS rule technical IDs must be unique.",
         notFound: "The requested DNS rule was not found.",
         fixErrors: "Fix validation errors before saving.",
-        serverRequired: "Rule must reference an existing DNS server.",
+        serverRequired: "Select one or more DNS servers from the list.",
         listsRequired: "Rule must include at least one list.",
         unknownLists: "Unknown lists: {{lists}}",
         duplicate: "Duplicate rule entry.",
@@ -4987,13 +5067,15 @@ export const enTranslation = {
         serverTag: "DNS server",
         selectServer: "Select DNS server",
         dnsServers: "DNS servers",
+        serverSelectionHint:
+          "With multiple servers, keen-pbr rotates between them and tries the next one on failure. The first server is not a permanent primary.",
         noServers: "No DNS servers defined on the DNS Servers page.",
         listNames: "Domain lists",
         allowDomainRebinding: "Allow domain rebinding for these domains",
         allowDomainRebindingHint:
           "Enable this only when you know this domain list points to internal services. Responses for matched domains will be allowed to contain internal/private IPs (for example 192.168.0.0/16, 10.0.0.0/8, and other local network ranges).",
         listPlaceholderDescription:
-          "Choose which lists this rule applies to. Matching domains will use this DNS server.",
+          "Choose which lists this rule applies to. Matching domains will use the selected DNS servers.",
         noListsSelected: "No lists selected",
         noLists:
           "No lists found. Please, create first filter on the Lists page.",

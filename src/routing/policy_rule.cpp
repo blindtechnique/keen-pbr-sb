@@ -83,7 +83,8 @@ bool rule_matches_live(const RuleSpec& expected, const DumpedRule& actual) {
 std::vector<RuleSpec> find_orphaned_generated_rules(
     const std::vector<RuleSpec>& desired,
     const std::vector<DumpedRule>& live,
-    const std::set<uint32_t>& corroborated_route_tables) {
+    const std::set<uint32_t>& corroborated_route_tables,
+    uint32_t retired_mark_mask) {
     std::vector<RuleSpec> orphaned;
     for (const auto& candidate : live) {
         if (!candidate.exact_identity_representable ||
@@ -98,7 +99,13 @@ std::vector<RuleSpec> find_orphaned_generated_rules(
                 return expected.fwmark == candidate.fwmark &&
                        expected.fwmask == candidate.fwmask;
             });
-        if (!collides_with_current_mark) {
+        // Explicit STOP has no desired rules. Its captured namespace, plus
+        // generated route evidence and the exact rule shape, identifies old
+        // rules even when the current process never tracked their marks.
+        const bool belongs_to_retired_namespace = retired_mark_mask != 0U &&
+            candidate.fwmask == retired_mark_mask && candidate.fwmark != 0U &&
+            (candidate.fwmark & ~retired_mark_mask) == 0U;
+        if (!collides_with_current_mark && !belongs_to_retired_namespace) {
             continue;
         }
 
@@ -447,7 +454,8 @@ std::set<uint32_t> PolicyRuleManager::remove_obsolete(
 
 std::set<uint32_t> PolicyRuleManager::remove_orphaned_generated(
     const std::vector<RuleSpec>& desired,
-    const std::set<uint32_t>& corroborated_route_tables) {
+    const std::set<uint32_t>& corroborated_route_tables,
+    uint32_t retired_mark_mask) {
     if (dry_run_ || corroborated_route_tables.empty()) {
         return {};
     }
@@ -456,7 +464,8 @@ std::set<uint32_t> PolicyRuleManager::remove_orphaned_generated(
     std::vector<RuleSpec> orphaned;
     try {
         orphaned = policy_rule_detail::find_orphaned_generated_rules(
-            desired, netlink_.dump_policy_rules(), corroborated_route_tables);
+            desired, netlink_.dump_policy_rules(), corroborated_route_tables,
+            retired_mark_mask);
     } catch (const std::exception& error) {
         Logger::instance().warn(
             "Could not inspect stale managed policy rules: {}", error.what());

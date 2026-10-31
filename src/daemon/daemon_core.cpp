@@ -1,6 +1,7 @@
 #include "daemon.hpp"
 #include "../routing/retired_rule_conntrack.hpp"
 #include "../update/download_transport.hpp"
+#include "../intercept/intercept_runtime.hpp"
 #include "api_runtime_lifecycle.hpp"
 #include "keenetic_dns_firewall_lifecycle_policy.hpp"
 #include "netfilter_refresh_mutation_policy.hpp"
@@ -862,6 +863,11 @@ Daemon::Daemon(Config config,
 
     setup_signals();
     setup_control_channel();
+    intercept_cleanup_channel_ = std::make_shared<InterceptCleanupChannel>([this] {
+        return post_control_task([this] { dispatch_intercept_cleanup(); }, "intercept-conntrack-cleanup");
+    });
+    firewall_->set_interception_runtime(
+        make_intercept_runtime(firewall_->backend() == FirewallBackend::nftables, intercept_cleanup_channel_));
 
     const int64_t verify_max_bytes = active_config_snapshot_->config.daemon.value_or(DaemonConfig{})
         .firewall_verify_max_bytes.value_or(static_cast<int64_t>(DEFAULT_FIREWALL_VERIFY_CAPTURE_MAX_BYTES));
@@ -1127,6 +1133,9 @@ Daemon::~Daemon() {
     });
     cleanup_step("stop resolver I/O executor", [this] {
         resolver_io_executor_.cancel_pending_and_shutdown();
+    });
+    cleanup_step("stop DoH forwarder", [this] {
+        dns_proxy_runtime_.stop();
     });
     cleanup_step("stop routing test executor", [this] {
         routing_test_executor_.cancel_pending_and_shutdown();
@@ -2445,6 +2454,7 @@ bool Daemon::run_process_shutdown_cleanup() noexcept {
         target.intent = RuntimeStopCleanupIntent::process_shutdown;
         target.runtime_generation =
             runtime_generation_.load(std::memory_order_acquire);
+        target.conntrack_snapshot = snapshot_owned_conntrack_marks();
         target.cleanup_conntrack = false;
         target.deactivate_resolver = true;
         target.maximum_attempts = 3U;
@@ -4959,10 +4969,13 @@ void Daemon::start_runtime_cold_boot_rollback(
                                 active_config_snapshot_->config, "deactivate");
                         if (deactivate_args.empty()) {
                             resolver_deactivated = true;
+                            dns_proxy_runtime_.stop();
                         } else {
                             KPBR_LOCK_GUARD(system_resolver_hook_mutex_);
                             resolver_deactivated =
-                                hook_command_executor_(deactivate_args) == 0;
+                                dns_proxy_runtime_.deactivate([this, &deactivate_args] {
+                                    return hook_command_executor_(deactivate_args);
+                                }) == 0;
                         }
                         result->verified = routing_cleared &&
                             firewall_cleared && resolver_deactivated;
@@ -8870,9 +8883,11 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                                 summary.skipped == 0U &&
                                 summary.remaining_marks.empty();
                         };
-                    services.clear_routing = [this]() {
+                    services.clear_routing = [this, &target]() {
                         const auto inventory =
-                            routing_operation_owner_.clear();
+                            routing_operation_owner_.clear(
+                                /*include_generated_orphans=*/true,
+                                target.conntrack_snapshot.owned_mask);
                         return inventory &&
                             classify_runtime_routing_inventory(inventory) ==
                                 RuntimeRoutingInventoryAuthority::
@@ -10334,9 +10349,9 @@ bool Daemon::begin_runtime_firewall_lifecycle_resolver(
         operation.attempt_id = attempt_id;
         operation.timeout = std::chrono::seconds{15};
         operation.lifetime = std::move(lifetime);
-        operation.invoke_hook = [this, args]() {
+        operation.invoke_hook = [this, args, generation]() {
             KPBR_LOCK_GUARD(system_resolver_hook_mutex_);
-            return hook_command_executor_(args);
+            return invoke_resolver_with_dns_proxy(*generation, args);
         };
         operation.completion =
             [this, weak_context, generation](
@@ -10575,10 +10590,13 @@ bool Daemon::begin_runtime_firewall_start_rollback(
                 try {
                     if (deactivate_args.empty()) {
                         result->resolver_deactivated = true;
+                        dns_proxy_runtime_.stop();
                     } else {
                         KPBR_LOCK_GUARD(system_resolver_hook_mutex_);
                         result->resolver_deactivated =
-                            hook_command_executor_(deactivate_args) == 0;
+                            dns_proxy_runtime_.deactivate([this, &deactivate_args] {
+                                return hook_command_executor_(deactivate_args);
+                            }) == 0;
                         if (!result->resolver_deactivated) {
                             append_failure(
                                 "resolver deactivate",
@@ -15545,6 +15563,7 @@ void Daemon::run() {
     resolver_hook_executor_.cancel_pending_and_shutdown();
     resolver_stream_executor_.cancel_pending_and_shutdown();
     resolver_io_executor_.cancel_pending_and_shutdown();
+    dns_proxy_runtime_.stop();
     routing_test_executor_.cancel_pending_and_shutdown();
     interface_probe_executor_.cancel_pending_and_shutdown();
     blocking_executor_.cancel_pending_and_shutdown();

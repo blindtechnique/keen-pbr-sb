@@ -1,0 +1,889 @@
+#include <doctest/doctest.h>
+
+#include "../src/dns/dns_balancer.hpp"
+#include "../src/dns/dns_client.hpp"
+#include "../src/dns/doh_bootstrap.hpp"
+#include "../src/dns/doh_client.hpp"
+#include "../src/dns/doh_support.hpp"
+#include "../src/http/curl_runtime.hpp"
+#include "fake_dns_server.hpp"
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/epoll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cstring>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <thread>
+#include <vector>
+
+using namespace keen_pbr3;
+
+namespace {
+
+using Bytes = std::vector<std::uint8_t>;
+using namespace std::chrono_literals;
+
+// A DoH server over plain HTTP/1.1 on 127.0.0.1 (the client is told to allow
+// http:// in tests): POST /dns-query with application/dns-message, keep-alive.
+class FakeDohServer {
+public:
+    enum class Mode { Answer, Error500, ShortBody, Silent, Servfail };
+
+    explicit FakeDohServer(Mode mode = Mode::Answer) : mode_(mode) {
+        listen_ = ::socket(AF_INET, SOCK_STREAM, 0);
+        const int one = 1;
+        ::setsockopt(listen_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        REQUIRE(::bind(listen_, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) == 0);
+        socklen_t len = sizeof(addr);
+        ::getsockname(listen_, reinterpret_cast<sockaddr*>(&addr), &len);
+        port_ = ntohs(addr.sin_port);
+        REQUIRE(::listen(listen_, 8) == 0);
+        thread_ = std::thread([this] { run(); });
+    }
+
+    ~FakeDohServer() {
+        stop_.store(true);
+        thread_.join();
+        for (const int fd : clients_) ::close(fd);
+        ::close(listen_);
+    }
+
+    std::uint16_t port() const { return port_; }
+    std::string url() const { return "http://127.0.0.1:" + std::to_string(port_) + "/dns-query"; }
+    int requests() const { return requests_.load(); }
+    int connections() const { return connections_.load(); }
+    bool saw_zero_id() const { return zero_id_.load(); }
+    bool saw_dns_content_type() const { return content_type_ok_.load(); }
+    void set_mode(Mode mode) { mode_.store(mode); }
+
+private:
+    struct Client {
+        int fd;
+        std::string buffer;
+    };
+
+    void run() {
+        std::vector<Client> clients;
+        while (!stop_.load()) {
+            std::vector<pollfd> fds{{listen_, POLLIN, 0}};
+            for (const auto& client : clients) fds.push_back({client.fd, POLLIN, 0});
+            if (::poll(fds.data(), fds.size(), 20) <= 0) continue;
+            if ((fds[0].revents & POLLIN) != 0) {
+                const int fd = ::accept(listen_, nullptr, nullptr);
+                if (fd >= 0) {
+                    ++connections_;
+                    clients.push_back({fd, {}});
+                    clients_.push_back(fd);
+                }
+            }
+            for (std::size_t i = 0; i + 1 < fds.size(); ++i) {
+                if ((fds[i + 1].revents & (POLLIN | POLLHUP)) == 0) continue;
+                char chunk[4096];
+                const ssize_t n = ::recv(clients[i].fd, chunk, sizeof(chunk), 0);
+                if (n <= 0) {
+                    ::close(clients[i].fd);
+                    clients_.erase(std::find(clients_.begin(), clients_.end(), clients[i].fd));
+                    clients[i].fd = -1;
+                    continue;
+                }
+                clients[i].buffer.append(chunk, static_cast<std::size_t>(n));
+                while (handle_one(clients[i])) {
+                }
+            }
+            clients.erase(std::remove_if(clients.begin(), clients.end(),
+                                         [](const Client& c) { return c.fd < 0; }),
+                          clients.end());
+        }
+    }
+
+    // Answers one complete request in the buffer; false when none is complete.
+    bool handle_one(Client& client) {
+        const auto head_end = client.buffer.find("\r\n\r\n");
+        if (head_end == std::string::npos) return false;
+        const std::string head = client.buffer.substr(0, head_end);
+        std::size_t length = 0;
+        const auto cl = head.find("ontent-Length: ");
+        if (cl != std::string::npos) length = std::stoul(head.substr(cl + 15));
+        if (client.buffer.size() < head_end + 4 + length) return false;
+        const std::string body = client.buffer.substr(head_end + 4, length);
+        client.buffer.erase(0, head_end + 4 + length);
+
+        ++requests_;
+        content_type_ok_.store(head.find("application/dns-message") != std::string::npos &&
+                               head.rfind("POST /dns-query", 0) == 0);
+        zero_id_.store(body.size() >= 12 && body[0] == 0 && body[1] == 0);
+
+        const Mode mode = mode_.load();
+        if (mode == Mode::Silent) return true;
+        std::string reply_body;
+        std::string status = "200 OK";
+        if (mode == Mode::Error500) {
+            status = "500 Internal Server Error";
+        } else if (mode == Mode::ShortBody) {
+            reply_body = "xx";
+        } else {
+            reply_body = body;
+            if (reply_body.size() >= 12) {
+                reply_body[2] = static_cast<char>(reply_body[2] | 0x80);
+                reply_body[3] = static_cast<char>((reply_body[3] & 0xF0) | 0x80 |
+                                                  (mode == Mode::Servfail ? 2 : 0));
+            }
+        }
+        const std::string response = "HTTP/1.1 " + status + "\r\nContent-Type: application/dns-message\r\n" +
+                                     "Content-Length: " + std::to_string(reply_body.size()) +
+                                     "\r\n\r\n" + reply_body;
+        ::send(client.fd, response.data(), response.size(), MSG_NOSIGNAL);
+        return true;
+    }
+
+    std::atomic<Mode> mode_;
+    int listen_{-1};
+    std::uint16_t port_{0};
+    std::vector<int> clients_;
+    std::atomic<bool> stop_{false};
+    std::atomic<int> requests_{0};
+    std::atomic<int> connections_{0};
+    std::atomic<bool> zero_id_{false};
+    std::atomic<bool> content_type_ok_{false};
+    std::thread thread_;
+};
+
+// A plain DNS server on 127.0.0.1 (UDP) that answers every query with `rcode`
+// and, when given, one A record of `answer_ip`.
+class FakeUdpDns {
+public:
+    explicit FakeUdpDns(int rcode = 0, const char* answer_ip = nullptr, const char* bind_ip = "127.0.0.1")
+        : rcode_(rcode) {
+        if (answer_ip != nullptr) {
+            in_addr parsed{};
+            ::inet_pton(AF_INET, answer_ip, &parsed);
+            std::memcpy(answer_.data(), &parsed, answer_.size());
+            has_answer_ = true;
+        }
+        fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        ::inet_pton(AF_INET, bind_ip, &addr.sin_addr);
+        REQUIRE(::bind(fd_, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) == 0);
+        socklen_t len = sizeof(addr);
+        ::getsockname(fd_, reinterpret_cast<sockaddr*>(&addr), &len);
+        port_ = ntohs(addr.sin_port);
+        thread_ = std::thread([this] {
+            while (!stop_.load()) {
+                pollfd pfd{fd_, POLLIN, 0};
+                if (::poll(&pfd, 1, 20) <= 0) continue;
+                std::uint8_t buf[2048];
+                sockaddr_in from{};
+                socklen_t from_len = sizeof(from);
+                const ssize_t n = ::recvfrom(fd_, buf, sizeof(buf), 0,
+                                             reinterpret_cast<sockaddr*>(&from), &from_len);
+                if (n < 12) continue;
+                ++hits_;
+                std::size_t length = static_cast<std::size_t>(n);
+                buf[2] = static_cast<std::uint8_t>(buf[2] | 0x80);
+                buf[3] = static_cast<std::uint8_t>((buf[3] & 0xF0) | 0x80 | rcode_);
+                if (has_answer_) {
+                    // Header and question, then one A record pointing at the name.
+                    std::size_t end = 12;
+                    while (end < length && buf[end] != 0) end += buf[end] + 1U;
+                    end += 5;
+                    const std::uint8_t record[] = {0xC0, 0x0C, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4,
+                                                   answer_[0], answer_[1], answer_[2], answer_[3]};
+                    std::memcpy(buf + end, record, sizeof(record));
+                    buf[6] = 0;
+                    buf[7] = 1;  // ANCOUNT
+                    buf[10] = 0;
+                    buf[11] = 0;  // no OPT
+                    length = end + sizeof(record);
+                }
+                ::sendto(fd_, buf, length, 0, reinterpret_cast<const sockaddr*>(&from), from_len);
+            }
+        });
+    }
+    ~FakeUdpDns() {
+        stop_.store(true);
+        thread_.join();
+        ::close(fd_);
+    }
+    std::uint16_t port() const { return port_; }
+    int hits() const { return hits_.load(); }
+
+private:
+    int rcode_;
+    std::array<std::uint8_t, 4> answer_{};
+    bool has_answer_{false};
+    int fd_{-1};
+    std::uint16_t port_{0};
+    std::atomic<bool> stop_{false};
+    std::atomic<int> hits_{0};
+    std::thread thread_;
+};
+
+DnsBalancerOptions doh_options() {
+    DnsBalancerOptions options;
+    options.listen_ip = "127.0.0.1";
+    options.udp_attempt_timeout = 200ms;
+    options.tcp_attempt_timeout = 300ms;
+    options.doh_attempt_timeout = 1000ms;
+    options.dead_for = 30s;
+    options.allow_plain_http = true;
+    return options;
+}
+
+DnsBalancerSettings doh_settings() {
+    DnsBalancerSettings settings;
+    settings.doh_enabled = true;
+    return settings;
+}
+
+std::uint16_t free_udp_port() {
+    return fake_dns::unused_udp_port();
+}
+
+Bytes make_query(std::uint16_t id, const char* name = "example.com") {
+    return build_dns_query(id, name, kDnsTypeA, kDnsClassIN, false);
+}
+
+// Sends `query` to the forwarder over UDP; the answer, or empty on timeout.
+Bytes ask_udp(std::uint16_t port, const Bytes& query, int timeout_ms = 3000) {
+    const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    ::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    ::sendto(fd, query.data(), query.size(), 0, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr));
+    pollfd pfd{fd, POLLIN, 0};
+    Bytes answer;
+    if (::poll(&pfd, 1, timeout_ms) > 0) {
+        answer.resize(4096);
+        const ssize_t n = ::recv(fd, answer.data(), answer.size(), 0);
+        answer.resize(n > 0 ? static_cast<std::size_t>(n) : 0);
+    }
+    ::close(fd);
+    return answer;
+}
+
+Bytes ask_tcp(std::uint16_t port, const Bytes& query, int timeout_ms = 3000) {
+    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    ::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    Bytes answer;
+    if (::connect(fd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) == 0) {
+        Bytes framed{static_cast<std::uint8_t>(query.size() >> 8),
+                     static_cast<std::uint8_t>(query.size() & 0xFF)};
+        framed.insert(framed.end(), query.begin(), query.end());
+        ::send(fd, framed.data(), framed.size(), MSG_NOSIGNAL);
+        timeval tv{timeout_ms / 1000, (timeout_ms % 1000) * 1000};
+        ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        std::uint8_t head[2];
+        if (::recv(fd, head, 2, MSG_WAITALL) == 2) {
+            answer.resize(static_cast<std::size_t>((head[0] << 8) | head[1]));
+            if (::recv(fd, answer.data(), answer.size(), MSG_WAITALL) !=
+                static_cast<ssize_t>(answer.size())) {
+                answer.clear();
+            }
+        }
+    }
+    ::close(fd);
+    return answer;
+}
+
+std::uint8_t rcode_of(const Bytes& message) {
+    return message.size() >= 4 ? static_cast<std::uint8_t>(message[3] & 0x0F) : 0xFF;
+}
+
+DnsBalancerGroup doh_group(std::uint16_t port, std::vector<DnsBalancerUpstream> upstreams) {
+    DnsBalancerGroup group;
+    group.port = port;
+    group.upstreams = std::move(upstreams);
+    return group;
+}
+
+} // namespace
+
+TEST_CASE("doh forwarder: real TLS verifies CA and hostname while pins bypass DNS and proxy env") {
+    CurlRuntime curl;
+    REQUIRE(std::getenv("KPBR_TEST_DOH_CA") != nullptr);
+    REQUIRE(std::getenv("KPBR_TEST_DOH_PORT") != nullptr);
+    const std::string ca = std::getenv("KPBR_TEST_DOH_CA");
+    const std::string https_port = std::getenv("KPBR_TEST_DOH_PORT");
+    for (const auto& variant : {0, 1, 2}) {
+        auto options = doh_options();
+        options.allow_plain_http = false;
+        options.doh_attempt_timeout = 2000ms;
+        DnsBalancer balancer(options);
+        const auto port = free_udp_port();
+        auto settings = doh_settings();
+        settings.ipv6_enabled = false;
+        if (variant != 1) settings.ca_path = ca;
+        const std::string host = variant == 2 ? "wrong-name.example" : "doh-fixture.example";
+        auto upstream = DnsBalancerUpstream::doh(
+            "https://" + host + ":" + https_port + "/dns-query", "", {"127.0.0.1"});
+        REQUIRE(balancer.configure({doh_group(port, {upstream})}, settings).empty());
+        const auto answer = ask_udp(port, make_query(0x1234));
+        REQUIRE(answer.size() >= 12);
+        CHECK(rcode_of(answer) == (variant == 0 ? 0 : 2));
+    }
+}
+
+TEST_CASE("doh forwarder: IPv4-only policy excludes IPv6 transport and bootstrap") {
+    CurlRuntime curl;
+    DnsBalancer balancer(doh_options());
+    auto settings = doh_settings();
+    settings.ipv6_enabled = false;
+    settings.bootstrap = {DnsBalancerUpstream::plain("::1")};
+    const auto port = free_udp_port();
+    REQUIRE(balancer.configure({doh_group(port, {
+        DnsBalancerUpstream::doh("https://[::1]/dns-query")
+    })}, settings).empty());
+    CHECK(rcode_of(ask_udp(port, make_query(7))) == 2);
+}
+
+TEST_CASE("doh forwarder: UDP query is answered through DoH with the client's id") {
+    CurlRuntime curl;
+    FakeDohServer server;
+    DnsBalancer balancer(doh_options());
+    const auto port = free_udp_port();
+    CHECK(balancer.configure({doh_group(port, {DnsBalancerUpstream::doh(server.url())})},
+                             doh_settings())
+              .empty());
+
+    const Bytes query = make_query(0xBEEF);
+    const Bytes answer = ask_udp(port, query);
+    REQUIRE(answer.size() == query.size());
+    CHECK(answer[0] == 0xBE);
+    CHECK(answer[1] == 0xEF);
+    CHECK((answer[2] & 0x80) != 0);
+    CHECK(rcode_of(answer) == 0);
+    CHECK(server.requests() == 1);
+    CHECK(server.saw_zero_id());
+    CHECK(server.saw_dns_content_type());
+}
+
+TEST_CASE("doh forwarder: TCP query is answered through DoH") {
+    CurlRuntime curl;
+    FakeDohServer server;
+    DnsBalancer balancer(doh_options());
+    const auto port = free_udp_port();
+    balancer.configure({doh_group(port, {DnsBalancerUpstream::doh(server.url())})}, doh_settings());
+
+    const Bytes query = make_query(0x1234);
+    const Bytes answer = ask_tcp(port, query);
+    REQUIRE(answer.size() == query.size());
+    CHECK(answer[0] == 0x12);
+    CHECK(answer[1] == 0x34);
+    CHECK((answer[2] & 0x80) != 0);
+    CHECK(server.requests() == 1);
+}
+
+TEST_CASE("doh forwarder: fresh connections cannot reuse another detour's socket") {
+    CurlRuntime curl;
+    FakeDohServer server;
+    DnsBalancer balancer(doh_options());
+    const auto port = free_udp_port();
+    balancer.configure({doh_group(port, {DnsBalancerUpstream::doh(server.url())})}, doh_settings());
+
+    for (std::uint16_t id = 1; id <= 12; ++id) {
+        const Bytes answer = ask_udp(port, make_query(id));
+        REQUIRE(answer.size() > 12);
+        CHECK(answer[1] == id);
+    }
+    CHECK(server.requests() == 12);
+    CHECK(server.connections() == 12);
+}
+
+TEST_CASE("doh forwarder: plain and DoH servers take turns") {
+    CurlRuntime curl;
+    FakeDohServer doh;
+    FakeUdpDns plain;
+    DnsBalancer balancer(doh_options());
+    const auto port = free_udp_port();
+    REQUIRE(balancer.configure({doh_group(port, {DnsBalancerUpstream::plain("127.0.0.1", plain.port()),
+                                         DnsBalancerUpstream::doh(doh.url())})},
+                       doh_settings()).empty());
+    for (std::uint16_t id = 1; id <= 10; ++id) {
+        REQUIRE(ask_udp(port, make_query(id)).size() > 12);
+    }
+    CHECK(plain.hits() == 5);
+    CHECK(doh.requests() == 5);
+}
+
+TEST_CASE("doh forwarder: a failing DoH server hands the query to the next one") {
+    CurlRuntime curl;
+    for (const auto mode : {FakeDohServer::Mode::Error500, FakeDohServer::Mode::ShortBody,
+                            FakeDohServer::Mode::Servfail, FakeDohServer::Mode::Silent}) {
+        CAPTURE(static_cast<int>(mode));
+        FakeDohServer doh(mode);
+        FakeUdpDns plain;
+        DnsBalancer balancer(doh_options());
+        const auto port = free_udp_port();
+        balancer.configure({doh_group(port, {DnsBalancerUpstream::doh(doh.url()),
+                                             DnsBalancerUpstream::plain("127.0.0.1", plain.port())})},
+                           doh_settings());
+        for (std::uint16_t id = 1; id <= 4; ++id) {
+            const Bytes answer = ask_udp(port, make_query(id), 4000);
+            REQUIRE(answer.size() > 12);
+            CHECK(rcode_of(answer) == 0);
+        }
+        CHECK(plain.hits() == 4);
+        // Network errors and SERVFAIL both cool down only this DNS upstream.
+        CHECK(doh.requests() <= 2);
+    }
+}
+
+TEST_CASE("doh forwarder: when every server fails the client gets SERVFAIL") {
+    CurlRuntime curl;
+    FakeDohServer doh(FakeDohServer::Mode::Error500);
+    DnsBalancer balancer(doh_options());
+    const auto port = free_udp_port();
+    balancer.configure({doh_group(port, {DnsBalancerUpstream::doh(doh.url())})}, doh_settings());
+    const Bytes answer = ask_udp(port, make_query(7));
+    REQUIRE(answer.size() >= 12);
+    CHECK(answer[1] == 7);
+    CHECK(rcode_of(answer) == 2);
+}
+
+TEST_CASE("doh forwarder: without DoH support a DoH-only group answers SERVFAIL, a mixed one uses the plain server") {
+    CurlRuntime curl;
+    FakeDohServer doh;
+    FakeUdpDns plain;
+    DnsBalancer balancer(doh_options());
+    const auto only = free_udp_port();
+    auto other = free_udp_port();
+    if (other == only) other = static_cast<std::uint16_t>(other + 1);
+    DnsBalancerSettings off;  // doh_enabled = false
+    balancer.configure({doh_group(only, {DnsBalancerUpstream::doh(doh.url())}),
+                        doh_group(other, {DnsBalancerUpstream::doh(doh.url()),
+                                          DnsBalancerUpstream::plain("127.0.0.1", plain.port())})},
+                       off);
+    CHECK(rcode_of(ask_udp(only, make_query(1))) == 2);
+    const Bytes answer = ask_udp(other, make_query(2));
+    REQUIRE(answer.size() > 12);
+    CHECK(rcode_of(answer) == 0);
+    CHECK(doh.requests() == 0);
+    CHECK(plain.hits() == 1);
+}
+
+TEST_CASE("doh forwarder: a detour without a routing mark makes the server unusable") {
+    CurlRuntime curl;
+    FakeDohServer doh;
+    DnsBalancer balancer(doh_options());
+    const auto port = free_udp_port();
+    balancer.configure({doh_group(port, {DnsBalancerUpstream::doh(doh.url(), "vpn")})}, doh_settings());
+    CHECK(rcode_of(ask_udp(port, make_query(3))) == 2);
+    CHECK(doh.requests() == 0);
+}
+
+TEST_CASE("doh forwarder: https to a server that does not speak TLS fails the query") {
+    CurlRuntime curl;
+    FakeDohServer not_tls;
+    DnsBalancer balancer(doh_options());
+    const auto port = free_udp_port();
+    balancer.configure(
+        {doh_group(port, {DnsBalancerUpstream::doh("https://127.0.0.1:" + std::to_string(not_tls.port()) +
+                                                   "/dns-query")})},
+        doh_settings());
+    CHECK(rcode_of(ask_udp(port, make_query(5), 6000)) == 2);
+}
+
+TEST_CASE("doh forwarder stats: DoH failures are told apart") {
+    CurlRuntime curl;
+    struct Case {
+        FakeDohServer::Mode mode;
+        DnsUpstreamOutcome outcome;
+    };
+    for (const auto& item : {Case{FakeDohServer::Mode::Error500, DnsUpstreamOutcome::HttpError},
+                             Case{FakeDohServer::Mode::ShortBody, DnsUpstreamOutcome::BadAnswer},
+                             Case{FakeDohServer::Mode::Silent, DnsUpstreamOutcome::Timeout},
+                             Case{FakeDohServer::Mode::Servfail, DnsUpstreamOutcome::Servfail}}) {
+        CAPTURE(dns_upstream_outcome_name(item.outcome));
+        FakeDohServer doh(item.mode);
+        DnsBalancer balancer(doh_options());
+        const auto port = free_udp_port();
+        balancer.configure({doh_group(port, {DnsBalancerUpstream::doh(doh.url())})}, doh_settings());
+        CHECK(rcode_of(ask_udp(port, make_query(1), 4000)) == 2);
+
+        const auto stats = balancer.stats();
+        REQUIRE(stats.listeners.size() == 1);
+        REQUIRE(stats.listeners[0].upstreams.size() == 1);
+        const auto& upstream = stats.listeners[0].upstreams[0];
+        CHECK(upstream.upstream.kind == DnsBalancerUpstreamKind::Doh);
+        CHECK(upstream.results[static_cast<std::size_t>(item.outcome)] == 1);
+        CHECK(upstream.consecutive_failures == 1);
+        CHECK(upstream.last_failure == item.outcome);
+    }
+}
+
+TEST_CASE("doh forwarder stats: answers are counted with their time") {
+    CurlRuntime curl;
+    FakeDohServer doh;
+    DnsBalancer balancer(doh_options());
+    const auto port = free_udp_port();
+    balancer.configure({doh_group(port, {DnsBalancerUpstream::doh(doh.url())})}, doh_settings());
+    for (std::uint16_t id = 1; id <= 3; ++id) REQUIRE(ask_udp(port, make_query(id)).size() > 12);
+    REQUIRE(ask_tcp(port, make_query(9)).size() > 12);
+
+    const auto stats = balancer.stats();
+    const auto& upstream = stats.listeners.at(0).upstreams.at(0);
+    CHECK(upstream.results[static_cast<std::size_t>(DnsUpstreamOutcome::Ok)] == 4);
+    std::uint64_t timed = 0;
+    for (const auto count : upstream.latency_buckets) timed += count;
+    CHECK(timed == 4);
+    CHECK(upstream.consecutive_failures == 0);
+}
+
+TEST_CASE("doh forwarder probe: asks DoH servers outside the groups") {
+    CurlRuntime curl;
+    FakeDohServer healthy;
+    FakeDohServer broken(FakeDohServer::Mode::Error500);
+    DnsBalancer balancer(doh_options());  // no groups
+    DnsBalancerSettings settings = doh_settings();
+    settings.detour_marks["vpn"] = 7;
+
+    const auto request = [](const std::string& url, const std::string& detour = {}) {
+        DnsProbeRequest wanted;
+        wanted.upstream = DnsBalancerUpstream::doh(url, detour);
+        wanted.query = make_query(0x4242);
+        return wanted;
+    };
+    const auto results = balancer.probe(
+        {request(healthy.url()), request(broken.url()), request("https://127.0.0.1:1/dns-query"),
+         request(healthy.url(), "other")},
+        3s, settings);
+    REQUIRE(results.size() == 4);
+    CHECK(results[0].outcome == DnsUpstreamOutcome::Ok);
+    REQUIRE(results[0].answer.size() > 12);
+    CHECK(results[0].answer[0] == 0x42);  // the id the caller sent
+    CHECK(results[0].answer[1] == 0x42);
+    CHECK(results[1].outcome == DnsUpstreamOutcome::HttpError);
+    CHECK(results[1].usable);
+    CHECK(results[2].usable);
+    CHECK(results[2].outcome != DnsUpstreamOutcome::Ok);
+    // A detour without a routing mark cannot be used.
+    CHECK_FALSE(results[3].usable);
+    CHECK(healthy.requests() == 1);
+}
+
+TEST_CASE("doh forwarder probe: without DoH enabled the server is unusable") {
+    CurlRuntime curl;
+    FakeDohServer healthy;
+    DnsBalancer balancer(doh_options());
+    DnsProbeRequest wanted;
+    wanted.upstream = DnsBalancerUpstream::doh(healthy.url());
+    wanted.query = make_query(1);
+    const auto results = balancer.probe({wanted}, 2s, {});
+    REQUIRE(results.size() == 1);
+    CHECK_FALSE(results[0].usable);
+    CHECK(healthy.requests() == 0);
+}
+
+TEST_CASE("doh bootstrap: looks the host up on a worker thread") {
+    std::mutex mutex;
+    std::vector<std::string> asked;
+    std::optional<DnsBalancerUpstream> seen_server;
+    std::atomic<int> ready{0};
+    DohBootstrap bootstrap(
+        [&] { ++ready; },
+        [&](const std::string& host, const std::vector<DnsBalancerUpstream>& servers) {
+            std::lock_guard<std::mutex> lock(mutex);
+            asked.push_back(host);
+            seen_server = servers.empty() ? std::nullopt : std::optional(servers.front());
+            return host == "known.example" ? std::vector<std::string>{"192.0.2.7"}
+                                           : std::vector<std::string>{};
+        });
+    bootstrap.set_servers({DnsBalancerUpstream::plain("10.0.0.1", 53)});
+    bootstrap.request("known.example");
+    bootstrap.request("unknown.example");
+    for (int i = 0; i < 100 && ready.load() < 2; ++i) std::this_thread::sleep_for(20ms);
+    const auto results = bootstrap.take_results();
+    REQUIRE(results.size() == 2);
+    CHECK(results[0].host == "known.example");
+    CHECK(results[0].ips == std::vector<std::string>{"192.0.2.7"});
+    CHECK(results[1].ips.empty());
+    CHECK(seen_server == std::optional<DnsBalancerUpstream>(DnsBalancerUpstream::plain("10.0.0.1", 53)));
+    CHECK(bootstrap.take_results().empty());
+}
+
+TEST_CASE("doh bootstrap: explicit servers only, never an implicit system resolver") {
+    // A server that answers with a SERVFAIL gives no address.
+    FakeUdpDns servfail(2);
+    CHECK(DohBootstrap::resolve("dns.example", {DnsBalancerUpstream::plain("127.0.0.1", servfail.port())})
+              .empty());
+    // The system resolver knows localhost.
+    const auto local = DohBootstrap::resolve("localhost", {});
+    CHECK(local.empty());
+}
+
+TEST_CASE("doh bootstrap: a server that fails, denies the name or has no address hands over to the next") {
+    FakeUdpDns servfail(2);
+    FakeUdpDns nxdomain(3);
+    FakeUdpDns empty;  // NOERROR without records
+    FakeUdpDns good(0, "192.0.2.9");
+    const auto upstream = [](const FakeUdpDns& dns, const char* name) {
+        auto server = DnsBalancerUpstream::plain("127.0.0.1", dns.port());
+        server.name = name;
+        return server;
+    };
+    // Nothing listens on this port: the query fails at once.
+    auto dead = DnsBalancerUpstream::plain("127.0.0.1", free_udp_port());
+    dead.name = "dead";
+
+    const auto found = DohBootstrap::resolve(
+        "dns.example", {dead, upstream(servfail, "sf"), upstream(nxdomain, "nx"),
+                        upstream(empty, "empty"), upstream(good, "good")});
+    CHECK(found == std::vector<std::string>{"192.0.2.9"});
+    CHECK(servfail.hits() >= 1);
+    CHECK(nxdomain.hits() >= 1);
+    CHECK(empty.hits() >= 1);
+    CHECK(good.hits() == 1);
+
+    // Servers after the one that answered are not asked.
+    FakeUdpDns unused(0, "192.0.2.10");
+    CHECK(DohBootstrap::resolve("dns.example", {upstream(good, "good"), upstream(unused, "unused")}) ==
+          std::vector<std::string>{"192.0.2.9"});
+    CHECK(unused.hits() == 0);
+}
+
+TEST_CASE("doh bootstrap: when no server finds the host, the result names what each one said") {
+    FakeUdpDns nxdomain(3);
+    FakeUdpDns servfail(2);
+    auto first = DnsBalancerUpstream::plain("127.0.0.1", nxdomain.port());
+    first.name = "google_dns";
+    auto second = DnsBalancerUpstream::plain("127.0.0.1", servfail.port());
+    second.name = "quad9";
+
+    std::string failures;
+    CHECK(DohBootstrap::resolve("dns.example", {first, second}, &failures).empty());
+    CHECK(failures == "google_dns (nxdomain), quad9 (servfail)");
+}
+
+namespace {
+
+// The forwarder listens on 127.0.0.1 (see doh_options()); the bootstrap servers
+// of these tests live on another loopback address so they are not mistaken for it.
+DnsBalancerUpstream bootstrap_at(const FakeUdpDns& dns, const char* name) {
+    auto server = DnsBalancerUpstream::plain("127.0.0.3", dns.port());
+    server.name = name;
+    return server;
+}
+
+// The first queries after a configure() may come before the host lookup is
+// over (they get SERVFAIL); asks again until a real answer comes.
+Bytes ask_until_answered(std::uint16_t port, std::uint16_t id) {
+    Bytes answer;
+    for (int i = 0; i < 100; ++i) {
+        answer = ask_udp(port, make_query(id));
+        if (answer.size() > 12 && rcode_of(answer) == 0) break;
+        std::this_thread::sleep_for(20ms);
+    }
+    return answer;
+}
+
+std::string named_doh_url(const FakeDohServer& server) {
+    return "http://doh.test:" + std::to_string(server.port()) + "/dns-query";
+}
+
+} // namespace
+
+TEST_CASE("doh forwarder: the host of a DoH URL is looked up through the bootstrap servers in turn") {
+    CurlRuntime curl;
+    FakeDohServer doh;
+    FakeUdpDns nxdomain(3, nullptr, "127.0.0.3");
+    FakeUdpDns good(0, "127.0.0.1", "127.0.0.3");
+    DnsBalancer balancer(doh_options());
+    const auto port = free_udp_port();
+    DnsBalancerSettings settings = doh_settings();
+    settings.bootstrap = {bootstrap_at(nxdomain, "blocked"), bootstrap_at(good, "good")};
+    balancer.configure({doh_group(port, {DnsBalancerUpstream::doh(named_doh_url(doh))})}, settings);
+
+    REQUIRE(ask_until_answered(port, 1).size() > 12);
+    CHECK(nxdomain.hits() >= 1);
+    CHECK(good.hits() >= 1);
+    CHECK(doh.requests() == 1);
+}
+
+TEST_CASE("doh forwarder: a DoH server with fixed addresses is not looked up and is reached at them") {
+    CurlRuntime curl;
+    FakeDohServer doh;
+    FakeUdpDns bootstrap(0, "192.0.2.1", "127.0.0.3");
+    DnsBalancer balancer(doh_options());
+    const auto port = free_udp_port();
+    DnsBalancerSettings settings = doh_settings();
+    settings.bootstrap = {bootstrap_at(bootstrap, "unused")};
+    balancer.configure(
+        {doh_group(port, {DnsBalancerUpstream::doh(named_doh_url(doh), "", {"127.0.0.1"})})}, settings);
+
+    const Bytes answer = ask_udp(port, make_query(5));
+    REQUIRE(answer.size() > 12);
+    CHECK(rcode_of(answer) == 0);
+    CHECK(doh.requests() == 1);
+    CHECK(bootstrap.hits() == 0);
+
+    // The same URL without addresses is a server of its own: it is looked up.
+    balancer.configure({doh_group(port, {DnsBalancerUpstream::doh(named_doh_url(doh), "", {"127.0.0.1"}),
+                                         DnsBalancerUpstream::doh(named_doh_url(doh))})},
+                       settings);
+    REQUIRE(ask_udp(port, make_query(6)).size() > 12);
+    for (int i = 0; i < 100 && bootstrap.hits() == 0; ++i) std::this_thread::sleep_for(20ms);
+    CHECK(bootstrap.hits() >= 1);
+}
+
+TEST_CASE("doh forwarder: a new list of bootstrap servers looks the hosts up again and keeps the old addresses") {
+    CurlRuntime curl;
+    FakeDohServer doh;
+    FakeUdpDns first(0, "127.0.0.1", "127.0.0.3");
+    FakeUdpDns second(2, nullptr, "127.0.0.3");  // SERVFAIL: finds nothing
+    DnsBalancer balancer(doh_options());
+    const auto port = free_udp_port();
+    DnsBalancerSettings settings = doh_settings();
+    settings.bootstrap = {bootstrap_at(first, "first")};
+    const std::vector<DnsBalancerGroup> groups{
+        doh_group(port, {DnsBalancerUpstream::doh(named_doh_url(doh))})};
+    balancer.configure(groups, settings);
+    REQUIRE(ask_until_answered(port, 1).size() > 12);
+    const int first_hits = first.hits();
+
+    settings.bootstrap = {bootstrap_at(second, "second")};
+    balancer.configure(groups, settings);
+    for (int i = 0; i < 100 && second.hits() == 0; ++i) std::this_thread::sleep_for(20ms);
+    CHECK(second.hits() >= 1);
+    CHECK(first.hits() == first_hits);
+    // The lookup came back empty: the addresses found before keep working.
+    const Bytes answer = ask_udp(port, make_query(2));
+    REQUIRE(answer.size() > 12);
+    CHECK(rcode_of(answer) == 0);
+    CHECK(doh.requests() == 2);
+}
+
+TEST_CASE("doh forwarder: an unresolved host is reported with the bootstrap servers that were tried") {
+    CurlRuntime curl;
+    FakeUdpDns nxdomain(3, nullptr, "127.0.0.3");
+    FakeUdpDns servfail(2, nullptr, "127.0.0.3");
+    DnsBalancer balancer(doh_options());
+    DnsBalancerSettings settings = doh_settings();
+    settings.bootstrap = {bootstrap_at(nxdomain, "google_dns"), bootstrap_at(servfail, "quad9")};
+    DnsProbeRequest wanted;
+    wanted.upstream = DnsBalancerUpstream::doh("http://doh.test:9/dns-query");
+    wanted.query = make_query(1);
+    const auto results = balancer.probe({wanted}, 1500ms, settings);
+    REQUIRE(results.size() == 1);
+    CHECK(results[0].error.find("could not find the address of doh.test via bootstrap servers: "
+                                "google_dns (nxdomain), quad9 (servfail)") != std::string::npos);
+}
+
+TEST_CASE("doh client: direct use on an epoll loop, with cancel and timeout") {
+    CurlRuntime curl;
+    struct State {
+        int done{0};
+        bool ok{false};
+        std::uint64_t user{0};
+    } state;
+    const int ep = ::epoll_create1(EPOLL_CLOEXEC);
+    DohClientOptions options;
+    options.epoll_fd = ep;
+    options.tag_kind = 1;
+    options.allow_plain_http = true;
+    DohClient client(options,
+                     [](void* ctx, std::uint64_t user, const DohResult& result) {
+                         auto* s = static_cast<State*>(ctx);
+                         ++s->done;
+                         s->ok = result.ok;
+                         s->user = user;
+                     },
+                     &state);
+    REQUIRE(client.valid());
+    const auto pump = [&](int budget_ms, int want_done) {
+        for (int waited = 0; waited < budget_ms && state.done < want_done; waited += 10) {
+            epoll_event events[8];
+            const int n = ::epoll_wait(ep, events, 8, 10);
+            for (int i = 0; i < n; ++i) {
+                client.handle_socket_event(static_cast<int>(events[i].data.u64 & 0xFFFFFFFFu),
+                                           events[i].events);
+            }
+            if (client.next_timeout_ms() == 0) client.handle_timeout();
+        }
+    };
+
+    FakeDohServer server;
+    const std::size_t endpoint = client.add_endpoint(server.url(), 0);
+    REQUIRE(endpoint != DohClient::kNoEndpoint);
+    const Bytes query = make_query(0x4242);
+
+    // Unresolved host: nothing is started.
+    CHECK(client.start(endpoint, query.data(), query.size(), 1000ms, 1) == DohClient::kNoTransfer);
+    client.set_addresses(endpoint, {"127.0.0.1"});
+    CHECK(client.endpoint_ready(endpoint));
+
+    CHECK(client.start(endpoint, query.data(), query.size(), 1000ms, 11) != DohClient::kNoTransfer);
+    pump(2000, 1);
+    CHECK(state.done == 1);
+    CHECK(state.ok);
+    CHECK(state.user == 11);
+
+    // A cancelled transfer reports nothing.
+    server.set_mode(FakeDohServer::Mode::Silent);
+    const std::size_t transfer = client.start(endpoint, query.data(), query.size(), 1000ms, 12);
+    REQUIRE(transfer != DohClient::kNoTransfer);
+    pump(100, 2);
+    client.cancel(transfer);
+    pump(300, 2);
+    CHECK(state.done == 1);
+
+    // A server that never answers ends in an error at the transfer timeout.
+    client.start(endpoint, query.data(), query.size(), 200ms, 13);
+    pump(3000, 2);
+    CHECK(state.done == 2);
+    CHECK_FALSE(state.ok);
+    CHECK(state.user == 13);
+
+    // Not a usable URL.
+    CHECK(client.add_endpoint("ftp://example.com/x", 0) == DohClient::kNoEndpoint);
+    CHECK(client.add_endpoint("https://", 0) == DohClient::kNoEndpoint);
+    ::close(ep);
+}
+
+TEST_CASE("find_ca_bundle: a certificate file wins over a directory; empty places are skipped") {
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() / ("kpbr-ca-" + std::to_string(::getpid()));
+    fs::create_directories(root / "empty");
+    fs::create_directories(root / "certs");
+    { std::ofstream(root / "certs" / "a.pem") << "x"; }
+    { std::ofstream(root / "bundle.crt") << "x"; }
+    { std::ofstream(root / "zero.crt"); }
+
+    const auto file = find_ca_bundle({(root / "missing.crt").string(), (root / "zero.crt").string(),
+                                      (root / "bundle.crt").string()},
+                                     {(root / "certs").string()});
+    REQUIRE(file.has_value());
+    CHECK(file->path == (root / "bundle.crt").string());
+    CHECK_FALSE(file->is_directory);
+
+    const auto dir = find_ca_bundle({(root / "missing.crt").string()},
+                                    {(root / "empty").string(), (root / "nope").string(),
+                                     (root / "certs").string()});
+    REQUIRE(dir.has_value());
+    CHECK(dir->path == (root / "certs").string());
+    CHECK(dir->is_directory);
+
+    CHECK_FALSE(find_ca_bundle({(root / "missing.crt").string()}, {(root / "empty").string()})
+                    .has_value());
+    fs::remove_all(root);
+}

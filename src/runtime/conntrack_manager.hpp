@@ -156,6 +156,9 @@ struct ConntrackExactForwardedFlow {
     bool assured{false};
     bool seen_reply{false};
     bool fastnat{false};
+    // Set only by an observation explicitly restricted to a known zone.
+    // Older callers retain their existing selector contract (null).
+    std::optional<uint16_t> zone;
 
     bool operator==(const ConntrackExactForwardedFlow& other) const {
         return family == other.family &&
@@ -170,7 +173,7 @@ struct ConntrackExactForwardedFlow {
                tcp_state == other.tcp_state &&
                assured == other.assured &&
                seen_reply == other.seen_reply &&
-               fastnat == other.fastnat;
+               fastnat == other.fastnat && zone == other.zone;
     }
 };
 
@@ -210,6 +213,10 @@ struct ConntrackFlowObservationOptions {
     // establish the source-wide read-only media guard. The UDP-only option
     // above remains reserved for Meta policy activation preflights.
     std::optional<std::uint16_t> media_seed_destination_port;
+    // Passive learning has no authority over port forwards or other conntrack
+    // zones. Source filtering happens before charging the observation budget.
+    bool require_default_zone_no_dnat{false};
+    std::set<std::string> ordinary_sources;
 };
 
 struct ConntrackExactFlowCleanupSummary {

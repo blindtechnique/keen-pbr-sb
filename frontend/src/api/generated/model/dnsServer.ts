@@ -20,11 +20,16 @@ export interface DnsServer {
   display_name?: string;
   /** DNS server source type. */
   type?: DnsServerType;
-  /** IPv4 or IPv6 address of the DNS server, with optional port. Required for `type=static`. Must be omitted for `type=keenetic`. Formats: "8.8.8.8", "8.8.8.8:5353", "::1", "[::1]:5353". Default port is 53.
+  /** IPv4 or IPv6 address of the DNS server, with optional port. Required for `type=static`; for `type=doh` use an HTTPS URL. Must be omitted for `type=keenetic`. Formats: "8.8.8.8", "8.8.8.8:5353", "::1", "[::1]:5353". Default port is 53.
    */
   address?: string;
   /** Outbound tag to use when querying this DNS server. */
   detour?: string;
+  /**
+     * Optional fixed numeric addresses for a DoH URL host. TLS still verifies the URL hostname. Without these addresses a hostname needs explicit dns.bootstrap servers.
+     * @maxItems 16
+     */
+  ips?: string[];
   /** Optional direct domain suffix bindings, without list references. Each domain includes its subdomains. Matching is case-insensitive; a leading "*." and a trailing dot are accepted. Names must be DNS-compatible ASCII (use punycode for international names). Direct bindings override list-based DNS rules and inherited Keenetic DNS policy for the same suffix and its subdomains. Among direct bindings, the most specific suffix wins. Binding the same suffix to several servers supplies multiple upstreams. Global fallback and traffic routing rules are not changed.
    */
   domains?: string[];

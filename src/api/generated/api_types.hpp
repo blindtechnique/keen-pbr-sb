@@ -403,6 +403,13 @@ namespace api {
         json _config_unknown_fields = nullptr;
     };
 
+    struct Learning {
+        std::optional<bool> dns;
+        std::optional<bool> l7;
+        // Opaque fields belonging to this object; not an API property.
+        json _config_unknown_fields = nullptr;
+    };
+
     struct DnsRuleElement {
         std::optional<bool> allow_domain_rebinding;
         std::optional<std::string> display_name;
@@ -410,18 +417,20 @@ namespace api {
         std::optional<std::string> id;
         std::vector<std::string> list;
         std::optional<std::vector<std::string>> route_rule_ids;
-        std::string server;
+        std::optional<std::string> server;
+        std::optional<std::vector<std::string>> servers;
         // Opaque fields belonging to this object; not an API property.
         json _config_unknown_fields = nullptr;
     };
 
-    enum class DnsServerType : int { KEENETIC, STATIC };
+    enum class DnsServerType : int { DOH, KEENETIC, STATIC };
 
     struct DnsServerElement {
         std::optional<std::string> address;
         std::optional<std::string> detour;
         std::optional<std::string> display_name;
         std::optional<std::vector<std::string>> domains;
+        std::optional<std::vector<std::string>> ips;
         std::string tag;
         std::optional<DnsServerType> type;
         // Opaque fields belonging to this object; not an API property.
@@ -435,10 +444,13 @@ namespace api {
     };
 
     struct Dns {
+        std::optional<std::vector<std::string>> bootstrap;
         std::optional<ClientDnsEnforcement> client_dns_enforcement;
         std::optional<DnsTestServer> dns_test_server;
         std::optional<std::vector<std::string>> fallback;
         std::optional<bool> firefox_doh_canary;
+        std::optional<Learning> learning;
+        std::optional<bool> passive_learning;
         std::optional<std::vector<DnsRuleElement>> rules;
         std::optional<std::vector<DnsServerElement>> servers;
         std::optional<SystemResolver> system_resolver;
@@ -808,6 +820,31 @@ namespace api {
         bool granted = false;
     };
 
+    enum class DnsState : int { ACTIVE, APPLYING, DISABLED, FAIL_OPEN_UNCONFIRMED, NO_INTERFACES, NO_LISTS, SNAPSHOT_UNAVAILABLE, STOPPED, UNAVAILABLE, UNKNOWN };
+
+    enum class FailOpen : int { ERROR, NOT_RUN, OK, SKIPPED, UNSUPPORTED };
+
+    struct Interception {
+        std::string dns_detail;
+        int64_t dns_hold_timeouts = 0;
+        int64_t dns_matched = 0;
+        int64_t dns_packets = 0;
+        bool dns_requested = false;
+        DnsState dns_state;
+        FailOpen fail_open;
+        std::vector<std::string> interfaces;
+        std::string l7_detail;
+        int64_t l7_matched = 0;
+        int64_t l7_packets = 0;
+        bool l7_requested = false;
+        DnsState l7_state;
+        int64_t log_overruns = 0;
+        FailOpen nflog;
+        FailOpen nfqueue;
+        int64_t queue_overruns = 0;
+        int64_t set_errors = 0;
+    };
+
     enum class LifecycleOperationStageStatus : int { FAILED, PENDING, RUNNING, SKIPPED, SUCCEEDED };
 
     struct LifecycleOperationStageElement {
@@ -848,6 +885,7 @@ namespace api {
         std::optional<std::string> commit;
         bool config_is_draft = false;
         std::optional<int64_t> daemon_pid;
+        std::optional<Interception> interception;
         std::optional<LifecycleOperation> lifecycle_operation;
         std::string os_type;
         std::string os_version;
@@ -2627,6 +2665,7 @@ namespace api {
         std::optional<DependencyRelation> dependency_relation;
         std::optional<DependencyTarget> dependency_target;
         std::optional<Dns> dns_config;
+        std::optional<Learning> dns_learning_config;
         std::optional<DnsRuleElement> dns_rule;
         std::optional<DnsServerElement> dns_server;
         std::optional<SystemResolver> dns_system_resolver;
@@ -2640,6 +2679,9 @@ namespace api {
         std::optional<GeoLookupResult> geo_lookup_result;
         std::optional<GrantedResponse> granted_response;
         std::optional<HealthResponse> health_response;
+        std::optional<Interception> interception_health;
+        std::optional<FailOpen> interception_probe_state;
+        std::optional<DnsState> interception_state;
         std::optional<InterfaceNames> interface_names;
         std::optional<InternalVpnServerElement> internal_vpn_server;
         std::optional<InternalVpnServiceElement> internal_vpn_service;
@@ -2982,6 +3024,9 @@ void to_json(json & j, const Daemon & x);
 void from_json(const json & j, DnsTestServer & x);
 void to_json(json & j, const DnsTestServer & x);
 
+void from_json(const json & j, Learning & x);
+void to_json(json & j, const Learning & x);
+
 void from_json(const json & j, DnsRuleElement & x);
 void to_json(json & j, const DnsRuleElement & x);
 
@@ -3107,6 +3152,9 @@ void to_json(json & j, const GeoLookupResult & x);
 
 void from_json(const json & j, GrantedResponse & x);
 void to_json(json & j, const GrantedResponse & x);
+
+void from_json(const json & j, Interception & x);
+void to_json(json & j, const Interception & x);
 
 void from_json(const json & j, LifecycleOperationStageElement & x);
 void to_json(json & j, const LifecycleOperationStageElement & x);
@@ -3674,6 +3722,12 @@ void to_json(json & j, const DependencyRelation & x);
 
 void from_json(const json & j, GeoLookupResultError & x);
 void to_json(json & j, const GeoLookupResultError & x);
+
+void from_json(const json & j, DnsState & x);
+void to_json(json & j, const DnsState & x);
+
+void from_json(const json & j, FailOpen & x);
+void to_json(json & j, const FailOpen & x);
 
 void from_json(const json & j, LifecycleOperationStageStatus & x);
 void to_json(json & j, const LifecycleOperationStageStatus & x);
@@ -4692,11 +4746,30 @@ namespace api {
         j["listen"] = x.listen;
     }
 
+    inline void from_json(const json & j, Learning& x) {
+        x._config_unknown_fields = nullptr;
+        if (j.is_object()) {
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                if (it.key() == "dns" || it.key() == "l7") continue;
+                if (x._config_unknown_fields.is_null()) x._config_unknown_fields = json::object();
+                x._config_unknown_fields[it.key()] = it.value();
+            }
+        }
+        x.dns = get_stack_optional<bool>(j, "dns");
+        x.l7 = get_stack_optional<bool>(j, "l7");
+    }
+
+    inline void to_json(json & j, const Learning & x) {
+        j = x._config_unknown_fields.is_object() ? x._config_unknown_fields : json::object();
+        j["dns"] = x.dns;
+        j["l7"] = x.l7;
+    }
+
     inline void from_json(const json & j, DnsRuleElement& x) {
         x._config_unknown_fields = nullptr;
         if (j.is_object()) {
             for (auto it = j.begin(); it != j.end(); ++it) {
-                if (it.key() == "allow_domain_rebinding" || it.key() == "display_name" || it.key() == "enabled" || it.key() == "id" || it.key() == "list" || it.key() == "route_rule_ids" || it.key() == "server") continue;
+                if (it.key() == "allow_domain_rebinding" || it.key() == "display_name" || it.key() == "enabled" || it.key() == "id" || it.key() == "list" || it.key() == "route_rule_ids" || it.key() == "server" || it.key() == "servers") continue;
                 if (x._config_unknown_fields.is_null()) x._config_unknown_fields = json::object();
                 x._config_unknown_fields[it.key()] = it.value();
             }
@@ -4707,7 +4780,8 @@ namespace api {
         x.id = get_stack_optional<std::string>(j, "id");
         x.list = j.at("list").get<std::vector<std::string>>();
         x.route_rule_ids = get_stack_optional<std::vector<std::string>>(j, "route_rule_ids");
-        x.server = j.at("server").get<std::string>();
+        x.server = get_stack_optional<std::string>(j, "server");
+        x.servers = get_stack_optional<std::vector<std::string>>(j, "servers");
     }
 
     inline void to_json(json & j, const DnsRuleElement & x) {
@@ -4719,13 +4793,14 @@ namespace api {
         j["list"] = x.list;
         j["route_rule_ids"] = x.route_rule_ids;
         j["server"] = x.server;
+        j["servers"] = x.servers;
     }
 
     inline void from_json(const json & j, DnsServerElement& x) {
         x._config_unknown_fields = nullptr;
         if (j.is_object()) {
             for (auto it = j.begin(); it != j.end(); ++it) {
-                if (it.key() == "address" || it.key() == "detour" || it.key() == "display_name" || it.key() == "domains" || it.key() == "tag" || it.key() == "type") continue;
+                if (it.key() == "address" || it.key() == "detour" || it.key() == "display_name" || it.key() == "domains" || it.key() == "ips" || it.key() == "tag" || it.key() == "type") continue;
                 if (x._config_unknown_fields.is_null()) x._config_unknown_fields = json::object();
                 x._config_unknown_fields[it.key()] = it.value();
             }
@@ -4734,6 +4809,7 @@ namespace api {
         x.detour = get_stack_optional<std::string>(j, "detour");
         x.display_name = get_stack_optional<std::string>(j, "display_name");
         x.domains = get_stack_optional<std::vector<std::string>>(j, "domains");
+        x.ips = get_stack_optional<std::vector<std::string>>(j, "ips");
         x.tag = j.at("tag").get<std::string>();
         x.type = get_stack_optional<DnsServerType>(j, "type");
     }
@@ -4744,6 +4820,7 @@ namespace api {
         j["detour"] = x.detour;
         j["display_name"] = x.display_name;
         j["domains"] = x.domains;
+        j["ips"] = x.ips;
         j["tag"] = x.tag;
         j["type"] = x.type;
     }
@@ -4769,15 +4846,18 @@ namespace api {
         x._config_unknown_fields = nullptr;
         if (j.is_object()) {
             for (auto it = j.begin(); it != j.end(); ++it) {
-                if (it.key() == "client_dns_enforcement" || it.key() == "dns_test_server" || it.key() == "fallback" || it.key() == "firefox_doh_canary" || it.key() == "rules" || it.key() == "servers" || it.key() == "system_resolver") continue;
+                if (it.key() == "bootstrap" || it.key() == "client_dns_enforcement" || it.key() == "dns_test_server" || it.key() == "fallback" || it.key() == "firefox_doh_canary" || it.key() == "learning" || it.key() == "passive_learning" || it.key() == "rules" || it.key() == "servers" || it.key() == "system_resolver") continue;
                 if (x._config_unknown_fields.is_null()) x._config_unknown_fields = json::object();
                 x._config_unknown_fields[it.key()] = it.value();
             }
         }
+        x.bootstrap = get_stack_optional<std::vector<std::string>>(j, "bootstrap");
         x.client_dns_enforcement = get_stack_optional<ClientDnsEnforcement>(j, "client_dns_enforcement");
         x.dns_test_server = get_stack_optional<DnsTestServer>(j, "dns_test_server");
         x.fallback = get_stack_optional<std::vector<std::string>>(j, "fallback");
         x.firefox_doh_canary = get_stack_optional<bool>(j, "firefox_doh_canary");
+        x.learning = get_stack_optional<Learning>(j, "learning");
+        x.passive_learning = get_stack_optional<bool>(j, "passive_learning");
         x.rules = get_stack_optional<std::vector<DnsRuleElement>>(j, "rules");
         x.servers = get_stack_optional<std::vector<DnsServerElement>>(j, "servers");
         x.system_resolver = get_stack_optional<SystemResolver>(j, "system_resolver");
@@ -4785,10 +4865,13 @@ namespace api {
 
     inline void to_json(json & j, const Dns & x) {
         j = x._config_unknown_fields.is_object() ? x._config_unknown_fields : json::object();
+        j["bootstrap"] = x.bootstrap;
         j["client_dns_enforcement"] = x.client_dns_enforcement;
         j["dns_test_server"] = x.dns_test_server;
         j["fallback"] = x.fallback;
         j["firefox_doh_canary"] = x.firefox_doh_canary;
+        j["learning"] = x.learning;
+        j["passive_learning"] = x.passive_learning;
         j["rules"] = x.rules;
         j["servers"] = x.servers;
         j["system_resolver"] = x.system_resolver;
@@ -5572,6 +5655,49 @@ namespace api {
         j["granted"] = x.granted;
     }
 
+    inline void from_json(const json & j, Interception& x) {
+        x.dns_detail = j.at("dns_detail").get<std::string>();
+        x.dns_hold_timeouts = j.at("dns_hold_timeouts").get<int64_t>();
+        x.dns_matched = j.at("dns_matched").get<int64_t>();
+        x.dns_packets = j.at("dns_packets").get<int64_t>();
+        x.dns_requested = j.at("dns_requested").get<bool>();
+        x.dns_state = j.at("dns_state").get<DnsState>();
+        x.fail_open = j.at("fail_open").get<FailOpen>();
+        x.interfaces = j.at("interfaces").get<std::vector<std::string>>();
+        x.l7_detail = j.at("l7_detail").get<std::string>();
+        x.l7_matched = j.at("l7_matched").get<int64_t>();
+        x.l7_packets = j.at("l7_packets").get<int64_t>();
+        x.l7_requested = j.at("l7_requested").get<bool>();
+        x.l7_state = j.at("l7_state").get<DnsState>();
+        x.log_overruns = j.at("log_overruns").get<int64_t>();
+        x.nflog = j.at("nflog").get<FailOpen>();
+        x.nfqueue = j.at("nfqueue").get<FailOpen>();
+        x.queue_overruns = j.at("queue_overruns").get<int64_t>();
+        x.set_errors = j.at("set_errors").get<int64_t>();
+    }
+
+    inline void to_json(json & j, const Interception & x) {
+        j = json::object();
+        j["dns_detail"] = x.dns_detail;
+        j["dns_hold_timeouts"] = x.dns_hold_timeouts;
+        j["dns_matched"] = x.dns_matched;
+        j["dns_packets"] = x.dns_packets;
+        j["dns_requested"] = x.dns_requested;
+        j["dns_state"] = x.dns_state;
+        j["fail_open"] = x.fail_open;
+        j["interfaces"] = x.interfaces;
+        j["l7_detail"] = x.l7_detail;
+        j["l7_matched"] = x.l7_matched;
+        j["l7_packets"] = x.l7_packets;
+        j["l7_requested"] = x.l7_requested;
+        j["l7_state"] = x.l7_state;
+        j["log_overruns"] = x.log_overruns;
+        j["nflog"] = x.nflog;
+        j["nfqueue"] = x.nfqueue;
+        j["queue_overruns"] = x.queue_overruns;
+        j["set_errors"] = x.set_errors;
+    }
+
     inline void from_json(const json & j, LifecycleOperationStageElement& x) {
         x.detail = j.at("detail").get<std::string>();
         x.id = j.at("id").get<std::string>();
@@ -5615,6 +5741,7 @@ namespace api {
         x.commit = get_stack_optional<std::string>(j, "commit");
         x.config_is_draft = j.at("config_is_draft").get<bool>();
         x.daemon_pid = get_stack_optional<int64_t>(j, "daemon_pid");
+        x.interception = get_stack_optional<Interception>(j, "interception");
         x.lifecycle_operation = get_stack_optional<LifecycleOperation>(j, "lifecycle_operation");
         x.os_type = j.at("os_type").get<std::string>();
         x.os_version = j.at("os_version").get<std::string>();
@@ -5639,6 +5766,7 @@ namespace api {
         j["commit"] = x.commit;
         j["config_is_draft"] = x.config_is_draft;
         j["daemon_pid"] = x.daemon_pid;
+        j["interception"] = x.interception;
         j["lifecycle_operation"] = x.lifecycle_operation;
         j["os_type"] = x.os_type;
         j["os_version"] = x.os_version;
@@ -8824,6 +8952,7 @@ namespace api {
         x.dependency_relation = get_stack_optional<DependencyRelation>(j, "DependencyRelation");
         x.dependency_target = get_stack_optional<DependencyTarget>(j, "DependencyTarget");
         x.dns_config = get_stack_optional<Dns>(j, "DnsConfig");
+        x.dns_learning_config = get_stack_optional<Learning>(j, "DnsLearningConfig");
         x.dns_rule = get_stack_optional<DnsRuleElement>(j, "DnsRule");
         x.dns_server = get_stack_optional<DnsServerElement>(j, "DnsServer");
         x.dns_system_resolver = get_stack_optional<SystemResolver>(j, "DnsSystemResolver");
@@ -8837,6 +8966,9 @@ namespace api {
         x.geo_lookup_result = get_stack_optional<GeoLookupResult>(j, "GeoLookupResult");
         x.granted_response = get_stack_optional<GrantedResponse>(j, "GrantedResponse");
         x.health_response = get_stack_optional<HealthResponse>(j, "HealthResponse");
+        x.interception_health = get_stack_optional<Interception>(j, "InterceptionHealth");
+        x.interception_probe_state = get_stack_optional<FailOpen>(j, "InterceptionProbeState");
+        x.interception_state = get_stack_optional<DnsState>(j, "InterceptionState");
         x.interface_names = get_stack_optional<InterfaceNames>(j, "InterfaceNames");
         x.internal_vpn_server = get_stack_optional<InternalVpnServerElement>(j, "InternalVpnServer");
         x.internal_vpn_service = get_stack_optional<InternalVpnServiceElement>(j, "InternalVpnService");
@@ -9129,6 +9261,7 @@ namespace api {
         j["DependencyRelation"] = x.dependency_relation;
         j["DependencyTarget"] = x.dependency_target;
         j["DnsConfig"] = x.dns_config;
+        j["DnsLearningConfig"] = x.dns_learning_config;
         j["DnsRule"] = x.dns_rule;
         j["DnsServer"] = x.dns_server;
         j["DnsSystemResolver"] = x.dns_system_resolver;
@@ -9142,6 +9275,9 @@ namespace api {
         j["GeoLookupResult"] = x.geo_lookup_result;
         j["GrantedResponse"] = x.granted_response;
         j["HealthResponse"] = x.health_response;
+        j["InterceptionHealth"] = x.interception_health;
+        j["InterceptionProbeState"] = x.interception_probe_state;
+        j["InterceptionState"] = x.interception_state;
         j["InterfaceNames"] = x.interface_names;
         j["InternalVpnServer"] = x.internal_vpn_server;
         j["InternalVpnService"] = x.internal_vpn_service;
@@ -9525,13 +9661,15 @@ namespace api {
     }
 
     inline void from_json(const json & j, DnsServerType & x) {
-        if (j == "keenetic") x = DnsServerType::KEENETIC;
+        if (j == "doh") x = DnsServerType::DOH;
+        else if (j == "keenetic") x = DnsServerType::KEENETIC;
         else if (j == "static") x = DnsServerType::STATIC;
         else { throw std::runtime_error("Cannot deserialize to enumeration \"DnsServerType\""); }
     }
 
     inline void to_json(json & j, const DnsServerType & x) {
         switch (x) {
+            case DnsServerType::DOH: j = "doh"; break;
             case DnsServerType::KEENETIC: j = "keenetic"; break;
             case DnsServerType::STATIC: j = "static"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"DnsServerType\": " + std::to_string(static_cast<int>(x)));
@@ -9749,6 +9887,56 @@ namespace api {
         switch (x) {
             case GeoLookupResultError::INVALID_REQUEST: j = "invalid_request"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"GeoLookupResultError\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, DnsState & x) {
+        if (j == "active") x = DnsState::ACTIVE;
+        else if (j == "applying") x = DnsState::APPLYING;
+        else if (j == "disabled") x = DnsState::DISABLED;
+        else if (j == "fail_open_unconfirmed") x = DnsState::FAIL_OPEN_UNCONFIRMED;
+        else if (j == "no_interfaces") x = DnsState::NO_INTERFACES;
+        else if (j == "no_lists") x = DnsState::NO_LISTS;
+        else if (j == "snapshot_unavailable") x = DnsState::SNAPSHOT_UNAVAILABLE;
+        else if (j == "stopped") x = DnsState::STOPPED;
+        else if (j == "unavailable") x = DnsState::UNAVAILABLE;
+        else if (j == "unknown") x = DnsState::UNKNOWN;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"DnsState\""); }
+    }
+
+    inline void to_json(json & j, const DnsState & x) {
+        switch (x) {
+            case DnsState::ACTIVE: j = "active"; break;
+            case DnsState::APPLYING: j = "applying"; break;
+            case DnsState::DISABLED: j = "disabled"; break;
+            case DnsState::FAIL_OPEN_UNCONFIRMED: j = "fail_open_unconfirmed"; break;
+            case DnsState::NO_INTERFACES: j = "no_interfaces"; break;
+            case DnsState::NO_LISTS: j = "no_lists"; break;
+            case DnsState::SNAPSHOT_UNAVAILABLE: j = "snapshot_unavailable"; break;
+            case DnsState::STOPPED: j = "stopped"; break;
+            case DnsState::UNAVAILABLE: j = "unavailable"; break;
+            case DnsState::UNKNOWN: j = "unknown"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"DnsState\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, FailOpen & x) {
+        if (j == "error") x = FailOpen::ERROR;
+        else if (j == "not_run") x = FailOpen::NOT_RUN;
+        else if (j == "ok") x = FailOpen::OK;
+        else if (j == "skipped") x = FailOpen::SKIPPED;
+        else if (j == "unsupported") x = FailOpen::UNSUPPORTED;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"FailOpen\""); }
+    }
+
+    inline void to_json(json & j, const FailOpen & x) {
+        switch (x) {
+            case FailOpen::ERROR: j = "error"; break;
+            case FailOpen::NOT_RUN: j = "not_run"; break;
+            case FailOpen::OK: j = "ok"; break;
+            case FailOpen::SKIPPED: j = "skipped"; break;
+            case FailOpen::UNSUPPORTED: j = "unsupported"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"FailOpen\": " + std::to_string(static_cast<int>(x)));
         }
     }
 
@@ -12309,6 +12497,7 @@ namespace api {
     inline bool prune_config_json_for_persistence(json & j, const Dns & x);
     inline bool prune_config_json_for_persistence(json & j, const ClientDnsEnforcement & x);
     inline bool prune_config_json_for_persistence(json & j, const DnsTestServer & x);
+    inline bool prune_config_json_for_persistence(json & j, const Learning & x);
     inline bool prune_config_json_for_persistence(json & j, const DnsRuleElement & x);
     inline bool prune_config_json_for_persistence(json & j, const DnsServerElement & x);
     inline bool prune_config_json_for_persistence(json & j, const SystemResolver & x);
@@ -12488,6 +12677,9 @@ namespace api {
 
     inline bool prune_config_json_for_persistence(json & j, const Dns & x) {
         if (!j.is_object()) return j.is_null();
+        if (auto it = j.find("bootstrap"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.bootstrap)) j.erase(it);
+        }
         if (auto it = j.find("client_dns_enforcement"); it != j.end()) {
             if (prune_config_json_for_persistence(*it, x.client_dns_enforcement)) j.erase(it);
         }
@@ -12499,6 +12691,12 @@ namespace api {
         }
         if (auto it = j.find("firefox_doh_canary"); it != j.end()) {
             if (prune_config_json_for_persistence(*it, x.firefox_doh_canary)) j.erase(it);
+        }
+        if (auto it = j.find("learning"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.learning)) j.erase(it);
+        }
+        if (auto it = j.find("passive_learning"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.passive_learning)) j.erase(it);
         }
         if (auto it = j.find("rules"); it != j.end()) {
             if (prune_config_json_for_persistence(*it, x.rules)) j.erase(it);
@@ -12534,6 +12732,17 @@ namespace api {
         return j.empty();
     }
 
+    inline bool prune_config_json_for_persistence(json & j, const Learning & x) {
+        if (!j.is_object()) return j.is_null();
+        if (auto it = j.find("dns"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.dns)) j.erase(it);
+        }
+        if (auto it = j.find("l7"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.l7)) j.erase(it);
+        }
+        return j.empty();
+    }
+
     inline bool prune_config_json_for_persistence(json & j, const DnsRuleElement & x) {
         if (!j.is_object()) return j.is_null();
         if (auto it = j.find("allow_domain_rebinding"); it != j.end()) {
@@ -12557,6 +12766,9 @@ namespace api {
         if (auto it = j.find("server"); it != j.end()) {
             if (prune_config_json_for_persistence(*it, x.server)) j.erase(it);
         }
+        if (auto it = j.find("servers"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.servers)) j.erase(it);
+        }
         return j.empty();
     }
 
@@ -12573,6 +12785,9 @@ namespace api {
         }
         if (auto it = j.find("domains"); it != j.end()) {
             if (prune_config_json_for_persistence(*it, x.domains)) j.erase(it);
+        }
+        if (auto it = j.find("ips"); it != j.end()) {
+            if (prune_config_json_for_persistence(*it, x.ips)) j.erase(it);
         }
         if (auto it = j.find("tag"); it != j.end()) {
             if (prune_config_json_for_persistence(*it, x.tag)) j.erase(it);

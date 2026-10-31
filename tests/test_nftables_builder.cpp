@@ -4,6 +4,7 @@
 #include "../src/config/routing_state.hpp"
 #include "../src/firewall/nft_batch_pipe.hpp"
 #include "../src/firewall/nftables.hpp"
+#include "../src/firewall/interception_scope.hpp"
 
 #include <nlohmann/json.hpp>
 #include <sys/socket.h>
@@ -41,6 +42,18 @@ L4Proto parse_test_proto(const std::string& proto) {
 // at class scope.
 class NftablesBuilderTest {
 public:
+  static nlohmann::json build_interception_document(bool enabled, bool previous) {
+    NftablesFirewall fw;
+    fw.set_ipv6_enabled(false);
+    FirewallGlobalPrefilter scope;
+    scope.inbound_interfaces = {"br0"};
+    fw.set_interception_hooks({enabled, enabled, {"br0"}, interception_client_scope(scope, {}, false)});
+    NftablesFirewall::LiveTableState live;
+    live.table_exists = true;
+    live.intercept_dns_chain_exists = previous;
+    live.intercept_l7_chain_exists = previous;
+    return fw.build_apply_document(live, false, false, false);
+  }
   // set helpers
   static nlohmann::json build_table_json() {
     return NftablesFirewall::build_table_json();
@@ -525,6 +538,23 @@ public:
 };
 
 } // namespace keen_pbr3
+
+TEST_CASE("nft passive capture is added and retired in the same rules transaction") {
+  const auto enabled = keen_pbr3::NftablesBuilderTest::build_interception_document(true, false).dump();
+  CHECK(enabled.find("KeenPbrDnsTap") != std::string::npos);
+  CHECK(enabled.find("KeenPbrL7Tap") != std::string::npos);
+  CHECK(enabled.find("bypass") != std::string::npos);
+  const auto disabled = keen_pbr3::NftablesBuilderTest::build_interception_document(false, true);
+  int removed = 0;
+  for (const auto& command : disabled.at("nftables")) {
+    if (command.contains("delete") && command["delete"].contains("chain")) {
+      const auto name = command["delete"]["chain"].value("name", "");
+      if (name == "KeenPbrDnsTap" || name == "KeenPbrL7Tap") ++removed;
+    }
+  }
+  CHECK(removed == 2);
+  CHECK(disabled.dump().find("\"queue\"") == std::string::npos);
+}
 
 TEST_CASE("nft live refresh flushes static set but preserves dynamic entries") {
   const auto doc =

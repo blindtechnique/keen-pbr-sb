@@ -1,4 +1,5 @@
 #include "iptables.hpp"
+#include "interception_rules.hpp"
 #include "firewall_cleanup_absence.hpp"
 #include "firewall_runtime.hpp"
 #include "ipset_restore_pipe.hpp"
@@ -6744,6 +6745,8 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
     last_applied_forward_udp_rejects_ =
         pending_forward_udp_rejects_;
 
+    apply_interception_rules(effective_ipv6);
+
     // Clear pending buffers
     pending_sets_.clear();
     pending_elements_.clear();
@@ -6890,6 +6893,9 @@ void IptablesFirewall::cleanup_rules_impl(bool sweep_live_state) {
             "PREROUTING",
             raw ? RAW_CHAIN_NAME : CHAIN_NAME);
         remove_chain(command, "mangle", "OUTPUT", OUTPUT_CHAIN_NAME);
+        // DNS and L7 taps never own a built-in chain or a foreign NFQUEUE.
+        remove_chain(command, "mangle", "POSTROUTING", kInterceptDnsChain);
+        remove_chain(command, "mangle", "PREROUTING", kInterceptL7Chain);
         if (raw || sweep_live_state) {
             remove_chain(
                 command,
@@ -7364,12 +7370,14 @@ void IptablesFirewall::cleanup_impl() {
 
 void IptablesFirewall::cleanup() {
     std::lock_guard<std::mutex> lock(pair_state_mutex_);
+    auto interception_stop = begin_interception_stop();
     cleanup_impl();
 }
 
 FirewallOwnedCleanupInspection
 IptablesFirewall::cleanup_and_inspect_owned() {
     std::lock_guard<std::mutex> lock(pair_state_mutex_);
+    auto interception_stop = begin_interception_stop();
     strict_cleanup_pending_ = true;
 
     std::string cleanup_error;
@@ -7428,6 +7436,50 @@ IptablesFirewall::cleanup_and_inspect_owned() {
 
 FirewallBackend IptablesFirewall::backend() const {
     return FirewallBackend::iptables;
+}
+
+void IptablesFirewall::apply_interception_rules(bool effective_ipv6) {
+    const auto hooks = interception_hooks();
+    const auto& interfaces = hooks.interfaces;
+    const auto family = [&](bool ipv6, bool& created, bool& inspected) {
+        const char* command = ipv6 ? "ip6tables" : "iptables";
+        const bool enabled = (!ipv6 || effective_ipv6) && hooks.any() && !interfaces.empty();
+        if (!enabled && !created && !inspected) {
+            // A process can inherit capture hooks after a crash even when
+            // passive learning is now disabled. Read once, not on every tick.
+            if (ipv6 && !effective_ipv6 && !ipv6_backend_available()) return;
+            const auto inventory = run_iptables_control({command, "-t", "mangle", "-S"});
+            if (inventory.exit_code != 0 || inventory.truncated || inventory.timed_out ||
+                inventory.termination_uncertain) {
+                Logger::instance().warn("Could not inspect inherited passive capture hooks in {}", command);
+                return; // unknown is not recorded as empty
+            }
+            const std::string lines = "\n" + inventory.stdout_output + "\n";
+            created = lines.find(std::string("\n-N ") + kInterceptDnsChain + "\n") != std::string::npos ||
+                      lines.find(std::string("\n-N ") + kInterceptL7Chain + "\n") != std::string::npos;
+            inspected = true;
+        }
+        if (!enabled && !created) return;
+        if (enabled) {
+            // The listener is already bound. One mangle transaction replaces
+            // both user chains; exact hooks are deduplicated by the backend.
+            pipe_to_cmd({ipv6 ? "ip6tables-restore" : "iptables-restore", "--noflush"},
+                        interception_iptables_script(hooks, ipv6));
+            created = true; // retain cleanup responsibility if hook repair fails
+            reconcile_hook(command, "mangle", "POSTROUTING", kInterceptDnsChain);
+            reconcile_hook(command, "mangle", "PREROUTING", kInterceptL7Chain);
+        } else {
+            for (const auto& item : {std::pair{"POSTROUTING", kInterceptDnsChain},
+                                      std::pair{"PREROUTING", kInterceptL7Chain}}) {
+                remove_all_hooks(command, "mangle", item.first, item.second);
+                safe_exec({command, "-t", "mangle", "-F", item.second}, true);
+                safe_exec({command, "-t", "mangle", "-X", item.second}, true);
+            }
+            created = false;
+        }
+    };
+    family(false, interception_v4_created_, interception_v4_inspected_);
+    family(true, interception_v6_created_, interception_v6_inspected_);
 }
 
 void cleanup_stale_iptables_ppe_deoffload_strict() {

@@ -593,6 +593,7 @@ set(SOURCES
   src/daemon/conntrack_cleanup_coordinator.cpp
   src/daemon/idle_stall_supervisor.cpp
   src/daemon/daemon_runtime.cpp
+  src/daemon/daemon_intercept.cpp
   src/daemon/daemon_tunnel_probe.cpp
   src/daemon/daemon_resolver.cpp
   src/daemon/runtime_resolver_generation_snapshot.cpp
@@ -800,7 +801,54 @@ install(FILES ${CMAKE_SOURCE_DIR}/packages/common/local.lst
   DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/keen-pbr)
 
 # Unit tests (optional, requires doctest submodule)
+# Native DoH is idle until explicitly configured. No packet interception.
+add_library(keen-pbr-doh STATIC
+  src/dns/dns_balancer.cpp src/dns/doh_client.cpp
+  src/dns/doh_bootstrap.cpp src/dns/doh_support.cpp
+  src/dns/dns_client.cpp src/dns/dns_wire.cpp)
+set_target_properties(keen-pbr-doh PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+target_compile_definitions(keen-pbr-doh PUBLIC WITH_DOH)
+target_include_directories(keen-pbr-doh PRIVATE ${KEEN_PBR_GENERATED_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(keen-pbr-doh PUBLIC ${KEEN_PBR_CURL_TARGET} Threads::Threads fmt::fmt-header-only)
+keen_pbr_apply_project_options(keen-pbr-doh)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+  target_link_libraries(keen-pbr-doh PUBLIC stdc++fs)
+endif()
+target_link_libraries(keen-pbr PRIVATE keen-pbr-doh)
+
+# Optional DNS/NFQUEUE + passive L7 engine, owned by the daemon firewall lifecycle.
+set(KEEN_PBR_INTERCEPT_SOURCES
+  ${CMAKE_SOURCE_DIR}/src/l7/crypto/aes128.cpp
+  ${CMAKE_SOURCE_DIR}/src/l7/crypto/sha256.cpp
+  ${CMAKE_SOURCE_DIR}/src/l7/flow_buffer.cpp
+  ${CMAKE_SOURCE_DIR}/src/l7/http_host.cpp
+  ${CMAKE_SOURCE_DIR}/src/l7/quic_initial.cpp
+  ${CMAKE_SOURCE_DIR}/src/l7/tls_client_hello.cpp
+  ${CMAKE_SOURCE_DIR}/src/netfilter/nflog.cpp
+  ${CMAKE_SOURCE_DIR}/src/netfilter/kernel_probe.cpp
+  ${CMAKE_SOURCE_DIR}/src/netfilter/nfqueue.cpp
+  ${CMAKE_SOURCE_DIR}/src/netfilter/nl_msg.cpp
+  ${CMAKE_SOURCE_DIR}/src/netfilter/nl_socket.cpp
+  ${CMAKE_SOURCE_DIR}/src/netfilter/set_writer.cpp
+  ${CMAKE_SOURCE_DIR}/src/netfilter/set_reader.cpp
+  ${CMAKE_SOURCE_DIR}/src/lists/domain_index.cpp
+  ${CMAKE_SOURCE_DIR}/src/intercept/dns_tcp_reassembly.cpp
+  ${CMAKE_SOURCE_DIR}/src/intercept/intercept_processor.cpp
+  ${CMAKE_SOURCE_DIR}/src/intercept/set_element_cache.cpp
+  ${CMAKE_SOURCE_DIR}/src/intercept/intercept_service.cpp
+  ${CMAKE_SOURCE_DIR}/src/intercept/intercept_snapshot.cpp
+  ${CMAKE_SOURCE_DIR}/src/intercept/intercept_runtime.cpp)
+add_library(keen-pbr-intercept STATIC EXCLUDE_FROM_ALL ${KEEN_PBR_INTERCEPT_SOURCES})
+set_target_properties(keen-pbr-intercept PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+target_include_directories(keen-pbr-intercept PRIVATE ${KEEN_PBR_GENERATED_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(keen-pbr-intercept PUBLIC keen-pbr-doh Threads::Threads fmt::fmt-header-only)
+keen_pbr_apply_project_options(keen-pbr-intercept)
+if(LIBATOMIC)
+  target_link_libraries(keen-pbr-intercept PUBLIC ${LIBATOMIC})
+endif()
+
 option(BUILD_TESTS "Build unit tests" OFF)
+target_link_libraries(keen-pbr PRIVATE keen-pbr-intercept)
 if(BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)

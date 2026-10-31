@@ -283,7 +283,11 @@ public:
     // Compatibility seams needed while the remaining direct Daemon users are
     // migrated behind this owner. They are serialized but not asynchronous.
     void notify_interface_up(const std::string& interface_name) noexcept;
-    RuntimeRoutingInventorySnapshotPtr clear();
+    // STOP also retires corroborated protocol-186 residue from older
+    // generations. Rollback callers retain the tracked-ledger-only default.
+    RuntimeRoutingInventorySnapshotPtr clear(
+        bool include_generated_orphans = false,
+        uint32_t retired_mark_mask = 0U);
 
 private:
     struct PreparedInventoryPublication final {

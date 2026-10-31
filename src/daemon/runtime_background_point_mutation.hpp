@@ -1,6 +1,7 @@
 #pragma once
 
 #include "runtime_recovery_policy.hpp"
+#include "../intercept/intercept_cleanup.hpp"
 
 #include "../firewall/firewall.hpp"
 #include "../runtime/idle_stall_detector.hpp"
@@ -453,6 +454,7 @@ enum class RuntimeBackgroundPointMutationKind : std::uint8_t {
     idle_stall_exact_cleanup,
     meta_udp443_cleanup,
     owned_conntrack_cleanup,
+    intercept_cleanup,
 };
 
 using RuntimeBackgroundPointMutationTargetPayload = std::variant<
@@ -460,7 +462,8 @@ using RuntimeBackgroundPointMutationTargetPayload = std::variant<
     RuntimeUdpCallAffinityPointMutationTarget,
     RuntimeIdleStallExactCleanupPointMutationTarget,
     RuntimeMetaUdp443CleanupPointMutationTarget,
-    RuntimeOwnedConntrackCleanupPointMutationTarget>;
+    RuntimeOwnedConntrackCleanupPointMutationTarget,
+    InterceptCleanupBatch>;
 
 struct RuntimeBackgroundPointMutationTarget final {
     RuntimeBackgroundPointMutationKind kind{
@@ -470,6 +473,9 @@ struct RuntimeBackgroundPointMutationTarget final {
 
     std::uint64_t runtime_generation() const noexcept {
         switch (kind) {
+        case RuntimeBackgroundPointMutationKind::intercept_cleanup:
+            if (const auto* value = std::get_if<InterceptCleanupBatch>(&payload)) return value->runtime_generation;
+            break;
         case RuntimeBackgroundPointMutationKind::udp_call_affinity:
             if (const auto* value = std::get_if<
                     RuntimeUdpCallAffinityPointMutationTarget>(&payload)) {
@@ -502,6 +508,8 @@ struct RuntimeBackgroundPointMutationTarget final {
 
     bool payload_kind_matches() const noexcept {
         switch (kind) {
+        case RuntimeBackgroundPointMutationKind::intercept_cleanup:
+            return std::holds_alternative<InterceptCleanupBatch>(payload);
         case RuntimeBackgroundPointMutationKind::udp_call_affinity:
             return std::holds_alternative<
                 RuntimeUdpCallAffinityPointMutationTarget>(payload);
@@ -523,6 +531,8 @@ struct RuntimeBackgroundPointMutationTarget final {
             return false;
         }
         switch (kind) {
+        case RuntimeBackgroundPointMutationKind::intercept_cleanup:
+            return std::get<InterceptCleanupBatch>(payload).valid();
         case RuntimeBackgroundPointMutationKind::udp_call_affinity:
             return std::get<RuntimeUdpCallAffinityPointMutationTarget>(
                        payload)
@@ -552,6 +562,8 @@ struct RuntimeBackgroundPointMutationTarget final {
             return false;
         }
         switch (kind) {
+        case RuntimeBackgroundPointMutationKind::intercept_cleanup:
+            return std::get<InterceptCleanupBatch>(payload) == std::get<InterceptCleanupBatch>(other.payload);
         case RuntimeBackgroundPointMutationKind::udp_call_affinity:
             return std::get<RuntimeUdpCallAffinityPointMutationTarget>(
                        payload) ==
@@ -823,7 +835,8 @@ using RuntimeBackgroundPointMutationResultPayload = std::variant<
     RuntimeUdpCallAffinityPointMutationResult,
     RuntimeIdleStallExactCleanupPointMutationResult,
     RuntimeMetaUdp443CleanupPointMutationResult,
-    RuntimeOwnedConntrackCleanupPointMutationResult>;
+    RuntimeOwnedConntrackCleanupPointMutationResult,
+    InterceptCleanupResult>;
 
 struct RuntimeBackgroundPointMutationResult final {
     RuntimeBackgroundPointMutationTarget target;
@@ -852,6 +865,8 @@ struct RuntimeBackgroundPointMutationResult final {
 
     bool result_kind_matches() const noexcept {
         switch (target.kind) {
+        case RuntimeBackgroundPointMutationKind::intercept_cleanup:
+            return std::holds_alternative<InterceptCleanupResult>(payload);
         case RuntimeBackgroundPointMutationKind::udp_call_affinity:
             return std::holds_alternative<
                 RuntimeUdpCallAffinityPointMutationResult>(payload);
@@ -879,6 +894,8 @@ struct RuntimeBackgroundPointMutationResult final {
             return false;
         }
         switch (target.kind) {
+        case RuntimeBackgroundPointMutationKind::intercept_cleanup:
+            return std::get<InterceptCleanupResult>(payload).valid_for(std::get<InterceptCleanupBatch>(target.payload));
         case RuntimeBackgroundPointMutationKind::udp_call_affinity:
             return std::get<RuntimeUdpCallAffinityPointMutationResult>(
                        payload)
@@ -920,6 +937,8 @@ struct RuntimeBackgroundPointMutationResult final {
             return false;
         }
         switch (target.kind) {
+        case RuntimeBackgroundPointMutationKind::intercept_cleanup:
+            return std::get<InterceptCleanupResult>(payload) == std::get<InterceptCleanupResult>(other.payload);
         case RuntimeBackgroundPointMutationKind::udp_call_affinity:
             return std::get<RuntimeUdpCallAffinityPointMutationResult>(
                        payload) ==

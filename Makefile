@@ -30,7 +30,7 @@ CLANG_FEATURE_CMAKE_FLAGS := -DWITH_API=ON -DUSE_KEENETIC_API=ON
         frontend-build \
         frontend-api-generate \
         transport-manager-test transport-manager-fuzz transport-manager-build \
-        test test-api-operation-errors test-package-dns \
+        test test-api-operation-errors test-package-dns test-stop-update test-dns-policy \
         firewall-it-images firewall-it \
         clang-build clang-check-production clang-check clang-tidy clang-tidy-curated \
         generate generate-check \
@@ -160,6 +160,8 @@ sanitize: ## Build and run the unit suite under AddressSanitizer + UndefinedBeha
 # keen-pbr-firewall-it (нужны Docker и netns, у неё свой `make firewall-it`).
 # Проверяется тестом build_scripts/tests/test_test_target_coverage.py.
 NARROW_TEST_TARGETS := \
+	keen-pbr-intercept-tests \
+	keen-pbr-doh-tests \
 	keen-pbr-background-task-diagnostics-tests \
 	keen-pbr-cache-generation-tests \
 	keen-pbr-native-tunnel-import-tests \
@@ -221,7 +223,69 @@ test: ## Build and run unit tests (doctest)
 	ctest --test-dir $(GCC_BUILD_DIR) --output-on-failure --no-tests=error \
 		-L '^(native|package-lifecycle)$$'
 
+.PHONY: test-doh test-dns-groups check-doh-daemon test-intercept test-intercept-runtime check-intercept-daemon
+.PHONY: test-intercept-health check-intercept-health-daemon
+.PHONY: test-intercept-cleanup check-intercept-cleanup-daemon
+test-intercept-cleanup: test-intercept-runtime ## Address-scoped cleanup core and real firewall staging, no IPK
+
+check-intercept-cleanup-daemon:
+	cmake -S . -B $(GCC_BUILD_DIR) $(GCC_CMAKE_FLAGS) -DBUILD_TESTS=ON -DWITH_API=ON -DUSE_KEENETIC_API=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON $(TEST_CMAKE_FLAGS)
+	python3 build_scripts/check_dns_daemon_compilation.py $(GCC_BUILD_DIR) --intercept-cleanup
+test-intercept-health: test-intercept
+	cmake --build $(GCC_BUILD_DIR) --parallel $(BUILD_JOBS) --target keen-pbr-background-task-diagnostics-tests
+	ctest --test-dir $(GCC_BUILD_DIR) --output-on-failure --no-tests=error -R '^keen-pbr-background-task-diagnostics-tests$$'
+	cmake --build $(GCC_BUILD_DIR) --parallel $(BUILD_JOBS) --target keen-pbr-routing-list-review-tests
+	$(GCC_BUILD_DIR)/tests/keen-pbr-routing-list-review-tests
+
+check-intercept-health-daemon:
+	cmake -S . -B $(GCC_BUILD_DIR) $(GCC_CMAKE_FLAGS) -DBUILD_TESTS=ON -DWITH_API=ON -DUSE_KEENETIC_API=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON $(TEST_CMAKE_FLAGS)
+	python3 build_scripts/check_dns_daemon_compilation.py $(GCC_BUILD_DIR) --intercept-health
+
+test-dns-groups: test-doh test-dns-policy ## DNS groups, generation/STOP metadata and firewall detours; no IPK
+	cmake --build $(GCC_BUILD_DIR) --parallel $(BUILD_JOBS) --target keen-pbr-routing-list-review-tests
+	$(GCC_BUILD_DIR)/tests/keen-pbr-routing-list-review-tests
+
+test-intercept-runtime: test-intercept ## Focused capture/publication/STOP and real firewall-builder regressions (no IPK)
+	cmake --build $(GCC_BUILD_DIR) --parallel $(BUILD_JOBS) --target keen-pbr-routing-list-review-tests
+	$(GCC_BUILD_DIR)/tests/keen-pbr-routing-list-review-tests
+
+check-intercept-daemon: ## Compile four interception integration units only; no binary or IPK
+	cmake -S . -B $(GCC_BUILD_DIR) $(GCC_CMAKE_FLAGS) -DBUILD_TESTS=ON -DWITH_API=ON -DUSE_KEENETIC_API=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON $(TEST_CMAKE_FLAGS)
+	python3 build_scripts/check_dns_daemon_compilation.py $(GCC_BUILD_DIR) --intercept
+
+test-intercept: ## DNS/NFQUEUE + passive L7 core and lifecycle tests; no daemon or IPK
+	cmake -S . -B $(GCC_BUILD_DIR) $(GCC_CMAKE_FLAGS) -DBUILD_TESTS=ON -DWITH_API=ON -DUSE_KEENETIC_API=ON $(TEST_CMAKE_FLAGS)
+	cmake --build $(GCC_BUILD_DIR) --parallel $(BUILD_JOBS) --target keen-pbr-intercept keen-pbr-intercept-tests
+	ctest --test-dir $(GCC_BUILD_DIR) --output-on-failure --no-tests=error -R '^keen-pbr-intercept-tests$$'
+
+check-doh-daemon: ## Compile DNS/daemon integration units only; no binary, full suite or IPK
+	cmake -S . -B $(GCC_BUILD_DIR) $(GCC_CMAKE_FLAGS) -DBUILD_TESTS=ON -DWITH_API=ON -DUSE_KEENETIC_API=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON $(TEST_CMAKE_FLAGS)
+	python3 build_scripts/check_dns_daemon_compilation.py $(GCC_BUILD_DIR)
+
+test-doh: ## Local DoH transport, bootstrap, forwarder and publication rollback (no IPK)
+	cmake -S . -B $(GCC_BUILD_DIR) $(GCC_CMAKE_FLAGS) -DBUILD_TESTS=ON -DWITH_API=ON -DUSE_KEENETIC_API=ON $(TEST_CMAKE_FLAGS)
+	cmake --build $(GCC_BUILD_DIR) --parallel $(BUILD_JOBS) --target keen-pbr-doh-tests
+	ctest --test-dir $(GCC_BUILD_DIR) --output-on-failure --no-tests=error -R '^keen-pbr-doh-tests$$'
+
+test-dns-policy: ## Focused DNS configuration, generation, catalogue and dependency regressions (no IPK)
+	cmake -S . -B $(GCC_BUILD_DIR) $(GCC_CMAKE_FLAGS) -DBUILD_TESTS=ON -DWITH_API=ON -DUSE_KEENETIC_API=ON $(TEST_CMAKE_FLAGS)
+	cmake --build $(GCC_BUILD_DIR) --parallel $(BUILD_JOBS) --target keen-pbr-runtime-resolver-generation-tests keen-pbr-route-failure-policy-tests keen-pbr-list-query-tests
+	ctest --test-dir $(GCC_BUILD_DIR) --output-on-failure --no-tests=error -R '^(keen-pbr-runtime-resolver-generation-tests|keen-pbr-route-failure-policy-tests)$$'
+	$(GCC_BUILD_DIR)/tests/keen-pbr-list-query-tests
+
+test-stop-update: ## Focused STOP, routing residue and package-update regressions (no IPK)
+	python3 -m unittest build_scripts.tests.test_update_retry build_scripts.tests.test_control_gate -v
+	sh -n install.sh
+	sh -n packages/keenetic/keen-pbr/files/opt/etc/init.d/S80keen-pbr
+	sh -n packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-update.sh
+	cmake -S . -B $(GCC_BUILD_DIR) $(GCC_CMAKE_FLAGS) -DBUILD_TESTS=ON -DWITH_API=ON -DUSE_KEENETIC_API=ON $(TEST_CMAKE_FLAGS)
+	cmake --build $(GCC_BUILD_DIR) --parallel $(BUILD_JOBS) --target keen-pbr-runtime-routing-exact-tests keen-pbr-runtime-firewall-owner-tests keen-pbr-rescue-tests
+	ctest --test-dir $(GCC_BUILD_DIR) --output-on-failure --no-tests=error -R '^(keen-pbr-runtime-routing-exact-tests|keen-pbr-runtime-firewall-owner-tests|keen-pbr-rescue-tests)$$'
+	$(BUSYBOX) sh tests/package_it/run-netfilter-hook-signals.sh packages/keenetic/keen-pbr/files/opt/etc/ndm/netfilter.d/50-keen-pbr-routing.sh packages/keenetic/keen-pbr/files/opt/etc/init.d/S80keen-pbr packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-startup-guard.sh packages/openwrt/keen-pbr/files/etc/init.d/keen-pbr packages/openwrt/keen-pbr/files/usr/lib/keen-pbr/firewall.sh packages/openwrt/keen-pbr/files/etc/hotplug.d/firewall/70-keen-pbr
+	$(BUSYBOX) sh tests/package_it/run-keenetic-fastnat-lifecycle.sh packages/keenetic/keen-pbr/files/opt/etc/init.d/S80keen-pbr packages/keenetic/keen-pbr/files/prerm
+
 test-package-dns: ## Run isolated Keenetic DNS and uninstall regressions without compiling
+	python3 -m unittest build_scripts.tests.test_update_retry build_scripts.tests.test_control_gate -v
 	python3 -m unittest build_scripts.tests.test_update_download_transport -v
 	python3 -m unittest build_scripts.tests.test_debian_postinst_dns -v
 	python3 -m unittest build_scripts.tests.test_installer_component_preservation -v

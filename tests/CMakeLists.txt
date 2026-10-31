@@ -1,3 +1,59 @@
+# A separate instrumented target keeps test-only netlink injection out of production.
+add_executable(keen-pbr-intercept-tests
+  test_main.cpp
+  test_dns_tcp_reassembly.cpp
+  test_domain_index.cpp
+  test_intercept_processor.cpp
+  test_l7_flow_buffer.cpp
+  test_l7_crypto.cpp
+  test_l7_quic.cpp
+  test_l7_tls.cpp
+  test_l7_http.cpp
+  test_nfqueue.cpp
+  test_nflog.cpp
+  test_nfnetlink.cpp
+  test_kernel_probe.cpp
+  test_set_element_cache.cpp
+  test_set_writer.cpp
+  test_seqlock_ring.cpp
+  test_intercept_snapshot.cpp
+  test_intercept_lifecycle.cpp
+  test_intercept_runtime.cpp
+  test_intercept_cleanup.cpp
+  test_set_reader.cpp
+  test_conntrack_manager.cpp
+  ../src/runtime/conntrack_manager.cpp
+  ${KEEN_PBR_INTERCEPT_SOURCES}
+  ../src/log/logger.cpp ../src/log/trace.cpp)
+set_target_properties(keen-pbr-intercept-tests PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+target_compile_definitions(keen-pbr-intercept-tests PRIVATE KEEN_PBR3_TESTING)
+target_include_directories(keen-pbr-intercept-tests PRIVATE
+  ${KEEN_PBR_GENERATED_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/third_party/doctest)
+target_link_libraries(keen-pbr-intercept-tests PRIVATE keen-pbr-doh Threads::Threads fmt::fmt-header-only nlohmann_json::nlohmann_json)
+keen_pbr_apply_project_options(keen-pbr-intercept-tests)
+if(LIBATOMIC)
+  target_link_libraries(keen-pbr-intercept-tests PRIVATE ${LIBATOMIC})
+endif()
+add_test(NAME keen-pbr-intercept-tests COMMAND keen-pbr-intercept-tests)
+set_tests_properties(keen-pbr-intercept-tests PROPERTIES LABELS native TIMEOUT 90)
+
+add_executable(keen-pbr-doh-tests
+  test_main.cpp test_doh_client.cpp test_dns_balancer.cpp
+  test_dns_client.cpp test_dns_wire.cpp test_doh_plan.cpp
+  ../src/dns/dns_server.cpp ../src/dns/dns_router.cpp
+  ../src/log/logger.cpp ../src/log/trace.cpp ../src/http/curl_runtime.cpp)
+set_target_properties(keen-pbr-doh-tests PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+target_include_directories(keen-pbr-doh-tests PRIVATE
+  ${KEEN_PBR_GENERATED_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/third_party/doctest)
+target_link_libraries(keen-pbr-doh-tests PRIVATE keen-pbr-doh nlohmann_json::nlohmann_json)
+keen_pbr_apply_project_options(keen-pbr-doh-tests)
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME keen-pbr-doh-tests COMMAND ${Python3_EXECUTABLE}
+  ${CMAKE_CURRENT_SOURCE_DIR}/run_doh_tls_fixture.py $<TARGET_FILE:keen-pbr-doh-tests>)
+set_tests_properties(keen-pbr-doh-tests PROPERTIES LABELS native TIMEOUT 120)
+
 add_executable(keen-pbr-tests
   test_main.cpp
   test_firewall_counter_evidence.cpp
@@ -66,6 +122,7 @@ add_executable(keen-pbr-tests
   test_base64.cpp
   test_bounded_operation_admission.cpp
   test_dnsmasq_gen.cpp
+  test_dns_rule_servers.cpp
   test_dnsmasq_access_policy.cpp
   test_dnsmasq_helper_packages.cpp
   test_dns_txt_client.cpp
@@ -534,6 +591,7 @@ add_executable(keen-pbr-runtime-routing-exact-tests
   test_raw_rtnetlink_codec.cpp
   test_runtime_routing_transaction.cpp
   test_runtime_routing_exact_owner.cpp
+  test_runtime_routing_operation_owner.cpp
   ../src/routing/policy_rule_evidence.cpp
   ../src/routing/netlink.cpp
   ../src/routing/raw_rtnetlink_codec.cpp
@@ -1322,6 +1380,7 @@ add_test(
 # methods remain a link dependency of ListStreamer.
 add_executable(keen-pbr-runtime-resolver-generation-tests
   test_main.cpp
+  test_dns_rule_servers.cpp
   test_runtime_resolver_generation_snapshot.cpp
   test_resolver_stream_attempt_owner.cpp
   test_runtime_firewall_lifecycle_resolver_attempt.cpp
@@ -2626,6 +2685,8 @@ target_include_directories(keen-pbr-tests PRIVATE
 )
 
 target_link_libraries(keen-pbr-tests PRIVATE
+  keen-pbr-intercept
+  keen-pbr-doh
   nlohmann_json::nlohmann_json
   ${KEEN_PBR_CURL_TARGET}
   PkgConfig::ZLIB

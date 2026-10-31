@@ -4,6 +4,9 @@
 #include "../dns/dnsmasq_access_policy.hpp"
 #include "../dns/keenetic_dns.hpp"
 #include "../dns/dns_txt_client.hpp"
+#include "../dns/doh_plan.hpp"
+#include "../dns/dns_router.hpp"
+#include "../dns/doh_support.hpp"
 #include "../log/logger.hpp"
 #ifdef WITH_API
 #include "../api/status_stream.hpp"
@@ -18,6 +21,31 @@
 #include <utility>
 
 namespace keen_pbr3 {
+
+int Daemon::invoke_resolver_with_dns_proxy(
+    const ResolverGenerationSnapshot& generation, const std::vector<std::string>& args) {
+    const auto& config = generation.config;
+    const DnsServerRegistry registry(config.dns.value_or(DnsConfig{}),
+                                     generation.keenetic_dns.snapshot);
+    DnsBalancerSettings settings;
+    settings.ipv6_enabled = generation.ipv6_policy.targets_enabled;
+    settings.listen_ip = kDohListenIp;
+    if (registry.proxy_uses_doh()) {
+        const auto ca = detect_ca_bundle();
+        if (!ca) throw DnsError("Install CA certificates to use DNS-over-HTTPS",
+                                "config.dns.doh_ca");
+        settings.doh_enabled = true;
+        settings.ca_path = ca->path;
+        settings.ca_is_directory = ca->is_directory;
+        settings.bootstrap = registry.bootstrap_servers();
+        settings.detour_marks = allocate_outbound_marks(
+            config.fwmark.value_or(FwmarkConfig{}),
+            config.outbounds.value_or(std::vector<Outbound>{}));
+    }
+    return dns_proxy_runtime_.apply(registry.proxy_groups(), settings, [this, &args] {
+        return hook_command_executor_(args);
+    });
+}
 
 namespace {
 

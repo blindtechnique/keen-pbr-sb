@@ -124,6 +124,14 @@ inline bool dns_rule_enabled(const DnsRule& rule) {
     return rule.enabled.value_or(true);
 }
 
+// Explicit arrays take precedence, including an invalid empty array. Never
+// silently revive a legacy server when the user cleared the new selection.
+inline std::vector<std::string> dns_rule_server_tags(const DnsRule& rule) {
+    if (rule.servers) return *rule.servers;
+    if (rule.server) return {*rule.server};
+    return {};
+}
+
 // --- JSON deserialization and validation ---
 
 Config parse_config(const std::string& json_str);

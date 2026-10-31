@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import runpy
 import unittest
@@ -40,9 +41,26 @@ class DiscordProfileTest(unittest.TestCase):
         for key in KEYS:
             custom = re.sub(rf"--new={key}\s+.*?(?=--new=|$)", "", custom, flags=re.S)
         self.assertEqual(custom.split(), self.base_values["NFQWS_ARGS_CUSTOM"].split())
+        base_args = self.values["NFQWS_BASE_ARGS"].split()
+        base_args.remove("--blob=quic_dbank:@/opt/etc/nfqws2/blobs/quic_initial_dbankcloud_ru.bin")
+        self.assertEqual(base_args, self.base_values["NFQWS_BASE_ARGS"].split())
         for profile in ("01 safe", "02 balanced"):
             text, _ = self.gen["build"](profile, self.gen["PROFILES"][profile])
             self.assertNotIn("_exp", text)
+
+    def test_discord_additions_preserve_nonexperimental_snapshot(self):
+        # Frozen immediately before the third Discord candidate was added.
+        # Comparing only two outputs of the same generator would miss an
+        # accidental simultaneous change to a shared tier or queue setting.
+        normalized = {k: v.split() for k, v in self.base_values.items()}
+        digest = hashlib.sha256(json.dumps(normalized, sort_keys=True).encode()).hexdigest()
+        self.assertEqual(digest, "59c47638497d1cd939eb6558bc6df1f55a6dd2377be147131e85ba91480993d2")
+        for profile, expected in (
+            ("01 safe", "2385602d7405f0997195854fd88514d6478602de00baf980a16f2fbe88ee85cc"),
+            ("02 balanced", "869052c4c4c16a2f99778a81adb3d50577b812ba9e1c6834657da5fb7ce9cfc8"),
+        ):
+            text, _ = self.gen["build"](profile, self.gen["PROFILES"][profile])
+            self.assertEqual(hashlib.sha256(text.encode()).hexdigest(), expected, profile)
 
     def test_only_declared_ports_domains_and_protocols_enter_experiment(self):
         tcp = self.block("discord_tcp_exp")
@@ -55,7 +73,7 @@ class DiscordProfileTest(unittest.TestCase):
         for block in (tcp, media):
             self.assertIn("--filter-l7=tls", block)
             self.assertIn("--hostlist-exclude=/opt/etc/nfqws2/lists/exclude.list", block)
-        self.assertIn("--filter-udp=50000-50099,19294-19344", udp)
+        self.assertIn("--filter-udp=50000-50100,19294-19344", udp)
         self.assertIn("--filter-l7=discord,stun", udp)
         self.assertFalse(any("--hostlist" in token for token in udp))
         custom = " ".join(self.values["NFQWS_ARGS_CUSTOM"].split())
@@ -93,25 +111,50 @@ class DiscordProfileTest(unittest.TestCase):
         self.assertEqual(actions, [
             "--lua-desync=fake:blob=quic_initial:repeats=6:strategy=1",
             "--lua-desync=fake:blob=quic_steam:optional:repeats=6:strategy=2",
+            "--lua-desync=fake:blob=quic_dbank:optional:repeats=6:strategy=3",
         ])
         path = SHARE / "nfqws-blobs/quic_initial_steamcommunity_com.bin"
         self.assertEqual(path.stat().st_size, 1200)
         self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), "2fe18b3bd20807d36704d0b072092ee49ae84edca907a4420ab9a0f0f28fddcf")
         self.assertIn(path.name, self.required)
         self.assertNotIn("ACTIVE_DISCORD", self.text)
-        self.assertEqual(self.required, self.base_required)
+        dbank = SHARE / "nfqws-blobs/quic_initial_dbankcloud_ru.bin"
+        self.assertEqual(dbank.stat().st_size, 1357)
+        self.assertEqual(hashlib.sha256(dbank.read_bytes()).hexdigest(), "f7a1c1cffc8f65bd47412b7ca5588653d21eec916bb79203c9914890a62874df")
+        self.assertEqual(self.required, sorted(self.base_required + [dbank.name]))
 
     def test_tcp_candidates_are_native_and_share_the_same_targets(self):
         for key in KEYS[:2]:
             actions = [t for t in self.block(key) if ":strategy=" in t]
-            self.assertEqual(set(re.search(r":strategy=(\d+)", t)[1] for t in actions), {"1", "2"})
+            self.assertEqual(set(re.search(r":strategy=(\d+)", t)[1] for t in actions), {"1", "2", "3"})
             self.assertEqual(actions[:2], self.gen["pool"](self.gen["TCP_TIERS"], 1))
-            self.assertEqual(actions[2:], [
+            self.assertEqual(actions[2:5], [
                 "--lua-desync=fake:blob=stun_fake:optional:tcp_seq=-10000:tcp_ack=-66000:repeats=6:strategy=2",
                 "--lua-desync=fake:blob=tls_google:optional:tcp_seq=-10000:tcp_ack=-66000:repeats=6:strategy=2",
                 "--lua-desync=multisplit:pos=1,midsld:strategy=2",
             ])
             self.assertFalse(any("badseq" in t or "dpi-desync" in t for t in actions))
+            third = [
+                "--lua-desync=fake:blob=tls_google:optional:tcp_seq=1000:tcp_ack=-66000:repeats=6:strategy=3",
+                "--lua-desync=multisplit:pos=2:strategy=3",
+            ]
+            if key == "discord_tcp_exp":
+                third.insert(0, "--lua-desync=fake:blob=stun_fake:optional:tcp_seq=1000:tcp_ack=-66000:repeats=6:strategy=3")
+            self.assertEqual(actions[5:], third, key)
+
+    def test_new_recipes_invalidate_only_the_three_experimental_pools(self):
+        revisions = dict(re.findall(r":key=([^:\s]+):kpbr_rev=([a-f0-9]+)",
+                                   self.values["NFQWS_ARGS_CUSTOM"]))
+        for key, old in (
+            ("discord_tcp_exp", "1970eefd84aa61bc"),
+            ("discord_media_tcp_exp", "b6326764b3f113d7"),
+            ("discord_udp_exp", "f91ba7ce218c3974"),
+        ):
+            self.assertNotEqual(revisions.pop(key), old, key)
+        self.assertEqual(revisions, {
+            "gv_tcp": "4b9e6ce0a92975fd", "yt_tcp": "96b488aa125cd228",
+            "yt_quic": "91b4ca6d3577b68d",
+        })
 
     def test_experiment_is_packaged_and_part_of_generator_parity(self):
         self.assertIn(EXPERIMENT, self.gate["GENERATED_PROFILES"])

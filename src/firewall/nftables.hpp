@@ -105,6 +105,8 @@ private:
         bool forward_udp_reject_chain_exists{false};
         bool dns_nat_chain_exists{false};
         bool snat_chain_exists{false};
+        bool intercept_dns_chain_exists{false};
+        bool intercept_l7_chain_exists{false};
         std::set<std::string> set_names;
         std::map<std::string, std::string> set_schemas;
     };

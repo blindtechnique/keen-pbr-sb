@@ -387,12 +387,13 @@ TEST_CASE("generate-resolver-config includes fallback server directives in confi
     DnsmasqGenerator gen(reg, streamer, route_cfg, dns_cfg, lists);
     const std::string output = run_generate(gen);
 
-    const auto primary_pos = output.find("server=1.1.1.1\n");
-    const auto backup_pos = output.find("server=9.9.9.9#5353\n");
-
-    CHECK(primary_pos != std::string::npos);
-    CHECK(backup_pos != std::string::npos);
-    CHECK(primary_pos < backup_pos);
+    CHECK(lines_with_prefix(output, "server=") ==
+          std::vector<std::string>{"server=127.0.0.89#5355"});
+    REQUIRE(reg.proxy_groups().size() == 1);
+    REQUIRE(reg.proxy_groups()[0].upstreams.size() == 2);
+    CHECK(reg.proxy_groups()[0].upstreams[0].ip == "1.1.1.1");
+    CHECK(reg.proxy_groups()[0].upstreams[1].ip == "9.9.9.9");
+    CHECK(reg.proxy_groups()[0].upstreams[1].port == 5353);
 }
 
 TEST_CASE("direct fallback metadata contains only direct global DNS without changing active rules") {
@@ -421,7 +422,10 @@ TEST_CASE("direct fallback metadata contains only direct global DNS without chan
     CHECK(lines_with_prefix(output, "# keen-pbr direct-fallback server=") ==
           std::vector<std::string>{"# keen-pbr direct-fallback server=77.88.8.8"});
     CHECK(lines_with_prefix(output, "server=") == std::vector<std::string>{
-        "server=77.88.8.8", "server=10.20.30.53", "server=/only.example/192.0.2.53"});
+        "server=127.0.0.89#5355", "server=/only.example/192.0.2.53"});
+    REQUIRE(registry.proxy_groups().size() == 1);
+    CHECK(registry.proxy_groups()[0].upstreams.size() == 2);
+    CHECK(registry.detour_servers("vpn-dns").front()->resolved_ip == "10.20.30.53");
     CHECK(generator.compute_config_hash() == extract_txt_hash(output));
 }
 
@@ -460,9 +464,13 @@ TEST_CASE("direct fallback metadata preserves custom ports and excludes self DNS
             expected.push_back("# keen-pbr direct-fallback server=2001:db8::53#5353");
         }
         CHECK(lines_with_prefix(output, "# keen-pbr direct-fallback server=") == expected);
-        CHECK(lines_with_prefix(output, "server=") == std::vector<std::string>{
-            "server=127.0.0.1", "server=127.1.2.3", "server=::1",
-            "server=127.0.0.1#40508", "server=9.9.9.9#5353", "server=2001:db8::53#5353"});
+        CHECK(lines_with_prefix(output, "server=") ==
+              std::vector<std::string>{"server=127.0.0.89#5355"});
+        REQUIRE(registry.proxy_groups().size() == 1);
+        REQUIRE(registry.proxy_groups()[0].upstreams.size() == 3);
+        CHECK(registry.proxy_groups()[0].upstreams[0].port == 40508);
+        CHECK(registry.proxy_groups()[0].upstreams[1].ip == "9.9.9.9");
+        CHECK(registry.proxy_groups()[0].upstreams[2].ip == "2001:db8::53");
         CHECK(generator.compute_config_hash() == extract_txt_hash(output));
     }
 }
@@ -497,7 +505,10 @@ TEST_CASE("direct fallback metadata uses the prepared Keenetic address order wit
               "# keen-pbr direct-fallback server=127.0.0.1#40508",
               "# keen-pbr direct-fallback server=127.0.0.1#40500"});
     CHECK(lines_with_prefix(output, "server=") == std::vector<std::string>{
-        "server=127.0.0.1#40508", "server=127.0.0.1#40500", "server=/only.example/192.0.2.53"});
+        "server=127.0.0.89#5355", "server=/only.example/192.0.2.53"});
+    REQUIRE(registry.proxy_groups().size() == 1);
+    CHECK(registry.proxy_groups()[0].upstreams[0].port == 40508);
+    CHECK(registry.proxy_groups()[0].upstreams[1].port == 40500);
     CHECK(generator.compute_config_hash() == extract_txt_hash(output));
     CHECK(fetch_count == 0);
 }
@@ -756,11 +767,12 @@ TEST_CASE("generate-resolver-config includes all keenetic fallback servers in se
     DnsmasqGenerator gen(reg, streamer, route_cfg, dns_cfg, lists);
     const std::string output = run_generate(gen);
 
-    const auto dot_pos = output.find("server=127.0.0.1#40500\n");
-    const auto doh_pos = output.find("server=127.0.0.1#40508\n");
-    CHECK(dot_pos != std::string::npos);
-    CHECK(doh_pos != std::string::npos);
-    CHECK(dot_pos < doh_pos);
+    CHECK(lines_with_prefix(output, "server=") ==
+          std::vector<std::string>{"server=127.0.0.89#5355"});
+    REQUIRE(reg.proxy_groups().size() == 1);
+    REQUIRE(reg.proxy_groups()[0].upstreams.size() == 2);
+    CHECK(reg.proxy_groups()[0].upstreams[0].port == 40500);
+    CHECK(reg.proxy_groups()[0].upstreams[1].port == 40508);
     CHECK(output.find("server=198.51.100.10\n") == std::string::npos);
     CHECK(output.find("# Keenetic DNS is used:\n") != std::string::npos);
     CHECK(output.find("# 127.0.0.1:40500 -> DoT | tls://resolver.example\n") != std::string::npos);
@@ -803,8 +815,10 @@ TEST_CASE("generate-resolver-config preserves scoped Keenetic DNS policy over gl
         registry, streamer, route_cfg, dns_cfg, lists);
     const std::string output = run_generate(generator);
 
-    CHECK(output.find("server=127.0.0.1#40500\n") != std::string::npos);
-    CHECK(output.find("server=8.8.8.8\n") != std::string::npos);
+    CHECK(output.find("\nserver=127.0.0.89#5355\n") != std::string::npos);
+    REQUIRE(registry.proxy_groups().size() == 1);
+    CHECK(registry.proxy_groups()[0].upstreams[0].port == 40500);
+    CHECK(registry.proxy_groups()[0].upstreams[1].ip == "8.8.8.8");
     CHECK(output.find(
               "server=/youtube.com/127.0.0.1#40508\n") !=
           std::string::npos);
@@ -1167,8 +1181,11 @@ TEST_CASE("generate-resolver-config includes all keenetic dns rule servers") {
     DnsmasqGenerator gen(reg, streamer, route_cfg, dns_cfg, lists);
     const std::string output = run_generate(gen);
 
-    CHECK(output.find("server=/example.com/127.0.0.1#40500\n") != std::string::npos);
-    CHECK(output.find("server=/example.com/127.0.0.1#40508\n") != std::string::npos);
+    CHECK(output.find("server=/example.com/127.0.0.89#5355\n") != std::string::npos);
+    REQUIRE(reg.proxy_groups().size() == 1);
+    REQUIRE(reg.proxy_groups()[0].upstreams.size() == 2);
+    CHECK(reg.proxy_groups()[0].upstreams[0].port == 40500);
+    CHECK(reg.proxy_groups()[0].upstreams[1].port == 40508);
     CHECK(output.find("server=/example.com/198.51.100.10\n") == std::string::npos);
 }
 

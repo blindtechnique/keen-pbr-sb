@@ -1,3 +1,4 @@
+import { formatDnsRuleServers } from "@/lib/dns-rule-servers"
 import { useQuery } from "@tanstack/react-query"
 import { useMemo } from "react"
 
@@ -46,6 +47,7 @@ function configRelationshipFingerprint(
       servers: config.dns?.servers ?? [],
       rules: config.dns?.rules ?? [],
       fallback: config.dns?.fallback ?? [],
+      bootstrap: config.dns?.bootstrap ?? [],
     },
   })
 }
@@ -70,9 +72,10 @@ function dependencyLabel(reference: DependencyReference, config: ConfigObject) {
     case "dns_rule": {
       const rule = Number.isInteger(index) ? config.dns?.rules?.[index] : null
       return rule
-        ? `${getDnsRuleDisplayName(rule, index)} → ${
-            dnsServerDisplayNames.get(rule.server) ?? rule.server
-          }`
+        ? `${getDnsRuleDisplayName(rule, index)} → ${formatDnsRuleServers(
+            rule,
+            dnsServerDisplayNames
+          )}`
         : `DNS ${index + 1}`
     }
     case "outbound_group":

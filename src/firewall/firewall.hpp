@@ -2,6 +2,7 @@
 
 #include "ppe_deoffload.hpp"
 #include "port_spec_util.hpp"
+#include "interception.hpp"
 
 #include <atomic>
 #include <cstdint>
@@ -441,6 +442,29 @@ class Firewall {
 public:
     virtual ~Firewall() = default;
 
+    void set_interception_runtime(std::shared_ptr<FirewallInterceptionRuntime> runtime) {
+        interception_runtime_ = std::move(runtime);
+    }
+    std::shared_ptr<FirewallInterceptionUpdate> begin_interception_update() {
+        return interception_runtime_ ? interception_runtime_->begin_update() : nullptr;
+    }
+    void set_interception_hooks(InterceptionHooks hooks) { interception_hooks_ = hooks; }
+    InterceptionHooks interception_hooks() const { return interception_hooks_; }
+    InterceptionHealth interception_health() const {
+        return interception_runtime_ ? interception_runtime_->health() : InterceptionHealth{};
+    }
+    // The existing STOP owner calls backend cleanup. Invalidate/pause learning
+    // first, detach the backend hooks, and only then drain/unbind listeners.
+    struct InterceptionStop {
+        std::shared_ptr<FirewallInterceptionRuntime> runtime;
+        std::shared_ptr<FirewallInterceptionUpdate> update;
+        ~InterceptionStop() { update.reset(); if (runtime) runtime->stop(); }
+    };
+    InterceptionStop begin_interception_stop() {
+        interception_hooks_ = {};
+        return {interception_runtime_, begin_interception_update()};
+    }
+
     // Start a new buffered apply attempt. Backends may select attempt-scoped
     // physical names before sets and rules are queued.
     virtual void prepare_apply(FirewallApplyMode mode) { (void)mode; }
@@ -752,6 +776,8 @@ protected:
     PpeDeoffloadDesired ppe_deoffload_desired_;
 
 private:
+    std::shared_ptr<FirewallInterceptionRuntime> interception_runtime_;
+    InterceptionHooks interception_hooks_;
     mutable std::atomic<std::uint64_t>
         meta_udp443_publication_epoch_{0U};
 };

@@ -1,3 +1,4 @@
+import { getDnsRuleServers } from "@/lib/dns-rule-servers"
 import { useForm } from "@tanstack/react-form"
 import { useQueryClient } from "@tanstack/react-query"
 import { useStore } from "@tanstack/react-store"
@@ -389,9 +390,12 @@ function ListForm({
   // ссылкой в «Правила». То же — редкий случай нескольких правил на список.
   const dnsRuleEditable =
     dnsRulesForList.length <= 1 &&
-    dnsRulesForList.every(({ rule }) => (rule.list ?? []).length === 1)
+    dnsRulesForList.every(
+      ({ rule }) =>
+        (rule.list ?? []).length === 1 && getDnsRuleServers(rule).length <= 1
+    )
   const currentDnsServer = dnsRuleEditable
-    ? (dnsRulesForList[0]?.rule.server ?? "")
+    ? (getDnsRuleServers(dnsRulesForList[0]?.rule)[0] ?? "")
     : ""
   const [initialDnsServerForList] = useState(currentDnsServer)
   const [dnsServerForList, setDnsServerForList] = useState(

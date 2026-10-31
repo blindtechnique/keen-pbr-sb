@@ -33,7 +33,7 @@ describe("DNS rule semantic dirty state", () => {
 
     expect(normalizeDnsRuleDraft(draft)).toEqual({
       enabled: true,
-      server: "secure",
+      servers: ["secure"],
       list: ["privacy"],
       allow_domain_rebinding: false,
     })
@@ -69,7 +69,7 @@ describe("DNS rule semantic dirty state", () => {
     })
     const equivalent = {
       ...baseline,
-      server: " secure ",
+      servers: [" secure "],
       lists: ["telemetry", " privacy ", "privacy"],
     }
 

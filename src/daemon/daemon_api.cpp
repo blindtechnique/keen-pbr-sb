@@ -1962,6 +1962,7 @@ void Daemon::setup_api() {
                 runtime_snapshot.resolver_config_sync_state;
             service_health.config_is_draft = config_store_.config_is_draft();
             service_health.lifecycle_operation = lifecycle_operation_store_.snapshot();
+            service_health.interception = firewall_->interception_health();
             return service_health;
         },
         [this]() {

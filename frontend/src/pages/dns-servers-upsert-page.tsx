@@ -38,6 +38,15 @@ import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
+import { MultiSelectList } from "@/components/shared/multi-select-list"
+import { createDnsServerDisplayNameMap } from "@/lib/dns-display"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { Checkbox } from "@/components/ui/checkbox"
 import { DnsPresetPicker } from "@/components/dns/dns-preset-picker"
 import {
@@ -61,6 +70,8 @@ import {
   getDnsServerDraft,
   getDnsServerPresetTransition,
   normalizeDnsAddress,
+  normalizeDohUrl,
+  normalizeDohIps,
   normalizePlainDnsTemplateAddress,
   normalizeDnsServerDraftForComparison,
   withSavedPlainDnsTemplate,
@@ -77,6 +88,8 @@ const DNS_SERVER_FIELD_NAMES = {
   address: "address",
   detour: "detour",
   domains: "domains",
+  ips: "ips",
+  bootstrap: "bootstrap",
 } as const
 
 type DnsServerFieldName =
@@ -107,7 +120,10 @@ export function DnsServerUpsertPage({
     existingServer?.display_name ??
     findDnsPresetByAddress(existingServer?.address)?.name ??
     existingServer?.tag
-  const initialDraft = getDnsServerDraft(existingServer)
+  const initialDraft = getDnsServerDraft(
+    existingServer,
+    config?.dns?.bootstrap ?? []
+  )
 
   if (mode === "edit" && !existingServer && !configQuery.isLoading) {
     return (
@@ -225,7 +241,11 @@ function DnsServerForm({
       if (!config) {
         return
       }
-      if (presetSelection === "custom" && customSecondaryInvalid) {
+      if (
+        value.type === DnsServerType.static &&
+        presetSelection === "custom" &&
+        customSecondaryInvalid
+      ) {
         setOperationError(null)
         setApiErrorMessage(
           t("pages.dnsServerUpsert.validation.templateAddressInvalid")
@@ -242,7 +262,10 @@ function DnsServerForm({
           ? normalizedCustomSecondaryAddress
           : selectedPreset?.secondaryAddress
       const backupDraft =
-        mode === "create" && includeBackup && backupAddress
+        mode === "create" &&
+        value.type === DnsServerType.static &&
+        includeBackup &&
+        backupAddress
           ? {
               displayName: t(
                 "pages.dnsServerUpsert.presets.backupDisplayName",
@@ -264,10 +287,12 @@ function DnsServerForm({
         backupDraft
       )
       if (!updatedConfig) {
+        setApiErrorMessage(t("doh.invalidFields"))
         return
       }
       if (
         mode === "create" &&
+        value.type === DnsServerType.static &&
         presetSelection === "custom" &&
         saveCustomTemplate
       ) {
@@ -521,9 +546,55 @@ function DnsServerForm({
         <form.Subscribe selector={(state) => state.values.type}>
           {(type) => {
             const isKeeneticDns = type === DnsServerType.keenetic
+            const isDoh = type === DnsServerType.doh
+            const names = createDnsServerDisplayNameMap(configServers)
 
             return (
               <>
+                <form.Field name="type">
+                  {(field) => (
+                    <Field>
+                      <FieldLabel htmlFor="dns-server-type">
+                        {t("doh.type")}
+                      </FieldLabel>
+                      <FieldContent>
+                        <Select
+                          value={field.state.value}
+                          onValueChange={(value) => {
+                            if (
+                              value !== DnsServerType.static &&
+                              value !== DnsServerType.doh &&
+                              value !== DnsServerType.keenetic
+                            )
+                              return
+                            field.handleChange(value)
+                            setPresetSelection("custom")
+                            setIncludeBackup(false)
+                            setSaveCustomTemplate(false)
+                            setCustomSecondaryAddress("")
+                          }}
+                        >
+                          <SelectTrigger id="dns-server-type">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value={DnsServerType.static}>
+                              {t("doh.plain")}
+                            </SelectItem>
+                            <SelectItem value={DnsServerType.doh}>
+                              {t("doh.https")}
+                            </SelectItem>
+                            {isKeeneticDns ? (
+                              <SelectItem value={DnsServerType.keenetic}>
+                                Keenetic
+                              </SelectItem>
+                            ) : null}
+                          </SelectContent>
+                        </Select>
+                      </FieldContent>
+                    </Field>
+                  )}
+                </form.Field>
                 {isKeeneticDns ? (
                   <Field>
                     <FieldContent>
@@ -545,7 +616,12 @@ function DnsServerForm({
                       fieldApi.form.getFieldValue("type") ===
                       DnsServerType.keenetic
                         ? undefined
-                        : (getAddressError(value) ?? undefined),
+                        : fieldApi.form.getFieldValue("type") ===
+                            DnsServerType.doh
+                          ? normalizeDohUrl(value)
+                            ? undefined
+                            : t("doh.urlError")
+                          : (getAddressError(value) ?? undefined),
                   }}
                 >
                   {(field) => {
@@ -558,7 +634,9 @@ function DnsServerForm({
                     return (
                       <Field invalid={Boolean(error)}>
                         <FieldLabel htmlFor="dns-server-address">
-                          {t("pages.dnsServerUpsert.fields.address")}
+                          {isDoh
+                            ? t("doh.url")
+                            : t("pages.dnsServerUpsert.fields.address")}
                         </FieldLabel>
                         <FieldContent>
                           <Input
@@ -581,15 +659,21 @@ function DnsServerForm({
                                 )
                               }
                             }}
-                            placeholder={t(
-                              "pages.dnsServerUpsert.fields.addressPlaceholder"
-                            )}
+                            placeholder={
+                              isDoh
+                                ? "https://dns.example/dns-query"
+                                : t(
+                                    "pages.dnsServerUpsert.fields.addressPlaceholder"
+                                  )
+                            }
                             value={field.state.value}
                           />
                           <FieldHint
-                            description={t(
-                              "pages.dnsServerUpsert.fields.addressHint"
-                            )}
+                            description={
+                              isDoh
+                                ? t("doh.urlHint")
+                                : t("pages.dnsServerUpsert.fields.addressHint")
+                            }
                             error={error}
                           />
                         </FieldContent>
@@ -598,7 +682,79 @@ function DnsServerForm({
                   }}
                 </form.Field>
 
-                {presentation === "page" &&
+                {isDoh ? (
+                  <>
+                    <form.Field
+                      name="ips"
+                      validators={{
+                        onChange: ({ value }) =>
+                          normalizeDohIps(value ?? "")
+                            ? undefined
+                            : t("doh.ipsError"),
+                      }}
+                    >
+                      {(field) => (
+                        <Field invalid={field.state.meta.errors.length > 0}>
+                          <FieldLabel htmlFor="dns-doh-ips">
+                            {t("doh.ips")}
+                          </FieldLabel>
+                          <FieldContent>
+                            <Textarea
+                              id="dns-doh-ips"
+                              value={field.state.value ?? ""}
+                              onChange={(event) =>
+                                field.handleChange(event.target.value)
+                              }
+                            />
+                            <FieldHint
+                              description={t("doh.ipsHint")}
+                              error={getFirstFieldError(
+                                field.state.meta.errors
+                              )}
+                            />
+                          </FieldContent>
+                        </Field>
+                      )}
+                    </form.Field>
+                    <form.Field name="bootstrap">
+                      {(field) => (
+                        <Field>
+                          <FieldLabel>{t("doh.bootstrap")}</FieldLabel>
+                          <FieldContent>
+                            <MultiSelectList
+                              allowReorder
+                              maxItems={8}
+                              options={configServers
+                                .filter(
+                                  (server) =>
+                                    (server.type ?? DnsServerType.static) ===
+                                      DnsServerType.static &&
+                                    server.tag !== serverTag
+                                )
+                                .map((server) => server.tag)}
+                              value={field.state.value ?? []}
+                              onChange={field.handleChange}
+                              addLabel={t("doh.selectBootstrap")}
+                              renderItem={(tag) => names.get(tag) ?? tag}
+                              getSearchText={(tag) =>
+                                [names.get(tag), tag].join(" ")
+                              }
+                            />
+                            <FieldHint
+                              description={t("doh.bootstrapHint")}
+                              error={getFirstFieldError(
+                                field.state.meta.errors
+                              )}
+                            />
+                          </FieldContent>
+                        </Field>
+                      )}
+                    </form.Field>
+                  </>
+                ) : null}
+
+                {!isDoh &&
+                presentation === "page" &&
                 mode === "create" &&
                 presetSelection === "custom" ? (
                   <>
@@ -905,6 +1061,13 @@ function resolveDnsServerFieldPath(
   tag: string
 ): DnsServerFieldName | undefined {
   const normalizedTag = tag.trim()
+  if (path === "dns.bootstrap" || path.startsWith("dns.bootstrap."))
+    return DNS_SERVER_FIELD_NAMES.bootstrap
+  if (
+    path === `dns.servers.${normalizedTag}.ips` ||
+    path.startsWith(`dns.servers.${normalizedTag}.ips.`)
+  )
+    return DNS_SERVER_FIELD_NAMES.ips
 
   if (path === "dns.servers") {
     return DNS_SERVER_FIELD_NAMES.tag

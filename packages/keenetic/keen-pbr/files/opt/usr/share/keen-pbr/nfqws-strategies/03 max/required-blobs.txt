@@ -2,6 +2,7 @@ http_iana_org.bin
 quic_initial_4.bin
 quic_initial_5.bin
 quic_initial_6.bin
+quic_initial_dbankcloud_ru.bin
 quic_initial_steamcommunity_com.bin
 quic_initial_www_google_com.bin
 stun.bin

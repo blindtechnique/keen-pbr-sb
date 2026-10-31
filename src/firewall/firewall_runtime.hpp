@@ -28,6 +28,7 @@ namespace keen_pbr3 {
 // narrower: staging never publishes the Meta UDP/443 filter and never deletes
 // conntrack tuples before the caller completes specialized preflight.
 struct StagedRuntimeFirewall {
+    std::shared_ptr<FirewallInterceptionUpdate> interception_update;
     // The realized rule-state snapshot to store for verification and status.
     std::vector<RuleState> rule_states;
     // Which list content this transaction was built from.

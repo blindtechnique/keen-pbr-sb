@@ -274,6 +274,7 @@ bool Daemon::run_system_resolver_hook(std::string_view action,
     const auto args =
         build_system_resolver_hook_args(active_config_snapshot_->config, action, attempt_id);
     if (args.empty()) {
+        if (action == "deactivate") dns_proxy_runtime_.stop();
         return true;
     }
 
@@ -283,8 +284,16 @@ bool Daemon::run_system_resolver_hook(std::string_view action,
         command += index == 2 ? "<resolver-attempt>" : args[index];
     }
 
-    auto execute_hook = [this, args] {
+    const auto dns_generation = resolver_generation_snapshot_;
+    auto execute_hook = [this, args, action = std::string(action), dns_generation] {
         KPBR_LOCK_GUARD(system_resolver_hook_mutex_);
+        if (action == "deactivate") {
+            return dns_proxy_runtime_.deactivate([this, &args] {
+                return hook_command_executor_(args);
+            });
+        }
+        if ((action == "reload" || action == "activate") && dns_generation)
+            return invoke_resolver_with_dns_proxy(*dns_generation, args);
         return hook_command_executor_(args);
     };
 
@@ -4299,9 +4308,9 @@ void Daemon::start_resolver_reload_retry_attempt(
         operation.attempt_id = attempt_id;
         operation.timeout = std::chrono::seconds{15};
         operation.lifetime = std::move(lifetime);
-        operation.invoke_hook = [this, args]() {
+        operation.invoke_hook = [this, args, generation]() {
             KPBR_LOCK_GUARD(system_resolver_hook_mutex_);
-            return hook_command_executor_(args);
+            return invoke_resolver_with_dns_proxy(*generation, args);
         };
 
         const auto request =
@@ -5648,6 +5657,19 @@ void Daemon::execute_runtime_background_point_mutation(
 
     try {
         switch (target.kind) {
+        case RuntimeBackgroundPointMutationKind::intercept_cleanup: {
+            const auto& batch = std::get<InterceptCleanupBatch>(target.payload);
+            result.payload = InterceptCleanupResult{};
+            if (running_.load(std::memory_order_acquire) && routing_runtime_active() &&
+                runtime_generation_.load(std::memory_order_acquire) == batch.runtime_generation) {
+                result.generation_revalidated = true;
+                const auto cleanup = execute_intercept_cleanup_batch(batch);
+                result.mutation_boundary_entered = cleanup.attempted != 0;
+                result.payload = cleanup;
+            }
+            result.completed = true;
+            return;
+        }
         case RuntimeBackgroundPointMutationKind::udp_call_affinity: {
             const auto& operation =
                 std::get<RuntimeUdpCallAffinityPointMutationTarget>(

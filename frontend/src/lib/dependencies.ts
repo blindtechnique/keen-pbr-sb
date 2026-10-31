@@ -1,4 +1,5 @@
 import type { ConfigObject } from "@/api/generated/model/configObject"
+import { getDnsRuleServers } from "@/lib/dns-rule-servers"
 import { getDnsRuleDisplayName } from "@/lib/dns-display"
 import { getListReferenceLabel } from "@/lib/list-display"
 import {
@@ -84,10 +85,11 @@ export function findBrokenReferences(
     }
   })
   ;(config.dns?.rules ?? []).forEach((rule, index) => {
-    if (!dnsServers.has(rule.server)) {
+    for (const tag of getDnsRuleServers(rule)) {
+      if (dnsServers.has(tag)) continue
       add({
-        id: `dns:${index}:server:${rule.server}`,
-        label: `${getDnsRuleDisplayName(rule, index)} → ${rule.server}`,
+        id: `dns:${index}:server:${tag}`,
+        label: `${getDnsRuleDisplayName(rule, index)} → ${tag}`,
         href: getRuleEditHref("dns-rules", rule, index),
       })
     }

@@ -14,10 +14,12 @@ import { pickUnknownConfigProperties } from "@/lib/config-unknown-fields"
 export type DnsServerDraft = {
   displayName: string
   tag: string
-  type: typeof DnsServerType.static | typeof DnsServerType.keenetic
+  type: DnsServerType
   address: string
   detour: string
   domains: string
+  ips?: string
+  bootstrap?: string[]
 }
 
 export type DnsServerBackupDraft = {
@@ -46,9 +48,12 @@ export const emptyDnsServerDraft: DnsServerDraft = {
   domains: "",
 }
 
-export function getDnsServerDraft(server?: DnsServer): DnsServerDraft {
+export function getDnsServerDraft(
+  server?: DnsServer,
+  bootstrap: string[] = []
+): DnsServerDraft {
   if (!server) {
-    return emptyDnsServerDraft
+    return { ...emptyDnsServerDraft, bootstrap }
   }
 
   return {
@@ -58,6 +63,10 @@ export function getDnsServerDraft(server?: DnsServer): DnsServerDraft {
     address: server.address ?? "",
     detour: server.detour ?? "",
     domains: (server.domains ?? []).join("\n"),
+    ...(server.type === DnsServerType.doh
+      ? { ips: (server.ips ?? []).join("\n") }
+      : {}),
+    bootstrap,
   }
 }
 
@@ -112,12 +121,17 @@ export function buildUpdatedConfigForDnsServerUpsert(
   const normalizedDisplayName = draft.displayName.trim()
   const domains = normalizeDnsDomainBindings(draft.domains)
   const isKeeneticDns = draft.type === DnsServerType.keenetic
+  const isDoh = draft.type === DnsServerType.doh
+  const ips = isDoh ? normalizeDohIps(draft.ips ?? "") : []
   const normalizedAddress = isKeeneticDns
     ? null
-    : normalizeDnsAddress(draft.address)
+    : isDoh
+      ? normalizeDohUrl(draft.address)
+      : normalizeDnsAddress(draft.address)
 
   if (
     !domains ||
+    !ips ||
     !normalizedTag ||
     !normalizedDisplayName ||
     normalizedDisplayName.length > 80 ||
@@ -140,6 +154,7 @@ export function buildUpdatedConfigForDnsServerUpsert(
     ...(normalizedAddress ? { address: normalizedAddress } : {}),
     ...(normalizedDetour ? { detour: normalizedDetour } : {}),
     ...(domains.length ? { domains } : {}),
+    ...(isDoh && ips.length ? { ips } : {}),
   }
   let nextServers =
     mode === "edit"
@@ -202,6 +217,9 @@ export function buildUpdatedConfigForDnsServerUpsert(
     dns: {
       ...(config.dns ?? {}),
       servers: nextServers,
+      ...(isDoh
+        ? { bootstrap: draft.bootstrap ?? config.dns?.bootstrap ?? [] }
+        : {}),
     },
   }
 }
@@ -271,7 +289,45 @@ export function normalizeDnsServerDraftForComparison(draft: DnsServerDraft) {
     address: isKeeneticDns ? "" : (normalizedAddress ?? draft.address.trim()),
     detour: isKeeneticDns ? "" : draft.detour.trim(),
     domains: normalizeDnsDomainBindings(draft.domains) ?? draft.domains.trim(),
+    ...(draft.type === DnsServerType.doh
+      ? {
+          ips: normalizeDohIps(draft.ips ?? "") ?? draft.ips,
+          bootstrap: draft.bootstrap ?? [],
+        }
+      : {}),
   }
+}
+
+export function normalizeDohUrl(value: string) {
+  const text = value.trim()
+  if (
+    !text.startsWith("https://") ||
+    /[\s\\#]/.test(text) ||
+    text.length > 2048
+  )
+    return null
+  try {
+    const url = new URL(text)
+    if (
+      !url.hostname ||
+      url.username ||
+      url.password ||
+      url.hash ||
+      url.port === "0"
+    )
+      return null
+    return text
+  } catch {
+    return null
+  }
+}
+
+export function normalizeDohIps(value: string): string[] | null {
+  const ips = [...new Set(value.split(/[\s,]+/).filter(Boolean))]
+  return ips.length <= 16 &&
+    ips.every((ip) => isValidIpv4(ip) || isValidIpv6(ip))
+    ? ips
+    : null
 }
 
 export function normalizeDnsAddress(value: string) {

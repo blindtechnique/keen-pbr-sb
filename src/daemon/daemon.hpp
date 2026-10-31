@@ -22,6 +22,7 @@
 #include "../config/route_failure_policy.hpp"
 #include "../dns/keenetic_dns.hpp"
 #include "../dns/dns_txt_client.hpp"
+#include "../dns/dns_proxy_runtime.hpp"
 #include "config_store.hpp"
 #include "config_reload_coordinator.hpp"
 #include "conntrack_cleanup_coordinator.hpp"
@@ -1228,6 +1229,9 @@ private:
     // Every bounded observer/maintenance mutation receives one immutable
     // identity before it enters the shared firewall owner.
     std::uint64_t background_point_mutation_serial_{0U};
+    std::shared_ptr<InterceptCleanupChannel> intercept_cleanup_channel_;
+    void dispatch_intercept_cleanup() noexcept;
+    InterceptCleanupResult execute_intercept_cleanup_batch(const InterceptCleanupBatch& batch) noexcept;
     // Every published exact reset owns a generation- and rule-fenced timer.
     // A transient removal failure is retried without allowing an older timer
     // to retire a later window for the same five-tuple.
@@ -1413,6 +1417,9 @@ private:
     int internal_vpn_catalog_refresh_retry_task_id_{-1};
     std::size_t internal_vpn_catalog_refresh_retry_attempt_{0};
     TracedMutex system_resolver_hook_mutex_;
+    DnsProxyRuntime dns_proxy_runtime_;
+    int invoke_resolver_with_dns_proxy(const ResolverGenerationSnapshot& generation,
+                                      const std::vector<std::string>& args);
     // Legacy cache-publication serialization. Resolver/firewall consumers no
     // longer hold the shared side while dnsmasq performs its IPC stream: each
     // transaction owns an immutable CacheManager generation lease instead.

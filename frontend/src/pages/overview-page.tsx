@@ -24,6 +24,7 @@ import {
   selectOverviewRoutingHealth,
 } from "@/components/overview/routing-health-result"
 import { DnsCheckWidget } from "@/components/overview/dns-check-widget"
+import { InterceptionPanel } from "@/components/overview/interception-panel"
 import { OutboundStateList } from "@/components/overview/outbound-state-list"
 import { RouteTrafficShareCard } from "@/components/overview/route-traffic-share-card"
 import { ServicesStatusCard } from "@/components/overview/services-status-card"
@@ -319,6 +320,14 @@ export function OverviewPage() {
             }
             configIsDraft={Boolean(configIsDraft)}
             onStatusChange={setDnsCheckStatus}
+          />
+          <InterceptionPanel
+            health={
+              serviceHealthQuery.isError
+                ? undefined
+                : serviceHealth?.interception
+            }
+            configIsDraft={Boolean(configIsDraft)}
           />
         </div>
 

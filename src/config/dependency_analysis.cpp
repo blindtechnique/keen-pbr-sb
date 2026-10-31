@@ -241,17 +241,20 @@ DependencyAnalysis analyze_dependencies(
                     }
                 }
             }
-            if (removed_dns_servers.find(rule.server) !=
-                removed_dns_servers.end()) {
+            const auto server_tags = dns_rule_server_tags(rule);
+            const bool all_servers_removed = std::all_of(server_tags.begin(), server_tags.end(),
+                [&](const std::string& tag) { return removed_dns_servers.count(tag) != 0U; });
+            for (const auto& tag : server_tags) {
+                if (removed_dns_servers.count(tag) == 0U) continue;
                 add_reference(
                     analysis,
                     seen_references,
-                    {{DependencyEntityKind::DnsServer, rule.server, false},
+                    {{DependencyEntityKind::DnsServer, tag, false},
                      DependencyDependentKind::DnsRule,
                      rule_id,
                      DependencyRelation::UsesDnsServer,
-                     DependencyConsequence::Delete,
-                     "dns.rules[" + rule_id + "].server",
+                     all_servers_removed ? DependencyConsequence::Delete : DependencyConsequence::Modify,
+                     "dns.rules[" + rule_id + "]." + (rule.servers ? "servers" : "server"),
                      "/dns-rules/" + rule_id + "/edit"});
             }
         }
@@ -277,6 +280,20 @@ DependencyAnalysis analyze_dependencies(
         }
     }
 
+    if (config.dns && config.dns->bootstrap && config.dns->servers) {
+        for (const auto& tag : *config.dns->bootstrap) {
+            if (removed_dns_servers.count(tag) == 0U) continue;
+            for (const auto& server : *config.dns->servers) {
+                if (server.type.value_or(api::DnsServerType::STATIC) != api::DnsServerType::DOH ||
+                    (server.ips && !server.ips->empty())) continue;
+                add_reference(analysis, seen_references,
+                    {{DependencyEntityKind::DnsServer, tag, false},
+                     DependencyDependentKind::DnsServer, server.tag,
+                     DependencyRelation::UsesDnsServer, DependencyConsequence::Modify,
+                     "dns.bootstrap", "/dns-servers/" + server.tag + "/edit"});
+            }
+        }
+    }
     if (config.dns && config.dns->fallback) {
         for (const auto& server_tag : *config.dns->fallback) {
             if (removed_dns_servers.find(server_tag) ==

@@ -7,6 +7,7 @@
  */
 import type { HealthResponseRuntimeState } from './healthResponseRuntimeState';
 import type { HealthResponseStatus } from './healthResponseStatus';
+import type { InterceptionHealth } from './interceptionHealth';
 import type { LifecycleOperation } from './lifecycleOperation';
 import type { ResolverConfigProbeStatus } from './resolverConfigProbeStatus';
 import type { ResolverConfigSyncState } from './resolverConfigSyncState';
@@ -59,4 +60,5 @@ export interface HealthResponse {
    */
   config_is_draft: boolean;
   lifecycle_operation?: LifecycleOperation;
+  interception?: InterceptionHealth;
 }

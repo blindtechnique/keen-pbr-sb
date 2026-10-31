@@ -1,3 +1,4 @@
+import { getDnsRuleServers } from "@/lib/dns-rule-servers"
 import type { ConfigObject } from "@/api/generated/model/configObject"
 import { getOperationErrorPresentation } from "@/lib/api-errors"
 import { stableJsonStringify } from "@/lib/semantic-json"
@@ -57,7 +58,7 @@ export function summarizeConfigEffects(
     .filter((rule) => rule.enabled !== false)
     .map((rule) => ({
       list: setMembers(rule.list),
-      server: rule.server,
+      servers: getDnsRuleServers(rule),
       allow_domain_rebinding: rule.allow_domain_rebinding ?? false,
     }))
   const dnsLists = Object.fromEntries(

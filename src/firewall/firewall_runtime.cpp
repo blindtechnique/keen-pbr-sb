@@ -1,4 +1,7 @@
 #include "firewall_runtime.hpp"
+#include "../intercept/intercept_cleanup.hpp"
+#include "interception_rules.hpp"
+#include "../config/dns_learning.hpp"
 #include "../runtime/nfqws_runtime_contract.hpp"
 
 #include "../runtime/meta_udp_443_policy.hpp"
@@ -456,6 +459,8 @@ static StagedRuntimeFirewall stage_runtime_firewall_with_streamer(
     firewall.set_global_prefilter(std::move(prefilter));
     firewall.set_fwmark_mask(
         fwmark_mask_value(config.fwmark.value_or(FwmarkConfig{})));
+    auto interception_update = firewall.begin_interception_update();
+    firewall.set_interception_hooks({});
     firewall.prepare_apply(mode);
 
     static const std::map<std::string, ListConfig> empty_lists;
@@ -468,6 +473,13 @@ static StagedRuntimeFirewall stage_runtime_firewall_with_streamer(
     // policy must authorize family coverage only from this second view.
     std::map<std::string, ListSetUsage> applied_list_usage;
     AppliedListContentState candidate_list_content_state;
+    auto cleanup_policy = std::make_shared<InterceptCleanupPolicy>();
+    cleanup_policy->owned_mask = firewall.fwmark_mask();
+    cleanup_policy->split_negated_addresses = firewall.backend() == FirewallBackend::iptables;
+    for (const auto& [tag, mark] : outbound_marks) {
+        if (mark != 0 && (mark & ~cleanup_policy->owned_mask) == 0)
+            cleanup_policy->owned_marks.insert(mark);
+    }
 
     for (size_t rule_idx = 0; rule_idx < route_rules.size(); ++rule_idx) {
         const auto& rule = route_rules[rule_idx];
@@ -488,6 +500,11 @@ static StagedRuntimeFirewall stage_runtime_firewall_with_streamer(
                               int family = AF_UNSPEC) {
             FirewallRuleCriteria rule_criteria = criteria;
             rule_criteria.dst_set_name = dst_set_name;
+            auto cleanup_criteria = rule_criteria;
+            cleanup_criteria.family = family;
+            if (is_blackhole || is_pass || rule_state.mark_for_family(family) != 0)
+                cleanup_policy->rules.push_back({std::move(cleanup_criteria),
+                    is_blackhole || is_pass ? 0U : rule_state.mark_for_family(family)});
 
             if (is_blackhole) {
                 firewall.create_drop_rule(rule_criteria);
@@ -832,6 +849,57 @@ static StagedRuntimeFirewall stage_runtime_firewall_with_streamer(
         staged.list_usage = std::move(applied_list_usage);
     }
     staged.mode = mode;
+    if (interception_update) {
+        auto capture_scope = firewall.global_prefilter();
+        // Keep explicit LAN interfaces separate from verified native ingress;
+        // pooled services require interface + client prefix, not all of br0.
+        capture_scope.inbound_interfaces = route_config.inbound_interfaces;
+        const auto verified_targets = effective_internal_vpn_targets != nullptr
+            ? *effective_internal_vpn_targets
+            : effective_internal_vpn_servers != nullptr
+                ? internal_vpn_interface_runtime_targets(*effective_internal_vpn_servers)
+                : std::vector<InternalVpnRuntimeTarget>{};
+        auto client_scope = interception_client_scope(capture_scope, verified_targets, ipv6_decision.enabled);
+        const auto capture_interfaces = interception_interfaces(client_scope);
+        const auto learning = dns_learning_enabled(config.dns);
+        std::vector<InterceptListBinding> bindings;
+        if ((learning.first || learning.second) &&
+            !capture_interfaces.empty()) {
+            for (const auto& [name, usage] : list_usage_cache) {
+                if (!usage.has_domain_entries) continue;
+                bindings.push_back({name, nlohmann::json(lists_map.at(name)).dump(),
+                    {firewall.dynamic_set_name(name, AF_INET),
+                     ipv6_decision.enabled ? firewall.dynamic_set_name(name, AF_INET6) : "",
+                     usage.dynamic_timeout}});
+            }
+        }
+        InterceptSnapshotPolicy policy;
+        policy.ipv6_enabled = ipv6_decision.enabled;
+        for (const auto& selector : client_scope.exclude) {
+            if (!selector.cidr.empty()) cleanup_policy->excluded_clients.push_back(selector.cidr);
+        }
+        for (const auto& binding : bindings) {
+            if (!binding.target.set_v4.empty()) cleanup_policy->learned_sets.insert(binding.target.set_v4);
+            if (!binding.target.set_v6.empty()) cleanup_policy->learned_sets.insert(binding.target.set_v6);
+        }
+        // Passive learning must not bypass the user's existing reconnection
+        // opt-out. A null policy revokes cleanup while leaving learning active.
+        if (!config.daemon || config.daemon->reconnect_unmarked_flows_on_routing_change.value_or(true))
+            policy.cleanup = std::move(cleanup_policy);
+        auto hooks = interception_update->prepare(bindings, policy,
+            [&](const InterceptListBinding& binding, const InterceptDomainConsumer& consume) {
+                if (!list_streamer) return false;
+                FunctionalVisitor domains([&](EntryType type, std::string_view entry) {
+                    if (type == EntryType::Domain) consume(entry);
+                });
+                list_streamer->stream_list(binding.name, lists_map.at(binding.name), domains);
+                return true;
+            }, rules_only, {learning.first, learning.second, capture_interfaces});
+        hooks.interfaces = capture_interfaces;
+        hooks.client_scope = std::move(client_scope);
+        firewall.set_interception_hooks(hooks);
+        staged.interception_update = std::move(interception_update);
+    }
     return staged;
 }
 
@@ -922,6 +990,7 @@ StagedRuntimeFirewall stage_runtime_firewall_from_snapshot(
 void commit_runtime_firewall(Firewall& firewall,
                              const StagedRuntimeFirewall& staged) {
     firewall.apply(staged.mode);
+    if (staged.interception_update) staged.interception_update->commit();
 }
 
 StagedRuntimeFirewall commit_runtime_firewall_with_rules_only_fallback(

@@ -19,6 +19,13 @@ export type DynamicTranslationUsage = Readonly<{
  */
 export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
   {
+    file: "src/components/overview/interception-panel.tsx",
+    argument: "`learning.states.${*}`",
+    keys: ["learning.states.*"],
+    reason:
+      "States are narrowed to the generated InterceptionState enum; unknown or missing values remain unknown.",
+  },
+  {
     file: "src/components/shared/server-field-error.tsx",
     argument: "presentation.key",
     keys: ["serverValidation.*"],

@@ -1,3 +1,4 @@
+import { formatDnsRuleServers } from "@/lib/dns-rule-servers"
 import {
   keepPreviousData,
   useQuery,
@@ -280,7 +281,7 @@ export function ListsPage() {
       for (const listId of rule.list ?? []) {
         if (!tableRowsById.has(listId)) continue
         const chips = dnsChipsByList.get(listId) ?? []
-        const label = dnsServerNames.get(rule.server) ?? rule.server
+        const label = formatDnsRuleServers(rule, dnsServerNames)
         if (!chips.some((chip) => chip.label === label)) {
           chips.push({
             kind: "dns",

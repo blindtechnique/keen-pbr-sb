@@ -1481,10 +1481,11 @@ paths:
         version but never an older one.
 
 
-        Refused rather than attempted when the helper is not installed, when an
-        update or rollback is already running, or when package recovery is
-        pending or in an unknown state, because a second concurrent update is
-        how a router ends up with a half-replaced package.
+        Refused when the helper is not installed or an update or rollback is
+        already running. An explicit retry may reach the signed installer with
+        pending package recovery: under the update lock, it verifies an intact
+        installed baseline before retiring a failed pre-install attempt, without
+        restoring old user settings. Unverified partial installs remain blocked.
       operationId: postSystemUpdate
       requestBody:
         required: true
@@ -6954,14 +6955,15 @@ components:
         type:
           type: string
           description: DNS server source type.
-          enum: [static, keenetic]
+          enum: [static, keenetic, doh]
           default: static
           example: "static"
         address:
           type: string
           description: >
             IPv4 or IPv6 address of the DNS server, with optional port.
-            Required for `type=static`. Must be omitted for `type=keenetic`.
+            Required for `type=static`; for `type=doh` use an HTTPS URL.
+            Must be omitted for `type=keenetic`.
             Formats: "8.8.8.8", "8.8.8.8:5353", "::1", "[::1]:5353".
             Default port is 53.
           example: "10.8.0.1"
@@ -6969,6 +6971,12 @@ components:
           type: string
           description: Outbound tag to use when querying this DNS server.
           example: "vpn"
+        ips:
+          type: array
+          maxItems: 16
+          description: Optional fixed numeric addresses for a DoH URL host. TLS still verifies the URL hostname. Without these addresses a hostname needs explicit dns.bootstrap servers.
+          items:
+            type: string
         domains:
           type: array
           description: >
@@ -6987,7 +6995,7 @@ components:
 
     DnsRule:
       type: object
-      required: [list, server]
+      required: [list]
       properties:
         route_rule_ids:
           type: array
@@ -7025,8 +7033,21 @@ components:
           example: ["my-domains", "remote-list"]
         server:
           type: string
-          description: DNS server tag to use for matched domains.
+          description: Legacy single DNS server. Use servers for new rules. Do not combine conflicting server and servers values.
           example: "vpn-dns"
+        servers:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          description: >
+            DNS server tags for matched domains, in configured order. All are
+            published to dnsmasq, which selects an upstream and handles retries.
+            At least one of servers or the legacy server must be present.
+            When both are supplied, server must equal the first servers entry.
+            An explicit empty array is invalid and never falls back to server.
+          items:
+            type: string
+          example: ["vpn_dns", "vpn_dns_backup"]
         allow_domain_rebinding:
           type: boolean
           default: false
@@ -7066,9 +7087,39 @@ components:
             defaults to 53.
           example: "127.0.0.1"
 
+    DnsLearningConfig:
+      type: object
+      description: Optional independent overrides for legacy dns.passive_learning. No automatic enablement on upgrade.
+      properties:
+        dns:
+          type: boolean
+          nullable: true
+          description: Learn from plain DNS replies on explicitly selected LAN interfaces. Missing or null inherits passive_learning (default false).
+        l7:
+          type: boolean
+          nullable: true
+          description: Learn visible TLS SNI, HTTP Host and QUIC names on explicitly selected LAN interfaces. Missing or null inherits passive_learning (default false). Does not decrypt ECH or reconnect existing flows.
+
     DnsConfig:
       type: object
       properties:
+        learning:
+          $ref: "#/components/schemas/DnsLearningConfig"
+        passive_learning:
+          type: boolean
+          nullable: true
+          description: >-
+            Experimental opt-in DNS reply and passive TLS/HTTP/QUIC learning for
+            explicitly selected LAN interfaces. Default false. Supplements dnsmasq;
+            does not replace it, change VPN health, restart services or delete conntrack.
+            Uses NFQUEUE 43053 with bypass and NFLOG group 43054; busy listeners are
+            not reclaimed. Existing encrypted connections are not rerouted.
+        bootstrap:
+          type: array
+          maxItems: 8
+          description: Static DNS server tags used only to resolve DoH URL hosts, in order. No automatic system-resolver fallback. Must not reference a local resolver or a DoH server.
+          items:
+            type: string
         servers:
           type: array
           items:
@@ -8728,6 +8779,66 @@ components:
         domains:
           type: integer
 
+    InterceptionHealth:
+      type: object
+      description: Read-only listener facts from the last firewall transaction and atomic counters. Not VPN health or an end-to-end routing test. Counters reset when the learner is recreated.
+      required: [dns_requested, l7_requested, dns_state, l7_state, dns_detail, l7_detail, interfaces, nfqueue, nflog, fail_open, dns_packets, dns_matched, l7_packets, l7_matched, set_errors, dns_hold_timeouts, queue_overruns, log_overruns]
+      properties:
+        dns_requested:
+          type: boolean
+        l7_requested:
+          type: boolean
+        dns_state:
+          $ref: "#/components/schemas/InterceptionState"
+        l7_state:
+          $ref: "#/components/schemas/InterceptionState"
+        dns_detail:
+          type: string
+        l7_detail:
+          type: string
+        interfaces:
+          type: array
+          items:
+            type: string
+        nfqueue:
+          $ref: "#/components/schemas/InterceptionProbeState"
+        nflog:
+          $ref: "#/components/schemas/InterceptionProbeState"
+        fail_open:
+          $ref: "#/components/schemas/InterceptionProbeState"
+        dns_packets:
+          type: integer
+          minimum: 0
+        dns_matched:
+          type: integer
+          minimum: 0
+        l7_packets:
+          type: integer
+          minimum: 0
+        l7_matched:
+          type: integer
+          minimum: 0
+        set_errors:
+          type: integer
+          minimum: 0
+        dns_hold_timeouts:
+          type: integer
+          minimum: 0
+        queue_overruns:
+          type: integer
+          minimum: 0
+        log_overruns:
+          type: integer
+          minimum: 0
+
+    InterceptionState:
+      type: string
+      enum: [unknown, disabled, stopped, applying, no_interfaces, no_lists, unavailable, fail_open_unconfirmed, snapshot_unavailable, active]
+
+    InterceptionProbeState:
+      type: string
+      enum: [not_run, ok, unsupported, error, skipped]
+
     HealthResponse:
       type: object
       required:
@@ -8829,6 +8940,8 @@ components:
           example: false
         lifecycle_operation:
           $ref: "#/components/schemas/LifecycleOperation"
+        interception:
+          $ref: "#/components/schemas/InterceptionHealth"
 
     LifecycleOperation:
       type: object

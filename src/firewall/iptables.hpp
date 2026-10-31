@@ -131,6 +131,11 @@ public:
     }
 
 private:
+    void apply_interception_rules(bool effective_ipv6);
+    bool interception_v4_created_{false};
+    bool interception_v6_created_{false};
+    bool interception_v4_inspected_{false};
+    bool interception_v6_inspected_{false};
     static constexpr const char* CHAIN_NAME = "KeenPbrTable";
     static constexpr const char* RAW_CHAIN_NAME = "KeenPbrRaw";
     static constexpr const char* RAW_CONNTRACK_CHAIN_NAME =

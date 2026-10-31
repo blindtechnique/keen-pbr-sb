@@ -6,12 +6,21 @@
  * OpenAPI spec version: 3.0.0
  */
 import type { ClientDnsEnforcement } from './clientDnsEnforcement';
+import type { DnsLearningConfig } from './dnsLearningConfig';
 import type { DnsRule } from './dnsRule';
 import type { DnsServer } from './dnsServer';
 import type { DnsSystemResolver } from './dnsSystemResolver';
 import type { DnsTestServer } from './dnsTestServer';
 
 export interface DnsConfig {
+  learning?: DnsLearningConfig;
+  /** Experimental opt-in DNS reply and passive TLS/HTTP/QUIC learning for explicitly selected LAN interfaces. Default false. Supplements dnsmasq; does not replace it, change VPN health, restart services or delete conntrack. Uses NFQUEUE 43053 with bypass and NFLOG group 43054; busy listeners are not reclaimed. Existing encrypted connections are not rerouted. */
+  passive_learning?: boolean | null;
+  /**
+     * Static DNS server tags used only to resolve DoH URL hosts, in order. No automatic system-resolver fallback. Must not reference a local resolver or a DoH server.
+     * @maxItems 8
+     */
+  bootstrap?: string[];
   servers?: DnsServer[];
   rules?: DnsRule[];
   /** Ordered DNS server tags to use when no rule matches. */

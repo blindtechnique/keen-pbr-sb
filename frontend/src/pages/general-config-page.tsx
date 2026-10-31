@@ -51,6 +51,8 @@ import {
 import { InternalVpnServicesField } from "@/components/settings/internal-vpn-services-field"
 import { LoggingSettingsCard } from "@/components/settings/logging-settings-card"
 import { FirefoxDohCanaryField } from "@/components/settings/firefox-doh-canary-field"
+import { DnsLearningField } from "@/components/settings/dns-learning-field"
+import { getDnsLearning, withDnsLearning } from "@/lib/dns-learning"
 import {
   BackupAndRestoreCard,
   SoftwareUpdateCard,
@@ -149,6 +151,8 @@ type SettingsDraft = {
   ipsetMaxelem: string
   clientDnsEnforcement: boolean
   firefoxDohCanary: boolean
+  learningDns: boolean
+  learningL7: boolean
   inboundInterfaces: string[]
   internalVpnServers?: InternalVpnServer[]
   internalVpnServices?: InternalVpnService[]
@@ -179,6 +183,8 @@ const fallbackDraft: SettingsDraft = {
   ipsetMaxelem: "",
   clientDnsEnforcement: false,
   firefoxDohCanary: true,
+  learningDns: false,
+  learningL7: false,
   inboundInterfaces: [],
   listsAutoupdateEnabled: false,
   cron: "0 4 * * 0",
@@ -211,6 +217,8 @@ const SETTINGS_FIELD_NAMES = {
   ipsetMaxelem: "ipsetMaxelem",
   clientDnsEnforcement: "clientDnsEnforcement",
   firefoxDohCanary: "firefoxDohCanary",
+  learningDns: "learningDns",
+  learningL7: "learningL7",
   inboundInterfaces: "inboundInterfaces",
   internalVpnServers: "internalVpnServers",
   internalVpnServices: "internalVpnServices",
@@ -1662,6 +1670,39 @@ function LoadedGeneralConfigPage({
           </CardHeader>
           <CardContent>
             <FieldGroup>
+              <div className="max-w-[480px] space-y-2">
+                <h3 className="font-medium">{t("learning.title")}</h3>
+                <p className="text-sm text-muted-foreground">
+                  {t("learning.scopeHint")}
+                </p>
+                <a
+                  className="inline-block py-2 text-sm text-primary underline"
+                  href="/#learning"
+                >
+                  {t("learning.diagnosticsLink")}
+                </a>
+              </div>
+              <form.Field name={SETTINGS_FIELD_NAMES.learningDns}>
+                {(field) => (
+                  <DnsLearningField
+                    kind="dns"
+                    value={field.state.value}
+                    onChange={(value) => field.handleChange(value)}
+                    error={getFirstFieldError(field.state.meta.errors)}
+                  />
+                )}
+              </form.Field>
+              <form.Field name={SETTINGS_FIELD_NAMES.learningL7}>
+                {(field) => (
+                  <DnsLearningField
+                    kind="l7"
+                    value={field.state.value}
+                    onChange={(value) => field.handleChange(value)}
+                    error={getFirstFieldError(field.state.meta.errors)}
+                  />
+                )}
+              </form.Field>
+              <FieldSeparator />
               <form.Field name={SETTINGS_FIELD_NAMES.ppeDeoffloadMode}>
                 {(field) => (
                   <Field width="short">
@@ -2416,6 +2457,8 @@ function getDraftFromConfig(config: ConfigObject): SettingsDraft {
       config.dns?.client_dns_enforcement?.enabled ??
       fallbackDraft.clientDnsEnforcement,
     firefoxDohCanary: getFirefoxDohCanaryEnabled(config.dns),
+    learningDns: getDnsLearning(config.dns).dns,
+    learningL7: getDnsLearning(config.dns).l7,
     inboundInterfaces: normalizeInternalVpnServerInterfaceNames(
       config.route?.inbound_interfaces ?? fallbackDraft.inboundInterfaces
     ),
@@ -2491,7 +2534,13 @@ function buildUpdatedConfig(
       internal_vpn_services: draft.internalVpnServices,
     },
     dns: {
-      ...withFirefoxDohCanary(config.dns, draft.firefoxDohCanary),
+      ...withDnsLearning(
+        withFirefoxDohCanary(config.dns, draft.firefoxDohCanary),
+        {
+          dns: draft.learningDns,
+          l7: draft.learningL7,
+        }
+      ),
       client_dns_enforcement: {
         ...config.dns?.client_dns_enforcement,
         enabled: draft.clientDnsEnforcement,
@@ -2656,6 +2705,10 @@ function resolveSettingsFieldPath(path: string): SettingsFieldName | undefined {
       return SETTINGS_FIELD_NAMES.clientDnsEnforcement
     case "dns.firefox_doh_canary":
       return SETTINGS_FIELD_NAMES.firefoxDohCanary
+    case "dns.learning.dns":
+      return SETTINGS_FIELD_NAMES.learningDns
+    case "dns.learning.l7":
+      return SETTINGS_FIELD_NAMES.learningL7
     case "lists_autoupdate.enabled":
       return SETTINGS_FIELD_NAMES.listsAutoupdateEnabled
     case "lists_autoupdate.cron":

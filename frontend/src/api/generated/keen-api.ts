@@ -3763,7 +3763,7 @@ export function useGetSystemUpdate<TData = Awaited<ReturnType<typeof getSystemUp
 
 The request must match the freshly checked channel, tag and full package version. The signed manifest is checked against that version before running the installer. A channel switch may install an equal version but never an older one.
 
-Refused rather than attempted when the helper is not installed, when an update or rollback is already running, or when package recovery is pending or in an unknown state, because a second concurrent update is how a router ends up with a half-replaced package.
+Refused when the helper is not installed or an update or rollback is already running. An explicit retry may reach the signed installer with pending package recovery: under the update lock, it verifies an intact installed baseline before retiring a failed pre-install attempt, without restoring old user settings. Unverified partial installs remain blocked.
 
  * @summary Start the keen-pbr-sb self-update
  */

@@ -208,11 +208,12 @@ DISCORD_TIERS = [
 ]
 
 # An experimental comparison inside Max, not a separate selectable strategy.
-# Keep the same six repeats for both UDP candidates to isolate the blob.
+# Keep the same six repeats for all UDP candidates to isolate the blob.
 # ACTIVE_DISCORD_UDP.bin from the nfqws1 example is our existing quic_steam.
 DISCORD_EXPERIMENT_UDP_TIERS = [
     ["fake:blob=quic_initial:repeats=6"],
     ["fake:blob=quic_steam:optional:repeats=6"],
+    ["fake:blob=quic_dbank:optional:repeats=6"],
 ]
 DISCORD_EXPERIMENT_TCP_TIERS = [
     TCP_TIERS[0],
@@ -223,6 +224,18 @@ DISCORD_EXPERIMENT_TCP_TIERS = [
     ["fake:blob=stun_fake:optional:tcp_seq=-10000:tcp_ack=-66000:repeats=6",
      "fake:blob=tls_google:optional:tcp_seq=-10000:tcp_ack=-66000:repeats=6",
      "multisplit:pos=1,midsld"],
+    # Additional BAT comparison, not a replacement for either existing slot:
+    # badseq_increment=1000 with nfqws1's default ACK offset, and its implicit
+    # multisplit position 2. Keep these explicit native nfqws2 arguments local
+    # to Discord; the general TCP pool retains its proven checksum guards.
+    ["fake:blob=stun_fake:optional:tcp_seq=1000:tcp_ack=-66000:repeats=6",
+     "fake:blob=tls_google:optional:tcp_seq=1000:tcp_ack=-66000:repeats=6",
+     "multisplit:pos=2"],
+]
+DISCORD_EXPERIMENT_MEDIA_TCP_TIERS = DISCORD_EXPERIMENT_TCP_TIERS[:2] + [
+    # The BAT's alternate-port discord.media branch uses Google TLS only.
+    ["fake:blob=tls_google:optional:tcp_seq=1000:tcp_ack=-66000:repeats=6",
+     "multisplit:pos=2"],
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -252,7 +265,7 @@ PROFILES = {
               "фрагментация IP и подмена оригинала в QUIC. Последний TCP-вариант "
               "пробует syndata только на первом SYN к HTTPS/443; повторные неудачи "
               "учитываются для перехода к следующему варианту в новом соединении. "
-              "Для Discord — отдельные TCP-пулы и два UDP-кандидата для начала соединения. "
+              "Для Discord — отдельные TCP-пулы и три UDP-кандидата для начала соединения. "
               "Экспериментальный: syndata может не поддерживаться по пути, а кэш "
               "имён для SYN не различает домены на общем IP. "
               "Ставьте, только если обычный не справляется."),
@@ -345,20 +358,20 @@ def discord_experiment_blocks():
 
     Observe replies/retries, but act only on outbound handshake payloads.
     Do not widen NFQUEUE ports, process arbitrary UDP/media or send TCP RSTs.
-    Common STUN ports and the WebRTC passthrough keep their previous behavior.
+    Common STUN ports and the WebRTC passthrough rule stay unchanged.
     """
     blocks = []
-    for key, ports, domains in (
-        ("discord_tcp_exp", "443", DISCORD_DOMAINS),
-        ("discord_media_tcp_exp", "2053,2083,2087,2096,8443", "discord.media"),
+    for key, ports, domains, tiers in (
+        ("discord_tcp_exp", "443", DISCORD_DOMAINS, DISCORD_EXPERIMENT_TCP_TIERS),
+        ("discord_media_tcp_exp", "2053,2083,2087,2096,8443", "discord.media",
+         DISCORD_EXPERIMENT_MEDIA_TCP_TIERS),
     ):
         matcher = [f"--filter-tcp={ports}", "--filter-l7=tls",
                    f"--hostlist-domains={domains}",
                    f"--hostlist-exclude={LISTS}/exclude.list",
                    "--payload=all", "--out-range=-s66996",
                    f"--in-range=-s{ROTATOR_TCP_REPLY_RANGE_SEQ}"]
-        actions = ["--in-range=x", "--payload=tls_client_hello"] + pool(
-            DISCORD_EXPERIMENT_TCP_TIERS, 2)
+        actions = ["--in-range=x", "--payload=tls_client_hello"] + pool(tiers, len(tiers))
         blocks.append([f"--new={key}"] + matcher + [revisioned_circular(
             key, matcher, actions, hostkey="host_ip",
             inseq=ROTATOR_TCP_SUCCESS_INSEQ, maxseq=65536,
@@ -366,12 +379,14 @@ def discord_experiment_blocks():
 
     # Deliberately no STUN-wide 3478/5349 capture. The protocol check is also
     # required: sharing these ports is not proof that a packet is Discord.
-    matcher = ["--filter-udp=50000-50099,19294-19344",
+    # 50100 already belongs to the global NFQUEUE range. Only its recognized
+    # Discord/STUN handshake enters this experiment instead of passthrough.
+    matcher = ["--filter-udp=50000-50100,19294-19344",
                "--filter-l7=discord,stun", "--payload=all",
                "--out-range=-n4", "--in-range=-n2"]
     actions = ["--in-range=x", "--out-range=<n2",
                "--payload=discord_ip_discovery,stun"] + pool(
-                   DISCORD_EXPERIMENT_UDP_TIERS, 2)
+                   DISCORD_EXPERIMENT_UDP_TIERS, len(DISCORD_EXPERIMENT_UDP_TIERS))
     blocks.append(["--new=discord_udp_exp"] + matcher + [revisioned_circular(
         "discord_udp_exp", matcher, actions, hostkey="host_ip", udp=True,
     )] + actions)
@@ -628,7 +643,9 @@ def build(profile_name, spec):
                   + (" · отдельные пулы: googlevideo, youtube, youtube-QUIC, discord, "
                      "сквозной WebRTC" if spec["custom"] else " · без доменных пулов"))
     if spec.get("discord_experiment"):
-        tiers_note += " · эксперимент: Discord TCP 2, discord.media TCP 2, Discord UDP 2"
+        tiers_note += (f" · эксперимент: Discord TCP {len(DISCORD_EXPERIMENT_TCP_TIERS)}, "
+                       f"discord.media TCP {len(DISCORD_EXPERIMENT_MEDIA_TCP_TIERS)}, "
+                       f"Discord UDP {len(DISCORD_EXPERIMENT_UDP_TIERS)}")
 
     head = "\n".join([
         f"# keen-pbr-sb · профиль «{spec['title']}»",

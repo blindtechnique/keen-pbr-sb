@@ -39,7 +39,6 @@ import { useListUsageSubtitle } from "@/hooks/use-list-usage-subtitle"
 import {
   createDnsServerDisplayNameMap,
   getDnsRuleDisplayName,
-  getDnsServerDisplayName,
 } from "@/lib/dns-display"
 import {
   clearFormServerErrors,
@@ -54,15 +53,6 @@ import { getTagNameValidationError } from "@/lib/tag-name-validation"
 import { makeTechnicalId } from "@/lib/technical-id"
 import { useRuleEditTarget } from "@/hooks/use-rule-edit-target"
 import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectLabel,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
-import {
   buildUpdatedConfigWithRules,
   createDnsRuleDraft,
   type DnsRuleDraft,
@@ -75,7 +65,7 @@ const DNS_RULE_FIELD_NAMES = {
   id: "rule.id",
   displayName: "rule.displayName",
   enabled: "rule.enabled",
-  server: "rule.server",
+  server: "rule.servers",
   lists: "rule.lists",
   allowDomainRebinding: "rule.allowDomainRebinding",
 } as const
@@ -213,17 +203,13 @@ function DnsRuleForm({
   presentation: UpsertPagePresentation
   rules: DnsRule[]
 }) {
-  const { t, i18n } = useTranslation()
+  const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [, navigate] = useLocation()
   const close = useUpsertPageClose()
   const dnsServers = loadedConfig.dns?.servers ?? []
   const serverTags = dnsServers.map((server) => server.tag).filter(Boolean)
   const serverNames = createDnsServerDisplayNameMap(dnsServers)
-  const serverSelectItems = dnsServers.map((server) => ({
-    value: server.tag,
-    label: getDnsServerDisplayName(server),
-  }))
   const listOptions = sortListIdsByDisplayName(
     Object.keys(loadedConfig.lists ?? {}),
     loadedConfig.lists
@@ -289,7 +275,7 @@ function DnsRuleForm({
 
     return {
       ...createDnsRuleDraft("", existingRuleIds),
-      server: serverTags[0] ?? "",
+      servers: serverTags.slice(0, 1),
     }
   })
   const [technicalIdManuallyEdited, setTechnicalIdManuallyEdited] =
@@ -568,49 +554,34 @@ function DnsRuleForm({
             return (
               <Field invalid={Boolean(error)}>
                 <FieldLabel>
-                  {t("pages.dnsRuleUpsert.fields.serverTag")}
+                  {t("pages.dnsRuleUpsert.fields.dnsServers")}
                 </FieldLabel>
                 <FieldContent>
-                  <Select
-                    items={serverSelectItems}
-                    onValueChange={(server) => field.handleChange(server ?? "")}
+                  <MultiSelectList
+                    options={serverTags}
+                    onChange={field.handleChange}
                     value={field.state.value}
-                  >
-                    <SelectTrigger aria-invalid={Boolean(error)}>
-                      <SelectValue
-                        placeholder={t(
-                          "pages.dnsRuleUpsert.fields.selectServer"
-                        )}
-                      />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectGroup>
-                        <SelectLabel>
-                          {t("pages.dnsRuleUpsert.fields.dnsServers")}
-                        </SelectLabel>
-                        {dnsServers
-                          .slice()
-                          .sort((left, right) =>
-                            getDnsServerDisplayName(left).localeCompare(
-                              getDnsServerDisplayName(right),
-                              i18n.language
-                            )
-                          )
-                          .map((server) => (
-                            <SelectItem key={server.tag} value={server.tag}>
-                              <span title={server.tag}>
-                                {serverNames.get(server.tag) ?? server.tag}
-                              </span>
-                            </SelectItem>
-                          ))}
-                      </SelectGroup>
-                    </SelectContent>
-                  </Select>
+                    name={DNS_RULE_FIELD_NAMES.server}
+                    error={error}
+                    renderItem={(tag) => serverNames.get(tag) ?? tag}
+                    getSearchText={(tag) =>
+                      `${serverNames.get(tag) ?? tag} ${tag}`
+                    }
+                    allowReorder
+                    placeholderTitle={t(
+                      "pages.dnsRuleUpsert.fields.selectServer"
+                    )}
+                    placeholderDescription={t(
+                      "pages.dnsRuleUpsert.fields.dnsServers"
+                    )}
+                    addLabel={t("pages.dnsRuleUpsert.fields.selectServer")}
+                    fullWidthAdd
+                  />
                   <FieldHint
                     description={
                       serverTags.length === 0
                         ? t("pages.dnsRuleUpsert.fields.noServers")
-                        : undefined
+                        : t("pages.dnsRuleUpsert.fields.serverSelectionHint")
                     }
                     error={error}
                   />
@@ -753,7 +724,7 @@ function resolveDnsRuleFieldPath(path: string): DnsRuleFieldName | undefined {
     return DNS_RULE_FIELD_NAMES.server
   }
 
-  if (/^dns\.rules(?:\[\d+\]|\.\d+)?\.server$/.test(path)) {
+  if (/^dns\.rules(?:\[\d+\]|\.\d+)?\.servers?(?:\[\d+\]|\.\d+)?$/.test(path)) {
     return DNS_RULE_FIELD_NAMES.server
   }
 

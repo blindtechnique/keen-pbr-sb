@@ -1,3 +1,4 @@
+import { formatDnsRuleServers, getDnsRuleServers } from "@/lib/dns-rule-servers"
 import type { ConfigObject } from "@/api/generated/model/configObject"
 import type { DnsRule } from "@/api/generated/model/dnsRule"
 import type { DeleteImpactItem } from "@/components/shared/delete-impact-dialog"
@@ -55,11 +56,28 @@ export function getDnsServerDeleteImpactItems(
   }
 
   for (const index of impact.matchingRuleIndexes) {
+    const rule = config?.dns?.rules?.[index]
+    const before = getDnsRuleServers(rule)
+    const remaining = before.filter((tag) => !serverTags.includes(tag))
     items.push({
-      label: t("pages.dnsServers.deleteDialog.items.dnsRule", {
-        name: getDnsRuleDisplayName(config?.dns?.rules?.[index], index),
-      }),
-      details: getDnsRuleDetails(config?.dns?.rules?.[index], config, t),
+      label: remaining.length
+        ? t("pages.dnsServers.deleteDialog.items.dnsRuleNarrowed", {
+            name: getDnsRuleDisplayName(rule, index),
+          })
+        : t("pages.dnsServers.deleteDialog.items.dnsRule", {
+            name: getDnsRuleDisplayName(rule, index),
+          }),
+      details: remaining.length
+        ? [
+            formatDetail(
+              t("pages.dnsRules.headers.serverTag"),
+              <ChangeValue
+                before={formatListValue(before, t, serverDisplayNames)}
+                after={formatListValue(remaining, t, serverDisplayNames)}
+              />
+            ),
+          ]
+        : getDnsRuleDetails(rule, config, t),
     })
   }
 
@@ -83,6 +101,7 @@ export function getDnsServerDeleteImpactItems(
     })
   }
 
+  if (impact.usesBootstrap) items.push({ label: t("doh.bootstrapDelete") })
   return items
 }
 
@@ -107,9 +126,10 @@ function getDnsRuleDetails(
     ),
     formatDetail(
       t("pages.dnsRules.headers.serverTag"),
-      createDnsServerDisplayNameMap(config?.dns?.servers ?? []).get(
-        rule.server
-      ) ?? rule.server
+      formatDnsRuleServers(
+        rule,
+        createDnsServerDisplayNameMap(config?.dns?.servers ?? [])
+      )
     ),
   ]
 }
