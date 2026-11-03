@@ -311,9 +311,16 @@ install_package_transactionally
 
     def test_installer_does_not_invoke_opkg_when_shared_preflight_fails(self):
         helper = self.rescue / "rescue-update.sh"
-        self.executable(helper, RESCUE_SOURCE + BOUNDARIES + '\ncase "$1" in space-protocol) echo 1;; stage-checked) stage_checked_candidate "$2";; *) exit 99;; esac')
+        self.executable(helper, RESCUE_SOURCE + BOUNDARIES + '''
+case "$1" in
+ space-protocol) echo 1;;
+ prepare-update) prepare_explicit_update;;
+ stage-checked) stage_checked_candidate "$2";;
+ *) exit 99;;
+esac
+''')
         source = function((ROOT / "install.sh").read_text(), "install_package_transactionally")
-        source = source.replace("/opt/bin/opkg", str(self.root / "opt/bin/opkg"))
+        source = source.replace("/opt/", f"{self.root}/opt/")
         body = f'''
 RESCUE_HELPER='{helper}'
 PACKAGE_FILE='{self.candidate}'
@@ -322,9 +329,12 @@ die() {{ echo "$1" >&2; exit 1; }}
 {source}
 install_package_transactionally
 '''
-        result = self.run_rescue(body, SPACE_OPT_FREE="8192")
-        self.assertEqual(result.returncode, 28, result.stderr)
-        self.assert_unchanged()
+        # The full installer's argument parser sets this before the function.
+        for update_only in ("0", "1"):
+            with self.subTest(update_only=update_only):
+                result = self.run_rescue(body, UPDATE_ONLY=update_only, SPACE_OPT_FREE="8192")
+                self.assertEqual(result.returncode, 28, result.stderr)
+                self.assert_unchanged()
 
     def test_web_cleanup_keeps_capacity_explanation_and_returns_failure(self):
         source = (LIB / "self-update.sh").read_text()

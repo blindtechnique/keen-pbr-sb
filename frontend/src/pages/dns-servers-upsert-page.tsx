@@ -586,7 +586,7 @@ function DnsServerForm({
                             </SelectItem>
                             {isKeeneticDns ? (
                               <SelectItem value={DnsServerType.keenetic}>
-                                Keenetic
+                                {t("doh.keenetic")}
                               </SelectItem>
                             ) : null}
                           </SelectContent>
@@ -661,7 +661,7 @@ function DnsServerForm({
                             }}
                             placeholder={
                               isDoh
-                                ? "https://dns.example/dns-query"
+                                ? t("doh.urlPlaceholder")
                                 : t(
                                     "pages.dnsServerUpsert.fields.addressPlaceholder"
                                   )

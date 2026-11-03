@@ -8,6 +8,7 @@ RUN apt-get update && \
       g++ \
       make \
       pkg-config \
+      python3 \
       libcurl4-openssl-dev \
       libnl-3-dev \
       libnl-route-3-dev \

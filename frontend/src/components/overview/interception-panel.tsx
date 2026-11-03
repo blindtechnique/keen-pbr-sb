@@ -79,11 +79,15 @@ export function InterceptionPanel({
               </summary>
               <div className="mt-2 space-y-1 font-mono text-xs break-all">
                 <p>
-                  NFQUEUE 43053: {health.nfqueue}; FAIL_OPEN: {health.fail_open}
+                  {t("learning.queueStatus", {
+                    id: 43053,
+                    state: health.nfqueue,
+                    failOpen: health.fail_open,
+                  })}
                 </p>
-                <p>NFLOG 43054: {health.nflog}</p>
-                <p>DNS: {health.dns_detail || "—"}</p>
-                <p>L7: {health.l7_detail || "—"}</p>
+                <p>{t("learning.logStatus", { id: 43054, state: health.nflog })}</p>
+                <p>{t("learning.dnsDetail", { detail: health.dns_detail || "—" })}</p>
+                <p>{t("learning.l7Detail", { detail: health.l7_detail || "—" })}</p>
                 <p>
                   {t("learning.overruns", {
                     dns: health.queue_overruns,
