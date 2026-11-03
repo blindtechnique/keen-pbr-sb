@@ -72,6 +72,8 @@ UNCOMPILED_SOURCES: set = set()
 # build. Keep the check limited to known source pairs, including opt-in targets.
 REQUIRED_SOURCE_DEPENDENCIES = {
     "../src/config/config.cpp": "../src/config/list_parser.cpp",
+    "../src/daemon/daemon_core.cpp": "../src/daemon/daemon_intercept.cpp",
+    "../src/daemon/daemon_runtime.cpp": "../src/daemon/daemon_intercept.cpp",
     "../src/daemon/daemon_api.cpp": "../src/config/outbound_delete.cpp",
     "../src/api/handler_transports.cpp": "../src/config/outbound_delete.cpp",
     "../src/config/outbound_delete.cpp": "../src/config/dependency_analysis.cpp",

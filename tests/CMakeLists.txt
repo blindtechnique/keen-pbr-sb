@@ -339,6 +339,7 @@ add_executable(keen-pbr-tests
   ../src/daemon/conntrack_cleanup_coordinator.cpp
   ../src/daemon/idle_stall_supervisor.cpp
   ../src/daemon/daemon_runtime.cpp
+  ../src/daemon/daemon_intercept.cpp
   ../src/daemon/daemon_tunnel_probe.cpp
   ../src/daemon/daemon_resolver.cpp
   ../src/daemon/runtime_resolver_generation_snapshot.cpp
