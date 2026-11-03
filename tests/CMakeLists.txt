@@ -50,6 +50,8 @@ target_include_directories(keen-pbr-doh-tests PRIVATE
 target_link_libraries(keen-pbr-doh-tests PRIVATE keen-pbr-doh nlohmann_json::nlohmann_json)
 keen_pbr_apply_project_options(keen-pbr-doh-tests)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+# Discovery runs separately from CMake and may use a different Python.
+file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/doh-fixture-python.txt" CONTENT "${Python3_EXECUTABLE}\n")
 add_test(NAME keen-pbr-doh-tests COMMAND ${Python3_EXECUTABLE}
   ${CMAKE_CURRENT_SOURCE_DIR}/run_doh_tls_fixture.py $<TARGET_FILE:keen-pbr-doh-tests>)
 set_tests_properties(keen-pbr-doh-tests PROPERTIES LABELS native TIMEOUT 120)

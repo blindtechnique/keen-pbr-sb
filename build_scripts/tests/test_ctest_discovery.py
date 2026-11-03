@@ -14,10 +14,15 @@ class CTestDiscoveryTests(unittest.TestCase):
     def setUp(self):
         self.source = Path("/source")
         self.build = Path("/build")
-        self.native = ["keen-pbr-tests", "crash-diagnostics-smoke", "focused-tests"]
+        self.doh = "keen-pbr-doh-tests"
+        self.doh_python = str(SCRIPT.parent / "fixture venv" / "bin" / "python3")
+        self.doh_command = [self.doh_python, str(self.source / "tests/run_doh_tls_fixture.py"),
+                            str(self.build / "tests" / self.doh)]
+        self.native = ["keen-pbr-tests", "crash-diagnostics-smoke", "focused-tests", self.doh]
         self.document = {"tests": []}
         for name in self.native:
-            self.add(name, "native", [str(self.build / "tests" / name)])
+            self.add(name, "native", self.doh_command.copy() if name == self.doh
+                     else [str(self.build / "tests" / name)])
         for name, fixture in discovery.LIFECYCLE_FIXTURES.items():
             self.add(name, "package-lifecycle",
                      ["/bin/sh", str(self.source / "tests/package_it" / fixture), str(self.source)])
@@ -32,10 +37,39 @@ class CTestDiscoveryTests(unittest.TestCase):
         ]})
 
     def validate(self):
-        discovery.validate_discovery(self.document, self.native, self.source, self.build)
+        discovery.validate_discovery(self.document, self.native, self.source, self.build,
+                                     doh_python=self.doh_python)
 
     def test_valid_discovery(self):
         self.validate()
+
+    def test_doh_fixture_requires_the_exact_interpreter_script_and_binary(self):
+        doh = next(t for t in self.document["tests"] if t["name"] == self.doh)
+        python, fixture, binary = self.doh_command
+        for command in ([binary], [python, fixture], ["/other/venv/bin/python3", fixture, binary],
+                        [python, "/wrong/run_doh_tls_fixture.py", binary],
+                        [python, fixture, "/wrong/keen-pbr-doh-tests"],
+                        [python, "-c", "pass", fixture, binary],
+                        [python, fixture, binary, "--list-test-cases"]):
+            with self.subTest(command=command):
+                doh["command"] = command
+                with self.assertRaisesRegex(ValueError, self.doh):
+                    self.validate()
+
+    def test_doh_fixture_cannot_wrap_another_native_suite(self):
+        other = self.document["tests"][0]
+        other["command"] = self.doh_command[:2] + other["command"]
+        with self.assertRaisesRegex(ValueError, other["name"]):
+            self.validate()
+
+    def test_doh_interpreter_must_be_configured_and_absolute(self):
+        doh = next(t for t in self.document["tests"] if t["name"] == self.doh)
+        for interpreter in (None, "", "python3"):
+            with self.subTest(interpreter=interpreter):
+                self.doh_python = interpreter
+                doh["command"] = [interpreter, *self.doh_command[1:]]
+                with self.assertRaisesRegex(ValueError, "configured Python interpreter"):
+                    self.validate()
 
     def test_empty_discovery_cannot_pass(self):
         self.document["tests"] = []
