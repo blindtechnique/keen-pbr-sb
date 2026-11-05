@@ -68,6 +68,7 @@ import { TemplatePicker } from "@/components/lists/template-picker"
 import { ServerValidationAlert } from "@/components/shared/server-validation-alert"
 import { getFirstFieldError, getFormErrorMessage } from "@/lib/form-field-error"
 import {
+  UpsertFormActions,
   UpsertPage,
   type UpsertPagePresentation,
 } from "@/components/shared/upsert-page"
@@ -1765,46 +1766,47 @@ function ListForm({
 
       <ServerValidationAlert errors={unmappedServerErrors} />
 
-      <div className="flex justify-end gap-3" data-upsert-actions>
-        {mode === "edit" && listId && deleteImpact ? (
-          <UpsertDeleteAction
-            confirmLabel={t("pages.lists.deleteDialog.confirm")}
-            description={t("pages.lists.deleteDialog.description", {
-              names: getListReferenceLabel(listId, loadedConfig.lists),
-            })}
-            impactItems={getListDeleteImpactItems(
-              loadedConfig,
-              [listId],
-              deleteImpact,
-              replacementListId || undefined,
-              t
-            )}
-            isPending={deleteStageMutation.isPending}
-            label={t("common.delete")}
-            onConfirm={() =>
-              deleteStageMutation.mutate({
-                data: {
-                  base_revision: loadedConfigRevision,
-                  targets: buildListDeleteTargets(
-                    [listId],
-                    replacementListId || undefined
-                  ),
-                },
-              })
-            }
-            title={t("pages.lists.deleteDialog.title")}
-          >
-            <ListDeleteReplacementPicker
-              config={loadedConfig}
-              deletedIds={[listId]}
-              onChange={setReplacementListId}
-              replacementListId={replacementListId}
-            />
-          </UpsertDeleteAction>
-        ) : null}
-        <Button onClick={close} size="xl" type="button" variant="outline">
-          {t("common.cancel")}
-        </Button>
+      <UpsertFormActions
+        onCancel={close}
+        deleteAction={
+          mode === "edit" && listId && deleteImpact ? (
+            <UpsertDeleteAction
+              confirmLabel={t("pages.lists.deleteDialog.confirm")}
+              description={t("pages.lists.deleteDialog.description", {
+                names: getListReferenceLabel(listId, loadedConfig.lists),
+              })}
+              impactItems={getListDeleteImpactItems(
+                loadedConfig,
+                [listId],
+                deleteImpact,
+                replacementListId || undefined,
+                t
+              )}
+              isPending={deleteStageMutation.isPending}
+              label={t("common.delete")}
+              onConfirm={() =>
+                deleteStageMutation.mutate({
+                  data: {
+                    base_revision: loadedConfigRevision,
+                    targets: buildListDeleteTargets(
+                      [listId],
+                      replacementListId || undefined
+                    ),
+                  },
+                })
+              }
+              title={t("pages.lists.deleteDialog.title")}
+            >
+              <ListDeleteReplacementPicker
+                config={loadedConfig}
+                deletedIds={[listId]}
+                onChange={setReplacementListId}
+                replacementListId={replacementListId}
+              />
+            </UpsertDeleteAction>
+          ) : null
+        }
+      >
         <form.Subscribe selector={(state) => state.canSubmit}>
           {(canSubmit) => (
             <Button
@@ -1826,7 +1828,7 @@ function ListForm({
             </Button>
           )}
         </form.Subscribe>
-      </div>
+      </UpsertFormActions>
     </form>
   )
 }

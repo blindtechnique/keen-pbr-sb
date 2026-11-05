@@ -26,6 +26,7 @@ import { RouteFailurePolicyFields } from "@/components/shared/route-failure-poli
 import { ServerValidationAlert } from "@/components/shared/server-validation-alert"
 import { getFirstFieldError, getFormErrorMessage } from "@/lib/form-field-error"
 import {
+  UpsertFormActions,
   UpsertPage,
   type UpsertPagePresentation,
 } from "@/components/shared/upsert-page"
@@ -985,35 +986,26 @@ function RoutingRuleForm({
         }
       />
 
-      <div
-        className="grid grid-cols-2 gap-2 max-sm:*:h-auto max-sm:*:min-h-11 max-sm:*:w-full max-sm:*:min-w-0 max-sm:*:px-2 max-sm:*:py-2 max-sm:*:whitespace-normal sm:flex sm:justify-end sm:gap-3"
-        data-upsert-actions
+      <UpsertFormActions
+        onCancel={close}
+        deleteAction={
+          mode === "edit" ? (
+            <UpsertDeleteAction
+              confirmLabel={t("pages.routingRuleUpsert.delete.confirm")}
+              description={t("pages.routingRuleUpsert.delete.description")}
+              disabled={targetUnavailable}
+              impactItems={[]}
+              isPending={postConfigMutation.isPending}
+              label={t("common.delete")}
+              onConfirm={handleDelete}
+              title={t("pages.routingRuleUpsert.delete.title")}
+            />
+          ) : null
+        }
       >
-        {mode === "edit" ? (
-          <UpsertDeleteAction
-            confirmLabel={t("pages.routingRuleUpsert.delete.confirm")}
-            description={t("pages.routingRuleUpsert.delete.description")}
-            disabled={targetUnavailable}
-            impactItems={[]}
-            isPending={postConfigMutation.isPending}
-            label={t("common.delete")}
-            onConfirm={handleDelete}
-            title={t("pages.routingRuleUpsert.delete.title")}
-          />
-        ) : null}
-        <Button
-          className={mode === "create" ? "col-span-full" : undefined}
-          onClick={close}
-          size="xl"
-          type="button"
-          variant="outline"
-        >
-          {t("common.cancel")}
-        </Button>
         <form.Subscribe selector={(state) => state.canSubmit}>
           {(canSubmit) => (
             <Button
-              className="col-span-full"
               disabled={
                 targetUnavailable ||
                 postConfigMutation.isPending ||
@@ -1029,7 +1021,7 @@ function RoutingRuleForm({
             </Button>
           )}
         </form.Subscribe>
-      </div>
+      </UpsertFormActions>
     </form>
   )
 }

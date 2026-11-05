@@ -24,8 +24,37 @@ import {
 import { useConfigMutationPending } from "@/api/mutations"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { buildAdvancedEditorHref } from "@/lib/upsert-presentation"
+import { cn } from "@/lib/utils"
 
 export type UpsertPagePresentation = "page" | "dialog"
+
+/** Two secondary actions share a row on phones; the submit action always has its own. */
+export function UpsertFormActions({
+  children,
+  deleteAction,
+  onCancel,
+}: {
+  children: ReactNode
+  deleteAction?: ReactNode
+  onCancel: () => void
+}) {
+  const { t } = useTranslation()
+  return (
+    <div
+      data-upsert-actions
+      className={cn(
+        "grid gap-2 max-sm:*:h-auto max-sm:*:min-h-11 max-sm:*:w-full max-sm:*:min-w-0 max-sm:*:px-2 max-sm:*:py-2 max-sm:*:whitespace-normal sm:flex sm:justify-end sm:gap-3 max-sm:[&>button[type=submit]]:col-span-full",
+        deleteAction ? "grid-cols-2" : "grid-cols-1"
+      )}
+    >
+      {deleteAction}
+      <Button onClick={onCancel} size="xl" type="button" variant="outline">
+        {t("common.cancel")}
+      </Button>
+      {children}
+    </div>
+  )
+}
 
 export function UpsertPage({
   title,

@@ -74,6 +74,40 @@ async function fixture(
         req.postDataJSON()?.action === "check_update"
       )
         return json({ error: "No update source in fixture" }, 503)
+      // The lists page reads its visible rows with POST, including when the editor closes.
+      if (
+        loggedIn &&
+        endpoint === "/api/lists/query" &&
+        req.method() === "POST"
+      ) {
+        const { limit = 50, offset = 0 } = req.postDataJSON()
+        const rows = Object.entries(config.lists).map(([id, list]) => ({
+          id,
+          display_name: list.display_name,
+          domain_count: list.domains?.length ?? 0,
+          ipv4_count: 0,
+          ipv6_count: 0,
+        }))
+        return json({
+          items: rows.slice(offset, offset + limit),
+          total: rows.length,
+          filtered_total: rows.length,
+          offset,
+          limit,
+          has_refreshable_lists: false,
+          is_draft: isDraft,
+          revision: (isDraft ? "2" : "1").repeat(64),
+        })
+      }
+      if (
+        loggedIn &&
+        endpoint === "/api/config/dependencies" &&
+        req.method() === "POST"
+      )
+        return json(
+          { error: "Dependency preview not provided by fixture" },
+          503
+        )
       writes.push(endpoint)
       if (endpoint === "/api/auth/login" && req.method() === "POST") {
         loggedIn = true
@@ -139,16 +173,16 @@ test("the authenticated app mounts with seven legacy DNS rules from GET /api/con
   assert.deepEqual(writes, ["/api/auth/login"])
 })
 
-test("route editor actions fit the screen, keep their labels and do not submit on cancel/delete", async (t) => {
+async function verifyEditorActions(t, editor) {
   const phone = await fixture(t, { mobile: true })
   const desktop = await fixture(t)
-  const edit = "/routing-rules/local_rule/edit"
+  const edit = editor.base + "/" + editor.id + "/edit"
   for (const [width, route, count] of [
     [320, edit, 3],
     [360, edit, 3],
     [390, edit, 3],
     [320, edit + "?view=page", 3],
-    [320, "/routing-rules/create", 2],
+    [320, editor.base + "/create", 2],
     [1280, edit, 3],
   ]) {
     const { page, writes } = width < 640 ? phone : desktop
@@ -177,8 +211,8 @@ test("route editor actions fit the screen, keep their labels and do not submit o
     assert.deepEqual(
       boxes.map((b) => b.label),
       count === 3
-        ? ["Удалить", "Отмена", "Сохранить правило"]
-        : ["Отмена", "Создать правило"],
+        ? ["Удалить", "Отмена", editor.save]
+        : ["Отмена", editor.create],
       label
     )
     assert.ok(
@@ -213,8 +247,8 @@ test("route editor actions fit the screen, keep their labels and do not submit o
     }
     assert.ok(await footer.locator('button[type="submit"]').isDisabled())
     if (width === 360) {
-      if (process.env.ROUTING_FOOTER_SCREENSHOT)
-        await page.screenshot({ path: process.env.ROUTING_FOOTER_SCREENSHOT })
+      if (process.env[editor.screenshot])
+        await page.screenshot({ path: process.env[editor.screenshot] })
       await footer.getByRole("button", { name: "Удалить", exact: true }).tap()
       await page
         .getByRole("dialog")
@@ -225,25 +259,63 @@ test("route editor actions fit the screen, keep their labels and do not submit o
         .getByRole("button", { name: "Отмена", exact: true })
         .tap()
       await footer.getByRole("button", { name: "Отмена", exact: true }).tap()
-      await page.waitForURL(origin + "/routing-rules")
+      await page.waitForURL(origin + editor.back)
       assert.deepEqual(writes, [])
     } else if (width === 390) {
-      await page.locator("#routing-rule-display-name").fill("Новое имя")
+      await page.locator(editor.nameField).fill("Новое имя")
       const submitted = page.waitForRequest(
         (req) =>
           req.method() === "POST" &&
           new URL(req.url()).pathname === "/api/config"
       )
-      await footer
-        .getByRole("button", { name: "Сохранить правило", exact: true })
-        .tap()
+      await footer.getByRole("button", { name: editor.save, exact: true }).tap()
       const staged = (await submitted).postDataJSON()
-      assert.equal(staged.route.rules.length, 1)
-      assert.equal(staged.route.rules[0].display_name, "Новое имя")
-      await page.waitForURL(origin + "/routing-rules")
+      assert.equal(editor.savedName(staged), "Новое имя")
+      await page.waitForURL(origin + editor.back)
     }
   }
   assert.deepEqual([...phone.errors, ...desktop.errors], [])
   assert.deepEqual(phone.writes, ["/api/config"])
   assert.deepEqual(desktop.writes, [])
-})
+}
+
+for (const editor of [
+  {
+    base: "/routing-rules",
+    back: "/routing-rules",
+    id: "local_rule",
+    nameField: "#routing-rule-display-name",
+    save: "Сохранить правило",
+    create: "Создать правило",
+    savedName: (c) =>
+      c.route.rules.length === 1 && c.route.rules[0].display_name,
+    screenshot: "ROUTING_FOOTER_SCREENSHOT",
+  },
+  {
+    base: "/lists",
+    back: "/lists",
+    id: "sites",
+    nameField: "#list-display-name",
+    save: "Сохранить список",
+    create: "Создать список",
+    savedName: (c) => c.lists.sites.display_name,
+    screenshot: "LIST_FOOTER_SCREENSHOT",
+  },
+  {
+    base: "/dns-servers",
+    back: "/dns-servers",
+    id: "primary",
+    nameField: "#dns-server-display-name",
+    save: "Сохранить DNS-сервер",
+    create: "Создать DNS-сервер",
+    savedName: (c) =>
+      c.dns.servers.find((s) => s.tag === "primary")?.display_name,
+    screenshot: "DNS_SERVER_FOOTER_SCREENSHOT",
+  },
+]) {
+  test(
+    editor.base +
+      ": responsive actions, safe cancel/delete and single draft save",
+    (t) => verifyEditorActions(t, editor)
+  )
+}

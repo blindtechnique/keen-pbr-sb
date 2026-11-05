@@ -28,6 +28,7 @@ import {
 import { OutboundSelect } from "@/components/shared/outbound-select"
 import { OperationErrorMessage } from "@/components/shared/operation-error-message"
 import {
+  UpsertFormActions,
   UpsertPage,
   type UpsertPagePresentation,
 } from "@/components/shared/upsert-page"
@@ -951,28 +952,29 @@ function DnsServerForm({
       <DnsServerOperationError error={operationError} />
       <ServerValidationAlert errors={unmappedServerErrors} />
 
-      <div className="flex justify-end gap-3" data-upsert-actions>
-        {mode === "edit" && serverTag && config ? (
-          <UpsertDeleteAction
-            confirmLabel={t("pages.dnsServers.deleteDialog.confirm")}
-            description={t("pages.dnsServers.deleteDialog.description", {
-              tags: formatDnsServerNames(config, [serverTag]),
-            })}
-            impactItems={getDnsServerDeleteImpactItems(
-              config,
-              [serverTag],
-              getDnsServerDeleteImpact(config, [serverTag]),
-              t
-            )}
-            isPending={postConfigMutation.isPending}
-            label={t("common.delete")}
-            onConfirm={handleDelete}
-            title={t("pages.dnsServers.deleteDialog.title")}
-          />
-        ) : null}
-        <Button onClick={close} size="xl" type="button" variant="outline">
-          {t("common.cancel")}
-        </Button>
+      <UpsertFormActions
+        onCancel={close}
+        deleteAction={
+          mode === "edit" && serverTag && config ? (
+            <UpsertDeleteAction
+              confirmLabel={t("pages.dnsServers.deleteDialog.confirm")}
+              description={t("pages.dnsServers.deleteDialog.description", {
+                tags: formatDnsServerNames(config, [serverTag]),
+              })}
+              impactItems={getDnsServerDeleteImpactItems(
+                config,
+                [serverTag],
+                getDnsServerDeleteImpact(config, [serverTag]),
+                t
+              )}
+              isPending={postConfigMutation.isPending}
+              label={t("common.delete")}
+              onConfirm={handleDelete}
+              title={t("pages.dnsServers.deleteDialog.title")}
+            />
+          ) : null
+        }
+      >
         <form.Subscribe selector={(state) => state.canSubmit}>
           {(canSubmit) => (
             <Button
@@ -992,7 +994,7 @@ function DnsServerForm({
             </Button>
           )}
         </form.Subscribe>
-      </div>
+      </UpsertFormActions>
     </form>
   )
 }
