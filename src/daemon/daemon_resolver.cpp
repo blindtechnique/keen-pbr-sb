@@ -17,6 +17,7 @@
 
 #include <fmt/ranges.h>
 
+#include <stdexcept>
 #include <type_traits>
 #include <utility>
 
@@ -25,11 +26,11 @@ namespace keen_pbr3 {
 int Daemon::invoke_resolver_with_dns_proxy(
     const ResolverGenerationSnapshot& generation, const std::vector<std::string>& args) {
     const auto& config = generation.config;
-    const DnsServerRegistry registry(config.dns.value_or(DnsConfig{}),
-                                     generation.keenetic_dns.snapshot);
+    if (!generation.dns_registry) throw std::logic_error("Missing prepared resolver registry");
+    const auto& registry = *generation.dns_registry;
     DnsBalancerSettings settings;
     settings.ipv6_enabled = generation.ipv6_policy.targets_enabled;
-    settings.listen_ip = kDohListenIp;
+    settings.listen_ip = kDnsProxyListenIp;
     if (registry.proxy_uses_doh()) {
         const auto ca = detect_ca_bundle();
         if (!ca) throw DnsError("Install CA certificates to use DNS-over-HTTPS",
@@ -136,7 +137,13 @@ ResolverGenerationSnapshot Daemon::make_resolver_generation_snapshot(
         std::move(trusted_dns_interfaces);
     input.generation =
         runtime_generation_.load(std::memory_order_acquire);
-    return build_runtime_resolver_generation_snapshot(input);
+    return prepare_resolver_generation(input);
+}
+
+ResolverGenerationSnapshot Daemon::prepare_resolver_generation(const RuntimeResolverGenerationInput& input) {
+    auto registry = dns_proxy_runtime_.prepare_registry(
+        input.config.dns.value_or(DnsConfig{}), input.keenetic_dns.snapshot);
+    return build_runtime_resolver_generation_snapshot(input, std::move(registry));
 }
 
 void Daemon::update_resolver_config_hash() {

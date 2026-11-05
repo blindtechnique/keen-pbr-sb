@@ -1,5 +1,7 @@
 #pragma once
 
+#include "dns_proxy_ports.hpp"
+
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -10,11 +12,6 @@
 #include <vector>
 
 namespace keen_pbr3 {
-
-// The local DNS forwarder listens on one address (dns.proxy_address), one port
-// per set of upstreams (UDP and TCP). Ports are dns.proxy_port_start + the
-// position of the set, at most kDnsBalancerMaxGroups of them.
-constexpr std::size_t kDnsBalancerMaxGroups = 32;
 
 enum class DnsBalancerUpstreamKind : std::uint8_t {
     Plain,  // UDP, with a TCP retry for truncated answers
@@ -58,6 +55,7 @@ struct DnsBalancerUpstream {
 struct DnsBalancerGroup {
     std::uint16_t port{0};    // listen port on the forwarder address
     std::vector<DnsBalancerUpstream> upstreams;  // in the order they are tried
+    std::shared_ptr<DnsProxyPort> binding{}; // runtime reservation; absent for fixed-port callers
 };
 
 // What the groups resolve for, by port: the names of the lists, or this entry
@@ -71,7 +69,7 @@ inline bool operator==(const DnsBalancerUpstream& a, const DnsBalancerUpstream& 
            a.detour == b.detour && a.ips == b.ips;
 }
 inline bool operator==(const DnsBalancerGroup& a, const DnsBalancerGroup& b) {
-    return a.port == b.port && a.upstreams == b.upstreams;
+    return a.port == b.port && a.upstreams == b.upstreams && a.binding == b.binding;
 }
 
 // Where the forwarder gets what its upstreams cannot know on their own.
@@ -102,7 +100,7 @@ inline bool operator==(const DnsBalancerSettings& a, const DnsBalancerSettings& 
 }
 
 struct DnsBalancerOptions {
-    std::string listen_ip{"127.0.0.89"};
+    std::string listen_ip{kDnsProxyListenIp};
     // How long one upstream gets to answer before the next one is tried.
     std::chrono::milliseconds udp_attempt_timeout{1500};
     std::chrono::milliseconds tcp_attempt_timeout{2500};

@@ -63,7 +63,7 @@ TEST_CASE("DNS server selections preserve legacy and explicit empty semantics") 
 TEST_CASE("DNS publishes one group target and preserves every selected server's detour") {
     auto dns = multi_dns();
     const auto output = generated_dns(dns);
-    CHECK(output.find("server=/example.org/127.0.0.89#5355\n") != std::string::npos);
+    CHECK(output.find("server=/example.org/127.0.0.89#15355\n") != std::string::npos);
     CHECK(output.find("server=/example.org/1.1.1.1\n") == std::string::npos);
     CHECK(output.find("server=/example.org/9.9.9.9#5353\n") == std::string::npos);
     DnsServerRegistry registry(dns);
@@ -81,7 +81,7 @@ TEST_CASE("DNS group hash tracks underlying plain addresses and order even at th
     const auto original = generated_dns(dns, true);
     dns.servers->front().address = "1.0.0.1";
     CHECK(generated_dns(dns, true) != original);
-    CHECK(generated_dns(dns).find("server=/example.org/127.0.0.89#5355\n") != std::string::npos);
+    CHECK(generated_dns(dns).find("server=/example.org/127.0.0.89#15355\n") != std::string::npos);
     const auto changed = generated_dns(dns, true);
     std::reverse(dns.rules->front().servers->begin(), dns.rules->front().servers->end());
     CHECK(generated_dns(dns, true) != changed);
@@ -92,7 +92,7 @@ TEST_CASE("DNS grouped fallback preserves only direct upstream records for STOP"
     dns.servers->front().detour.reset();
     dns.fallback = std::vector<std::string>{"primary", "backup"};
     const auto output = generated_dns(dns);
-    CHECK(output.find("\nserver=127.0.0.89#5355\n") != std::string::npos);
+    CHECK(output.find("\nserver=127.0.0.89#15355\n") != std::string::npos);
     CHECK(output.find("# keen-pbr direct-fallback server=1.1.1.1\n") != std::string::npos);
     CHECK(output.find("# keen-pbr direct-fallback server=9.9.9.9") == std::string::npos);
     CHECK(output.find("# keen-pbr direct-fallback server=127.") == std::string::npos);
@@ -146,7 +146,7 @@ TEST_CASE("DoH generation hash tracks HTTPS pins and bootstrap, and STOP fallbac
     server.ips = std::vector<std::string>{"1.1.1.1"};
     dns.fallback = std::vector<std::string>{"primary", "backup"};
     const auto text = generated_dns(dns);
-    CHECK(text.find("server=127.0.0.89#5355") != std::string::npos);
+    CHECK(text.find("server=127.0.0.89#15355") != std::string::npos);
     CHECK(text.find("# keen-pbr direct-fallback server=127.0.0.89") == std::string::npos);
     const auto before = generated_dns(dns, true);
     server.ips = std::vector<std::string>{"1.0.0.1"};

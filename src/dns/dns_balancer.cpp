@@ -404,6 +404,7 @@ struct DnsBalancer::Impl {
             std::lock_guard<std::mutex> lock(mutex);
             last_stats = {};
             applied.clear();
+            pending.clear();
             applied_settings = {};
             applied_generation = requested_generation;
         }
@@ -637,7 +638,7 @@ struct DnsBalancer::Impl {
                         break;
                     }
                 }
-                if (slot == kMaxListeners || !open_listener(slot, group.port)) {
+                if (slot == kMaxListeners || !open_listener(slot, group)) {
                     bind_failed.push_back(group.port);
                     continue;
                 }
@@ -987,7 +988,8 @@ struct DnsBalancer::Impl {
 #endif
     }
 
-    bool open_listener(std::size_t index, std::uint16_t port) {
+    bool open_listener(std::size_t index, const DnsBalancerGroup& group) {
+        const auto port = group.port;
         sockaddr_in addr{};
         if (!make_listen_addr(listen_ip, port, addr)) {
             return false;
@@ -995,15 +997,23 @@ struct DnsBalancer::Impl {
         Listener& listener = listeners[index];
         listener = Listener{};
         listener.port = port;
-        const int one = 1;
-        listener.udp_fd = ::socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-        listener.tcp_fd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-        bool ok = listener.udp_fd >= 0 && listener.tcp_fd >= 0;
-        if (ok) {
-            ::setsockopt(listener.tcp_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-            ok = ::bind(listener.udp_fd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) == 0 &&
-                 ::bind(listener.tcp_fd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) == 0 &&
-                 ::listen(listener.tcp_fd, 16) == 0;
+        bool ok;
+        if (group.binding) {
+            const int error = (group.binding->number() == port && listen_ip == kDnsProxyListenIp)
+                ? group.binding->duplicate_sockets(listener.udp_fd, listener.tcp_fd) : EINVAL;
+            ok = error == 0;
+            if (!ok) errno = error;
+        } else {
+            const int one = 1;
+            listener.udp_fd = ::socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+            listener.tcp_fd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+            ok = listener.udp_fd >= 0 && listener.tcp_fd >= 0;
+            if (ok) {
+                ::setsockopt(listener.tcp_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+                ok = ::bind(listener.udp_fd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) == 0 &&
+                     ::bind(listener.tcp_fd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) == 0 &&
+                     ::listen(listener.tcp_fd, 16) == 0;
+            }
         }
         if (!ok) {
             Logger::instance().warn("DNS forwarder: cannot listen on {}:{}: {}", listen_ip,
@@ -1030,6 +1040,9 @@ struct DnsBalancer::Impl {
         for (std::size_t i = 0; i < tcp_sessions.size(); ++i) {
             if (tcp_sessions[i].used && tcp_sessions[i].listener == index) release_tcp(i);
         }
+        // The reservation can outlive this worker's duplicates.
+        ::epoll_ctl(epoll_fd, EPOLL_CTL_DEL, listener.udp_fd, nullptr);
+        ::epoll_ctl(epoll_fd, EPOLL_CTL_DEL, listener.tcp_fd, nullptr);
         close_fd(listener.udp_fd);
         close_fd(listener.tcp_fd);
         listener = Listener{};

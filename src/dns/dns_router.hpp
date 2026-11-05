@@ -13,11 +13,13 @@ namespace keen_pbr3 {
 
 class DnsServerRegistry {
 public:
+    using ReservePort = std::function<std::shared_ptr<DnsProxyPort>(std::size_t)>;
     // Construct from DNS config.
     // Parses all DNS server definitions and validates tags.
     explicit DnsServerRegistry(
         const DnsConfig& dns_config,
-        const std::optional<KeeneticDnsSnapshot>& keenetic_snapshot = std::nullopt);
+        const std::optional<KeeneticDnsSnapshot>& keenetic_snapshot = std::nullopt,
+        const ReservePort& reserve_port = {});
 
     std::vector<const DnsServerConfig*> get_servers(const std::string& tag) const;
 
@@ -53,7 +55,8 @@ public:
     }
 
 private:
-    std::vector<DnsServerConfig> make_targets(const std::vector<std::string>& tags);
+    std::vector<DnsServerConfig> make_targets(const std::vector<std::string>& tags,
+                                              const ReservePort& reserve_port);
     std::map<std::string, std::vector<DnsServerConfig>> servers_;
     std::map<std::string, std::vector<DnsServerConfig>> detour_servers_;
     std::vector<std::string> fallback_tags_;

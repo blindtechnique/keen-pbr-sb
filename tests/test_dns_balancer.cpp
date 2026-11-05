@@ -379,7 +379,7 @@ TEST_CASE("dns balancer: stop is clean and idempotent") {
 
 TEST_CASE("dns balancer: the default listen address is the loopback address 127.0.0.89") {
     CHECK(DnsBalancerOptions{}.listen_ip == "127.0.0.89");
-    CHECK(5355 + kDnsBalancerMaxGroups <= 65536);
+    CHECK(kDnsProxyFirstPort + kDnsProxyPortCount <= 65536);
 }
 
 TEST_CASE("dns balancer: a new listen address reopens the listeners there") {

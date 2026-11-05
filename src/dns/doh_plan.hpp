@@ -11,9 +11,6 @@
 
 namespace keen_pbr3 {
 
-inline constexpr const char* kDohListenIp = "127.0.0.89";
-inline constexpr std::uint16_t kDohFirstPort = 5355;
-
 class DohPlanError : public DnsError {
 public:
     DohPlanError(std::string message, std::string code, std::string path)
@@ -137,7 +134,7 @@ inline DohPlan make_doh_plan(const DnsConfig& dns) {
                                "config.dns.bootstrap", "dns.bootstrap");
         if (plan.groups.size() >= kDnsBalancerMaxGroups)
             throw DohPlanError("At most 32 DoH servers are supported", "config.dns.doh_limit", "dns.servers");
-        const auto port = static_cast<std::uint16_t>(kDohFirstPort + plan.groups.size());
+        const auto port = static_cast<std::uint16_t>(kDnsProxyFirstPort + plan.groups.size());
         auto upstream = DnsBalancerUpstream::doh(*server.address, server.detour.value_or(""), ips);
         upstream.name = tag;
         plan.ports.emplace(tag, port);

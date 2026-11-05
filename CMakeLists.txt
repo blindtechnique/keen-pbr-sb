@@ -803,7 +803,7 @@ install(FILES ${CMAKE_SOURCE_DIR}/packages/common/local.lst
 # Unit tests (optional, requires doctest submodule)
 # Native DoH is idle until explicitly configured. No packet interception.
 add_library(keen-pbr-doh STATIC
-  src/dns/dns_balancer.cpp src/dns/doh_client.cpp
+  src/dns/dns_balancer.cpp src/dns/dns_proxy_ports.cpp src/dns/doh_client.cpp
   src/dns/doh_bootstrap.cpp src/dns/doh_support.cpp
   src/dns/dns_client.cpp src/dns/dns_wire.cpp)
 set_target_properties(keen-pbr-doh PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)

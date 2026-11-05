@@ -1422,6 +1422,7 @@ target_include_directories(
 )
 target_link_libraries(
   keen-pbr-runtime-resolver-generation-tests PRIVATE
+  keen-pbr-doh
   nlohmann_json::nlohmann_json
   fmt::fmt-header-only
   ${KEEN_PBR_CURL_TARGET}

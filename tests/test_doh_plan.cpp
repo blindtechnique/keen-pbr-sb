@@ -9,6 +9,104 @@
 using namespace keen_pbr3;
 using namespace std::chrono_literals;
 
+namespace {
+class ForeignListener {
+public:
+    ForeignListener(int type, std::uint16_t port) : fd_(::socket(AF_INET, type | SOCK_CLOEXEC, 0)) {
+        REQUIRE(fd_ >= 0);
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_ANY);
+        address.sin_port = htons(port);
+        const int rc = ::bind(fd_, reinterpret_cast<const sockaddr*>(&address), sizeof(address));
+        bound_ = rc == 0;
+        // A real LLMNR service can already own this port on a developer machine.
+        REQUIRE((rc == 0 || errno == EADDRINUSE));
+        if (rc == 0 && type == SOCK_STREAM) REQUIRE(::listen(fd_, 1) == 0);
+    }
+    ~ForeignListener() { ::close(fd_); }
+    bool bound() const { return bound_; }
+    ForeignListener(const ForeignListener&) = delete;
+    ForeignListener& operator=(const ForeignListener&) = delete;
+private:
+    int fd_;
+    bool bound_{false};
+};
+} // namespace
+
+TEST_CASE("DNS proxy starts beside the Keenetic SMB wildcard UDP listener") {
+    using namespace fake_dns;
+    ForeignListener smb(SOCK_DGRAM, 5355);
+    ForeignListener occupied_udp(SOCK_DGRAM, kDnsProxyFirstPort);
+    ForeignListener occupied_tcp(SOCK_STREAM, kDnsProxyFirstPort + 1);
+    const bool udp_half_was_free = ForeignListener(SOCK_DGRAM, kDnsProxyFirstPort + 1).bound();
+    // A truncated response makes the client retry on the very same port over TCP.
+    auto reply = [](const Bytes& q, bool tcp) {
+        return make_reply(q, 0, {a_rr("192.0.2.8")}, !tcp);
+    };
+    FakeDnsServer first(reply), second(reply);
+    auto dns = nlohmann::json::parse(R"({
+      "servers":[{"tag":"a","address":"127.0.0.1"},{"tag":"b","address":"127.0.0.1"}],
+      "fallback":["a","b"], "rules":[{"list":["example"],"servers":["a","b"]}]
+    })").get<DnsConfig>();
+    dns.servers->at(0).address = "127.0.0.1:" + std::to_string(first.port());
+    dns.servers->at(1).address = "127.0.0.1:" + std::to_string(second.port());
+    DnsProxyRuntime runtime;
+    const auto registry = runtime.prepare_registry(dns);
+    REQUIRE(registry->proxy_groups().size() == 1);
+    const auto port = registry->fallback_targets().at(0).port;
+    CHECK(port >= kDnsProxyFirstPort + 2);
+    if (udp_half_was_free) {
+        ForeignListener unused_half(SOCK_DGRAM, kDnsProxyFirstPort + 1);
+        CHECK(unused_half.bound()); // TCP collision released the partial UDP reservation
+    }
+    ForeignListener second_smb(SOCK_DGRAM, 5355);
+    CHECK_FALSE(second_smb.bound());
+    CHECK(port == registry->list_targets("example").at(0).port);
+    CHECK(port == runtime.prepare_registry(dns)->proxy_groups().at(0).port);
+    auto query = [&] { return dns_query(kDnsProxyListenIp, port, "host.example",
+                                        kDnsTypeA, kDnsClassIN, 1000ms); };
+    REQUIRE(runtime.apply(registry->proxy_groups(), {}, [&] {
+        const auto answer = query();
+        CHECK(answer.status == DnsQueryStatus::Ok);
+        CHECK(answer.via_tcp);
+        CHECK(answer.addresses == std::vector<std::string>{"192.0.2.8"});
+        return 0;
+    }) == 0);
+    auto candidate = registry->proxy_groups();
+    std::reverse(candidate[0].upstreams.begin(), candidate[0].upstreams.end());
+    CHECK(runtime.apply(candidate, {}, [] { return 7; }) == 7);
+    CHECK(query().status == DnsQueryStatus::Ok);
+    runtime.stop();
+    // Even a retained resolver snapshot must not keep STOP's UDP listener open.
+    CHECK(query().status == DnsQueryStatus::NetworkError);
+}
+
+TEST_CASE("exhausted DNS port range leaves a working group alone and needs no port for direct DNS") {
+    DnsProxyRuntime runtime;
+    const auto dns = nlohmann::json::parse(R"({
+      "servers":[{"tag":"a","address":"192.0.2.1"},{"tag":"b","address":"192.0.2.2"}],
+      "fallback":["a","b"]
+    })").get<DnsConfig>();
+    const auto current = runtime.prepare_registry(dns);
+    REQUIRE(runtime.apply(current->proxy_groups(), {}, [] { return 0; }) == 0);
+    std::vector<std::unique_ptr<ForeignListener>> occupied;
+    for (std::size_t i = 0; i < kDnsProxyPortCount; ++i) {
+        auto port = static_cast<std::uint16_t>(kDnsProxyFirstPort + i);
+        if (port != current->proxy_groups()[0].port)
+            occupied.emplace_back(std::make_unique<ForeignListener>(SOCK_DGRAM, port));
+    }
+    auto two = dns;
+    two.rules.emplace(1);
+    two.rules->at(0).list = {"reverse"};
+    two.rules->at(0).servers = std::vector<std::string>{"b", "a"};
+    CHECK_THROWS_AS(runtime.prepare_registry(two), std::runtime_error);
+    CHECK(runtime.prepare_registry(dns)->proxy_groups()[0].binding == current->proxy_groups()[0].binding);
+    auto direct = dns;
+    direct.fallback = std::vector<std::string>{"a"};
+    CHECK(runtime.prepare_registry(direct)->proxy_groups().empty());
+}
+
 static DnsConfig doh_config() {
     return nlohmann::json::parse(R"({
       "bootstrap":["plain"],
@@ -111,7 +209,7 @@ TEST_CASE("DNS forwarding plan uses the pinned Keenetic snapshot without leaking
 TEST_CASE("DNS forwarding groups reject a loop into their managed listener range") {
     auto dns = doh_config();
     dns.fallback = std::vector<std::string>{"plain", "cloud"};
-    dns.servers->back().address = "127.0.0.89:5356";
+    dns.servers->back().address = "127.0.0.89:15482";
     dns.bootstrap.reset();
     dns.servers->front().ips = std::vector<std::string>{"1.1.1.1"};
     CHECK_THROWS_AS((void)DnsServerRegistry(dns), DnsError);

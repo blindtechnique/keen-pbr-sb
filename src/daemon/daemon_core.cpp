@@ -1589,6 +1589,9 @@ void Daemon::handle_ipc_control_requests() {
                                     }
                                 }
 
+                                if (!generation->dns_registry) {
+                                    throw ipc::ControlProtocolError("resolver_generation_unavailable");
+                                }
                                 const auto header = ipc::encode_message(
                                     {{"protocol_version",
                                       ipc::kControlProtocolVersion},
@@ -1606,11 +1609,8 @@ void Daemon::handle_ipc_control_requests() {
                                 ListStreamer streamer(
                                     cache,
                                     generation->list_cache_snapshot);
-                                DnsServerRegistry registry(
-                                    dns_config,
-                                    generation->keenetic_dns.snapshot);
                                 DnsmasqGenerator generator(
-                                    registry,
+                                    *generation->dns_registry,
                                     streamer,
                                     route_config,
                                     dns_config,
@@ -7314,7 +7314,7 @@ void Daemon::begin_preowned_runtime_firewall_config_generation(
                 std::move(trusted_interfaces);
             input.generation = generation;
             return std::make_shared<const ResolverGenerationSnapshot>(
-                build_runtime_resolver_generation_snapshot(input));
+                prepare_resolver_generation(input));
         };
 
         transaction->candidate_resolver_generation =

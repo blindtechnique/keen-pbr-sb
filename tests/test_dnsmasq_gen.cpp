@@ -388,7 +388,7 @@ TEST_CASE("generate-resolver-config includes fallback server directives in confi
     const std::string output = run_generate(gen);
 
     CHECK(lines_with_prefix(output, "server=") ==
-          std::vector<std::string>{"server=127.0.0.89#5355"});
+          std::vector<std::string>{"server=127.0.0.89#15355"});
     REQUIRE(reg.proxy_groups().size() == 1);
     REQUIRE(reg.proxy_groups()[0].upstreams.size() == 2);
     CHECK(reg.proxy_groups()[0].upstreams[0].ip == "1.1.1.1");
@@ -422,7 +422,7 @@ TEST_CASE("direct fallback metadata contains only direct global DNS without chan
     CHECK(lines_with_prefix(output, "# keen-pbr direct-fallback server=") ==
           std::vector<std::string>{"# keen-pbr direct-fallback server=77.88.8.8"});
     CHECK(lines_with_prefix(output, "server=") == std::vector<std::string>{
-        "server=127.0.0.89#5355", "server=/only.example/192.0.2.53"});
+        "server=127.0.0.89#15355", "server=/only.example/192.0.2.53"});
     REQUIRE(registry.proxy_groups().size() == 1);
     CHECK(registry.proxy_groups()[0].upstreams.size() == 2);
     CHECK(registry.detour_servers("vpn-dns").front()->resolved_ip == "10.20.30.53");
@@ -465,7 +465,7 @@ TEST_CASE("direct fallback metadata preserves custom ports and excludes self DNS
         }
         CHECK(lines_with_prefix(output, "# keen-pbr direct-fallback server=") == expected);
         CHECK(lines_with_prefix(output, "server=") ==
-              std::vector<std::string>{"server=127.0.0.89#5355"});
+              std::vector<std::string>{"server=127.0.0.89#15355"});
         REQUIRE(registry.proxy_groups().size() == 1);
         REQUIRE(registry.proxy_groups()[0].upstreams.size() == 3);
         CHECK(registry.proxy_groups()[0].upstreams[0].port == 40508);
@@ -505,7 +505,7 @@ TEST_CASE("direct fallback metadata uses the prepared Keenetic address order wit
               "# keen-pbr direct-fallback server=127.0.0.1#40508",
               "# keen-pbr direct-fallback server=127.0.0.1#40500"});
     CHECK(lines_with_prefix(output, "server=") == std::vector<std::string>{
-        "server=127.0.0.89#5355", "server=/only.example/192.0.2.53"});
+        "server=127.0.0.89#15355", "server=/only.example/192.0.2.53"});
     REQUIRE(registry.proxy_groups().size() == 1);
     CHECK(registry.proxy_groups()[0].upstreams[0].port == 40508);
     CHECK(registry.proxy_groups()[0].upstreams[1].port == 40500);
@@ -768,7 +768,7 @@ TEST_CASE("generate-resolver-config includes all keenetic fallback servers in se
     const std::string output = run_generate(gen);
 
     CHECK(lines_with_prefix(output, "server=") ==
-          std::vector<std::string>{"server=127.0.0.89#5355"});
+          std::vector<std::string>{"server=127.0.0.89#15355"});
     REQUIRE(reg.proxy_groups().size() == 1);
     REQUIRE(reg.proxy_groups()[0].upstreams.size() == 2);
     CHECK(reg.proxy_groups()[0].upstreams[0].port == 40500);
@@ -815,7 +815,7 @@ TEST_CASE("generate-resolver-config preserves scoped Keenetic DNS policy over gl
         registry, streamer, route_cfg, dns_cfg, lists);
     const std::string output = run_generate(generator);
 
-    CHECK(output.find("\nserver=127.0.0.89#5355\n") != std::string::npos);
+    CHECK(output.find("\nserver=127.0.0.89#15355\n") != std::string::npos);
     REQUIRE(registry.proxy_groups().size() == 1);
     CHECK(registry.proxy_groups()[0].upstreams[0].port == 40500);
     CHECK(registry.proxy_groups()[0].upstreams[1].ip == "8.8.8.8");
@@ -1181,7 +1181,7 @@ TEST_CASE("generate-resolver-config includes all keenetic dns rule servers") {
     DnsmasqGenerator gen(reg, streamer, route_cfg, dns_cfg, lists);
     const std::string output = run_generate(gen);
 
-    CHECK(output.find("server=/example.com/127.0.0.89#5355\n") != std::string::npos);
+    CHECK(output.find("server=/example.com/127.0.0.89#15355\n") != std::string::npos);
     REQUIRE(reg.proxy_groups().size() == 1);
     REQUIRE(reg.proxy_groups()[0].upstreams.size() == 2);
     CHECK(reg.proxy_groups()[0].upstreams[0].port == 40500);

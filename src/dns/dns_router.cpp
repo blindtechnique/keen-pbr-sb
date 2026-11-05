@@ -31,7 +31,8 @@ void append_unique_endpoint(std::vector<DnsServerConfig>& endpoints,
 
 DnsServerRegistry::DnsServerRegistry(
     const DnsConfig& dns_config,
-    const std::optional<KeeneticDnsSnapshot>& keenetic_snapshot)
+    const std::optional<KeeneticDnsSnapshot>& keenetic_snapshot,
+    const ReservePort& reserve_port)
     : fallback_tags_(dns_config.fallback.value_or(std::vector<std::string>{})) {
     std::vector<std::string> keenetic_server_tags;
     const auto doh_plan = make_doh_plan(dns_config);
@@ -140,7 +141,7 @@ DnsServerRegistry::DnsServerRegistry(
     // Use the same deterministic plan for hashing, streaming and activation.
     // Preserve our existing first-enabled-rule priority, rather than merging
     // later rules into an earlier rule's DNS policy.
-    fallback_targets_ = make_targets(fallback_tags_);
+    fallback_targets_ = make_targets(fallback_tags_, reserve_port);
     std::map<std::string, std::vector<std::string>> list_tags;
     for (const auto& rule : dns_config.rules.value_or(std::vector<DnsRule>{})) {
         if (!dns_rule_enabled(rule)) continue;
@@ -148,16 +149,16 @@ DnsServerRegistry::DnsServerRegistry(
             list_tags.emplace(list, dns_rule_server_tags(rule));
     }
     for (const auto& [list, tags] : list_tags)
-        list_targets_[list] = make_targets(tags);
+        list_targets_[list] = make_targets(tags, reserve_port);
     std::set<std::string> direct_tags;
     for (const auto& server : dns_config.servers.value_or(std::vector<DnsServer>{}))
         if (server.domains && !server.domains->empty()) direct_tags.insert(server.tag);
     for (const auto& tag : direct_tags)
-        direct_targets_[tag] = make_targets({tag});
+        direct_targets_[tag] = make_targets({tag}, reserve_port);
 }
 
 std::vector<DnsServerConfig> DnsServerRegistry::make_targets(
-    const std::vector<std::string>& tags) {
+    const std::vector<std::string>& tags, const ReservePort& reserve_port) {
     std::vector<DnsBalancerUpstream> upstreams;
     std::vector<DnsServerConfig> resolver_self_targets;
     const DnsServerConfig* single = nullptr;
@@ -187,8 +188,8 @@ std::vector<DnsServerConfig> DnsServerRegistry::make_targets(
     if (upstreams.empty()) return resolver_self_targets;
     for (const auto& upstream : upstreams) {
         if (upstream.kind == DnsBalancerUpstreamKind::Plain &&
-            upstream.ip == kDohListenIp && upstream.port >= kDohFirstPort &&
-            upstream.port < kDohFirstPort + kDnsBalancerMaxGroups)
+            upstream.ip == kDnsProxyListenIp && upstream.port >= kDnsProxyFirstPort &&
+            upstream.port < kDnsProxyFirstPort + kDnsProxyPortCount)
             throw DnsError("A DNS group cannot forward back into the managed proxy",
                            "config.dns.proxy_loop");
     }
@@ -200,11 +201,15 @@ std::vector<DnsServerConfig> DnsServerRegistry::make_targets(
         if (proxy_groups_.size() >= kDnsBalancerMaxGroups)
             throw DnsError("At most 32 distinct DNS forwarder groups are supported",
                            "config.dns.proxy_limit");
-        const auto port = static_cast<std::uint16_t>(kDohFirstPort + proxy_groups_.size());
-        proxy_groups_.push_back({port, std::move(upstreams)});
+        // Validation and offline rendering are deterministic and do no network I/O.
+        // A live resolver generation instead pins a real UDP/TCP pair at this point.
+        auto binding = reserve_port ? reserve_port(proxy_groups_.size()) : nullptr;
+        const auto port = binding ? binding->number() :
+            static_cast<std::uint16_t>(kDnsProxyFirstPort + proxy_groups_.size());
+        proxy_groups_.push_back({port, std::move(upstreams), std::move(binding)});
         group = std::prev(proxy_groups_.end());
     }
-    auto target = parse_dns_server("", kDohListenIp, std::nullopt);
+    auto target = parse_dns_server("", kDnsProxyListenIp, std::nullopt);
     target.port = group->port;
     target.runtime_proxy = true;
     return {std::move(target)};

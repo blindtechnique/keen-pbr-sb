@@ -1418,6 +1418,7 @@ private:
     std::size_t internal_vpn_catalog_refresh_retry_attempt_{0};
     TracedMutex system_resolver_hook_mutex_;
     DnsProxyRuntime dns_proxy_runtime_;
+    ResolverGenerationSnapshot prepare_resolver_generation(const RuntimeResolverGenerationInput& input);
     int invoke_resolver_with_dns_proxy(const ResolverGenerationSnapshot& generation,
                                       const std::vector<std::string>& args);
     // Legacy cache-publication serialization. Resolver/firewall consumers no

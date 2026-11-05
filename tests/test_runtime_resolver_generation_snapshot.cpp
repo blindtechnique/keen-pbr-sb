@@ -4,6 +4,7 @@
 #include "../src/runtime/runtime_state_machine.hpp"
 
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -23,6 +24,41 @@ std::shared_ptr<const ResolverGenerationSnapshot> stream_generation(
 }
 
 } // namespace
+
+TEST_CASE("resolver hash and dnsmasq stream use the same reserved DNS port") {
+    RuntimeResolverGenerationInput input;
+    input.config.dns = nlohmann::json::parse(R"({
+      "servers":[{"tag":"a","address":"192.0.2.1"},{"tag":"b","address":"192.0.2.2"}],
+      "fallback":["a","b"],"rules":[{"list":["sites"],"servers":["a","b"]}]
+    })").get<DnsConfig>();
+    ListConfig sites;
+    sites.domains = std::vector<std::string>{"site.example"};
+    input.config.lists = std::map<std::string, ListConfig>{{"sites", sites}};
+    input.list_cache_snapshot = std::make_shared<ListCacheGenerationSnapshot>();
+    input.list_max_file_size_bytes = 4096;
+    // Simulate another owner occupying the normally preferred pair.
+    DnsProxyPorts other;
+    const auto occupied = other.reserve(0);
+    DnsProxyPorts ports;
+    const auto pinned = std::make_shared<const DnsServerRegistry>(
+        *input.config.dns, std::nullopt, [&](std::size_t i) { return ports.reserve(i); });
+    const auto port = pinned->proxy_groups().at(0).port;
+    REQUIRE(port != occupied->number());
+    const auto snapshot = build_runtime_resolver_generation_snapshot(input, pinned);
+    REQUIRE(snapshot.dns_registry == pinned);
+    CHECK(snapshot.expected_hash != build_runtime_resolver_generation_snapshot(input).expected_hash);
+    ListStreamer streamer(input.list_max_file_size_bytes, snapshot.list_cache_snapshot);
+    RouteConfig route;
+    DnsmasqGenerator gen(*snapshot.dns_registry, streamer, route, *input.config.dns,
+        *input.config.lists, snapshot.resolver_type, KEEN_PBR3_VERSION_FULL_STRING,
+        snapshot.ipv6_policy, snapshot.trusted_dns_interfaces);
+    std::ostringstream output;
+    gen.generate(output);
+    const std::string endpoint = std::string(kDnsProxyListenIp) + "#" + std::to_string(port) + "\n";
+    CHECK(output.str().find("server=" + endpoint) != std::string::npos);
+    CHECK(output.str().find("server=/site.example/" + endpoint) != std::string::npos);
+    CHECK(gen.compute_config_hash() == snapshot.expected_hash);
+}
 
 TEST_CASE("runtime resolver stream selects a private generation only for the exact active attempt") {
     const auto committed = stream_generation(41U, 9U);

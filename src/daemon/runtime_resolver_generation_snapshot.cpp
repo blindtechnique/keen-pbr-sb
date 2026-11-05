@@ -126,7 +126,8 @@ bool runtime_resolver_stream_completion_is_exact(
 }
 
 ResolverGenerationSnapshot build_runtime_resolver_generation_snapshot(
-    const RuntimeResolverGenerationInput& input) {
+    const RuntimeResolverGenerationInput& input,
+    std::shared_ptr<const DnsServerRegistry> dns_registry) {
     if (!input.list_cache_snapshot) {
         throw std::invalid_argument(
             "runtime resolver generation requires a pinned list snapshot");
@@ -150,8 +151,8 @@ ResolverGenerationSnapshot build_runtime_resolver_generation_snapshot(
         snapshot.list_cache_snapshot);
     const DnsConfig dns_cfg =
         snapshot.config.dns.value_or(DnsConfig{});
-    DnsServerRegistry dns_registry(
-        dns_cfg, snapshot.keenetic_dns.snapshot);
+    snapshot.dns_registry = dns_registry ? std::move(dns_registry) :
+        std::make_shared<const DnsServerRegistry>(dns_cfg, snapshot.keenetic_dns.snapshot);
     // DnsmasqGenerator retains references while computing the hash. Keep
     // optional defaults alive for the complete call.
     const RouteConfig route_cfg =
@@ -160,7 +161,7 @@ ResolverGenerationSnapshot build_runtime_resolver_generation_snapshot(
         snapshot.config.lists.value_or(
             std::map<std::string, ListConfig>{});
     DnsmasqGenerator generator(
-        dns_registry,
+        *snapshot.dns_registry,
         streamer,
         route_cfg,
         dns_cfg,
