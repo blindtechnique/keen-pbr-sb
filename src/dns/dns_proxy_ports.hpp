@@ -27,7 +27,6 @@ public:
 
 private:
     friend class DnsProxyPorts;
-    friend class DnsProxyRuntime;
     explicit DnsProxyPort(std::uint16_t port) : port_(port) {}
     int bind_pair(); // caller holds mutex_ (or the object is not yet shared)
     void release();

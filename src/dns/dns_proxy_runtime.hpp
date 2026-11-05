@@ -2,7 +2,6 @@
 
 #include "dns_balancer.hpp"
 #include "dns_router.hpp"
-#include <algorithm>
 #include <mutex>
 #include <stdexcept>
 
@@ -32,16 +31,16 @@ public:
             const int result = hook();
             if (result != 0) {
                 if (changed) replace(previous_groups, previous_settings);
-                release_retired(groups, previous_groups);
                 return result;
             }
             // First remove references from dnsmasq, then close unused listeners.
             if (changed && groups.empty()) replace(groups, settings);
-            release_retired(previous_groups, groups);
+            // The outer config transaction may still roll back after a successful
+            // hook. Its immutable snapshot keeps the old pair reserved until
+            // commit or rollback, even once this worker no longer serves it.
             return 0;
         } catch (...) {
             if (changed) replace(previous_groups, previous_settings);
-            release_retired(groups, previous_groups);
             throw;
         }
     }
@@ -66,15 +65,6 @@ public:
     }
 
 private:
-    static void release_retired(const std::vector<DnsBalancerGroup>& old_groups,
-                                const std::vector<DnsBalancerGroup>& kept) {
-        for (const auto& old : old_groups) {
-            if (old.binding && std::none_of(kept.begin(), kept.end(),
-                    [&](const auto& g) { return g.binding == old.binding; })) {
-                old.binding->release();
-            }
-        }
-    }
     void replace(const std::vector<DnsBalancerGroup>& groups, const DnsBalancerSettings& settings) {
         // Retire cached endpoint addresses and connection marks on configuration
         // changes, instead of retaining another generation's bootstrap results.

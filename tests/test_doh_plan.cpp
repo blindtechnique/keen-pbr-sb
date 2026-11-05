@@ -77,6 +77,13 @@ TEST_CASE("DNS proxy starts beside the Keenetic SMB wildcard UDP listener") {
     std::reverse(candidate[0].upstreams.begin(), candidate[0].upstreams.end());
     CHECK(runtime.apply(candidate, {}, [] { return 7; }) == 7);
     CHECK(query().status == DnsQueryStatus::Ok);
+    // A later stage of the outer transaction can still roll back after a
+    // successful resolver hook. Its pinned port must not be stolen in between.
+    REQUIRE(runtime.apply({}, {}, [] { return 0; }) == 0);
+    ForeignListener contender(SOCK_DGRAM, port);
+    CHECK_FALSE(contender.bound());
+    REQUIRE(runtime.apply(registry->proxy_groups(), {}, [] { return 0; }) == 0);
+    CHECK(query().status == DnsQueryStatus::Ok);
     runtime.stop();
     // Even a retained resolver snapshot must not keep STOP's UDP listener open.
     CHECK(query().status == DnsQueryStatus::NetworkError);
