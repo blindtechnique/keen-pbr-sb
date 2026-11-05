@@ -14,6 +14,8 @@
 
 </div>
 
+**Последняя опубликованная Alpha:** [обновить уже установленный keen-pbr-sb](#обновление) · [установить с нуля](#первая-установка). Номер сборки подставлять не нужно. Кнопка GitHub **Latest** ведёт на Stable, а не на Alpha.
+
 ## Назначение alpha
 
 Alpha предназначена для проверки изменений и технического знакомства с проектом. Это не обещание стабильности на любой модели роутера. Конкретный установленный пакет определяется полным номером сборки с датой и временем, а не только основным номером версии.
@@ -418,13 +420,25 @@ opkg install curl ca-certificates
 Через **wget**:
 
 ```sh
-wget -O /tmp/keen-pbr-alpha-install.sh -T 30 -t 2 https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/alpha/install.sh && TMPDIR=/tmp KEEN_PBR_INSTALL_LANGUAGE=ru KEEN_PBR_UPDATE_RELEASE_TAG= sh /tmp/keen-pbr-alpha-install.sh --alpha
+(
+  set -e
+  installer=$(mktemp /tmp/keen-pbr-alpha.XXXXXX)
+  trap 'rm -f "$installer"' 0
+  wget -T 30 -t 2 -O "$installer" https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/alpha/install.sh
+  TMPDIR=/tmp KEEN_PBR_INSTALL_LANGUAGE=ru KEEN_PBR_UPDATE_RELEASE_TAG= sh "$installer" --alpha
+)
 ```
 
 Или через **curl**:
 
 ```sh
-curl -fL --connect-timeout 15 --max-time 120 --retry 2 -o /tmp/keen-pbr-alpha-install.sh https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/alpha/install.sh && TMPDIR=/tmp KEEN_PBR_INSTALL_LANGUAGE=ru KEEN_PBR_UPDATE_RELEASE_TAG= sh /tmp/keen-pbr-alpha-install.sh --alpha
+(
+  set -e
+  installer=$(mktemp /tmp/keen-pbr-alpha.XXXXXX)
+  trap 'rm -f "$installer"' 0
+  curl -fL --connect-timeout 15 --max-time 120 --retry 2 -o "$installer" https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/alpha/install.sh
+  TMPDIR=/tmp KEEN_PBR_INSTALL_LANGUAGE=ru KEEN_PBR_UPDATE_RELEASE_TAG= sh "$installer" --alpha
+)
 ```
 
 ### Обновление
@@ -432,16 +446,32 @@ curl -fL --connect-timeout 15 --max-time 120 --retry 2 -o /tmp/keen-pbr-alpha-in
 **Если keen-pbr-sb уже установлен**, включая переход со Stable, добавьте `--update`. Если загрузчик ещё не подготовлен, сначала выполните подготовку HTTPS выше. Готовая команда через **wget**:
 
 ```sh
-wget -O /tmp/keen-pbr-alpha-install.sh -T 30 -t 2 https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/alpha/install.sh && TMPDIR=/tmp KEEN_PBR_INSTALL_LANGUAGE=ru KEEN_PBR_UPDATE_RELEASE_TAG= sh /tmp/keen-pbr-alpha-install.sh --alpha --update
+(
+  set -e
+  installer=$(mktemp /tmp/keen-pbr-alpha.XXXXXX)
+  trap 'rm -f "$installer"' 0
+  wget -T 30 -t 2 -O "$installer" https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/alpha/install.sh
+  TMPDIR=/tmp KEEN_PBR_INSTALL_LANGUAGE=ru KEEN_PBR_UPDATE_RELEASE_TAG= sh "$installer" --alpha --update
+)
 ```
 
 Или через **curl**:
 
 ```sh
-curl -fL --connect-timeout 15 --max-time 120 --retry 2 -o /tmp/keen-pbr-alpha-install.sh https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/alpha/install.sh && TMPDIR=/tmp KEEN_PBR_INSTALL_LANGUAGE=ru KEEN_PBR_UPDATE_RELEASE_TAG= sh /tmp/keen-pbr-alpha-install.sh --alpha --update
+(
+  set -e
+  installer=$(mktemp /tmp/keen-pbr-alpha.XXXXXX)
+  trap 'rm -f "$installer"' 0
+  curl -fL --connect-timeout 15 --max-time 120 --retry 2 -o "$installer" https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/alpha/install.sh
+  TMPDIR=/tmp KEEN_PBR_INSTALL_LANGUAGE=ru KEEN_PBR_UPDATE_RELEASE_TAG= sh "$installer" --alpha --update
+)
 ```
 
 Режим `--update` не запускает заново первичную настройку авторизации, DNS, sing-box и nfqws2. Во время установки панель и сетевые службы могут быть временно недоступны; не запускайте вторую установку, пока первая не завершилась.
+
+**Как проверить результат:** установщик выводит «Выбран выпуск `alpha-…`» и полное имя IPK. После завершения выполните `/opt/usr/bin/keen-pbr --version`: число после `build` должно совпасть с суффиксом версии в имени выбранного пакета. Если установка прервалась, одно только сообщение о выборе выпуска ещё не означает, что он установлен.
+
+Если после отката в `/opt/var/log/keen-pbr.log` есть `DNS forwarder: cannot listen on 127.0.0.89:5355: Address already in use`, выбор выпуска сработал, но DNS-посредник не смог занять UDP-порт. Проверить владельца можно командой `netstat -lnup | grep ':5355 '`. Повторная установка того же IPK не освободит порт. Если порт занят SMB, оставьте службу включённой и используйте восстановленную версию до исправления конфликта.
 
 Установщик выбирает самый новый alpha-тег по номеру запуска/попытки среди 100 последних публичных выпусков, затем фиксирует этот тег, проверяет архитектуру, SHA256 и подпись манифеста **именно канала alpha**. Если подходящего выпуска нет или проверка не пройдена, установка прекращается — скрытого перехода на Stable нет. HTTPS-проверку отключать не нужно; для wget требуется поддержка HTTPS и актуальные CA-сертификаты Entware.
 
