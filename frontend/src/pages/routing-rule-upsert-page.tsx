@@ -985,7 +985,10 @@ function RoutingRuleForm({
         }
       />
 
-      <div className="flex justify-end gap-3" data-upsert-actions>
+      <div
+        className="grid grid-cols-2 gap-2 max-sm:*:h-auto max-sm:*:min-h-11 max-sm:*:w-full max-sm:*:min-w-0 max-sm:*:px-2 max-sm:*:py-2 max-sm:*:whitespace-normal sm:flex sm:justify-end sm:gap-3"
+        data-upsert-actions
+      >
         {mode === "edit" ? (
           <UpsertDeleteAction
             confirmLabel={t("pages.routingRuleUpsert.delete.confirm")}
@@ -998,12 +1001,19 @@ function RoutingRuleForm({
             title={t("pages.routingRuleUpsert.delete.title")}
           />
         ) : null}
-        <Button onClick={close} size="xl" type="button" variant="outline">
+        <Button
+          className={mode === "create" ? "col-span-full" : undefined}
+          onClick={close}
+          size="xl"
+          type="button"
+          variant="outline"
+        >
           {t("common.cancel")}
         </Button>
         <form.Subscribe selector={(state) => state.canSubmit}>
           {(canSubmit) => (
             <Button
+              className="col-span-full"
               disabled={
                 targetUnavailable ||
                 postConfigMutation.isPending ||

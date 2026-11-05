@@ -48,6 +48,19 @@ describe("multi-server DNS rules", () => {
       "primary",
     ])
   })
+  test("null optional fields from the API are absent, not a list or a server tag", () => {
+    const legacy = { server: "primary", servers: null }
+    expect(getDnsRuleServers(legacy)).toEqual(["primary"])
+    expect(formatDnsRuleServers(legacy, new Map([["primary", "DNS"]]))).toBe(
+      "DNS"
+    )
+    expect(getDnsRuleServers({ server: null, servers: null })).toEqual([])
+    expect(getDnsRuleServers({ server: null })).toEqual([])
+    const ordered = ["backup", "primary"]
+    const result = getDnsRuleServers({ server: null, servers: ordered })
+    expect(result).toEqual(ordered)
+    expect(result).not.toBe(ordered)
+  })
   test("an empty explicit array never restores the old server", () => {
     expect(getDnsRuleServers({ server: "primary", servers: [] })).toEqual([])
     expect(

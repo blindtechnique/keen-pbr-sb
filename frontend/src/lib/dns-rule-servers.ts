@@ -1,16 +1,22 @@
 import type { DnsRule } from "@/api/generated/model/dnsRule"
 
+// GET /api/config also emits null for optional fields omitted on disk.
+type DnsRuleServerSelection = {
+  server?: string | null
+  servers?: readonly string[] | null
+}
+
 // Keep this aligned with dns_rule_server_tags() on the backend. In particular,
 // [] means an empty selection, not permission to revive a legacy server.
-export function getDnsRuleServers(
-  rule?: Pick<DnsRule, "server" | "servers">
-): string[] {
-  if (rule?.servers !== undefined) return [...rule.servers]
-  return rule?.server !== undefined ? [rule.server] : []
+export function getDnsRuleServers(rule?: DnsRuleServerSelection): string[] {
+  if (rule?.servers != null) {
+    return Array.isArray(rule.servers) ? [...rule.servers] : []
+  }
+  return typeof rule?.server === "string" ? [rule.server] : []
 }
 
 export function formatDnsRuleServers(
-  rule: Pick<DnsRule, "server" | "servers">,
+  rule: DnsRuleServerSelection,
   names: ReadonlyMap<string, string>
 ) {
   return getDnsRuleServers(rule)
