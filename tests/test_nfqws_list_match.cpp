@@ -351,7 +351,7 @@ TEST_CASE("nfqws generated startup branches honor exclusions without losing MTPr
     const ListLoader lists = [](const std::string& path) -> ListEntries {
         if (path.find("ipset_exclude.list") != std::string::npos)
             return std::make_shared<const std::vector<std::string>>(
-                std::vector<std::string>{"203.0.113.7"});
+                std::vector<std::string>{"203.0.113.7", "149.112.112.112"});
         if (path.find("ipset.list") != std::string::npos)
             return std::make_shared<const std::vector<std::string>>(
                 std::vector<std::string>{"203.0.113.0/24"});
@@ -370,7 +370,7 @@ TEST_CASE("nfqws generated startup branches honor exclusions without losing MTPr
         const std::string content{std::istreambuf_iterator<char>(input), {}};
         REQUIRE(validate_nfqws_candidate(content).empty());
         const auto profiles = parse_profile_references(build_nfqws_dry_run_args(content));
-        std::size_t ip_branches = 0, mtproto_branches = 0, udp_branches = 0;
+        std::size_t ip_branches = 0, mtproto_branches = 0, udp_branches = 0, dot_ip_branches = 0;
         for (const auto& profile : profiles) {
             INFO(profile.index);
             INFO(profile.name);
@@ -379,7 +379,20 @@ TEST_CASE("nfqws generated startup branches honor exclusions without losing MTPr
                 return std::find(profile.filters.begin(), profile.filters.end(), filter)
                     != profile.filters.end();
             };
-            if (has_filter("--filter-l7=mtproto")) {
+            if (profile.name == "dns_dot_ip") {
+                ++dot_ip_branches;
+                CHECK(has_filter("--filter-tcp=853"));
+                CHECK(has_filter("--filter-l7=tls"));
+                const auto result_for = [&](const std::string& host, const std::string& ip) {
+                    return evaluate_profile_lists(profile, host, {ip}, lists).result;
+                };
+                CHECK(result_for("dns.quad9.net", "9.9.9.9") == "matched");
+                CHECK(result_for("dns.google", "2001:4860:4860::8888") == "matched");
+                CHECK(result_for("dns.quad9.net", "203.0.113.1") == "unmatched");
+                CHECK(result_for("blocked.example.test", "9.9.9.9") == "excluded");
+                CHECK(result_for("dns.quad9.net", "149.112.112.112") == "excluded");
+                CHECK(result_for("", "9.9.9.9") == "hostname_required");
+            } else if (has_filter("--filter-l7=mtproto")) {
                 ++mtproto_branches;
                 CHECK(evaluate_profile_lists(profile, "", {"203.0.113.1"}, lists).result == "matched");
                 CHECK(evaluate_profile_lists(profile, "", {"203.0.113.7"}, lists).result == "excluded");
@@ -405,6 +418,7 @@ TEST_CASE("nfqws generated startup branches honor exclusions without losing MTPr
             }
         }
         CHECK(ip_branches == 2);
+        CHECK(dot_ip_branches == 1);
         CHECK(mtproto_branches == 1);
         CHECK(udp_branches == 1);
     }
