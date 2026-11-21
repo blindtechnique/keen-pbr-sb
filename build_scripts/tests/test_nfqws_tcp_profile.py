@@ -78,7 +78,8 @@ class TcpProfileTest(unittest.TestCase):
     def test_ip_selected_mtproto_observes_both_directions_without_a_host_requirement(self):
         for profile in self.gen['PROFILES']:
             custom = self.values(profile)[0]['NFQWS_ARGS_CUSTOM']
-            block = re.split(r'--new(?:=[^\s]+)?\s+', custom)[-1].split()
+            block, = (s.split() for s in re.split(r'--new(?:=[^\s]+)?\s+', custom)
+                      if '--filter-l7=mtproto' in s.split())
             pos = next(i for i, t in enumerate(block) if t.startswith('--lua-desync=circular:'))
             self.assertIn('--payload=all', block[:pos])
             self.assertIn('--in-range=-s27460', block[:pos])

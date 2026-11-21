@@ -119,6 +119,7 @@ check-nfqws-assets: ## Verify nfqws2 preset/blob invariants and their exact-waiv
 	python3 build_scripts/check-nfqws-assets.py
 	python3 -m unittest build_scripts.tests.test_check_nfqws_assets -v
 	python3 -m unittest build_scripts.tests.test_nfqws_discord_profile -v
+	python3 -m unittest build_scripts.tests.test_nfqws_dns_profile -v
 	python3 -m unittest build_scripts.tests.test_nfqws_tcp_profile -v
 	python3 -m unittest build_scripts.tests.test_nfqws_tcp_window -v
 

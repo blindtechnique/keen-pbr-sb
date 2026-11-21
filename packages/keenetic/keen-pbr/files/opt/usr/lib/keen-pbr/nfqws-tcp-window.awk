@@ -4,6 +4,7 @@
 BEGIN {
     reply_chain = "KpbrNfqTcpReply"
     reply_tag = "keen-pbr-sb:nfqws:tcp-reply:v1"
+    voice_tag = "keen-pbr-sb:nfqws:discord-voice:v1"
     input_shortcut_match = "-m state --state RELATED,ESTABLISHED -m connndmmark ! --mark 0x20/0x20"
 }
 function owned_reply(line) {
@@ -87,7 +88,18 @@ function valid_ports(ports,    count, p, r, i, n) {
     }
     return count > 0 && n <= 15
 }
-function template(    i, token, iface, ports, mark, count, n, fields, dir, iflag, pflag, rule) {
+# A port range must already be fully covered by the vendor rule. Do not
+# turn a partial or split match into a wider rule; unknown layouts opt out.
+function voice_coverage(ports,    p,r,i,k,lo,hi,a,b,touch) {
+    k = split(ports,p,",")
+    for (i=1; i<=k; i++) {
+        split(p[i],r,":"); lo=r[1]+0; hi=index(p[i],":") ? r[2]+0 : lo
+        if (lo <= 19344 && hi >= 19294) { touch=1; if (lo<=19294 && hi>=19344) a=1 }
+        if (lo <= 50100 && hi >= 50000) { touch=1; if (lo<=50000 && hi>=50100) b=1 }
+    }
+    return a && b ? 1 : (touch ? -1 : 0)
+}
+function template(voice,    i, token, iface, ports, mark, count, n, fields, dir, iflag, pflag, rule, coverage) {
     dir = $2 == "nfqws_pre" ? "reply" : "original"
     iflag = $2 == "nfqws_pre" ? "-i" : "-o"
     pflag = $2 == "nfqws_pre" ? "--sports" : "--dports"
@@ -106,7 +118,7 @@ function template(    i, token, iface, ports, mark, count, n, fields, dir, iflag
         token = $i
         if (token == "-m") {
             token = $(++i)
-            if (token != "tcp" && token != "mark" && token != "multiport" && token != "connbytes") return ""
+            if (token != (voice ? "udp" : "tcp") && token != "mark" && token != "multiport" && token != "connbytes") return ""
             if (seen["module:" token]++) return ""
         } else if (token == "!") {
             if ($(i + 1) != "--mark" || seen["!"]++) return ""
@@ -118,6 +130,16 @@ function template(    i, token, iface, ports, mark, count, n, fields, dir, iflag
         } else return ""
     }
     if (!seen["!"] || !seen["--queue-bypass"] || !seen["module:mark"] || !seen["module:connbytes"] || !seen["module:multiport"]) return ""
+    if (voice) {
+        coverage = voice_coverage(ports)
+        if (!coverage) return "covered"
+        if (coverage < 0 || voice_ifaces[iface]++ || voice_new_count >= 16) return ""
+        rule = "-A nfqws_post -o " iface " -p udp -m mark ! --mark " mark
+        # Some xtables parse "16:" as exactly packet 16. The complement of
+        # the verified vendor window has no open-ended number to reinterpret.
+        rule = rule " -m multiport --dports 19294:19344,50000:50100 -m connbytes ! --connbytes 1:" n " --connbytes-mode packets --connbytes-dir original"
+        return rule " -m comment --comment \"" voice_tag "\" -j NFQUEUE --queue-num " queue " --queue-bypass"
+    }
     if (templates[$0]++) return ""
     parents[$2]++
     if (parents[$2] > 16) return ""
@@ -130,6 +152,17 @@ function template(    i, token, iface, ports, mark, count, n, fields, dir, iflag
 }
 $1 == ":KpbrNfqTcpReply" { reply_exists = 1 }
 $1 == "-A" {
+    if (value("-j") == "nfqws_post" || value("-g") == "nfqws_post") {
+        post_hooks++
+        if ($0 != "-A POSTROUTING -j nfqws_post") voice_bad=1
+    }
+    if ($2 == "nfqws_post") {
+        if ($0 ~ /--comment "?keen-pbr-sb:nfqws:discord-voice:v1"?( |$)/) {
+            voice_old[++voice_old_count]=$0
+            next
+        }
+        if (voice_old_count && !owned($0)) voice_misplaced=1
+    }
     if ($2 == "nfqws_pre") pre_position++
     if (owned_reply($0)) {
         reply_old[++reply_old_count] = $0
@@ -164,7 +197,14 @@ $1 == "-A" {
         } else if (!(value("-j") == "NFQUEUE" && value("-p") == "udp")) reply_bad = 1
     }
     if (value("-j") != "NFQUEUE") next
-    if (value("-p") == "udp") next
+    if (value("-p") == "udp") {
+        if ($2 == "nfqws_post" && discord == "voice_v1") {
+            rule=template(1)
+            if (rule == "") voice_bad=1
+            else if (rule != "covered") voice_new[++voice_new_count]=rule
+        }
+        next
+    }
     if (value("-p") != "tcp") { incompatible = 1; next }
     if (value("--connbytes") != "") {
         rule = template()
@@ -179,6 +219,7 @@ $1 == "-A" {
     }
 }
 END {
+    if (mode != "apply" || discord != "voice_v1" || post_hooks != 1 || voice_bad) voice_new_count=0
     if (mode != "apply" || incompatible || !parents["nfqws_pre"] || !parents["nfqws_post"]) wanted_count = 0
     reply_enabled = mode == "apply" && reply == "postnat_v1" && !incompatible && !reply_bad && !reply_foreign && parents["nfqws_pre"] && parents["nfqws_post"] && pre_hooks == 1
     # An existing, untagged chain with our name is not ours to claim/flush.
@@ -207,6 +248,11 @@ END {
         want_reply("-A nfqws_pre -p tcp -m comment --comment \"" reply_tag "\" -j RETURN")
     }
     same = old_count == wanted_count
+    if (voice_old_count != voice_new_count || (voice_misplaced && voice_new_count)) same=0
+    for (i=1; same && i<=voice_old_count; i++) {
+        line=voice_old[i]
+        if (line != voice_new[i]) same=0
+    }
     for (i = 1; same && i <= old_count; i++) if (old[i] != wanted[i]) same = 0
     if (reply_old_count != reply_wanted_count || reply_misplaced) same = 0
     # Count only non-owned INPUT rules: the transaction deletes our old hook
@@ -223,10 +269,12 @@ END {
     if (same) exit
     print "*mangle"
     for (i = 1; i <= old_count; i++) delete_rule(old[i])
+    for (i = 1; i <= voice_old_count; i++) delete_rule(voice_old[i])
     for (i = 1; i <= reply_old_count; i++) delete_rule(reply_old[i])
     if (reply_enabled && !reply_exists) print "-N " reply_chain
     if (!reply_enabled && reply_exists && reply_old_count && !reply_foreign) print "-X " reply_chain
     for (i = 1; i <= wanted_count; i++) print wanted[i]
+    for (i = 1; i <= voice_new_count; i++) print voice_new[i]
     for (i = 1; i <= reply_wanted_count; i++) {
         line = reply_wanted[i]
         # Suppress TCP only in the old, pre-DNAT entry. All original vendor

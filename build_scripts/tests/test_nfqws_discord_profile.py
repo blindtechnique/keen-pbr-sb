@@ -52,15 +52,23 @@ class DiscordProfileTest(unittest.TestCase):
         # Frozen immediately before the third Discord candidate was added.
         # Comparing only two outputs of the same generator would miss an
         # accidental simultaneous change to a shared tier or queue setting.
-        normalized = {k: v.split() for k, v in self.base_values.items()}
-        digest = hashlib.sha256(json.dumps(normalized, sort_keys=True).encode()).hexdigest()
-        self.assertEqual(digest, "59c47638497d1cd939eb6558bc6df1f55a6dd2377be147131e85ba91480993d2")
+        def previous_assignments(values):
+            normalized = {k: v.split() for k, v in values.items()}
+            # DNS is tested independently. Compare all other assignments against
+            # their pre-DNS hashes, not two outputs of today's generator.
+            custom = normalized["NFQWS_ARGS_CUSTOM"]
+            normalized["NFQWS_ARGS_CUSTOM"] = custom[:custom.index("--new=dns_tls_name")]
+            ports, = normalized["TCP_PORTS"]
+            normalized["TCP_PORTS"] = [",".join(p for p in ports.split(",") if p != "853")]
+            return hashlib.sha256(json.dumps(normalized, sort_keys=True).encode()).hexdigest()
+        self.assertEqual(previous_assignments(self.base_values),
+                         "59c47638497d1cd939eb6558bc6df1f55a6dd2377be147131e85ba91480993d2")
         for profile, expected in (
-            ("01 safe", "2385602d7405f0997195854fd88514d6478602de00baf980a16f2fbe88ee85cc"),
-            ("02 balanced", "869052c4c4c16a2f99778a81adb3d50577b812ba9e1c6834657da5fb7ce9cfc8"),
+            ("01 safe", "8bc7781faac5b819b6080e39840dbc4c747e89a87d784236eeaf2319c3c14d44"),
+            ("02 balanced", "8c3cc594ecc2abf5db0644b46f28a300b049741827d39045c705c69c36674fa1"),
         ):
             text, _ = self.gen["build"](profile, self.gen["PROFILES"][profile])
-            self.assertEqual(hashlib.sha256(text.encode()).hexdigest(), expected, profile)
+            self.assertEqual(previous_assignments(self.gate["parse_shell_assignments"](text)), expected, profile)
 
     def test_only_declared_ports_domains_and_protocols_enter_experiment(self):
         tcp = self.block("discord_tcp_exp")

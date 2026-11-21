@@ -13,15 +13,16 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Общие константы
 # ─────────────────────────────────────────────────────────────────────────────
 
-TCP_PORTS = "80,443,1984,2053,2083,2087,2096,5222,8443"
+TCP_PORTS = "80,443,853,1984,2053,2083,2087,2096,5222,8443"
 UDP_PORTS = "443,590:600,1400,3478:3481,5349,19294:19344,49152:65535"
 
-FILTER_TCP = "443,80,1984,2053,2083,2087,2096,5222,8443"   # == TCP_PORTS
+FILTER_TCP = "443,80,1984,2053,2083,2087,2096,5222,8443"   # 853 is DNS-only
 FILTER_UDP_MAIN = "590-600,1400,3478-3481,5349,19294-19344,49152-65535"
 
 BLOBS = "/opt/etc/nfqws2/blobs"
@@ -82,6 +83,46 @@ YT_DOMAINS = ("youtube.com,youtu.be,ytimg.com,ggpht.com,"
               "youtubei.googleapis.com,jnn-pa.googleapis.com,yt-video-upload.l.google.com")
 GV_DOMAINS = "googlevideo.com,gvt1.com,gvt2.com"
 DISCORD_DOMAINS = "discord.com,discord.gg,discordapp.com,discordapp.net,discord.media"
+
+# Resolver endpoints, not content domains, bootstrap servers or resolver
+# configuration. A CDN address alone must never qualify an HTTPS connection.
+DNS_TLS_HOSTS = (
+    "common.dot.dns.yandex.net", "safe.dot.dns.yandex.net", "family.dot.dns.yandex.net",
+    "dns.opendns.com", "doh.opendns.com", "dns.google", "dns.quad9.net",
+    "dns10.quad9.net", "cloudflare-dns.com", "one.one.one.one", "dns.adguard-dns.com",
+    "dns.nextdns.io",
+)
+DOT_RESOLVER_IPS = (
+    "77.88.8.1", "77.88.8.8", "2a02:6b8::feed:0ff", "2a02:6b8:0:1::feed:0ff",
+    "208.67.222.222", "208.67.220.220",
+    "8.8.8.8", "8.8.4.4", "2001:4860:4860::8888", "2001:4860:4860::8844",
+    "1.1.1.1", "1.0.0.1", "2606:4700:4700::1111", "2606:4700:4700::1001",
+    "9.9.9.9", "149.112.112.112",
+)
+
+
+def encrypted_dns_blocks():
+    """Normal in-order TCP segmentation; no changes to DNS or TLS contents."""
+    args = []
+    for name, ports, selector, cut in (
+        ("dns_tls_name", "443,853", "--hostlist-domains=" + ",".join(DNS_TLS_HOSTS), "midsld"),
+        ("dns_dot_ip", "853", "--ipset-ip=" + ",".join(DOT_RESOLVER_IPS), "2"),
+    ):
+        args += [f"--new={name}", f"--filter-tcp={ports}", "--filter-l7=tls", selector,
+                 f"--hostlist-exclude={LISTS}/exclude.list",
+                 f"--ipset-exclude={LISTS}/ipset_exclude.list",
+                 "--in-range=x", "--payload=tls_client_hello",
+                 f"--lua-desync=multisplit:pos={cut}"]
+    return args
+
+
+# These are project-maintained earlier presets, including the older default;
+# NOT the two checksum-pinned vendor defaults or a user's saved strategies.
+LEGACY_DNS_PROFILES = (
+    "default", "ver1", "ver1 (alt)", "ver2", "ver2 (alt)", "ver3 safe", "ver4",
+    "ver5 aggresive", "ver6 hybrid", "ver7 more aggresive", "ver8 max aggresive",
+    "ver9 E max plus", "ver10 H2 hybrid plus",
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Тиры TCP (общий пул). Каждый тир — список действий без :strategy=N,
@@ -299,6 +340,7 @@ def circular(
     hostkey=None,
     failure_detector=None,
     tcp_window=False,
+    discord_fullsession=False,
 ):
     """circular с обязательным key= (стабильное пространство состояний)."""
     parts = [f"fails={fails}", "time=300"]
@@ -320,6 +362,8 @@ def circular(
     if tcp_window:
         parts.append("kpbr_tcp_window=96")
         parts.append("kpbr_tcp_reply=postnat_v1")
+    if discord_fullsession:
+        parts.append("kpbr_discord_fullsession=voice_v1")
     parts.append(f"key={key}")
     return "--lua-desync=circular:" + ":".join(parts)
 
@@ -388,7 +432,7 @@ def discord_experiment_blocks():
                "--payload=discord_ip_discovery,stun"] + pool(
                    DISCORD_EXPERIMENT_UDP_TIERS, len(DISCORD_EXPERIMENT_UDP_TIERS))
     blocks.append(["--new=discord_udp_exp"] + matcher + [revisioned_circular(
-        "discord_udp_exp", matcher, actions, hostkey="host_ip", udp=True,
+        "discord_udp_exp", matcher, actions, hostkey="host_ip", udp=True, discord_fullsession=True,
     )] + actions)
     return blocks
 
@@ -617,6 +661,7 @@ def build(profile_name, spec):
     if custom:
         custom += ["--new=mtproto_ip"]
     custom += mtproto
+    custom += encrypted_dns_blocks()
 
     # ── блобы, которые нужны именно этому профилю ────────────────────────────
     text = " ".join(args + quic + udp + custom)
@@ -653,6 +698,7 @@ def build(profile_name, spec):
         *[f"# {line}" for line in _wrap_text(spec["note"], 88)],
         "#",
         f"# Глубина пулов: {tiers_note}",
+        "# DoT/DoH: отдельные TLS-профили для DNS-серверов; системный выбор DNS не меняется.",
         "# Пулы разделены по группам трафика: у каждого свой circular со своим key=.",
         "# У TCP-пулов есть inseq= под ожидаемый объём входящего трафика; UDP его не использует.",
         "#",
@@ -744,7 +790,50 @@ def _wrap_text(text, width):
     return lines
 
 
+def legacy_dns_config(text):
+    """Project the two managed DNS blocks; preserve all pre-existing custom arguments."""
+    match, = re.finditer(r'(?m)^NFQWS_ARGS_CUSTOM="([^"]*)"$', text)
+    current = match[1].strip()
+    blocks = encrypted_dns_blocks()
+    if "--new=dns_dot_ip" in current:
+        # Replacing a previous managed list is fine; discarding extra user or
+        # vendor actions is not. Check the exact option layout of our suffix.
+        start = current.find(blocks[0])
+        prefix = current[:start].rstrip() if start != -1 else ""
+        suffix = current[start:] if start != -1 else current
+        expected = blocks if start != -1 else blocks[1:]
+        keys = lambda ts: [t.partition("=")[0] if not t.startswith("--new=") else t for t in ts]
+        if keys(suffix.split()) != keys(expected):
+            raise ValueError("unexpected existing DNS blocks; refusing to replace them")
+    else:
+        prefix = current
+    # Without an earlier CUSTOM block the first DNS block shares BASE_ARGS.
+    # A leading --new here would leave a catch-all empty first profile.
+    if prefix:
+        rendered = wrap("NFQWS_ARGS_CUSTOM", blocks, indent=19).split('="', 1)[1]
+        assignment = 'NFQWS_ARGS_CUSTOM="' + prefix + '\n' + ' ' * 19 + rendered
+    else:
+        assignment = wrap("NFQWS_ARGS_CUSTOM", blocks[1:], indent=19)
+    text = text[:match.start()] + assignment + text[match.end():]
+    ports, = re.finditer(r'(?m)^TCP_PORTS=([0-9,:]+)$', text)
+    values = ports[1].split(",")
+    if "853" not in values:
+        values.insert(values.index("443") + 1, "853")
+    return text[:ports.start(1)] + ",".join(values) + text[ports.end(1):]
+
+
 def main():
+    if sys.argv[1:] == ["--sync-legacy-dns"]:
+        base = (Path(__file__).resolve().parents[1] /
+                "packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/nfqws-strategies")
+        for name in LEGACY_DNS_PROFILES:
+            path = base / name / "nfqws2.conf"
+            source = path.read_text(encoding="utf-8")
+            projected = legacy_dns_config(source)
+            if source != projected:
+                with path.open("w", encoding="utf-8", newline="\n") as stream:
+                    stream.write(projected)
+        return
     if sys.argv[1:] == ["--legacy-pools"]:
         print(json.dumps(legacy_rotation_pools(), indent=2))
         return
