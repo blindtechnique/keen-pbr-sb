@@ -1,5 +1,5 @@
 #!/bin/sh
-# Optional, event-driven TCP observation. No daemon, vendor-file edits,
+# Optional, event-driven TCP observation and Max Discord voice queue coverage. No daemon, vendor-file edits,
 # service control, policy/mark writes, conntrack flushes or global table restore.
 # A missing/incompatible integration leaves normal nfqws2 and routing alone.
 set -f
@@ -74,6 +74,7 @@ window_locked=1
 
 window_queue=
 window_reply=
+window_discord=
 window_pid=
 window_identity=
 window_runtime() {
@@ -93,6 +94,9 @@ window_runtime() {
     grep -Fxq -- '--lua-init=@/opt/var/lib/keen-pbr/nfqws-rotator-telemetry-v1.lua' "$window_work/argv" || return 1
     if grep -Eq '^--lua-desync=circular:.*:kpbr_tcp_reply=postnat_v1(:|$)' "$window_work/argv"; then
         window_reply=postnat_v1
+    fi
+    if grep -Eq '^--lua-desync=circular:.*:kpbr_discord_fullsession=voice_v1:key=discord_udp_exp:kpbr_rev=[0-9a-f]{16}$' "$window_work/argv"; then
+        window_discord=voice_v1
     fi
     window_queue=$(sed -n 's/^--qnum=\([0-9][0-9]*\)$/\1/p' "$window_work/argv")
     case "$window_queue" in ''|*[!0-9]*) return 1 ;; esac
@@ -117,11 +121,11 @@ for window_tables in iptables ip6tables; do
     window_xtables "$window_tables-save" -t mangle > "$window_work/before" 2>/dev/null || continue
     [ "$(wc -c < "$window_work/before")" -le 1048576 ] || { window_result=1; continue; }
     if [ "$window_mode" = status ]; then
-        grep -E 'keen-pbr-sb:nfqws:tcp-(window|reply):v1' "$window_work/before" || true
+        grep -E 'keen-pbr-sb:nfqws:(tcp-window|tcp-reply|discord-voice):v1' "$window_work/before" || true
         continue
     fi
     if [ "$window_mode" = apply ] && ! window_same_process; then window_mode=remove; fi
-    awk -v mode="$window_mode" -v queue="$window_queue" -v budget=96 -v reply="$window_reply" \
+    awk -v mode="$window_mode" -v queue="$window_queue" -v budget=96 -v reply="$window_reply" -v discord="$window_discord" \
         -f "$window_lib/nfqws-tcp-window.awk" "$window_work/before" > "$window_work/plan" || { window_result=1; continue; }
     [ -s "$window_work/plan" ] || continue
     if [ "$window_mode" = apply ] && ! window_same_process; then

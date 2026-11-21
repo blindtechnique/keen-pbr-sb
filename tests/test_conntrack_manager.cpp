@@ -1854,4 +1854,27 @@ TEST_CASE("ConntrackManager mark helpers are no-ops for an empty owned mask") {
               0x5A0000AAU, 0x00BC00DDU, 0) == 0x5A0000AAU);
 }
 
+TEST_CASE("ConntrackManager learning cleanup excludes DNAT zones and unrelated clients before budget") {
+    const auto line = [](const std::string& source, const std::string& reply_source, const std::string& suffix) {
+        return "ipv4 2 tcp 6 60 ESTABLISHED src=" + source +
+            " dst=203.0.113.5 sport=23456 dport=443 packets=5 bytes=500 src=" + reply_source +
+            " dst=192.0.2.1 sport=443 dport=23456 packets=4 bytes=400 [ASSURED] mark=0 use=1" + suffix + "\n";
+    };
+    const auto snapshot = line("192.168.1.3", "203.0.113.5", "") +
+        line("192.168.1.2", "10.0.0.5", "") +
+        line("192.168.1.2", "203.0.113.5", " zone=9") +
+        line("192.168.1.2", "203.0.113.5", "");
+    std::vector<std::string> deleted;
+    ConntrackManager manager([&](const auto& args) { deleted = args; return ConntrackManager::CommandResult{0, {}}; },
+        [&](size_t) { return std::optional<ConntrackManager::Snapshot>{{snapshot, false}}; });
+    ConntrackFlowObservationOptions options;
+    options.require_default_zone_no_dnat = true; options.max_flows = 1; options.ordinary_sources = {"192.168.1.2"};
+    auto found = manager.observe_forwarded_destination_flows({"203.0.113.5"}, {"192.168.1.1"}, 0xff0000, options);
+    CHECK_FALSE(found.flow_limit_reached); REQUIRE(found.flows.size() == 1);
+    CHECK(found.flows[0].source == "192.168.1.2"); CHECK(found.flows[0].zone == std::optional<uint16_t>{0});
+    CHECK(manager.delete_exact_forwarded_flow(found.flows[0], 0xff0000, 0x10000) == ConntrackCleanupResult::Succeeded);
+    CHECK(deleted == std::vector<std::string>{"conntrack", "-D", "-f", "ipv4", "-p", "tcp", "-s", "192.168.1.2",
+        "--sport", "23456", "-d", "203.0.113.5", "--dport", "443", "--mark", "0/4294967295", "--zone", "0"});
+}
+
 } // namespace keen_pbr3

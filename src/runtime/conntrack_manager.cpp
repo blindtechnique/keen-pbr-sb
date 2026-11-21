@@ -1510,6 +1510,13 @@ ConntrackManager::observe_forwarded_destination_flows(
             !options.ipv6_enabled) {
             continue;
         }
+        if (options.require_default_zone_no_dnat) {
+            // With conntrack's proc snapshot, omitted zone means the default.
+            // Explicit/unknown zone annotations are deliberately not adopted.
+            if (line.find("zone") != std::string_view::npos ||
+                parsed->original.destination.value != parsed->reply.source.value ||
+                parsed->original.destination_port != parsed->reply.source_port) continue;
+        }
         const bool ordinary_mark_eligible =
             mark_is_observer_eligible(parsed->mark, owned_mask);
         const bool media_mark_eligible = ordinary_mark_eligible ||
@@ -1581,6 +1588,7 @@ ConntrackManager::observe_forwarded_destination_flows(
             parsed->assured,
             parsed->seen_reply,
             parsed->fastnat};
+        if (options.require_default_zone_no_dnat) observed_flow.zone = 0;
         const bool media_seed_matches = std::any_of(
             media_seed_selectors.begin(), media_seed_selectors.end(),
             [&parsed](const NormalizedTargetCidr& selector) {
@@ -1594,6 +1602,7 @@ ConntrackManager::observe_forwarded_destination_flows(
         if (options.include_ordinary_destination_flows &&
             ordinary_mark_eligible &&
             ordinary_transport_matches &&
+            (options.ordinary_sources.empty() || options.ordinary_sources.count(observed_flow.source)) &&
             seen_flows.insert(identity).second) {
             if (!claim_flow_budget(identity)) {
                 observation.flow_limit_reached = true;
@@ -1926,7 +1935,7 @@ ConntrackCleanupResult ConntrackManager::delete_exact_forwarded_flow(
 
     const std::string mark_selector =
         std::to_string(flow.mark) + "/4294967295";
-    const auto result = runner_({
+    std::vector<std::string> command{
         "conntrack", "-D",
         "-f", family,
         "-p", protocol,
@@ -1934,7 +1943,12 @@ ConntrackCleanupResult ConntrackManager::delete_exact_forwarded_flow(
         "--sport", std::to_string(flow.source_port),
         "-d", destination->value,
         "--dport", std::to_string(flow.destination_port),
-        "--mark", mark_selector});
+        "--mark", mark_selector};
+    if (flow.zone) {
+        command.push_back("--zone");
+        command.push_back(std::to_string(*flow.zone));
+    }
+    const auto result = runner_(command);
     if (result.exit_code == 127) {
         return ConntrackCleanupResult::CommandUnavailable;
     }

@@ -6,6 +6,21 @@
 
 namespace keen_pbr3 {
 
+// Unaligned network-order reads. Callers validate packet length first.
+inline uint16_t load_be16(const uint8_t* p) {
+    return (static_cast<uint16_t>(p[0]) << 8) | p[1];
+}
+
+inline uint32_t load_be32(const uint8_t* p) {
+    return (static_cast<uint32_t>(p[0]) << 24) |
+           (static_cast<uint32_t>(p[1]) << 16) |
+           (static_cast<uint32_t>(p[2]) << 8) | p[3];
+}
+
+inline uint64_t load_be64(const uint8_t* p) {
+    return (static_cast<uint64_t>(load_be32(p)) << 32) | load_be32(p + 4);
+}
+
 class ByteView {
 public:
     ByteView() = default;

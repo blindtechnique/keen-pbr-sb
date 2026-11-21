@@ -503,10 +503,10 @@ void register_health_service_handler(ApiServer& server, ApiContext& ctx) {
         if (update_is_running())
             throw ApiError(
                 "keen-pbr-sb update or rollback is already running", 409);
-        if (update_recovery_is_blocked())
-            throw ApiError(
-                "package recovery is pending or has unknown state; run rescue recovery before starting another update",
-                409);
+        // A pending marker is not proof that package bytes changed. The
+        // authenticated installer, under the update lock, can verify an intact
+        // baseline and retire a failed pre-install attempt without restoring
+        // old settings. Truly partial installs remain blocked there.
         const auto request = nlohmann::json::parse(body, nullptr, false);
         if (!request.is_object() || request.size() != 3 ||
             !request.contains("channel") || !request["channel"].is_string() ||

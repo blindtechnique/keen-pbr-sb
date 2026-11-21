@@ -1447,7 +1447,7 @@ bool dns_policy_covers_list(const Config& config,
                 rule.list.end()) {
             continue;
         }
-        return rule.server == server;
+        return dns_rule_server_tags(rule) == std::vector<std::string>{server};
     }
     return false;
 }
@@ -1465,9 +1465,11 @@ bool dns_policy_covers_list_on_detour(
                 rule.list.end()) {
             continue;
         }
-        const auto* server = find_dns_server(config, rule.server);
-        return server != nullptr && server->detour.has_value() &&
-               *server->detour == detour;
+        const auto tags = dns_rule_server_tags(rule);
+        return !tags.empty() && std::all_of(tags.begin(), tags.end(), [&](const std::string& tag) {
+            const auto* server = find_dns_server(config, tag);
+            return server != nullptr && server->detour.has_value() && *server->detour == detour;
+        });
     }
     return false;
 }
@@ -2263,6 +2265,7 @@ CatalogSetupPlan plan_catalog_setup(
             auto replacement = rule;
             replacement.list = affected;
             replacement.server = *dns_server;
+            replacement.servers.reset();
             if (!remaining.empty()) {
                 replacement.id = unique_technical_id(rule_seed(affected), "dns_rule", ids);
                 replacement.display_name = name_for(affected);
@@ -2416,17 +2419,22 @@ void validate_recommended_list_setup(
             "Beginner setup requires one dedicated DNS rule for the list");
     }
 
-    const auto* dns_server =
-        find_dns_server(candidate, dns_matches.front()->server);
-    if (dns_server == nullptr) {
-        throw std::invalid_argument(
-            "Beginner setup DNS server does not exist");
+    const auto tags = dns_rule_server_tags(*dns_matches.front());
+    if (tags.empty()) {
+        throw std::invalid_argument("Beginner setup requires a DNS server");
     }
-    if (!dns_server->detour.has_value() ||
-        *dns_server->detour != outbound->tag) {
-        throw std::invalid_argument(
-            "Beginner setup DNS server must use the same outbound as the "
-            "route; create or select a compatible DNS server");
+    for (const auto& tag : tags) {
+        const auto* dns_server = find_dns_server(candidate, tag);
+        if (dns_server == nullptr) {
+            throw std::invalid_argument(
+                "Beginner setup DNS server does not exist");
+        }
+        if (!dns_server->detour.has_value() ||
+            *dns_server->detour != outbound->tag) {
+            throw std::invalid_argument(
+                "Beginner setup DNS server must use the same outbound as the "
+                "route; create or select a compatible DNS server");
+        }
     }
 }
 

@@ -6,6 +6,11 @@ export type ServerValidationPresentation = {
 }
 
 const codeKeys = new Map<string, string>([
+  ["config.dns.doh_url", "doh.urlError"],
+  ["config.dns.doh_ips", "doh.ipsError"],
+  ["config.dns.bootstrap", "doh.bootstrapError"],
+  ["config.dns.doh_limit", "doh.limitError"],
+  ["config.dns.doh_ca", "doh.caError"],
   ["config.ip_cidr.leading_zeros", "serverValidation.ipv4LeadingZeros"],
   ["config.ip_cidr.invalid_address", "serverValidation.ipAddressOrCidr"],
   ["config.ip_cidr.invalid_prefix", "serverValidation.ipPrefixLength"],
@@ -44,6 +49,10 @@ const codeKeys = new Map<string, string>([
   ["config.dns.domain", "serverValidation.dnsDomain"],
   ["config.dns.different", "serverValidation.dnsDifferent"],
   ["config.dns.port_number", "serverValidation.dnsPort"],
+  [
+    "config.dns.rule_servers_conflict",
+    "serverValidation.dnsRuleServersConflict",
+  ],
   ["config.dns.port_range", "serverValidation.dnsPort"],
   ["config.dns.closing_bracket", "serverValidation.dnsIpv6Bracket"],
   ["config.dns.port_separator", "serverValidation.dnsIpv6Separator"],
@@ -504,7 +513,11 @@ export function getServerValidationPresentation(
           return { key: "serverValidation.unknownOutbound" }
         break
       case "DNS server tag":
-        if (path === `${owner}.server`)
+        if (
+          path === `${owner}.server` ||
+          (path.startsWith(`${owner}.servers`) &&
+            /^\[\d+\]$/.test(path.slice(`${owner}.servers`.length)))
+        )
           return { key: "serverValidation.unknownDns" }
         break
     }

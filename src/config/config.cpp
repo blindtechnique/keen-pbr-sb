@@ -6,6 +6,7 @@
 #include "list_parser.hpp"
 #include "../lists/list_source_decoder.hpp"
 #include "../dns/dns_server.hpp"
+#include "../dns/doh_plan.hpp"
 #include "../util/display_name.hpp"
 #include "../util/system_info.hpp"
 
@@ -2466,10 +2467,10 @@ void validate_config(const Config& cfg) {
                               "dns.servers[\"" + srv.tag +
                                   "\"].address is required for type='static'", "config.value.required");
                 }
-            } else {
+            } else if (srv_type != api::DnsServerType::DOH) {
                 add_issue(issues, "dns.servers." + srv.tag + ".type",
                           "dns.servers[\"" + srv.tag +
-                              "\"].type must be one of: static, keenetic", "config.dns.type");
+                              "\"].type must be one of: static, keenetic, doh", "config.dns.type");
             }
 
             if (!srv.detour.has_value()) continue;
@@ -2500,6 +2501,10 @@ void validate_config(const Config& cfg) {
                     "dns.servers[\"" + srv.tag + "\"].detour: unknown outbound tag \""
                         + dtag + "\"", "config.reference.outbound_missing");
             }
+        }
+        try { (void)make_doh_plan(*cfg.dns); }
+        catch (const DohPlanError& error) {
+            add_issue(issues, error.path(), error.what(), error.code());
         }
         if (keenetic_servers_count > 1) {
             add_issue(
@@ -2574,12 +2579,31 @@ void validate_config(const Config& cfg) {
                 rule_path + ".display_name",
                 "DNS rule display name",
                 rule.display_name);
-            validate_required_reference(issues,
-                                        dns_server_tags,
-                                        rule_path + ".server",
-                                        rule_path,
-                                        rule.server,
-                                        "DNS server tag", "config.reference.dns_server_missing");
+            const auto rule_servers = dns_rule_server_tags(rule);
+            if (rule_servers.empty()) {
+                add_issue(issues, rule_path + ".servers",
+                          "DNS rule must include at least one DNS server",
+                          "config.value.non_empty_array");
+            }
+            if (rule.servers && rule.server &&
+                (rule.servers->empty() || rule.servers->front() != *rule.server)) {
+                add_issue(issues, rule_path + ".server",
+                          "Legacy server must match the first servers entry",
+                          "config.dns.rule_servers_conflict");
+            }
+            std::set<std::string> seen_rule_servers;
+            for (size_t server_index = 0; server_index < rule_servers.size(); ++server_index) {
+                const auto server_path = rule.servers
+                    ? rule_path + ".servers[" + std::to_string(server_index) + "]"
+                    : rule_path + ".server";
+                validate_required_reference(issues, dns_server_tags, server_path,
+                                            rule_path, rule_servers[server_index],
+                                            "DNS server tag", "config.reference.dns_server_missing");
+                if (!seen_rule_servers.insert(rule_servers[server_index]).second) {
+                    add_issue(issues, server_path, "Duplicate DNS server in rule",
+                              "config.value.duplicate");
+                }
+            }
             if (rule.list.empty()) {
                 add_issue(issues,
                           rule_path + ".list",

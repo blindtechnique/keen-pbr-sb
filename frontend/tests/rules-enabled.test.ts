@@ -99,7 +99,7 @@ describe("dns rule enabled helpers", () => {
       getRuleDraft({
         enabled: false,
         list: ["ads"],
-        server: "vpn_dns",
+        servers: ["vpn_dns"],
       }).enabled
     ).toBe(false)
   })
@@ -123,7 +123,7 @@ describe("dns rule enabled helpers", () => {
             id: "",
             displayName: "",
             enabled: false,
-            server: "vpn_dns",
+            servers: ["vpn_dns"],
             lists: ["ads"],
             allowDomainRebinding: true,
           },
@@ -135,7 +135,7 @@ describe("dns rule enabled helpers", () => {
         rules: [
           {
             enabled: false,
-            server: "vpn_dns",
+            servers: ["vpn_dns"],
             list: ["ads"],
             allow_domain_rebinding: true,
           },
@@ -152,7 +152,7 @@ describe("dns rule enabled helpers", () => {
         id: "dns_ads",
         displayName: "DNS for ads",
         enabled: true,
-        server: "vpn_dns",
+        servers: ["vpn_dns"],
         lists: ["ads"],
         allowDomainRebinding: false,
       },
@@ -160,7 +160,7 @@ describe("dns rule enabled helpers", () => {
         id: "dns_work",
         displayName: "DNS for work",
         enabled: false,
-        server: "wan_dns",
+        servers: ["wan_dns"],
         lists: ["work"],
         allowDomainRebinding: true,
       },
@@ -171,7 +171,7 @@ describe("dns rule enabled helpers", () => {
         id: "dns_ads",
         displayName: "DNS for ads",
         enabled: false,
-        server: "vpn_dns",
+        servers: ["vpn_dns"],
         lists: ["ads"],
         allowDomainRebinding: false,
       },
@@ -179,7 +179,7 @@ describe("dns rule enabled helpers", () => {
         id: "dns_work",
         displayName: "DNS for work",
         enabled: false,
-        server: "wan_dns",
+        servers: ["wan_dns"],
         lists: ["work"],
         allowDomainRebinding: true,
       },
@@ -196,7 +196,7 @@ describe("dns rule enabled helpers", () => {
             id: "",
             displayName: "",
             enabled: false,
-            server: "",
+            servers: [],
             lists: [],
             allowDomainRebinding: false,
           },
@@ -204,7 +204,7 @@ describe("dns rule enabled helpers", () => {
             id: "dns_ads",
             displayName: "DNS for ads",
             enabled: true,
-            server: "vpn_dns",
+            servers: ["vpn_dns"],
             lists: ["ads"],
             allowDomainRebinding: false,
           },
@@ -222,7 +222,7 @@ describe("dns rule enabled helpers", () => {
       display_name: "Видео через Cloudflare",
       enabled: true,
       list: ["video"],
-      server: "cloudflare",
+      servers: ["cloudflare"],
     })
 
     expect(draft.id).toBe("dns_video")

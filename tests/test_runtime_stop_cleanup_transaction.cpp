@@ -2,6 +2,8 @@
 
 #include <doctest/doctest.h>
 
+#include <string>
+
 using namespace keen_pbr3;
 
 namespace {
@@ -135,7 +137,7 @@ TEST_CASE("runtime STOP retries only unverified monotonic cleanup stages") {
     CHECK(delays[1] == std::chrono::milliseconds{150});
 }
 
-TEST_CASE("runtime STOP never deactivates resolver before kernel cleanup") {
+TEST_CASE("runtime STOP restores ordinary DNS even when route cleanup fails") {
     auto target = runtime_stop_target();
     std::size_t resolver_calls = 0U;
     RuntimeStopCleanupServices services;
@@ -155,7 +157,46 @@ TEST_CASE("runtime STOP never deactivates resolver before kernel cleanup") {
     CHECK_FALSE(result.kernel_cleanup_verified());
     CHECK_FALSE(result.fully_verified());
     CHECK(result.attempts == 3U);
-    CHECK(resolver_calls == 0U);
+    CHECK(resolver_calls == 1U);
+    CHECK(result.resolver_deactivation_verified);
+    CHECK(result.conntrack_cleanup_verified);
+}
+
+TEST_CASE("runtime STOP retires classifiers before routes and marked connections") {
+    std::vector<std::string> calls;
+    RuntimeStopCleanupServices services;
+    services.cleanup_firewall = [&] { calls.push_back("firewall"); return true; };
+    services.clear_routing = [&] { calls.push_back("routing"); return true; };
+    services.cleanup_conntrack = [&](const OwnedConntrackCleanupSnapshot&) {
+        calls.push_back("conntrack");
+        return true;
+    };
+    services.deactivate_resolver = [&] { calls.push_back("resolver"); return true; };
+    const auto result = execute_runtime_stop_cleanup_transaction(
+        runtime_stop_target(), services);
+    CHECK(result.fully_verified());
+    CHECK(calls == std::vector<std::string>{"firewall", "routing", "conntrack", "resolver"});
+}
+
+TEST_CASE("runtime STOP does not claim conntrack clean while classifiers survive") {
+    unsigned conntrack_calls = 0;
+    unsigned resolver_calls = 0;
+    RuntimeStopCleanupServices services;
+    services.cleanup_firewall = [] { return false; };
+    services.clear_routing = [] { return true; };
+    services.cleanup_conntrack = [&](const OwnedConntrackCleanupSnapshot&) {
+        ++conntrack_calls;
+        return true;
+    };
+    services.deactivate_resolver = [&] { ++resolver_calls; return true; };
+    const auto result = execute_runtime_stop_cleanup_transaction(
+        runtime_stop_target(), services);
+    CHECK_FALSE(result.fully_verified());
+    CHECK_FALSE(result.conntrack_cleanup_verified);
+    CHECK(result.routing_cleanup_verified);
+    CHECK(result.resolver_deactivation_verified);
+    CHECK(conntrack_calls == 0U);
+    CHECK(resolver_calls == 1U);
 }
 
 TEST_CASE("process shutdown skips conntrack but verifies resolver deactivation") {

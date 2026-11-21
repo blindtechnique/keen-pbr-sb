@@ -8,10 +8,32 @@
 
 #include "api/handler_diagnostic_tasks.hpp"
 #include "api/handler_runtime_inventory.hpp"
+#include "api/handler_health_service.hpp"
 #include "api/sse_broadcaster.hpp"
 #include "api/status_stream.hpp"
 
 namespace keen_pbr3 {
+TEST_CASE("service health exposes learning facts without changing routing health") {
+    ServiceHealthState state;
+    state.status = api::HealthResponseStatus::RUNNING;
+    state.runtime_state = "running";
+    state.interception = InterceptionHealth{};
+    state.interception->dns_state = "fail_open_unconfirmed";
+    state.interception->dns_requested = true;
+    state.interception->fail_open = "unsupported";
+    state.interception->l7_state = "active";
+    state.interception->l7_packets = 7;
+    state.interception->interfaces = {"br0"};
+    const nlohmann::json encoded = build_health_response(state);
+    CHECK(encoded.at("status") == "running");
+    CHECK(encoded.at("runtime_state") == "running");
+    CHECK(encoded.at("interception").at("dns_state") == "fail_open_unconfirmed");
+    CHECK(encoded.at("interception").at("l7_packets") == 7);
+    CHECK(encoded.at("interception").at("interfaces") == nlohmann::json::array({"br0"}));
+    state.interception.reset();
+    const nlohmann::json absent = build_health_response(state);
+    CHECK((!absent.contains("interception") || absent.at("interception").is_null()));
+}
 namespace {
 
 ApiContext make_diagnostic_tasks_context(SseBroadcaster& broadcaster) {

@@ -1,8 +1,10 @@
 import type { ConfigObject } from "@/api/generated/model/configObject"
+import { getDnsRuleServers, withDnsRuleServers } from "@/lib/dns-rule-servers"
 
 export type DnsServerDeleteImpact = {
   matchingRuleIndexes: number[]
   usesFallback: boolean
+  usesBootstrap?: boolean
 }
 
 export function getDnsServerDeleteReferenceInfo(
@@ -29,9 +31,12 @@ export function getDnsServerDeleteImpact(
 
   return {
     matchingRuleIndexes: rules.flatMap((rule, index) =>
-      tagSet.has(rule.server) ? [index] : []
+      getDnsRuleServers(rule).some((tag) => tagSet.has(tag)) ? [index] : []
     ),
     usesFallback: fallback.some((tag) => tagSet.has(tag)),
+    ...(config.dns?.bootstrap?.some((tag) => tagSet.has(tag))
+      ? { usesBootstrap: true }
+      : {}),
   }
 }
 
@@ -53,11 +58,23 @@ export function buildUpdatedConfigForDnsServersDelete(
         (server) => !tagSet.has(server.tag)
       ),
       rules: cleanupReferences
-        ? rules.filter((rule) => !tagSet.has(rule.server))
+        ? rules.flatMap((rule) => {
+            const selected = getDnsRuleServers(rule)
+            if (!selected.some((tag) => tagSet.has(tag))) return [rule]
+            const remaining = selected.filter((tag) => !tagSet.has(tag))
+            return remaining.length ? [withDnsRuleServers(rule, remaining)] : []
+          })
         : rules,
       fallback: cleanupReferences
         ? fallback.filter((tag) => !tagSet.has(tag))
         : fallback,
+      ...(dnsConfig?.bootstrap
+        ? {
+            bootstrap: cleanupReferences
+              ? dnsConfig.bootstrap.filter((tag) => !tagSet.has(tag))
+              : dnsConfig.bootstrap,
+          }
+        : {}),
     },
   }
 }

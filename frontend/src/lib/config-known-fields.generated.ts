@@ -52,13 +52,20 @@ export const configKnownFields = {
     "ttl_bypass_enabled"
   ],
   "DnsConfig": [
+    "bootstrap",
     "client_dns_enforcement",
     "dns_test_server",
     "fallback",
     "firefox_doh_canary",
+    "learning",
+    "passive_learning",
     "rules",
     "servers",
     "system_resolver"
+  ],
+  "DnsLearningConfig": [
+    "dns",
+    "l7"
   ],
   "DnsRule": [
     "allow_domain_rebinding",
@@ -67,13 +74,15 @@ export const configKnownFields = {
     "id",
     "list",
     "route_rule_ids",
-    "server"
+    "server",
+    "servers"
   ],
   "DnsServer": [
     "address",
     "detour",
     "display_name",
     "domains",
+    "ips",
     "tag",
     "type"
   ],

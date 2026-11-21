@@ -103,7 +103,7 @@ local function event(p, track, outgoing, position, payload, retransmit, rst)
     if observed then circular(nil, d)
     else
         -- When circular does not match, C continues the ordinary plan. An
-        -- action escaping the observer would execute BOTH candidate slots.
+        -- action escaping the observer would execute ALL candidate slots.
         for _, instance in ipairs(d.plan) do plan_instance_execute(d, VERDICT_PASS, instance) end
     end
     return d.executed, observed
@@ -143,11 +143,45 @@ for _, p in ipairs(pools) do
     equal(first.nstrategy, 1, "first candidate retained")
     local second = fail(p, b)
     equal(second.nstrategy, 2, "second failed session selects candidate 2")
-    equal(first, second, "same target compared with both candidates")
+    equal(first, second, "same target compared across candidates")
     local retry = connection()
     local actions = event(p, retry, true, 1, p.tcp and "tls_client_hello" or "discord_ip_discovery")
     equal(#actions, p.tcp and 3 or 1, "only the selected candidate's actions execute")
     for _, action in ipairs(actions) do assert(action:find(":strategy=2", 1, true)) end
+    fail(p, connection())
+    fail(p, connection())
+    equal(first.nstrategy, 3, "two more failed sessions select candidate 3")
+    local third = connection()
+    actions = event(p, third, true, 1, p.tcp and "tls_client_hello" or "discord_ip_discovery")
+    local third_count = p.key == "discord_tcp_exp" and 3 or (p.tcp and 2 or 1)
+    equal(#actions, third_count, "only the new candidate's actions execute")
+    for _, action in ipairs(actions) do
+        assert(action:find(":strategy=3", 1, true))
+        if action:match("^fake:") then
+            if p.tcp then
+                assert(action:find(":tcp_seq=1000:tcp_ack=-66000:repeats=6:", 1, true))
+                if p.key == "discord_media_tcp_exp" then
+                    assert(action:find(":blob=tls_google:", 1, true))
+                end
+            else
+                assert(action:find(":blob=quic_dbank:optional:repeats=6:", 1, true))
+            end
+        else
+            equal(action, "multisplit:pos=2:strategy=3", "explicit BAT split position")
+        end
+    end
+    success(p, third)
+    equal(first.nstrategy, 3, "reply retains the new working candidate")
+    local unrelated = event(p, connection(), true, 1, p.tcp and "http_req" or "rtp")
+    equal(#unrelated, 0, "new candidate does not alter unrelated payloads")
+    if not p.tcp then
+        local subsequent = event(p, third, true, 2, "stun")
+        equal(#subsequent, 0, "new UDP candidate still alters only the first packet")
+        local stun = event(p, connection(), true, 1, "stun")
+        equal(#stun, 1, "initial STUN uses the new candidate")
+        equal(stun[1], "fake:blob=quic_dbank:optional:repeats=6:strategy=3", "STUN dbank fake")
+    end
+    scenarios = scenarios + 1
     fail(p, connection())
     fail(p, connection())
     equal(first.nstrategy, 1, "full circular wrap back to candidate 1")

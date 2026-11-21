@@ -399,6 +399,7 @@ describe("structured config validation codes", () => {
       ["config.dns.domain", "dnsDomain"],
       ["config.dns.different", "dnsDifferent"],
       ["config.dns.port_number", "dnsPort"],
+      ["config.dns.rule_servers_conflict", "dnsRuleServersConflict"],
       ["config.dns.port_range", "dnsPort"],
       ["config.dns.closing_bracket", "dnsIpv6Bracket"],
       ["config.dns.port_separator", "dnsIpv6Separator"],
@@ -876,6 +877,11 @@ describe("server validation presentation", () => {
     ],
     [
       "dns.rules[2].server",
+      "dns.rules[2] references unknown DNS server tag 'private_dns'",
+      "unknownDns",
+    ],
+    [
+      "dns.rules[2].servers[1]",
       "dns.rules[2] references unknown DNS server tag 'private_dns'",
       "unknownDns",
     ],

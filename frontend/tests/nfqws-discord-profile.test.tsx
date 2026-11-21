@@ -45,7 +45,7 @@ describe("Discord experiment inside Max", () => {
     }
   })
 
-  test("shows two candidates in each new pool without hiding the existing pools", () => {
+  test("shows three candidates in each experimental pool without changing the legacy UDP range", () => {
     const summary = parseNfqwsStrategy(profiles[2]!.content)
     expect(summary.status).toBe("complete")
     const experiments = summary.pools.filter((pool) =>
@@ -56,16 +56,17 @@ describe("Discord experiment inside Max", () => {
       "discord_media_tcp_exp",
       "discord_udp_exp",
     ])
-    expect(experiments.map((pool) => pool.rotation?.slots)).toEqual([2, 2, 2])
+    expect(experiments.map((pool) => pool.rotation?.slots)).toEqual([3, 3, 3])
     expect(experiments[0]!.tcpPorts).toBe("443")
     expect(experiments[1]!.domains).toEqual(["discord.media"])
-    expect(experiments[2]!.udpPorts).toBe("50000-50099,19294-19344")
+    expect(experiments[2]!.udpPorts).toBe("50000-50100,19294-19344")
     expect(
       summary.pools.some((pool) => pool.rotation?.stateKey === "gv_tcp")
     ).toBe(true)
     expect(
-      summary.pools.some((pool) => pool.rotation?.stateKey === "discord_udp")
-    ).toBe(true)
+      summary.pools.find((pool) => pool.rotation?.stateKey === "discord_udp")
+        ?.udpPorts
+    ).toBe("50000-50099,3478-3481,5349,19294-19344")
   })
 
   test.each(["ru", "en"])(

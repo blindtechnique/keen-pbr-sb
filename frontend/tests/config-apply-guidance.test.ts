@@ -40,6 +40,17 @@ function changed(edit: (config: ConfigObject) => void) {
 }
 
 describe("config apply effects", () => {
+  test("post-login banner accepts the API representation of legacy DNS rules", () => {
+    const legacy = structuredClone(initial)
+    legacy.dns!.rules = [{ list: ["sites"], server: "primary" }]
+    const fromApi = structuredClone(legacy)
+    // GET /api/config serializes a disengaged optional as JSON null.
+    Object.assign(fromApi.dns!.rules![0], { servers: null })
+    expect(summarizeConfigEffects(fromApi)).toEqual(
+      summarizeConfigEffects(legacy)
+    )
+  })
+
   test("Firefox automatic DoH canary is a DNS-only effect with enabled legacy defaults", () => {
     const baseline = summarizeConfigEffects(initial)
     for (const value of [undefined, null, true]) {

@@ -29,8 +29,12 @@ inline void retire_route_dns_bindings(Config& next, const Config& previous) {
             if (route_rule_still_present(route, next)) continue;
             bool linked = route.id && std::find(owners.begin(), owners.end(), *route.id) != owners.end();
             if (!dns.route_rule_ids && previous.lists) {
-                const auto server = std::find_if(old_servers.begin(), old_servers.end(), [&](const DnsServer& item) { return item.tag == dns.server; });
-                linked = server != old_servers.end() && server->detour == std::optional<std::string>{route.outbound} &&
+                const auto tags = dns_rule_server_tags(dns);
+                const bool matching_servers = !tags.empty() && std::all_of(tags.begin(), tags.end(), [&](const std::string& tag) {
+                    const auto server = std::find_if(old_servers.begin(), old_servers.end(), [&](const DnsServer& item) { return item.tag == tag; });
+                    return server != old_servers.end() && server->detour == std::optional<std::string>{route.outbound};
+                });
+                linked = matching_servers &&
                     !dns.list.empty() && std::all_of(dns.list.begin(), dns.list.end(), [&](const std::string& id) {
                         const auto list = previous.lists->find(id);
                         const auto& names = route_rule_lists(route);

@@ -1,3 +1,4 @@
+import { formatDnsRuleServers } from "@/lib/dns-rule-servers"
 import type { ReactNode } from "react"
 
 import type { ConfigObject } from "@/api/generated/model/configObject"
@@ -221,7 +222,7 @@ function getDnsRuleDetails(
     ),
     formatDetail(
       t("pages.dnsRules.headers.serverTag"),
-      dnsServerNames.get(rule.server) ?? rule.server
+      formatDnsRuleServers(rule, dnsServerNames)
     ),
   ]
 }

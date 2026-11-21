@@ -1121,6 +1121,40 @@ TEST_CASE(
         "Beginner setup requires one dedicated route rule for the list");
 }
 
+TEST_CASE("recommended list setup preserves compatible multiple DNS servers") {
+    const auto snapshot = nlohmann::json::array({routing_preset()});
+    auto candidate = plan_catalog_setup(
+        outbound_intent(), snapshot, base_config()).candidate;
+    DnsServer secondary;
+    secondary.tag = "secondary_dns";
+    secondary.address = "8.8.8.8";
+    secondary.detour = "proxy";
+    candidate.dns->servers->push_back(secondary);
+    auto& rule = candidate.dns->rules->front();
+    rule.server.reset();
+    rule.servers = std::vector<std::string>{"proxy_dns", "secondary_dns"};
+
+    CHECK_NOTHROW(validate_recommended_list_setup(candidate, "category_ai"));
+    const auto repeated = plan_catalog_setup(outbound_intent(), snapshot, candidate);
+    CHECK(nlohmann::json(*repeated.candidate.dns->rules) ==
+          nlohmann::json(*candidate.dns->rules));
+    CHECK(repeated.summary.dns_rules.empty());
+
+    SUBCASE("all DNS servers must use the route's VPN") {
+        candidate.dns->servers->back().detour.reset();
+        CHECK_THROWS_WITH(
+            validate_recommended_list_setup(candidate, "category_ai"),
+            "Beginner setup DNS server must use the same outbound as the route; "
+            "create or select a compatible DNS server");
+    }
+    SUBCASE("all DNS servers must exist") {
+        rule.servers->back() = "missing";
+        CHECK_THROWS_WITH(
+            validate_recommended_list_setup(candidate, "category_ai"),
+            "dns.rules[0] references unknown DNS server tag 'missing'");
+    }
+}
+
 TEST_CASE("catalog planner prefers SRS when authoritative preset also has raw subscription") {
     const nlohmann::json upstream_fixture = {
         {"id", "unavailable-in-russia"},

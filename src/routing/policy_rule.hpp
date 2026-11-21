@@ -17,7 +17,8 @@ bool rule_matches_live(const RuleSpec& expected, const DumpedRule& actual);
 std::vector<RuleSpec> find_orphaned_generated_rules(
     const std::vector<RuleSpec>& desired,
     const std::vector<DumpedRule>& live,
-    const std::set<uint32_t>& corroborated_route_tables);
+    const std::set<uint32_t>& corroborated_route_tables,
+    uint32_t retired_mark_mask = 0U);
 
 } // namespace policy_rule_detail
 
@@ -56,7 +57,8 @@ public:
         const std::vector<RuleSpec>& desired);
     std::set<uint32_t> remove_orphaned_generated(
         const std::vector<RuleSpec>& desired,
-        const std::set<uint32_t>& corroborated_route_tables);
+        const std::set<uint32_t>& corroborated_route_tables,
+        uint32_t retired_mark_mask = 0U);
 
     // Return every candidate route table which still has any live policy-rule
     // dependency, regardless of ownership. If the live rule dump fails, all

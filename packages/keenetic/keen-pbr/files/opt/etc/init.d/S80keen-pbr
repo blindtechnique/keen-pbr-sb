@@ -1953,6 +1953,56 @@ acquire_control_recovery_gate() {
     local startticks="$1"
     local owner_candidate
 
+    # A directory alone survives SIGKILL and used to require a router reboot.
+    # Serialize reclamation with a kernel lock on a permanent inode instead.
+    # Never unlink this file: waiters must all lock the same inode.
+    local lock_file="${STOPPING_RUNTIME_DIR}/control-recovery.lock"
+    ensure_stopping_runtime_dir || return 1
+    command -v flock >/dev/null 2>&1 || {
+        log_error "flock is missing; install the Entware flock package"
+        return 1
+    }
+    [ ! -L "$lock_file" ] || return 1
+    if [ ! -e "$lock_file" ]; then
+        (umask 077; set -C; : > "$lock_file") 2>/dev/null || true
+    fi
+    [ -f "$lock_file" ] &&
+        [ "$(path_owner_group_mode "$lock_file")" = "0:0:600" ] || return 1
+    exec 8>>"$lock_file" || return 1
+    if ! flock -n 8; then
+        exec 8>&-
+        return 2
+    fi
+
+    if [ -e "$STOPPING_CONTROL_RECOVERY_GATE_DIR" ] ||
+       [ -L "$STOPPING_CONTROL_RECOVERY_GATE_DIR" ]; then
+        if ! control_lease_dir_is_protected "$STOPPING_CONTROL_RECOVERY_GATE_DIR"; then
+            release_control_recovery_kernel_lock
+            log_error "Control recovery gate has unsafe ownership or type"
+            return 1
+        fi
+        if read_control_recovery_gate_owner && control_recovery_gate_owner_is_live; then
+            release_control_recovery_kernel_lock
+            return 2
+        fi
+        # A pre-flock init may still be between mkdir and owner publication.
+        # New controllers cannot enter that window while fd 8 is locked.
+        # Do not reclaim an ambiguous legacy record while another init lives.
+        if ! read_control_recovery_gate_owner && legacy_control_gate_writer_is_live; then
+            release_control_recovery_kernel_lock
+            return 2
+        fi
+        if [ -L "$STOPPING_CONTROL_RECOVERY_GATE_OWNER" ] ||
+           { [ -e "$STOPPING_CONTROL_RECOVERY_GATE_OWNER" ] &&
+             [ ! -f "$STOPPING_CONTROL_RECOVERY_GATE_OWNER" ]; } ||
+           ! rm -f "$STOPPING_CONTROL_RECOVERY_GATE_OWNER" ||
+           ! rmdir "$STOPPING_CONTROL_RECOVERY_GATE_DIR"; then
+            release_control_recovery_kernel_lock
+            log_error "Cannot retire stale keen-pbr control recovery metadata"
+            return 1
+        fi
+    fi
+
     STOPPING_CONTROL_RECOVERY_GATE_PID=""
     STOPPING_CONTROL_RECOVERY_GATE_STARTTICKS=""
     owner_candidate="${STOPPING_RUNTIME_DIR}/.control-recovery-owner.$$"
@@ -1961,6 +2011,7 @@ acquire_control_recovery_gate() {
         "$STOPPING_CONTROL_RECOVERY_GATE_MAGIC" "$pid" "$startticks" > \
         "$owner_candidate"); then
         rm -f "$owner_candidate"
+        release_control_recovery_kernel_lock
         log_error "Cannot write keen-pbr control recovery gate candidate"
         return 1
     fi
@@ -1968,12 +2019,8 @@ acquire_control_recovery_gate() {
     if ! (umask 077; mkdir "$STOPPING_CONTROL_RECOVERY_GATE_DIR" \
         2>/dev/null); then
         rm -f "$owner_candidate"
-        if read_control_recovery_gate_owner &&
-           control_recovery_gate_owner_is_live; then
-            return 2
-        fi
-        log_error "Keen-pbr control recovery gate is stale or unverifiable; reboot is required for safe tmpfs cleanup"
-        return 1
+        release_control_recovery_kernel_lock
+        return 2
     fi
     if ! ln "$owner_candidate" "$STOPPING_CONTROL_RECOVERY_GATE_OWNER" \
             2>/dev/null ||
@@ -1981,11 +2028,47 @@ acquire_control_recovery_gate() {
         rm -f "$owner_candidate"
         rm -f "$STOPPING_CONTROL_RECOVERY_GATE_OWNER" 2>/dev/null || true
         rmdir "$STOPPING_CONTROL_RECOVERY_GATE_DIR" 2>/dev/null || true
+        release_control_recovery_kernel_lock
         log_error "Cannot publish or verify keen-pbr control recovery gate ownership"
         return 1
     fi
     rm -f "$owner_candidate"
     return 0
+}
+
+release_control_recovery_kernel_lock() {
+    # Explicit unlock also releases descriptors briefly inherited by stat/rm.
+    flock -u 8 2>/dev/null || true
+    exec 8>&-
+}
+
+legacy_control_gate_writer_is_live() {
+    local entry
+    for entry in "$STOPPING_PROC_ROOT"/[0-9]*/cmdline; do
+        [ "$entry" != "$STOPPING_PROC_ROOT/$$/cmdline" ] || continue
+        [ -r "$entry" ] || continue
+        # Match the executed script, not a filename merely passed to a test,
+        # cat, grep or a diagnostic shell command.
+        if tr '\000' '\n' < "$entry" 2>/dev/null | awk '
+            NR==1 {
+                if ($0=="/opt/etc/init.d/S80keen-pbr") found=1
+                shell=($0 ~ /(^|\/)(sh|ash|bash|dash)$/)
+                busybox=($0 ~ /(^|\/)busybox$/)
+                next
+            }
+            NR==2 && busybox {shell=($0=="sh" || $0=="ash"); next}
+            shell && !script {
+                if ($0=="-c") {script=1; next}
+                if ($0 ~ /^-/) next
+                script=1
+                if ($0=="/opt/etc/init.d/S80keen-pbr") found=1
+            }
+            END {exit !found}
+        '; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 acquire_control_recovery_gate_bounded() {
@@ -2016,16 +2099,19 @@ release_control_recovery_gate() {
 
     if ! control_recovery_gate_owned_by_self \
         "$expected_pid" "$expected_startticks"; then
+        release_control_recovery_kernel_lock
         log_error "Cannot release a keen-pbr control recovery gate owned by another generation"
         return 1
     fi
     if ! rm -f "$STOPPING_CONTROL_RECOVERY_GATE_OWNER" ||
        ! rmdir "$STOPPING_CONTROL_RECOVERY_GATE_DIR"; then
+        release_control_recovery_kernel_lock
         log_error "Cannot remove keen-pbr control recovery gate"
         return 1
     fi
     STOPPING_CONTROL_RECOVERY_GATE_PID=""
     STOPPING_CONTROL_RECOVERY_GATE_STARTTICKS=""
+    release_control_recovery_kernel_lock
     return 0
 }
 
@@ -2700,9 +2786,8 @@ acquire_control_lease() {
     # Serialize the check/create/recover sequence itself. A live owner holds
     # this gate only for local filesystem operations, so bounded contenders
     # wait for publication and then either queue behind the new lease or take
-    # it. A stale/unverifiable gate is deliberately fail-closed until startup
-    # reboot cleanup; trying to recover that lock concurrently would recreate
-    # ABA.
+    # it. The kernel mutex serializes stale-record reclamation as well and is
+    # released automatically if its controller dies.
     if ! acquire_control_recovery_gate_bounded \
         "$startticks" "control lease acquisition"; then
         rm -f "$owner_candidate"
@@ -3132,33 +3217,9 @@ stopping_marker_is_exact_admission() {
 }
 
 clear_stale_control_recovery_gate_for_start() {
-    local attempt=0
-
-    while [ "$attempt" -lt 3 ]; do
-        if [ ! -e "$STOPPING_CONTROL_RECOVERY_GATE_DIR" ] &&
-           [ ! -L "$STOPPING_CONTROL_RECOVERY_GATE_DIR" ]; then
-            return 0
-        fi
-        if read_control_recovery_gate_owner &&
-           control_recovery_gate_owner_is_live; then
-            # The acquisition path below performs the bounded wait. Do not
-            # interfere with the live controller's owner-unlink/rmdir window.
-            return 0
-        fi
-        attempt=$((attempt + 1))
-        [ "$attempt" -lt 3 ] && sleep 1
-    done
-    if [ ! -e "$STOPPING_CONTROL_RECOVERY_GATE_DIR" ] &&
-       [ ! -L "$STOPPING_CONTROL_RECOVERY_GATE_DIR" ]; then
-        return 0
-    fi
-    # There is no POSIX/BusyBox compare-and-swap unlink for a fixed directory.
-    # Trying to repair this gate from another live init action can delete a
-    # replacement generation (ABA) or interfere with its final release. Keep
-    # it fail-closed; /var/run is tmpfs and a router reboot clears this
-    # millisecond-window crash residue without touching persistent config.
-    log_error "Keen-pbr control recovery gate is still present; reboot is required for safe tmpfs cleanup"
-    return 1
+    # Acquisition now recovers dead metadata under the kernel mutex. A live
+    # controller is handled by the ordinary bounded acquisition below.
+    return 0
 }
 
 clear_stale_stopping_marker_for_start() {
@@ -4461,6 +4522,15 @@ case "$1" in
 esac
 
 case "$1" in
+    recover-control-gate)
+        # Also used by the authenticated installer before an OLD prerm runs.
+        # This only reclaims dead control metadata, never signals a service.
+        lifecycle_lock_or_fail || exit 1
+        gate_startticks=$(stopping_process_startticks "$$") || exit 1
+        acquire_control_recovery_gate_bounded "$gate_startticks" "update preparation" || exit 1
+        release_control_recovery_gate "$gate_startticks"
+        exit $?
+        ;;
     drain-pending-delayed)
         if claim_control_drain_token; then
             delayed_token_status=0

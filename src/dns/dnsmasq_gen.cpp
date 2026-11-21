@@ -3,6 +3,7 @@
 #include "../crypto/md5.hpp"
 #include "../log/logger.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <functional>
 #include <set>
@@ -148,6 +149,29 @@ void DnsmasqGenerator::generate_directives(
     const bool firefox_doh_canary = dns_config_.firefox_doh_canary.value_or(true);
     if (hash_record_callback) {
         hash_record_callback("version|" + hash_version_);
+        // A local target may keep its port while its real upstreams change.
+        // Hash the complete ordered forwarding plan, not just server=127... .
+        for (const auto& group : dns_registry_.proxy_groups()) {
+            for (size_t index = 0; index < group.upstreams.size(); ++index) {
+                const auto& upstream = group.upstreams[index];
+                hash_record_callback("dns-proxy|" + std::to_string(group.port) + "|" +
+                    std::to_string(index) + "|" + nlohmann::json{
+                        {"kind", static_cast<int>(upstream.kind)}, {"ip", upstream.ip},
+                        {"port", upstream.port}, {"url", upstream.url},
+                        {"detour", upstream.detour}, {"ips", upstream.ips}}.dump());
+            }
+        }
+        for (const auto& server : dns_config_.servers.value_or(std::vector<DnsServer>{})) {
+            if (server.type.value_or(api::DnsServerType::STATIC) == api::DnsServerType::DOH)
+                hash_record_callback("doh|" + nlohmann::json(server).dump());
+        }
+        for (const auto& tag : dns_config_.bootstrap.value_or(std::vector<std::string>{})) {
+            hash_record_callback("doh-bootstrap|" + tag);
+            for (const auto& server : dns_config_.servers.value_or(std::vector<DnsServer>{})) {
+                if (server.tag == tag)
+                    hash_record_callback("doh-bootstrap-server|" + nlohmann::json(server).dump());
+            }
+        }
         hash_record_callback(
             std::string("firefox-doh-canary|") + (firefox_doh_canary ? "1" : "0"));
         hash_record_callback(
@@ -254,7 +278,7 @@ void DnsmasqGenerator::generate_directives(
         const bool resolver_itself = server->port == 53 &&
             (server->resolved_ip.rfind("127.", 0) == 0 ||
              server->resolved_ip == "::1");
-        const bool direct_fallback = !server->detour.has_value() &&
+        const bool direct_fallback = !server->is_doh() && !server->runtime_proxy && !server->detour.has_value() &&
             !resolver_itself &&
             !(ipv6_policy_.suppress_aaaa &&
               server->resolved_ip.find(':') != std::string::npos);
@@ -275,10 +299,14 @@ void DnsmasqGenerator::generate_directives(
                 if (server->port != 53) *out << "#" << server->port;
                 *out << "\n";
             }
-            *out << "server=" << server->resolved_ip;
-            if (server->port != 53) {
-                *out << "#" << server->port;
-            }
+        }
+    }
+    for (const auto& server : dns_registry_.fallback_targets()) {
+        if (hash_record_callback)
+            hash_record_callback("fallback-target|" + server.resolved_ip + "|" + std::to_string(server.port));
+        if (out != nullptr) {
+            *out << "server=" << server.resolved_ip;
+            if (server.port != 53) *out << "#" << server.port;
             *out << "\n";
         }
     }
@@ -304,14 +332,14 @@ void DnsmasqGenerator::generate_directives(
         if (!server_config.domains.has_value()) {
             continue;
         }
-        const auto servers = dns_registry_.get_servers(server_config.tag);
+        const auto& servers = dns_registry_.direct_targets(server_config.tag);
         for (const auto& domain : *server_config.domains) {
             const std::string bare = canonical_dns_domain(domain);
             direct_domains.insert(bare);
-            for (const auto* server : servers) {
-                std::string address = server->resolved_ip;
-                if (server->port != 53) {
-                    address += "#" + std::to_string(server->port);
+            for (const auto& server : servers) {
+                std::string address = server.resolved_ip;
+                if (server.port != 53) {
+                    address += "#" + std::to_string(server.port);
                 }
                 direct_server_records.insert("server=/" + bare + "/" + address);
             }
@@ -361,7 +389,7 @@ void DnsmasqGenerator::generate_directives(
         }
     }
 
-    std::map<std::string, std::string> dns_list_servers;
+    std::map<std::string, std::vector<std::string>> dns_list_servers;
     std::map<std::string, bool> dns_list_allow_rebind;
     for (const auto& rule : dns_config_.rules.value_or(std::vector<DnsRule>{})) {
         if (!dns_rule_enabled(rule)) {
@@ -369,7 +397,7 @@ void DnsmasqGenerator::generate_directives(
         }
         for (const auto& list_name : rule.list) {
             if (dns_list_servers.find(list_name) == dns_list_servers.end()) {
-                dns_list_servers[list_name] = rule.server;
+                dns_list_servers[list_name] = dns_rule_server_tags(rule);
                 dns_list_allow_rebind[list_name] =
                     rule.allow_domain_rebinding.value_or(false);
             }
@@ -391,10 +419,8 @@ void DnsmasqGenerator::generate_directives(
         const bool needs_ipset = ipset_lists.count(list_name) > 0;
 
         std::vector<const DnsServerConfig*> dns_servers;
-        auto dns_it = dns_list_servers.find(list_name);
-        if (dns_it != dns_list_servers.end()) {
-            dns_servers = dns_registry_.get_servers(dns_it->second);
-        }
+        for (const auto& server : dns_registry_.list_targets(list_name))
+            dns_servers.push_back(&server);
 
         const bool allow_domain_rebinding =
             dns_list_allow_rebind.find(list_name) != dns_list_allow_rebind.end()

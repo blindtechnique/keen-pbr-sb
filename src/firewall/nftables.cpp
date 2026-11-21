@@ -1,4 +1,5 @@
 #include "nftables.hpp"
+#include "interception_rules.hpp"
 #include "firewall_cleanup_absence.hpp"
 #include "iptables.hpp"
 #include "nft_batch_pipe.hpp"
@@ -433,6 +434,7 @@ void NftablesFirewall::prepare_apply(FirewallApplyMode mode) {
 }
 
 NftablesFirewall::~NftablesFirewall() {
+    auto interception_stop = begin_interception_stop();
     try {
         cleanup_impl(/*verification_required=*/false);
     } catch (const std::exception& e) {
@@ -2557,6 +2559,10 @@ NftablesFirewall::LiveTableState NftablesFirewall::read_live_table_state() const
                 && chain.value("name", "") == SNAT_CHAIN_NAME) {
                 state.snat_chain_exists = true;
             }
+            if (chain.value("family", "") == "inet" && chain.value("table", "") == TABLE_NAME) {
+                if (chain.value("name", "") == kInterceptDnsChain) state.intercept_dns_chain_exists = true;
+                if (chain.value("name", "") == kInterceptL7Chain) state.intercept_l7_chain_exists = true;
+            }
             continue;
         }
 
@@ -2650,6 +2656,14 @@ nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live
     }
     if (!emit_full_table && live_state.snat_chain_exists) {
         arr.push_back(build_delete_snat_chain_json());
+    }
+    for (const auto& tap : {std::pair{kInterceptDnsChain, live_state.intercept_dns_chain_exists},
+                            std::pair{kInterceptL7Chain, live_state.intercept_l7_chain_exists}}) {
+        if (!emit_full_table && tap.second) {
+            const nlohmann::json id{{"family", "inet"}, {"table", TABLE_NAME}, {"name", tap.first}};
+            arr.push_back({{"flush", {{"chain", id}}}});
+            arr.push_back({{"delete", {{"chain", id}}}});
+        }
     }
 
     std::set<std::string> pending_set_names;
@@ -2757,6 +2771,9 @@ nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live
     for (const auto& rule : pending_forward_udp_rejects_) {
         arr.push_back(build_forward_udp_reject_rule_json(rule));
     }
+
+    for (const auto& command : interception_nft_commands(interception_hooks(), ipv6_enabled()))
+        arr.push_back(command);
 
     // Elements. Under RulesOnly no loader ever ran (create_batch_loader
     // refuses), so this map is empty by construction; the guard states the
@@ -3016,6 +3033,7 @@ void NftablesFirewall::cleanup_impl(bool verification_required) {
 
 void NftablesFirewall::cleanup() {
     std::lock_guard<std::mutex> lock(pair_state_mutex_);
+    auto interception_stop = begin_interception_stop();
     cleanup_stale_iptables_ppe_deoffload_strict();
     cleanup_impl(/*verification_required=*/true);
 }
@@ -3023,6 +3041,7 @@ void NftablesFirewall::cleanup() {
 FirewallOwnedCleanupInspection
 NftablesFirewall::cleanup_and_inspect_owned() {
     std::lock_guard<std::mutex> lock(pair_state_mutex_);
+    auto interception_stop = begin_interception_stop();
     strict_cleanup_pending_ = true;
 
     // A previous backend generation may have left xtables chains or ipsets.

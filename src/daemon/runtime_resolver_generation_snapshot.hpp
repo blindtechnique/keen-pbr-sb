@@ -25,6 +25,8 @@ struct ResolverGenerationSnapshot {
     std::string expected_hash;
     std::uint64_t generation{0};
     std::uint64_t stream_epoch{0};
+    // All consumers of this generation use the same physical proxy endpoints.
+    std::shared_ptr<const DnsServerRegistry> dns_registry;
 };
 
 // Selection for one generate-resolver-config IPC request.  The caller must
@@ -113,6 +115,7 @@ struct RuntimeResolverGenerationInput {
 // the explicit input. A pinned list generation is mandatory; there is no live
 // CacheManager fallback at this worker-safe boundary.
 ResolverGenerationSnapshot build_runtime_resolver_generation_snapshot(
-    const RuntimeResolverGenerationInput& input);
+    const RuntimeResolverGenerationInput& input,
+    std::shared_ptr<const DnsServerRegistry> dns_registry = nullptr);
 
 } // namespace keen_pbr3

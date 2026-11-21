@@ -8,12 +8,13 @@
 #include "keenetic/ndms_native_secret_snapshot.hpp"
 #include "keenetic/ndms_native_writer_lease.hpp"
 
+#include <array>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <stdexcept>
-#include <sys/sysmacros.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -64,6 +65,29 @@ void require_child(const bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
 
+// The storage policy needs a readable byte source and an output sink, not
+// device-node semantics. A runner can allow mknod in /tmp yet reject opening
+// the result (nodev). Use private regular files only in the disposable root.
+void prepare_fixture_dev(const std::filesystem::path& root) {
+    const auto dev = root / "dev";
+    std::filesystem::create_directory(dev);
+    std::array<char, 64> bytes{}; // enough for each individual token/key read
+    std::ifstream entropy("/dev/urandom", std::ios::binary);
+    require_child(static_cast<bool>(entropy.read(bytes.data(), bytes.size())),
+                  "cannot read fixture entropy before chroot");
+    std::ofstream source(dev / "urandom", std::ios::binary);
+    source.write(bytes.data(), bytes.size());
+    source.close();
+    require_child(source.good(), "cannot write fixture entropy");
+    std::ofstream sink(dev / "null");
+    sink.close();
+    require_child(sink.good(), "cannot create fixture sink");
+    for (const char* name : {"urandom", "null"}) {
+        std::filesystem::permissions(dev / name, std::filesystem::perms::owner_read |
+                                                 std::filesystem::perms::owner_write);
+    }
+}
+
 class TestMaintenanceLease final : public MaintenanceLease {
 public:
     std::uint32_t base_generation() const noexcept override { return generation_; }
@@ -85,9 +109,6 @@ void exercise_entware_stores(const uid_t prefix_owner) {
         require_child(::chmod(parent, 0755) == 0, "fixture chmod failed");
     }
     require_child(::chmod(root.c_str(), 0755) == 0, "service chmod failed");
-    std::filesystem::create_directory("/dev");
-    require_child(::mknod("/dev/urandom", S_IFCHR | 0600, makedev(1, 9)) == 0, "fixture random device failed");
-    require_child(::mknod("/dev/null", S_IFCHR | 0600, makedev(1, 3)) == 0, "fixture null device failed");
 
     // The real production coordinator validates its helper BEFORE reaching
     // the native stores. A deliberately absent interpreter stops execution
@@ -193,6 +214,7 @@ TEST_CASE("native stores use production policy on Entware packaging-owned prefix
         REQUIRE(child >= 0);
         if (child == 0) {
             try {
+                prepare_fixture_dev(fixture.path);
                 require_child(::chroot(fixture.path.c_str()) == 0 && ::chdir("/") == 0, "fixture chroot failed");
                 exercise_entware_stores(owner);
                 ::_exit(0);

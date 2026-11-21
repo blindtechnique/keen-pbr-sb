@@ -26,6 +26,7 @@ import { RouteFailurePolicyFields } from "@/components/shared/route-failure-poli
 import { ServerValidationAlert } from "@/components/shared/server-validation-alert"
 import { getFirstFieldError, getFormErrorMessage } from "@/lib/form-field-error"
 import {
+  UpsertFormActions,
   UpsertPage,
   type UpsertPagePresentation,
 } from "@/components/shared/upsert-page"
@@ -985,22 +986,23 @@ function RoutingRuleForm({
         }
       />
 
-      <div className="flex justify-end gap-3" data-upsert-actions>
-        {mode === "edit" ? (
-          <UpsertDeleteAction
-            confirmLabel={t("pages.routingRuleUpsert.delete.confirm")}
-            description={t("pages.routingRuleUpsert.delete.description")}
-            disabled={targetUnavailable}
-            impactItems={[]}
-            isPending={postConfigMutation.isPending}
-            label={t("common.delete")}
-            onConfirm={handleDelete}
-            title={t("pages.routingRuleUpsert.delete.title")}
-          />
-        ) : null}
-        <Button onClick={close} size="xl" type="button" variant="outline">
-          {t("common.cancel")}
-        </Button>
+      <UpsertFormActions
+        onCancel={close}
+        deleteAction={
+          mode === "edit" ? (
+            <UpsertDeleteAction
+              confirmLabel={t("pages.routingRuleUpsert.delete.confirm")}
+              description={t("pages.routingRuleUpsert.delete.description")}
+              disabled={targetUnavailable}
+              impactItems={[]}
+              isPending={postConfigMutation.isPending}
+              label={t("common.delete")}
+              onConfirm={handleDelete}
+              title={t("pages.routingRuleUpsert.delete.title")}
+            />
+          ) : null
+        }
+      >
         <form.Subscribe selector={(state) => state.canSubmit}>
           {(canSubmit) => (
             <Button
@@ -1019,7 +1021,7 @@ function RoutingRuleForm({
             </Button>
           )}
         </form.Subscribe>
-      </div>
+      </UpsertFormActions>
     </form>
   )
 }

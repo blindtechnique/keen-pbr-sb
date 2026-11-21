@@ -78,7 +78,8 @@ class TcpProfileTest(unittest.TestCase):
     def test_ip_selected_mtproto_observes_both_directions_without_a_host_requirement(self):
         for profile in self.gen['PROFILES']:
             custom = self.values(profile)[0]['NFQWS_ARGS_CUSTOM']
-            block = re.split(r'--new(?:=[^\s]+)?\s+', custom)[-1].split()
+            block, = (s.split() for s in re.split(r'--new(?:=[^\s]+)?\s+', custom)
+                      if '--filter-l7=mtproto' in s.split())
             pos = next(i for i, t in enumerate(block) if t.startswith('--lua-desync=circular:'))
             self.assertIn('--payload=all', block[:pos])
             self.assertIn('--in-range=-s27460', block[:pos])
@@ -122,7 +123,9 @@ class TcpProfileTest(unittest.TestCase):
             selected = {k: v for k, v in expected.items() if profile == '03 max' or not k.startswith('discord_')}
             self.assertEqual(found.keys(), selected.keys())
             for key, previous in selected.items():
-                if 'tcp' in key:
+                # The third Discord UDP candidate also changes its recipe;
+                # unrelated QUIC must retain its existing learned selections.
+                if 'tcp' in key or key == 'discord_udp_exp':
                     self.assertNotEqual(found[key], previous, key)
                 else:
                     self.assertEqual(found[key], previous, key)

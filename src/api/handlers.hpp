@@ -63,6 +63,7 @@ struct ServiceHealthState {
     std::optional<api::ResolverConfigSyncState> resolver_config_sync_state;
     bool config_is_draft{false};
     std::optional<LifecycleOperationSnapshot> lifecycle_operation;
+    std::optional<InterceptionHealth> interception;
 };
 
 struct ListRefreshOperationResult {

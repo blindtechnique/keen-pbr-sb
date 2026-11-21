@@ -9,6 +9,20 @@
 namespace keen_pbr3 {
 namespace {
 
+nlohmann::json interception_json(const InterceptionHealth& state) {
+    return {
+        {"dns_requested", state.dns_requested}, {"l7_requested", state.l7_requested},
+        {"dns_state", state.dns_state}, {"l7_state", state.l7_state},
+        {"dns_detail", state.dns_detail}, {"l7_detail", state.l7_detail},
+        {"interfaces", state.interfaces}, {"nfqueue", state.nfqueue},
+        {"nflog", state.nflog}, {"fail_open", state.fail_open},
+        {"dns_packets", state.dns_packets}, {"dns_matched", state.dns_matched},
+        {"l7_packets", state.l7_packets}, {"l7_matched", state.l7_matched},
+        {"set_errors", state.set_errors}, {"dns_hold_timeouts", state.dns_hold_timeouts},
+        {"queue_overruns", state.queue_overruns}, {"log_overruns", state.log_overruns},
+    };
+}
+
 api::RuntimeState to_api_runtime_state(const std::string& state) {
     if (state == "running") return api::RuntimeState::RUNNING;
     if (state == "restart_required") return api::RuntimeState::RESTART_REQUIRED;
@@ -71,6 +85,8 @@ api::HealthResponse build_health_response(
     response.resolver_config_sync_state =
         service_health.resolver_config_sync_state;
     response.config_is_draft = service_health.config_is_draft;
+    if (service_health.interception)
+        response.interception = interception_json(*service_health.interception).get<api::Interception>();
     if (service_health.lifecycle_operation) {
         response.lifecycle_operation =
             lifecycle_operation_json(*service_health.lifecycle_operation)

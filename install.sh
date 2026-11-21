@@ -818,6 +818,25 @@ bootstrap_rescue_helpers() {
     "$LOCK_HELPER" transfer "$LOCK_OWNER_PID" "$LOCK_TOKEN" \
         "$LOCK_OWNER_PID" >/dev/null ||
         die "не удалось перевести блокировку обновления в безопасный формат" "could not migrate the update lock format"
+
+    # The installed prerm invokes the OLD init script. Recover its dead gate
+    # using the already-authenticated candidate's narrow metadata-only action
+    # before that prerm can strand this update again. Older packages simply
+    # lack the action and keep their previous installation path.
+    control_helper="$helper_tree/runtime-control.sh"
+    if tar -xzOf "$payload" ./opt/etc/init.d/S80keen-pbr > "$control_helper" &&
+       grep -q '^    recover-control-gate)' "$control_helper"; then
+        "$rescue_syntax_shell" -n "$control_helper" ||
+            die "ошибка синтаксиса помощника обновления" "invalid update preparation helper"
+        if ! command -v flock >/dev/null 2>&1; then
+            /opt/bin/opkg update && /opt/bin/opkg install flock ||
+                die "не удалось установить flock; службы не остановлены" "could not install flock; services were not stopped"
+        fi
+        if [ -f /opt/etc/keen-pbr/defaults ]; then
+            "$rescue_syntax_shell" "$control_helper" recover-control-gate ||
+                die "не удалось подготовить управление службой; проверьте активную операцию" "could not prepare service control; check the active operation"
+        fi
+    fi
 }
 
 check_bootstrap_space() {
@@ -1512,6 +1531,9 @@ install_package_transactionally() {
         die "не удалось защитить каталог rescue" "could not set permissions on the recovery directory"
     [ -x "$RESCUE_HELPER" ] ||
         die "rescue helper не установлен" "the recovery helper is not installed"
+    if [ "$UPDATE_ONLY" = 1 ] && grep -q '^prepare_explicit_update()' "$RESCUE_HELPER"; then
+        "$RESCUE_HELPER" prepare-update || return $?
+    fi
     if [ "$("$RESCUE_HELPER" space-protocol 2>/dev/null || true)" = 1 ]; then
         if [ "${RESUME_FIRST_INSTALL:-0}" != 1 ]; then
             "$RESCUE_HELPER" stage-checked "$PACKAGE_FILE" || return $?
@@ -1566,6 +1588,9 @@ install_package_transactionally() {
     if [ ! -e "$RESCUE_DIR/pending-baseline.ipk" ] &&
        [ ! -L "$RESCUE_DIR/pending-baseline.ipk" ]; then
         say "Первая установка не завершена. Предыдущего IPK ещё нет; сохранённую установку можно продолжить повторным запуском этой команды." "First installation is incomplete. No previous IPK exists yet; rerun this command to resume the saved installation."
+    elif grep -q '^prepare_explicit_update()' "$RESCUE_HELPER" &&
+         "$RESCUE_HELPER" prepare-update; then
+        say "Установленный пакет не изменился; настройки сохранены. Можно повторить обновление." "The installed package did not change; settings were preserved. You can retry the update."
     elif [ -x "$RESCUE_HELPER" ] &&
        "$RESCUE_HELPER" rollback-candidate; then
         say "Предыдущий IPK автоматически восстановлен." "The previous IPK was restored automatically."

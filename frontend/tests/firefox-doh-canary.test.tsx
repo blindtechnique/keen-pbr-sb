@@ -115,7 +115,7 @@ describe("Firefox automatic DoH canary local settings", () => {
       "firefoxDohCanary: getFirefoxDohCanaryEnabled(config.dns)"
     )
     expect(page).toContain(
-      "...withFirefoxDohCanary(config.dns, draft.firefoxDohCanary)"
+      "withFirefoxDohCanary(config.dns, draft.firefoxDohCanary)"
     )
     expect(page).toContain(
       "<form.Field name={SETTINGS_FIELD_NAMES.firefoxDohCanary}>"

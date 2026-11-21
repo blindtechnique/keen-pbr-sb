@@ -1,3 +1,4 @@
+import { getDnsRuleServers } from "@/lib/dns-rule-servers"
 import { useCallback, useMemo } from "react"
 import { useTranslation } from "react-i18next"
 
@@ -43,10 +44,13 @@ export function useListUsageSubtitle(
     return buildListUsageByName(
       rules as DnsRule[],
       (rule) => rule.list,
-      (rule) => rule.server,
+      (rule) =>
+        getDnsRuleServers(rule)
+          .map((tag) => labels?.target(tag) ?? tag)
+          .join(", "),
       excludeRuleIndex
     )
-  }, [excludeRuleIndex, ruleType, rules])
+  }, [excludeRuleIndex, ruleType, rules, labels])
 
   return useCallback(
     (listName: string) => {
@@ -59,13 +63,15 @@ export function useListUsageSubtitle(
         .map(
           (usage) =>
             `${labels?.rule(usage.ruleIndex) ?? `#${usage.ruleIndex + 1}`} → ${
-              labels?.target(usage.target) ?? usage.target
+              ruleType === "dns"
+                ? usage.target
+                : (labels?.target(usage.target) ?? usage.target)
             }`
         )
         .join(", ")
 
       return t("common.listUsage.usedElsewhere", { summary })
     },
-    [labels, t, usageByName]
+    [labels, ruleType, t, usageByName]
   )
 }

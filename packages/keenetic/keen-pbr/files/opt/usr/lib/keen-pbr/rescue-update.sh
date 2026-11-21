@@ -831,6 +831,60 @@ ensure_known_idle() {
     }
 }
 
+installed_matches_pending_baseline() (
+    # Read-only proof for a failed prerm: an intact old package needs no
+    # reinstall and, especially, no restoration of a days-old config snapshot.
+    valid_ipk_file "$PENDING_BASELINE_IPK" || exit 1
+    proof=$(mktemp -d "$RESCUE_DIR/.installed-proof.XXXXXX") || exit 1
+    trap 'rm -rf "$proof"' EXIT
+    tar -xzOf "$PENDING_BASELINE_IPK" ./control.tar.gz > "$proof/control.tgz" || exit 1
+    tar -xzOf "$proof/control.tgz" ./control > "$proof/control" || exit 1
+    tar -xzOf "$proof/control.tgz" ./conffiles > "$proof/conffiles" || exit 1
+    baseline_version=$(sed -n 's/^Version: //p' "$proof/control")
+    [ -n "$baseline_version" ] || exit 1
+    "$OPKG" status keen-pbr > "$proof/installed" || exit 1
+    grep -Fqx "Version: $baseline_version" "$proof/installed" || exit 1
+    grep -q '^Status:.* installed$' "$proof/installed" || exit 1
+    # Only package-owned regular files/directories are accepted. No archive
+    # symlink or traversal can redirect extraction or the installed comparison.
+    tar -xzOf "$PENDING_BASELINE_IPK" ./data.tar.gz > "$proof/data.tgz" || exit 1
+    tar -tzf "$proof/data.tgz" > "$proof/members" || exit 1
+    while IFS= read -r member; do
+        case "$member" in .|./|./opt|./opt/|opt|opt/|./opt/*|opt/*) ;; *) exit 1 ;; esac
+        case "/${member#./}/" in *'/../'*|*'/./'*) exit 1 ;; esac
+    done < "$proof/members"
+    tar -tvzf "$proof/data.tgz" > "$proof/types" || exit 1
+    awk 'substr($0,1,1) != "-" && substr($0,1,1) != "d" {bad=1} END {exit bad}' "$proof/types" || exit 1
+    mkdir "$proof/payload" || exit 1
+    tar -xzf "$proof/data.tgz" -C "$proof/payload" || exit 1
+    [ -s "$proof/payload/opt/usr/bin/keen-pbr" ] &&
+        [ -s "$proof/payload/opt/usr/bin/transport-manager" ] || exit 1
+    find "$proof/payload" -type f > "$proof/files" || exit 1
+    while IFS= read -r expected; do
+        relative=${expected#"$proof/payload"}
+        # The authenticated installer refreshes this guard before opkg. The
+        # package's mutable conffiles belong to the user, not to this proof.
+        [ "$relative" != /opt/etc/init.d/S00keen-pbr-rescue ] || continue
+        grep -Fqx "$relative" "$proof/conffiles" && continue
+        actual="$ROOT$relative"
+        [ -f "$actual" ] && [ ! -L "$actual" ] &&
+            cmp -s "$expected" "$actual" || exit 1
+    done < "$proof/files"
+)
+
+prepare_explicit_update() {
+    ensure_known_idle >/dev/null 2>&1 && return 0
+    [ "$(pending_phase)" = candidate-staged ] &&
+        installed_matches_pending_baseline && verify_runtime || {
+        echo "Previous update did not finish and the installed baseline could not be verified; recovery files were retained." >&2
+        return 3
+    }
+    # Only the old package was staged; it is still byte-for-byte installed and
+    # running. Discard this failed attempt without opkg, stop or config restore.
+    clear_package_unknown_after_recovery && clear_pending || return 1
+    echo "Previous package is intact; retrying update without rolling back user settings." >&2
+}
+
 cleanup_pending_artifacts() {
     if [ -n "$ROOT" ] &&
        [ "${KEEN_PBR_RESCUE_TEST_FAIL_CLEANUP:-0}" = "1" ]; then
@@ -1526,6 +1580,10 @@ case "$command" in
 esac
 
 case "$command" in
+    prepare-update)
+        [ "$#" -eq 1 ] || exit 2
+        prepare_explicit_update
+        ;;
     stage-checked)
         [ "$#" -eq 2 ] || exit 2
         stage_checked_candidate "$2"
@@ -1563,7 +1621,7 @@ case "$command" in
         recover_pending_explicit
         ;;
     *)
-        echo "Usage: $0 {stage-checked IPK|check-install-space|stage IPK|verify|promote|rollback-candidate|rollback-previous|recover-startup|recover-pending|can-rollback-previous|status}" >&2
+        echo "Usage: $0 {prepare-update|stage-checked IPK|check-install-space|stage IPK|verify|promote|rollback-candidate|rollback-previous|recover-startup|recover-pending|can-rollback-previous|status}" >&2
         exit 2
         ;;
 esac

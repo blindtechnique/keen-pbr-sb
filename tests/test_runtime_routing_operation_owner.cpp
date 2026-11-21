@@ -1060,6 +1060,55 @@ TEST_CASE("clear never removes a route anchor after rule deletion uncertainty") 
     CHECK(netlink.contains_route(route_for(150U)));
 }
 
+TEST_CASE("explicit STOP removes untracked generated rules and blackhole routes") {
+    RecordingRuntimeRoutingNetlink netlink;
+    const auto stale_route = route_for(150U);
+    auto stale_rule = rule_for(150U);
+    stale_rule.fwmark = 0x00010000U;
+    stale_rule.fwmask = 0x00ff0000U;
+    netlink.add_route(stale_route);
+    netlink.add_rule_for_family(stale_rule, AF_INET);
+    netlink.events.clear();
+    auto owner = make_owner(netlink);
+
+    const auto cleared = owner.clear(true, 0x00ff0000U);
+    REQUIRE(static_cast<bool>(cleared));
+    CHECK(cleared->kernel_state_known);
+    CHECK(cleared->outcome == RuntimeRoutingOperationOutcome::cleared);
+    CHECK(netlink.live_routes.empty());
+    CHECK(netlink.live_rules.empty());
+    CHECK(netlink.events == std::vector<std::string>{
+        "rule:delete:150", "route:delete:150"});
+}
+
+TEST_CASE("explicit STOP preserves a foreign namespace and its route dependency") {
+    RecordingRuntimeRoutingNetlink netlink;
+    const auto stale_route = route_for(150U);
+    auto foreign_rule = rule_for(150U);
+    foreign_rule.fwmark = 0x42U;
+    foreign_rule.fwmask = 0x0000ffffU;
+    netlink.add_route(stale_route);
+    netlink.add_rule_for_family(foreign_rule, AF_INET);
+    netlink.events.clear();
+    auto owner = make_owner(netlink);
+
+    const auto cleared = owner.clear(true, 0x00ff0000U);
+    REQUIRE(static_cast<bool>(cleared));
+    CHECK_FALSE(cleared->kernel_state_known);
+    CHECK(netlink.events.empty());
+    CHECK(netlink.live_routes.size() == 1U);
+    CHECK(netlink.live_rules.size() == 1U);
+}
+
+TEST_CASE("explicit STOP cannot report an empty kernel after failed live inventory") {
+    RecordingRuntimeRoutingNetlink netlink;
+    netlink.add_route(route_for(150U));
+    netlink.failing_route_dump = true;
+    auto owner = make_owner(netlink);
+    CHECK_THROWS(owner.clear(true, 0x00ff0000U));
+    CHECK(netlink.live_routes.size() == 1U);
+}
+
 TEST_CASE("repopulate preserves an anchor while prior rule cleanup is uncertain") {
     RecordingRuntimeRoutingNetlink netlink;
     auto owner = make_owner(netlink);

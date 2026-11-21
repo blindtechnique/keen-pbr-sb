@@ -1,3 +1,4 @@
+import { formatDnsRuleServers, getDnsRuleServers } from "@/lib/dns-rule-servers"
 import { Plus, Save, SparklesIcon } from "lucide-react"
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
@@ -146,7 +147,7 @@ function DnsRulesEditor({
   const visibleRules = filterBySearchQuery(indexedRules, search, (entry) => [
     getDnsRuleDisplayName(entry.rule, entry.index),
     entry.rule.id,
-    serverNames.get(entry.rule.server) ?? entry.rule.server,
+    formatDnsRuleServers(entry.rule, serverNames),
     formatListReferenceLabels(entry.rule.list, loadedConfig?.lists),
   ])
   const ruleRowIds = visibleRules.map((entry) =>
@@ -435,8 +436,8 @@ function DnsRulesEditor({
                 maxRows={1}
               />,
               <span className="font-medium" key={`server-${index}`}>
-                <span title={rule.server}>
-                  {serverNames.get(rule.server) ?? rule.server}
+                <span title={getDnsRuleServers(rule).join(", ")}>
+                  {formatDnsRuleServers(rule, serverNames)}
                 </span>
               </span>,
               <Badge

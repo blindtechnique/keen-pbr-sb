@@ -17,7 +17,10 @@ LIFECYCLE_FIXTURES = {
 }
 
 
-def validate_discovery(document, expected_native, source_root, build_root):
+DOH_SUITE = "keen-pbr-doh-tests"
+
+
+def validate_discovery(document, expected_native, source_root, build_root, *, doh_python=None):
     tests = document.get("tests", [])
     if not tests:
         raise ValueError("CTest discovered no tests; check root enable_testing()")
@@ -45,7 +48,12 @@ def validate_discovery(document, expected_native, source_root, build_root):
             raise ValueError(f"{name}: executable missing; build the test target first")
         if labels == ["native"]:
             native.add(name)
-            if command != [str(build_root / "tests" / name)]:
+            expected = [str(build_root / "tests" / name)]
+            if name == DOH_SUITE:
+                if not doh_python or not Path(doh_python).is_absolute():
+                    raise ValueError(f"{name}: missing absolute path to the configured Python interpreter")
+                expected = [doh_python, str(source_root / "tests/run_doh_tls_fixture.py"), *expected]
+            if command != expected:
                 raise ValueError(f"{name}: CTest does not run the expected test executable")
         elif labels == ["package-lifecycle"]:
             lifecycle.add(name)
@@ -73,7 +81,10 @@ def main():
             check=True, capture_output=True, text=True, timeout=60,
         )
         document = json.loads(result.stdout)
-        validate_discovery(document, args.native_targets, source_root, build_root)
+        doh_python = None
+        if DOH_SUITE in args.native_targets:
+            doh_python = (build_root / "tests/doh-fixture-python.txt").read_text(encoding="utf-8").rstrip("\r\n")
+        validate_discovery(document, args.native_targets, source_root, build_root, doh_python=doh_python)
         for target in args.native_targets:
             if not (build_root / "tests" / target).is_file():
                 raise ValueError(f"test binary not built: {target}")

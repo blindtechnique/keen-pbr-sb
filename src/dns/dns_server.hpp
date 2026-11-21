@@ -4,6 +4,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace keen_pbr3 {
 
@@ -33,6 +34,11 @@ struct DnsServerConfig {
     std::optional<std::string> detour;
     std::string resolved_ip;               // bare IP (no port, no brackets)
     uint16_t    port = 53;                 // parsed port, default 53
+    bool runtime_proxy = false;             // not a direct fallback after STOP
+    std::string doh_url;                    // original HTTPS endpoint, never a DNS address
+    std::vector<std::string> ips;
+
+    bool is_doh() const noexcept { return !doh_url.empty(); }
 };
 
 // Build a DnsServerConfig from a config-level DnsServer definition.

@@ -109,6 +109,23 @@ TEST_CASE("outbound dependency analysis includes list fallback detours") {
         DependencyConsequence::Modify));
 }
 
+TEST_CASE("removing one of multiple DNS servers narrows rather than deletes its rule") {
+    auto config = dependency_fixture();
+    DnsServer backup;
+    backup.tag = "secondary";
+    backup.address = "9.9.9.9";
+    config.dns->servers->push_back(backup);
+    auto& rule = config.dns->rules->front();
+    rule.server.reset();
+    rule.servers = std::vector<std::string>{"remote", "secondary"};
+    const auto partial = analyze_dependencies(config, {{DependencyEntityKind::DnsServer, "secondary", false}});
+    CHECK(has_reference(partial, DependencyDependentKind::DnsRule, "0", DependencyConsequence::Modify));
+    CHECK_FALSE(has_reference(partial, DependencyDependentKind::DnsRule, "0", DependencyConsequence::Delete));
+    const auto all = analyze_dependencies(config, {
+        {DependencyEntityKind::DnsServer, "remote", false}, {DependencyEntityKind::DnsServer, "secondary", false}});
+    CHECK(has_reference(all, DependencyDependentKind::DnsRule, "0", DependencyConsequence::Delete));
+}
+
 TEST_CASE("outbound dependency analysis includes global list refresh primary and fallback") {
     auto config = dependency_fixture();
     ListRefreshConfig refresh;

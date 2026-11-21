@@ -412,28 +412,26 @@ chmod +x "$reduced_stat_root/opt/bin/stat"
     [ -f "$STOPPING_MARKER" ]
     rm -f "$STOPPING_MARKER"
 
-    # Runtime recovery never adopts a dead/ambiguous sibling gate: only the
-    # serialized startup boundary may clear it. This prevents a delayed
-    # recoverer from moving a replacement fixed lease (ABA).
+    # A dead owner no longer bricks STOP/update until reboot. The permanent
+    # kernel mutex serializes reclamation even between concurrent callers.
     mkdir "$STOPPING_CONTROL_RECOVERY_GATE_DIR"
     chmod 0700 "$STOPPING_CONTROL_RECOVERY_GATE_DIR"
     printf '%s\n' 'keen-pbr-control-recovery-v1 99999999 1' \
         > "$STOPPING_CONTROL_RECOVERY_GATE_OWNER"
     chmod 0600 "$STOPPING_CONTROL_RECOVERY_GATE_OWNER"
-    if acquire_control_lease reapply-nat; then
-        echo "runtime controller adopted a stale recovery gate" >&2
-        exit 1
-    fi
-    [ ! -e "$STOPPING_CONTROL_LEASE_DIR" ]
-    if clear_stale_control_recovery_gate_for_start; then
-        echo "startup mutated a stale recovery gate without filesystem CAS" >&2
-        exit 1
-    fi
-    [ -f "$STOPPING_CONTROL_RECOVERY_GATE_OWNER" ]
-    # /var/run is tmpfs in production; removing this fixture models reboot,
-    # the only safe recovery boundary for this millisecond-window crash.
-    rm -f "$STOPPING_CONTROL_RECOVERY_GATE_OWNER"
-    rmdir "$STOPPING_CONTROL_RECOVERY_GATE_DIR"
+    acquire_control_lease reapply-nat
+    control_lease_owned_by_self
+    release_control_lease
+    [ ! -e "$STOPPING_CONTROL_RECOVERY_GATE_DIR" ]
+    [ -f "$STOPPING_RUNTIME_DIR/control-recovery.lock" ]
+    clear_stale_control_recovery_gate_for_start
+
+    # A controller can die between mkdir and owner publication as well.
+    mkdir "$STOPPING_CONTROL_RECOVERY_GATE_DIR"
+    chmod 0700 "$STOPPING_CONTROL_RECOVERY_GATE_DIR"
+    acquire_control_lease stop
+    release_control_lease
+    [ ! -e "$STOPPING_CONTROL_RECOVERY_GATE_DIR" ]
 
     mkdir "$STOPPING_CONTROL_RECOVERY_GATE_DIR"
     chmod 0700 "$STOPPING_CONTROL_RECOVERY_GATE_DIR"

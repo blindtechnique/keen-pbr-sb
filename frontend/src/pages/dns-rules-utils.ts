@@ -2,6 +2,7 @@ import type { ConfigObject } from "@/api/generated/model/configObject"
 import type { DnsRule } from "@/api/generated/model/dnsRule"
 import i18n from "@/i18n"
 import { makeTechnicalId } from "@/lib/technical-id"
+import { getDnsRuleServers } from "@/lib/dns-rule-servers"
 import { configKnownFields } from "@/lib/config-known-fields.generated"
 import {
   toConfigUnknownFieldsDraft,
@@ -12,7 +13,7 @@ export type DnsRuleDraft = ConfigUnknownFieldsDraft & {
   id: string
   displayName: string
   enabled: boolean
-  server: string
+  servers: string[]
   lists: string[]
   allowDomainRebinding: boolean
   routeRuleIds?: string[]
@@ -33,7 +34,7 @@ export function createDnsRuleDraft(
     id: makeTechnicalId(displayName, existingIds, { prefix: "dns_rule" }),
     displayName,
     enabled: true,
-    server: "",
+    servers: [],
     lists: [],
     allowDomainRebinding: false,
   }
@@ -45,7 +46,7 @@ export function getRuleDraft(rule?: DnsRule): DnsRuleDraft {
     id: rule?.id ?? "",
     displayName: rule?.display_name ?? "",
     enabled: rule?.enabled ?? true,
-    server: rule?.server ?? "",
+    servers: getDnsRuleServers(rule),
     lists: [...(rule?.list ?? [])],
     allowDomainRebinding: rule?.allow_domain_rebinding ?? false,
     ...(rule?.route_rule_ids ? { routeRuleIds: [...rule.route_rule_ids] } : {}),
@@ -60,7 +61,9 @@ export function normalizeDnsRuleDraft(rule: DnsRuleDraft): DnsRule {
     ...(normalizedId ? { id: normalizedId } : {}),
     ...(normalizedDisplayName ? { display_name: normalizedDisplayName } : {}),
     enabled: rule.enabled,
-    server: rule.server.trim(),
+    servers: Array.from(
+      new Set(rule.servers.map((tag) => tag.trim()).filter(Boolean))
+    ),
     list: Array.from(
       new Set(rule.lists.map((list) => list.trim()).filter(Boolean))
     ).sort(),
@@ -127,7 +130,10 @@ export function validateRules(
     const nextRuleErrors: RuleErrors = {}
     const parsedLists = rule.lists
 
-    if (!rule.server || !serverTagSet.has(rule.server)) {
+    if (
+      !rule.servers.length ||
+      rule.servers.some((tag) => !serverTagSet.has(tag))
+    ) {
       nextRuleErrors.server = t("pages.dnsRuleUpsert.validation.serverRequired")
     }
 
@@ -144,7 +150,7 @@ export function validateRules(
       })
     }
 
-    const dedupeKey = `${rule.server}::${[...parsedLists].sort().join("|")}`
+    const dedupeKey = `${rule.servers.join("|")}::${[...parsedLists].sort().join("|")}`
     if (seenRules.has(dedupeKey)) {
       nextRuleErrors.duplicate = t("pages.dnsRuleUpsert.validation.duplicate")
     }

@@ -111,6 +111,23 @@ TEST_CASE("specialized config causes survive validation serialization and genera
     }
 }
 
+TEST_CASE("DNS rule arrays validate every reference and reject ambiguous legacy values") {
+    const std::string document = R"({
+        "lists":{"ai":{"domains":["example.org"]}},
+        "dns":{"servers":[{"tag":"primary","address":"1.1.1.1"},{"tag":"backup","address":"9.9.9.9"}],
+               "fallback":["primary"], "rules":[{"list":["ai"],"servers":["primary","backup"]}]}
+    })";
+    auto config = parse_test_config(document);
+    REQUIRE(config.dns->rules->size() == 1);
+    auto& rule = config.dns->rules->front();
+    CHECK(dns_rule_server_tags(rule) == std::vector<std::string>{"primary", "backup"});
+    SUBCASE("missing secondary") { rule.servers->push_back("absent"); }
+    SUBCASE("duplicate") { rule.servers->push_back("primary"); }
+    SUBCASE("empty explicit array cannot revive legacy") { rule.servers->clear(); rule.server = "primary"; }
+    SUBCASE("conflicting legacy") { rule.server = "backup"; }
+    CHECK_THROWS_AS(validate_config(config), ConfigValidationError);
+}
+
 TEST_CASE("config migration: versionless and explicit v1 raw documents preserve their fields") {
     // Synthetic boundary fixture, not a claimed historical released config.
     nlohmann::json legacy = {
@@ -4696,7 +4713,7 @@ TEST_CASE("finished metadata preserves DNS capability and typed enum branches") 
     config.dns->servers->resize(1);
     config.dns->servers->front().type = static_cast<api::DnsServerType>(999);
     check_finished_metadata_issue(finished_typed_issues(config), "dns.servers.default_dns.type", "config.dns.type",
-        "dns.servers[\"default_dns\"].type must be one of: static, keenetic");
+        "dns.servers[\"default_dns\"].type must be one of: static, keenetic, doh");
 }
 
 TEST_CASE("finished metadata keeps conntrack ownership diagnostics ordered and accepted modes unchanged") {
@@ -4747,4 +4764,24 @@ TEST_CASE("finished metadata keeps conntrack ownership diagnostics ordered and a
     CHECK_NOTHROW(parse_test_config(document.dump()));
     document["outbounds"][4]["conntrack_on_switch"] = "preserve";
     CHECK_NOTHROW(parse_test_config(document.dump()));
+}
+
+TEST_CASE("DoH validation reports the edited field and keeps explicit bootstrap optional with fixed IPs") {
+    auto config = parse_test_config(finished_metadata_base().dump());
+    auto& server = config.dns->servers->front();
+    server.type = api::DnsServerType::DOH;
+    server.address = "https://dns.example/dns-query";
+    server.ips = std::vector<std::string>{"192.0.2.53"};
+    CHECK_NOTHROW(validate_config(config));
+    server.ips = std::vector<std::string>{"192.0.2.53:443"};
+    check_finished_metadata_issue(finished_typed_issues(config),
+        "dns.servers.default_dns.ips", "config.dns.doh_ips");
+    server.ips.reset();
+    check_finished_metadata_issue(finished_typed_issues(config),
+        "dns.bootstrap", "config.dns.bootstrap");
+    server.address = "http://dns.example/dns-query";
+    const auto errors = finished_typed_issues(config);
+    REQUIRE(errors.size() == 1);
+    check_finished_metadata_issue(errors,
+        "dns.servers.default_dns.address", "config.dns.doh_url");
 }

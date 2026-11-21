@@ -28,8 +28,14 @@ export interface DnsRule {
   enabled?: boolean | null;
   /** List names whose domains should be resolved by this server. */
   list: string[];
-  /** DNS server tag to use for matched domains. */
-  server: string;
+  /** Legacy single DNS server. Use servers for new rules. Do not combine conflicting server and servers values. */
+  server?: string;
+  /**
+     * DNS server tags for matched domains, in configured order. All are published to dnsmasq, which selects an upstream and handles retries. At least one of servers or the legacy server must be present. When both are supplied, server must equal the first servers entry. An explicit empty array is invalid and never falls back to server.
+
+     * @minItems 1
+     */
+  servers?: string[];
   /** Allow DNS responses for matched domains to resolve to internal/private network addresses (for example 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, and other local ranges).
    */
   allow_domain_rebinding?: boolean;

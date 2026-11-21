@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include "../src/firewall/firewall_runtime.hpp"
+#include "../src/intercept/intercept_cleanup.hpp"
 #include "../src/config/config.hpp"
 #include "../src/dns/keenetic_dns.hpp"
 #include "../src/lists/list_entry_visitor.hpp"
@@ -169,6 +170,37 @@ public:
 
 private:
     std::filesystem::path path_;
+};
+
+class RecordingInterception final : public FirewallInterceptionRuntime {
+public:
+    explicit RecordingInterception(RecordingFirewall& value) : firewall(value) {}
+    struct Update final : FirewallInterceptionUpdate {
+        explicit Update(RecordingInterception& value) : owner(value) { owner.firewall.events.push_back("pause-learning"); }
+        ~Update() override { if (!committed) owner.firewall.events.push_back("abort-learning"); }
+        InterceptionHooks prepare(const std::vector<InterceptListBinding>& bindings,
+            const InterceptSnapshotPolicy& policy, const InterceptDomainReader& reader, bool reuse,
+            const InterceptionRequest& request) override {
+            owner.names.clear(); owner.domains.clear();
+            owner.cleanup = policy.cleanup;
+            for (const auto& binding : bindings) {
+                owner.names.push_back(binding.name);
+                CHECK_FALSE(binding.content_signature.empty());
+                CHECK_FALSE(binding.target.set_v4.empty());
+                if (!reuse) CHECK(reader(binding, [&](auto value) { owner.domains.emplace_back(value); }));
+            }
+            owner.firewall.events.push_back("bind-learning");
+            return {request.dns && !bindings.empty(), request.l7 && !bindings.empty()};
+        }
+        void commit() noexcept override { committed = true; owner.firewall.events.push_back("publish-learning"); }
+        RecordingInterception& owner;
+        bool committed{false};
+    };
+    std::shared_ptr<FirewallInterceptionUpdate> begin_update() override { return std::make_shared<Update>(*this); }
+    void stop() noexcept override { firewall.events.push_back("stop-learning"); }
+    RecordingFirewall& firewall;
+    std::vector<std::string> names, domains;
+    std::shared_ptr<const InterceptCleanupPolicy> cleanup;
 };
 
 Config staged_transaction_config();
@@ -1534,6 +1566,183 @@ Config selector_list_config(OutboundType outbound_type) {
 }
 
 }  // namespace
+
+TEST_CASE("passive learning uses active lists and follows the firewall commit") {
+    FirewallTempDirectory dir;
+    CacheManager cache(dir.path());
+    RecordingFirewall firewall;
+    auto capture = std::make_shared<RecordingInterception>(firewall);
+    firewall.set_interception_runtime(capture);
+    auto config = staged_transaction_config();
+    config.dns = DnsConfig{};
+    config.dns->passive_learning = true;
+    config.route->inbound_interfaces = {"br0"};
+    config.lists->at("seam").domains = {"example.org"};
+    (*config.lists)["unused"].domains = {"unrelated.org"};
+    auto staged = stage_runtime_firewall(config, {{"vpn", 0x70000U}}, {}, cache,
+        firewall, FirewallApplyMode::PreserveSets);
+    CHECK(capture->names == std::vector<std::string>{"seam"});
+    CHECK(capture->domains == std::vector<std::string>{"example.org"});
+    REQUIRE(capture->cleanup);
+    REQUIRE(capture->cleanup->rules.size() == 2);
+    CHECK(capture->cleanup->rules[0].criteria.dst_set_name == firewall.static_set_name("seam", AF_INET));
+    CHECK(capture->cleanup->rules[1].criteria.dst_set_name == firewall.dynamic_set_name("seam", AF_INET));
+    CHECK(capture->cleanup->rules[1].criteria.family == AF_INET);
+    CHECK(capture->cleanup->rules[1].mark == 0x70000U);
+    CHECK(capture->cleanup->learned_sets == std::set<std::string>{firewall.dynamic_set_name("seam", AF_INET)});
+    CHECK(firewall.interception_hooks().interfaces == std::vector<std::string>{"br0"});
+    CHECK(firewall.events.front() == "pause-learning");
+    CHECK(firewall.events.back() == "bind-learning");
+    commit_runtime_firewall(firewall, staged);
+    REQUIRE(firewall.events.size() >= 2);
+    CHECK(firewall.events[firewall.events.size() - 2] == "apply");
+    CHECK(firewall.events.back() == "publish-learning");
+}
+
+TEST_CASE("passive learning preserves the user's reconnection opt-out across commits") {
+    FirewallTempDirectory dir;
+    CacheManager cache(dir.path());
+    RecordingFirewall firewall;
+    auto capture = std::make_shared<RecordingInterception>(firewall);
+    firewall.set_interception_runtime(capture);
+    auto config = staged_transaction_config();
+    config.dns = DnsConfig{};
+    config.dns->passive_learning = true;
+    config.route->inbound_interfaces = {"br0"};
+    config.lists->at("seam").domains = {"example.org"};
+    config.daemon = DaemonConfig{};
+    for (const auto enabled : {true, false, true}) {
+        config.daemon->reconnect_unmarked_flows_on_routing_change = enabled;
+        auto staged = stage_runtime_firewall(config, {{"vpn", 0x70000U}}, {}, cache,
+            firewall, FirewallApplyMode::PreserveSets);
+        CHECK(bool(capture->cleanup) == enabled);
+        CHECK(capture->names == std::vector<std::string>{"seam"});
+        CHECK(firewall.interception_hooks().dns);
+        CHECK(firewall.interception_hooks().l7);
+        commit_runtime_firewall(firewall, staged);
+        CHECK(firewall.events.back() == "publish-learning");
+    }
+}
+
+TEST_CASE("passive learning is off by default and never captures without explicit LAN scope") {
+    FirewallTempDirectory dir;
+    CacheManager cache(dir.path());
+    RecordingFirewall firewall;
+    auto capture = std::make_shared<RecordingInterception>(firewall);
+    firewall.set_interception_runtime(capture);
+    auto config = staged_transaction_config();
+    config.lists->at("seam").domains = {"example.org"};
+    config.route->inbound_interfaces = {"br0"};
+    { auto stage = stage_runtime_firewall(config, {{"vpn", 0x70000U}}, {}, cache,
+        firewall, FirewallApplyMode::PreserveSets); CHECK(capture->names.empty()); }
+    config.dns = DnsConfig{};
+    config.dns->passive_learning = true;
+    config.route->inbound_interfaces.reset();
+    { auto stage = stage_runtime_firewall(config, {{"vpn", 0x70000U}}, {}, cache,
+        firewall, FirewallApplyMode::PreserveSets); CHECK(capture->names.empty()); }
+    CHECK_FALSE(firewall.interception_hooks().any());
+}
+
+TEST_CASE("passive learning independent overrides preserve legacy compatibility") {
+    FirewallTempDirectory dir;
+    CacheManager cache(dir.path());
+    RecordingFirewall firewall;
+    firewall.set_interception_runtime(std::make_shared<RecordingInterception>(firewall));
+    auto config = staged_transaction_config();
+    config.lists->at("seam").domains = {"example.org"};
+    config.route->inbound_interfaces = {"br0"};
+    for (const auto& input : {
+        nlohmann::json{{"passive_learning", true}, {"learning", {{"dns", false}}}},
+        nlohmann::json{{"learning", {{"l7", true}}}},
+        nlohmann::json{{"passive_learning", true}, {"learning", {{"dns", false}, {"l7", nullptr}}}}
+    }) {
+        config.dns = input.get<DnsConfig>();
+        auto staged = stage_runtime_firewall(config, {{"vpn", 0x70000U}}, {}, cache,
+            firewall, FirewallApplyMode::PreserveSets);
+        CHECK_FALSE(firewall.interception_hooks().dns);
+        CHECK(firewall.interception_hooks().l7);
+        commit_runtime_firewall(firewall, staged);
+    }
+}
+
+TEST_CASE("passive learning admits only verified enabled native client ingress") {
+    FirewallTempDirectory dir;
+    CacheManager cache(dir.path());
+    RecordingFirewall firewall;
+    auto capture = std::make_shared<RecordingInterception>(firewall);
+    firewall.set_interception_runtime(capture);
+    auto config = staged_transaction_config();
+    config.dns = DnsConfig{};
+    config.dns->passive_learning = true;
+    config.lists->at("seam").domains = {"example.org"};
+    // Stored names alone must not authorize capture when LAN is unspecified.
+    InternalVpnServer stored;
+    stored.interface = "unverified0";
+    stored.process_clients = true;
+    config.route->internal_vpn_servers = std::vector<InternalVpnServer>{stored};
+    {
+        auto staged = stage_runtime_firewall(config, {{"vpn", 0x70000U}}, {}, cache,
+            firewall, FirewallApplyMode::PreserveSets);
+        CHECK(capture->names.empty());
+    }
+    InternalVpnRuntimeTarget target;
+    target.stable_id = "ndms-service:ikev2";
+    target.match_kind = InternalVpnRuntimeMatchKind::source_pool;
+    target.process_clients = true;
+    target.interface = "br7";
+    target.verified_ingress_interfaces = {"xfrms0"};
+    target.source_cidrs_v4 = {"192.0.2.0/24"};
+    target.source_cidrs_v6 = {"2001:db8:12::/64"};
+    target.dns_redirect_bypass_ingress_v4 = {"xfrms0"};
+    std::vector<InternalVpnRuntimeTarget> verified{target};
+    {
+        auto staged = stage_runtime_firewall(config, {{"vpn", 0x70000U}}, {}, cache,
+            firewall, FirewallApplyMode::PreserveSets, nullptr, &verified);
+        const auto& hooks = firewall.interception_hooks();
+        CHECK(hooks.interfaces == std::vector<std::string>{"xfrms0"});
+        REQUIRE(hooks.client_scope.include.size() == 1); // global IPv6 is disabled
+        CHECK(hooks.client_scope.include.front().cidr == "192.0.2.0/24");
+        CHECK(hooks.client_scope.include.front().family == 4);
+        CHECK(hooks.client_scope.exclude.empty()); // addressless REDIRECT exception is not capture bypass
+        CHECK(capture->names == std::vector<std::string>{"seam"});
+        commit_runtime_firewall(firewall, staged);
+    }
+    verified.front().process_clients = false;
+    {
+        auto staged = stage_runtime_firewall(config, {{"vpn", 0x70000U}}, {}, cache,
+            firewall, FirewallApplyMode::PreserveSets, nullptr, &verified);
+        CHECK(firewall.interception_hooks().client_scope.include.empty());
+        CHECK_FALSE(firewall.interception_hooks().any());
+        commit_runtime_firewall(firewall, staged);
+    }
+}
+
+TEST_CASE("failed firewall commit cannot publish passive learning") {
+    FirewallTempDirectory dir;
+    CacheManager cache(dir.path());
+    RecordingFirewall firewall;
+    firewall.set_interception_runtime(std::make_shared<RecordingInterception>(firewall));
+    firewall.refuse_apply_mode = FirewallApplyMode::PreserveSets;
+    {
+        auto staged = stage_runtime_firewall(staged_transaction_config(), {{"vpn", 0x70000U}}, {}, cache,
+            firewall, FirewallApplyMode::PreserveSets);
+        CHECK_THROWS_AS(commit_runtime_firewall(firewall, staged), FirewallRulesOnlyError);
+    }
+    CHECK(firewall.events.back() == "abort-learning");
+    CHECK(std::find(firewall.events.begin(), firewall.events.end(), "publish-learning") == firewall.events.end());
+}
+
+TEST_CASE("passive learning STOP detaches hooks before closing its listener") {
+    RecordingFirewall firewall;
+    firewall.set_interception_runtime(std::make_shared<RecordingInterception>(firewall));
+    firewall.set_interception_hooks({true, true});
+    {
+        auto stopped = firewall.begin_interception_stop();
+        CHECK_FALSE(firewall.interception_hooks().any());
+        firewall.events.push_back("detach-hooks");
+    }
+    CHECK(firewall.events == std::vector<std::string>{"pause-learning", "detach-hooks", "abort-learning", "stop-learning"});
+}
 
 TEST_CASE("named empty or missing lists never broaden runtime source and port selectors") {
     FirewallTempDirectory directory;

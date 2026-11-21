@@ -1088,7 +1088,9 @@ void RuntimeRoutingOperationOwner::notify_interface_up(
 }
 
 RuntimeRoutingInventorySnapshotPtr
-RuntimeRoutingOperationOwner::clear() {
+RuntimeRoutingOperationOwner::clear(
+    bool include_generated_orphans,
+    uint32_t retired_mark_mask) {
     std::lock_guard<std::mutex> lock(mutex_);
     PreparedInventoryPublication fallback;
     try {
@@ -1098,7 +1100,26 @@ RuntimeRoutingOperationOwner::clear() {
             std::nullopt,
             /*inventory_complete=*/false,
             /*kernel_state_known=*/true);
-        const bool kernel_state_known = clear_ledgers_locked();
+        bool kernel_state_known;
+        if (include_generated_orphans) {
+            const auto generated_tables = routes_.live_generated_route_tables();
+            auto protected_tables = rules_.remove_orphaned_generated(
+                {}, generated_tables, retired_mark_mask);
+            const auto retained_tables = rules_.clear();
+            protected_tables.insert(
+                retained_tables.begin(), retained_tables.end());
+            const auto dependency_tables =
+                rules_.protect_route_tables_with_live_rules(
+                    routes_.get_routes(), generated_tables);
+            protected_tables.insert(
+                dependency_tables.begin(), dependency_tables.end());
+            const auto uncertain_tables =
+                routes_.remove_obsolete({}, protected_tables);
+            kernel_state_known =
+                protected_tables.empty() && uncertain_tables.empty();
+        } else {
+            kernel_state_known = clear_ledgers_locked();
+        }
         discard_pending_interface_notifications_locked();
         active_journal_.reset();
         std::atomic_store_explicit(

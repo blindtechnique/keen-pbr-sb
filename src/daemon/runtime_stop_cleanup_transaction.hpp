@@ -206,23 +206,25 @@ inline void execute_runtime_stop_cleanup_transaction_into(
          ++attempt) {
         ++result.attempts;
 
-        if (!result.conntrack_cleanup_verified) {
+        // Stop classifying new flows before retiring routes and connections.
+        // Otherwise traffic arriving during cleanup can recreate a marked
+        // connection after its only conntrack deletion has already succeeded.
+        if (!result.firewall_absence_verified) {
             result.mutation_boundary_entered = true;
             try {
-                result.conntrack_cleanup_verified =
-                    services.cleanup_conntrack &&
-                    services.cleanup_conntrack(
-                        result.target.conntrack_snapshot);
-                if (!result.conntrack_cleanup_verified) {
+                result.firewall_absence_verified =
+                    services.cleanup_firewall &&
+                    services.cleanup_firewall();
+                if (!result.firewall_absence_verified) {
                     result.record_failure(
-                        RuntimeStopCleanupFailureStage::conntrack);
+                        RuntimeStopCleanupFailureStage::firewall);
                 }
             } catch (const std::exception&) {
                 result.record_failure(
-                    RuntimeStopCleanupFailureStage::conntrack);
+                    RuntimeStopCleanupFailureStage::firewall);
             } catch (...) {
                 result.record_failure(
-                    RuntimeStopCleanupFailureStage::conntrack);
+                    RuntimeStopCleanupFailureStage::firewall);
             }
         }
 
@@ -245,27 +247,32 @@ inline void execute_runtime_stop_cleanup_transaction_into(
             }
         }
 
-        if (!result.firewall_absence_verified) {
+        if (result.firewall_absence_verified &&
+            !result.conntrack_cleanup_verified) {
             result.mutation_boundary_entered = true;
             try {
-                result.firewall_absence_verified =
-                    services.cleanup_firewall &&
-                    services.cleanup_firewall();
-                if (!result.firewall_absence_verified) {
+                result.conntrack_cleanup_verified =
+                    services.cleanup_conntrack &&
+                    services.cleanup_conntrack(
+                        result.target.conntrack_snapshot);
+                if (!result.conntrack_cleanup_verified) {
                     result.record_failure(
-                        RuntimeStopCleanupFailureStage::firewall);
+                        RuntimeStopCleanupFailureStage::conntrack);
                 }
             } catch (const std::exception&) {
                 result.record_failure(
-                    RuntimeStopCleanupFailureStage::firewall);
+                    RuntimeStopCleanupFailureStage::conntrack);
             } catch (...) {
                 result.record_failure(
-                    RuntimeStopCleanupFailureStage::firewall);
+                    RuntimeStopCleanupFailureStage::conntrack);
             }
         }
 
-        if (result.kernel_cleanup_verified() &&
-            !result.resolver_deactivation_verified) {
+        // An explicit STOP must restore ordinary DNS even if a separate
+        // kernel cleanup failed. Keeping list-specific DNS detours active
+        // after routing was removed can blackhole otherwise direct traffic.
+        if (!result.resolver_deactivation_verified) {
+            result.mutation_boundary_entered = true;
             try {
                 result.resolver_deactivation_verified =
                     services.deactivate_resolver &&

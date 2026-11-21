@@ -114,12 +114,14 @@ SearchFields dependency_search_fields(const Config& config) {
     }
     if (config.dns && config.dns->rules) {
         for (const auto& rule : *config.dns->rules) {
-            const auto server = servers.find(rule.server);
-            for (const auto& list : rule.list) {
-                auto& labels = fields[list];
-                labels.push_back(lower_search_text(rule.server));
-                if (server != servers.end()) {
-                    labels.push_back(lower_search_text(server->second));
+            for (const auto& tag : dns_rule_server_tags(rule)) {
+                const auto server = servers.find(tag);
+                for (const auto& list : rule.list) {
+                    auto& labels = fields[list];
+                    labels.push_back(lower_search_text(tag));
+                    if (server != servers.end()) {
+                        labels.push_back(lower_search_text(server->second));
+                    }
                 }
             }
         }

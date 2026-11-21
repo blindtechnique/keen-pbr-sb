@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 LIB = ROOT / 'packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr'
 TAG = 'keen-pbr-sb:nfqws:tcp-window:v1'
 REPLY_TAG = 'keen-pbr-sb:nfqws:tcp-reply:v1'
+VOICE_TAG = 'keen-pbr-sb:nfqws:discord-voice:v1'
 REPLY_CHAIN = 'KpbrNfqTcpReply'
 KEENETIC_INPUT_ACCEPT = '-A INPUT -m state --state RELATED,ESTABLISHED -m connndmmark ! --mark 0x20/0x20 -j ACCEPT'
 
@@ -107,7 +108,7 @@ else:
             assert not any(' KpbrNfqTcpReply ' in x or x.endswith(' KpbrNfqTcpReply') for x in lines)
             lines.remove(':KpbrNfqTcpReply - [0:0]')
             continue
-        assert any(tag in line for tag in ('keen-pbr-sb:nfqws:tcp-window:v1', 'keen-pbr-sb:nfqws:tcp-reply:v1')), line
+        assert any(tag in line for tag in ('keen-pbr-sb:nfqws:tcp-window:v1', 'keen-pbr-sb:nfqws:tcp-reply:v1', 'keen-pbr-sb:nfqws:discord-voice:v1')), line
         assert line.split()[1] in ('nfqws_pre', 'nfqws_post', 'KpbrNfqTcpReply', 'INPUT', 'FORWARD'), line
         if line.startswith('-I '):
             _, chain, number, rule = line.split(' ', 3)
@@ -179,6 +180,80 @@ class WindowTest(unittest.TestCase):
 
     def ours(self, family='iptables'):
         return [line for line in self.read(family) if TAG in line]
+
+    def with_live_max(self):
+        # Use the shipped advisory rather than duplicating a made-up argv.
+        import re
+        conf = LIB.parents[1] / 'share/keen-pbr/nfqws-strategies/03 max/nfqws2.conf'
+        token, = re.findall(r'--lua-desync=circular:[^\s"]*kpbr_discord_fullsession=[^\s"]+', conf.read_text())
+        path = self.root / 'proc/42/cmdline'
+        path.write_bytes(path.read_bytes() + token.encode() + b'\0')
+
+    @staticmethod
+    def voice_stock(**opts):
+        return [x.replace('443,590:600', '443,590:600,19294:19344,49152:65535') for x in stock(**opts)]
+
+    def test_live_max_voice_scope_rebuild_idempotence_and_exact_removal(self):
+        self.with_live_max()
+        for family in ('iptables', 'ip6tables'):
+            self.save(self.voice_stock(), family)
+        self.run_helper()
+        for family in ('iptables', 'ip6tables'):
+            lines = self.read(family)
+            rule, = (x for x in lines if VOICE_TAG in x)
+            self.assertEqual(rule, '-A nfqws_post -o eth3 -p udp -m mark ! --mark 0x40000000/0x40000000'
+                             ' -m multiport --dports 19294:19344,50000:50100 -m connbytes ! --connbytes 1:15'
+                             ' --connbytes-mode packets --connbytes-dir original -m comment --comment "'
+                             + VOICE_TAG + '" -j NFQUEUE --queue-num 300 --queue-bypass')
+            self.assertTrue(all(lines.index(x) < lines.index(rule) for x in lines if '-j RETURN' in x))
+            self.assertEqual([x for x in lines if VOICE_TAG not in x and TAG not in x], self.voice_stock())
+        n = (self.root / 'restores').read_text()
+        self.run_helper()
+        self.assertEqual((self.root / 'restores').read_text(), n)
+        # Snapshot after a rebuild: different interface/budget, no global edits.
+        rebuilt = self.voice_stock(limit=32, interface='eth4')
+        self.save(rebuilt)
+        self.run_helper()
+        line, = [x for x in self.read() if VOICE_TAG in x]
+        self.assertIn('-o eth4', line)
+        self.assertIn('! --connbytes 1:32', line)
+        # Switch to Balanced without restarting the helper: keep TCP, remove voice.
+        self.argv()
+        self.run_helper()
+        self.assertFalse(any(VOICE_TAG in x for x in self.read()))
+        self.assertTrue(self.ours())
+        self.run_helper('remove')
+        self.assertEqual(self.read(), rebuilt)
+        self.assertEqual(self.read('ip6tables'), self.voice_stock())
+
+    def test_voice_unknown_duplicate_partial_or_foreign_queue_declines_without_affecting_tcp(self):
+        self.with_live_max()
+        default = self.voice_stock()
+        orig, = [x for x in default if '-A nfqws_post' in x and '-p udp' in x]
+        for alternative in (orig.replace('49152:65535','49152:50099'),
+                            orig.replace('--queue-num 300','--queue-num 400'),
+                            orig.replace(' -j NFQUEUE', ' -m length --length 0:50 -j NFQUEUE'),
+                            orig.replace(' ! --mark',' --mark'), orig.replace(' --queue-bypass',''),
+                            orig.replace('1:15', '1:'),
+                            (orig, orig)):
+            replace = list(alternative) if isinstance(alternative, tuple) else [alternative]
+            base = [s for x in default for s in (replace if x == orig else [x])]
+            self.save(base)
+            self.run_helper(family='iptables')
+            self.assertFalse(any(VOICE_TAG in x for x in self.read()), alternative)
+            self.assertTrue(self.ours())
+            self.assertEqual([x for x in self.read() if TAG not in x], base)
+
+    def test_voice_late_foreign_policy_remains_ahead_of_our_tail(self):
+        self.with_live_max()
+        self.save(self.voice_stock())
+        self.run_helper(family='iptables')
+        late = '-A nfqws_post -o eth3 -m mark --mark 0x22/0xff -j RETURN'
+        self.save(self.read()[:-1] + [late, 'COMMIT'])
+        self.run_helper(family='iptables')
+        rules = self.read()
+        voice, = [x for x in rules if VOICE_TAG in x]
+        self.assertLess(rules.index(late), rules.index(voice))
 
     def test_extends_tcp_only_after_vendor_policy_and_keeps_stock_bytes(self):
         before = self.read()
@@ -667,6 +742,32 @@ class ReplyWindowTest(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get('KPBR_NFQWS_NATIVE_TEST') == '1', 'isolated NET_ADMIN container required')
 class NativeWindowTest(unittest.TestCase):
+    def _voice_round_trip(self, family):
+        fixture = WindowTest()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.with_live_max()
+        fixture.env['PATH'] = os.environ['PATH']
+        snapshot = lambda: subprocess.check_output([family + '-save', '-t', 'mangle'], text=True)
+        subprocess.run([family + '-restore'], input='\n'.join(fixture.voice_stock()) + '\n',
+                       text=True, check=True)
+        before = snapshot()
+        fixture.run_helper(family=family)
+        after = snapshot()
+        self.assertEqual(sum(VOICE_TAG in line for line in after.splitlines()), 1, after)
+        plan = subprocess.check_output(['awk', '-v', 'mode=apply', '-v', 'queue=300', '-v', 'budget=96',
+                                       '-v', 'discord=voice_v1', '-f', str(LIB/'nfqws-tcp-window.awk')],
+                                      input=after, text=True)
+        self.assertEqual(plan, '', after)
+        fixture.run_helper('remove', family=family)
+        self.assertEqual(firewall_policy_lines(before), firewall_policy_lines(snapshot()))
+
+    def test_discord_tail_native_ipv4(self):
+        self._voice_round_trip('iptables')
+
+    def test_discord_tail_native_ipv6(self):
+        self._voice_round_trip('ip6tables')
+
     def test_real_iptables_restore_syntax_order_idempotence_and_vendor_restart(self):
         fixture = WindowTest()
         fixture.setUp()
