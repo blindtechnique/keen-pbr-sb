@@ -518,7 +518,9 @@ TEST_CASE("nfqws PPE contract is available for every managed generated profile")
         INFO(contract.reason);
         REQUIRE(contract.available);
         CHECK(contract.queue_number == 300);
-        CHECK(contract.tcp_ranges.size() == 9U);
+        CHECK(contract.tcp_ranges == std::vector<NfqwsPpePortRange>{
+            {80, 80}, {443, 443}, {853, 853}, {1984, 1984}, {2053, 2053},
+            {2083, 2083}, {2087, 2087}, {2096, 2096}, {5222, 5222}, {8443, 8443}});
         CHECK(contract.quic_udp_443);
     }
 }
